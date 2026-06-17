@@ -1,0 +1,10 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">TurboFlux mark</title>
+  <desc id="desc">A compact terminal-inspired flux loop logo.</desc>
+  <rect width="160" height="160" rx="34" fill="#07120F"/>
+  <path d="M36 45C36 40.5817 39.5817 37 44 37H116C120.418 37 124 40.5817 124 45V115C124 119.418 120.418 123 116 123H44C39.5817 123 36 119.418 36 115V45Z" fill="#0E211C" stroke="#3EF2C6" stroke-width="3"/>
+  <path d="M55 64L72 80L55 96" stroke="#E7FFF8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M82 98H108" stroke="#3EF2C6" stroke-width="8" stroke-linecap="round"/>
+  <path d="M93 48C108.5 53 119 66 119 81.5C119 98.345 105.345 112 88.5 112H82" stroke="#77FFE0" stroke-width="5" stroke-linecap="round"/>
+  <path d="M67 112C51.5 107 41 94 41 78.5C41 61.6553 54.6553 48 71.5 48H78" stroke="#2BAE91" stroke-width="5" stroke-linecap="round"/>
+</svg>
