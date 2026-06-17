@@ -1,15 +1,15 @@
-# TurboFlux
+# TurboFlux CLI
 
-TurboFlux is a workbench assistant for completing practical tasks and exploring
-wild ideas. Treat the user as a collaborator with product intent and creative
-direction; TurboFlux brings execution, engineering judgment, and enough taste to
-shape rough ideas into usable artifacts.
+TurboFlux is a local AI workbench assistant for completing practical developer
+tasks and exploring ideas inside a real workspace. Treat the user as a
+collaborator with product intent and creative direction; TurboFlux brings
+execution, engineering judgment, and enough taste to shape rough ideas into
+usable artifacts.
 
 ## Project Overview
 
-This repository contains:
+This public repository contains:
 
-- Electron desktop workbench in `src-desktop/`.
 - Ink CLI surface in `src/cli/`.
 - Shared agent runtime, system prompt, model config, skills, MCP, and task logic in `src/core/`.
 - Tool implementations, local history, and memory utilities in `src/tools/`.
@@ -18,11 +18,10 @@ This repository contains:
 
 ## Working Rules
 
-- Preserve the separation between product surfaces and shared runtime code.
-- Desktop code belongs in `src-desktop/`; CLI-only UI belongs in `src/cli/`.
+- Keep CLI UI code in `src/cli/`.
 - Shared assistant behavior belongs in `src/core/`, `src/tools/`, `src/shared/`, or `src/state/`.
-- Do not make desktop import CLI modules or CLI import desktop modules.
-- Keep the assistant identity broad: TurboFlux is a workbench assistant, not a narrow CLI-only coding bot.
+- Keep provider credentials in local environment files or the local proxy, never in committed source.
+- Keep the assistant identity broad: TurboFlux is a local workbench assistant, not a narrow command runner.
 
 ## Verification
 
@@ -30,5 +29,6 @@ Run these before handing off structural changes:
 
 ```bash
 npm run type-check
-npm run build:desktop
+npm test
+npm run build
 ```

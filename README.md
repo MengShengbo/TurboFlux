@@ -19,7 +19,6 @@
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-0f172a?logo=typescript" />
   <img alt="React" src="https://img.shields.io/badge/React-19-20242a?logo=react" />
   <img alt="Ink" src="https://img.shields.io/badge/CLI-Ink-111827" />
-  <img alt="Electron" src="https://img.shields.io/badge/Desktop-Electron-1f2937?logo=electron" />
   <img alt="MCP" src="https://img.shields.io/badge/MCP-ready-0e211c" />
   <img alt="License" src="https://img.shields.io/badge/License-MIT-0f172a" />
 </p>
@@ -30,16 +29,17 @@
 
 ### 项目定位
 
-TurboFlux 是一个实验性的本地 AI 工作台。它把终端 CLI、共享 Agent Runtime、工具执行层、记忆与上下文、检查点历史、可选 Electron 桌面壳，以及本地 OpenAI-compatible 模型代理组合在一起。
+TurboFlux CLI 是一个实验性的本地 AI 工作台。它把终端 CLI、共享 Agent Runtime、工具执行层、记忆与上下文、检查点历史，以及本地 OpenAI-compatible 模型代理组合在一起。
 
 它更像开发者本机的工作流工具，而不是托管 SaaS 后端。核心目标是让 AI 能够在一个真实工作区里读代码、制定计划、执行命令、修改文件、保留上下文，并在必要时通过权限和检查点降低误操作风险。
+
+> 当前开源仓库只包含 CLI 与本地代理相关源码，不包含桌面端源码。
 
 ### 系统架构
 
 ```mermaid
 flowchart LR
   CLI["Ink 终端 CLI\nsrc/cli"] --> Runtime["Agent Runtime\nsrc/core"]
-  Desktop["Electron 桌面工作台\nsrc-desktop"] --> Runtime
   Runtime --> Tools["工具执行层\nsrc/tools"]
   Runtime --> Memory["记忆与上下文\nsrc/tools/memory"]
   Runtime --> MCP["MCP 客户端\nsrc/core/mcp"]
@@ -54,8 +54,7 @@ flowchart LR
 - 共享 Agent Runtime：支持计划模式、执行模式、任务树、上下文压缩、子代理、Skills、MCP 工具和多模型请求适配。
 - 工作区工具层：提供文件读写、命令执行、本地历史、记忆工具等能力，并带有沙箱与审批策略。
 - 检查点与会话：本地保存对话和检查点，方便恢复、回退和审查。
-- 本地模型代理：把上游 API Key 留在本地后端侧，CLI 和管理界面通过本地代理访问模型。
-- 桌面壳源码：`src-desktop/` 内包含 Electron main、preload、renderer 相关代码。
+- 本地模型代理：把上游 API Key 留在本地后端侧，CLI 和管理页面通过本地代理访问模型。
 
 ### 目录结构
 
@@ -67,7 +66,6 @@ src/server/    本地 OpenAI-compatible 代理和管理页面
 src/state/     模型与共享状态契约
 src/tools/     工具执行、本地历史、记忆工具
 src/shared/    跨层共享类型
-src-desktop/   Electron main / preload / renderer
 docs/assets/   README 与文档资源
 ```
 
@@ -148,11 +146,10 @@ TURBOFLUX_FREE_MODEL=gpt-5.5
 ```bash
 npm run dev:cli        # 监听 CLI
 npm run dev:server     # 监听本地代理
-npm run dev            # 启动 Electron 开发工作台
+npm run dev            # 默认等同于 dev:cli
 npm run type-check     # TypeScript 检查
 npm test               # Vitest 测试
 npm run build          # 编译 src/
-npm run build:desktop  # 构建 Electron bundles
 ```
 
 ### 安全设计
@@ -170,24 +167,23 @@ npm test
 npm audit --audit-level=high --registry=https://registry.npmjs.org
 ```
 
-当前快照：TypeScript 检查通过，测试通过，npm audit 无已知高危漏洞。
-
 ---
 
 ## English
 
 ### What It Is
 
-TurboFlux is an experimental local AI workbench. It combines a terminal CLI, shared agent runtime, tool execution layer, memory utilities, checkpoint history, optional Electron desktop shell, and a local OpenAI-compatible proxy.
+TurboFlux CLI is an experimental local AI workbench. It combines a terminal CLI, shared agent runtime, tool execution layer, memory utilities, checkpoint history, and a local OpenAI-compatible proxy.
 
 It is designed for local developer workflows rather than a hosted SaaS backend.
+
+> This public repository contains CLI and local proxy source only. Desktop source is not included.
 
 ### Architecture
 
 ```mermaid
 flowchart LR
   CLI["Ink CLI\nsrc/cli"] --> Runtime["Agent Runtime\nsrc/core"]
-  Desktop["Electron Workbench\nsrc-desktop"] --> Runtime
   Runtime --> Tools["Tool Executor\nsrc/tools"]
   Runtime --> Memory["Memory + Context\nsrc/tools/memory"]
   Runtime --> MCP["MCP Client\nsrc/core/mcp"]
@@ -203,7 +199,6 @@ flowchart LR
 - Workspace sandbox for file and command tools, plus approval gates for destructive or high-risk operations.
 - Local checkpoints and conversation storage for safer iteration.
 - Local model proxy that keeps upstream API keys on the backend side.
-- Optional Electron desktop workbench source under `src-desktop/`.
 
 ### Repository Layout
 
@@ -215,7 +210,6 @@ src/server/    Local OpenAI-compatible proxy and admin console
 src/state/     Shared provider/model state contracts
 src/tools/     Tool execution, local history, memory utilities
 src/shared/    Cross-layer types
-src-desktop/   Electron main/preload/renderer source
 docs/assets/   README and documentation assets
 ```
 
@@ -242,19 +236,6 @@ Run a single prompt and exit:
 
 ```bash
 npm start -- --command "summarize this repository"
-```
-
-Useful slash commands:
-
-```text
-/help                 list commands
-/config               show current config
-/config apiKey VALUE  set local proxy token or provider key
-/model                pick a model preset
-/plan                 switch to read/plan mode
-/vibe                 switch to autonomous execution mode
-/init                 create TURBOFLUX.md project instructions
-/resume               open saved conversations
 ```
 
 ### Local Model Proxy
@@ -288,7 +269,6 @@ npm run dev
 npm run type-check
 npm test
 npm run build
-npm run build:desktop
 ```
 
 ### Safety Notes

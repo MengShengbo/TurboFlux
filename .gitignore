@@ -8,6 +8,8 @@ dist-desktop/
 build/
 out/
 coverage/
+src-desktop/
+tsconfig.desktop.json
 
 .turboflux/
 .claude/

@@ -180,7 +180,7 @@ const tools: EnhancedToolDef[] = [
     parameters: [
       { name: 'text', type: 'string', description: 'The memory content to store (≤ 500 chars). Should be atomic, actionable, and generalizable.', required: true },
       { name: 'kind', type: 'string', description: 'Memory type. Use "fact" for project knowledge, "strategy" for learned approaches, "pitfall" for things to avoid, "workflow" for procedural steps, "preference" for user style preferences.', required: false, default: 'fact', enum: ['fact', 'strategy', 'pitfall', 'workflow', 'preference', 'episode'] },
-      { name: 'tags', type: 'array', description: 'Tags for retrieval (e.g. ["electron", "ipc", "debugging"]). Max 8 tags.', required: false },
+      { name: 'tags', type: 'array', description: 'Tags for retrieval (e.g. ["api", "auth", "debugging"]). Max 8 tags.', required: false },
       { name: 'confidence', type: 'string', description: 'How confident this memory is. "asserted" = user stated directly, "observed" = inferred from behavior, "inferred" = deduced from context.', required: false, default: 'observed', enum: ['asserted', 'observed', 'inferred'] },
     ],
     isReadOnly: false,

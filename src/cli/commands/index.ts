@@ -394,7 +394,7 @@ function detectTechStack(wsPath: string): string {
       if (pkg.dependencies?.express || pkg.dependencies?.hono) indicators.push('Node.js Server')
       if (pkg.devDependencies?.typescript) indicators.push('TypeScript')
       if (pkg.devDependencies?.vitest) indicators.push('Vitest')
-      if (pkg.devDependencies?.electron) indicators.push('Electron')
+      if (pkg.devDependencies?.tsx) indicators.push('TSX')
     } catch {}
   }
   if (has('Cargo.toml')) indicators.push('Rust')
