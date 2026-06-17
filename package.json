@@ -1,0 +1,62 @@
+{
+  "name": "turboflux",
+  "version": "0.1.0",
+  "description": "TurboFlux - workbench assistant for building ideas",
+  "main": "dist-desktop/main/index.js",
+  "bin": {
+    "turboflux": "./bin/turboflux.mjs"
+  },
+  "author": "TurboFlux",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dev:desktop",
+    "dev:cli": "tsx watch src/cli/index.ts",
+    "dev:once": "tsx src/cli/index.ts",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:desktop": "concurrently -k -n renderer,main,preload,electron \"vite --config src-desktop/vite.config.ts\" \"npm:dev:desktop:main\" \"npm:dev:desktop:preload\" \"npm:dev:desktop:electron\"",
+    "dev:desktop:main": "vite build --watch --config src-desktop/vite.main.config.ts",
+    "dev:desktop:preload": "vite build --watch --config src-desktop/vite.preload.config.ts",
+    "dev:desktop:electron": "node src-desktop/scripts/dev-electron.mjs",
+    "start": "tsx src/cli/index.ts",
+    "server": "tsx src/server/index.ts",
+    "build": "tsc",
+    "build:desktop": "vite build --config src-desktop/vite.config.ts && vite build --config src-desktop/vite.main.config.ts && vite build --config src-desktop/vite.preload.config.ts",
+    "start:desktop": "npm run build:desktop && electron .",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^10.0.3",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1",
+    "tsx": "^4.22.2",
+    "typescript": "^5.3.3",
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7",
+    "wait-on": "^9.0.10"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "chalk": "^5.6.2",
+    "cli-truncate": "^6.0.0",
+    "commander": "^12.1.0",
+    "diff": "^9.0.0",
+    "dotenv": "^17.4.2",
+    "figures": "^6.1.0",
+    "highlight.js": "^11.11.1",
+    "ink": "^7.0.3",
+    "ink-text-input": "^6.0.0",
+    "js-tiktoken": "^1.0.21",
+    "lucide-react": "^1.16.0",
+    "marked": "^18.0.4",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "string-width": "^8.2.1",
+    "strip-ansi": "^7.2.0"
+  }
+}
