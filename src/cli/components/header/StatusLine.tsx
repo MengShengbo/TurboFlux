@@ -51,14 +51,14 @@ export function StatusLine({ config, tokenUsage, mode = 'vibe', viewingHistory =
     <Box marginTop={0} flexDirection="row" justifyContent="space-between">
       <Box flexDirection="row">
         <Text color={MODE_COLORS[mode]} bold>[{MODE_LABELS[mode]}]</Text>
-        <Text color={theme.inactive}> </Text>
-        <Text color={theme.inactive}>
+        <Text color={theme.statusLine}> </Text>
+        <Text color={theme.statusLine}>
           {parts.length > 0 ? parts.join(' - ') : 'no model connection'}
           {isWide && ` - ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : 'unknown'}`}
           {hasProviderUsage && total > 0 && ' '}
         </Text>
         {hasProviderUsage && total > 0 && <Text color={barColor}>{bar}</Text>}
-        {hasProviderUsage && total > 0 && <Text color={theme.inactive}> {percentage}%</Text>}
+        {hasProviderUsage && total > 0 && <Text color={theme.statusLine}> {percentage}%</Text>}
       </Box>
     </Box>
   )

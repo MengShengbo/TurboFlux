@@ -51,8 +51,8 @@ export function Header({ workspaceName, model, mood, hasApiKey }: HeaderProps) {
           </Box>
           <Box flexDirection="column" alignItems="center">
             <Text bold color={theme.brand}>TurboFlux</Text>
-            <Text dimColor color={theme.inactive}>v0.1.0</Text>
-            {model ? <Text dimColor color={theme.inactive}>{fitModelLabel(model)}</Text> : null}
+            <Text color={theme.inactive}>v0.1.0</Text>
+            {model ? <Text color={theme.statusLine}>{fitModelLabel(model)}</Text> : null}
           </Box>
         </Box>
 

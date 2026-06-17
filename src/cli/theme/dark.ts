@@ -10,8 +10,8 @@ export const darkTheme: Theme = {
   info: '#2dd4bf',
 
   text: '#e2e8f0',
-  inactive: '#64748b',
-  subtle: '#334155',
+  inactive: '#94a3b8',
+  subtle: '#475569',
 
   diffAdded: '#166534',
   diffRemoved: '#7f1d1d',
