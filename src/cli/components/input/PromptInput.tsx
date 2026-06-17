@@ -4,6 +4,7 @@ import TextInput from 'ink-text-input'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
+import { getSafeFrameWidth } from '../../terminalLayout'
 
 interface PromptInputProps {
   value: string
@@ -91,6 +92,7 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, mode }: Pr
 
   const placeholder = mode === 'plan' ? 'Describe what to plan...'
     : 'What are we building today?'
+  const frameWidth = getSafeFrameWidth(columns)
 
   return (
     <Box flexDirection="column" marginTop={0}>
@@ -110,7 +112,7 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, mode }: Pr
         borderColor={theme.promptBorder}
         borderLeft={false}
         borderRight={false}
-        width={columns - 2}
+        width={frameWidth}
         flexDirection="row"
         paddingLeft={1}
         paddingRight={1}

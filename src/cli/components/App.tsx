@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { render, Box, Text, useInput, useApp } from 'ink'
+import { render, Box, Static, Text, useInput, useApp } from 'ink'
 import { ThemeProvider } from '../theme/index'
 import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
@@ -29,6 +29,7 @@ import type { MascotMood } from './header/Mascot'
 import { stripTextToolCallMarkup } from '../../shared/toolCallMarkup'
 import { useTerminalSize } from '../hooks/useTerminalSize'
 import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
+import { getSafeViewportWidth } from '../terminalLayout'
 
 interface AppProps {
   workspacePath: string
@@ -38,6 +39,10 @@ interface AppProps {
   verbose: boolean
   noFlicker: boolean
 }
+
+type StaticTranscriptItem =
+  | { kind: 'header'; id: string }
+  | { kind: 'message'; id: string; message: Message }
 
 function isMessageRole(role: string): role is Message['role'] {
   return role === 'user' || role === 'assistant' || role === 'system'
@@ -111,7 +116,11 @@ function isFalsyEnv(value: string | undefined): boolean {
   return normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off'
 }
 
-export function shouldUseNoFlicker(interactive: boolean, singleShot?: string, requested = false): boolean {
+export function shouldUseNoFlicker(
+  interactive: boolean,
+  singleShot?: string,
+  requested = false,
+): boolean {
   if (!interactive || singleShot) return false
   const forced = normalizeEnvFlag(process.env.TURBOFLUX_NO_FLICKER)
   if (isFalsyEnv(forced)) return false
@@ -252,6 +261,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const noFlickerActive = noFlicker && isInteractive && !singleShot
   const [config, setConfig] = useState(initialConfig)
   const [messages, setMessages] = useState<Message[]>([])
+  const [staticTranscriptRevision, setStaticTranscriptRevision] = useState(0)
   const [input, setInput] = useState('')
   const [isRunning, setIsRunning] = useState(false)
   const [streamText, setStreamText] = useState('')
@@ -328,10 +338,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setTranscriptOffset(offset => getNextTranscriptOffsetAfterAppend(offset, nextMessages.length, stickToLatest))
   }, [noFlickerActive])
 
+  const replaceMessages = useCallback((nextMessages: React.SetStateAction<Message[]>) => {
+    setStaticTranscriptRevision(revision => revision + 1)
+    setMessages(nextMessages)
+  }, [])
+
   const restoreCliStateFromTurns = useCallback((turns: AgentTurn[], nextInput = '', contextSegments = stateProvider.getContextSegments()) => {
     engine.restoreFromTurns(turns)
     engine.setContextSegments(contextSegments)
-    setMessages(turnsToMessages(turns))
+    replaceMessages(turnsToMessages(turns))
     setInput(nextInput)
     setTranscriptOffset(0)
     setTokenUsage(engine.getContextUsage())
@@ -350,7 +365,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     clear()
     setIsRunning(false)
     setMood('idle')
-  }, [engine, stateProvider, clearStreamFlushTimer, clear])
+  }, [engine, stateProvider, clearStreamFlushTimer, clear, replaceMessages])
 
   const getRewindContextSegments = useCallback((turns: AgentTurn[]) => {
     const boundaryTime = turns.reduce((max, turn) => Math.max(max, turn.timestamp), 0)
@@ -628,7 +643,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         modelPresets,
         workspacePath,
         setConfig: persistConfig,
-        setMessages,
+        setMessages: replaceMessages,
         restoreConversation: (turns, nextInput) => restoreCliStateFromTurns(turns, nextInput),
         exit,
         conversationManager: convManager,
@@ -789,9 +804,26 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay
   const showPrompt = !isRunning && !singleShot && activeOverlay === null && !cursorMode && !pendingAsk
+  const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
     <Box marginTop={1}>
       <Text dimColor>Message cursor: Up/Down navigate - Enter/Esc exit</Text>
+    </Box>
+  ) : null
+  const cursorPreviewNode = cursorPreviewMessage ? (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text dimColor>{`Selected message ${cursor!.index + 1}/${messages.length}`}</Text>
+      <MessageList
+        messages={[{
+          ...cursorPreviewMessage,
+          content: clipTextToRows(cursorPreviewMessage.content, 8, terminal.columns),
+          tools: undefined,
+          changes: undefined,
+        }]}
+        verbose={verbose}
+        diffMaxRows={0}
+        selectedIndex={0}
+      />
     </Box>
   ) : null
   const promptNode = showPrompt ? (
@@ -828,11 +860,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       {runningNode}
     </>
   )
+  const staticTranscriptItems = useMemo<StaticTranscriptItem[]>(() => [
+    { kind: 'header', id: 'startup-header' },
+    ...messages.map(message => ({ kind: 'message' as const, id: message.id, message })),
+  ], [messages])
 
   if (noFlickerActive) {
     return (
       <ThemeProvider>
-        <Box flexDirection="column" paddingX={1} width={terminal.columns} height={terminal.rows} overflow="hidden">
+        <Box flexDirection="column" paddingX={1} width={getSafeViewportWidth(terminal.columns)} height={terminal.rows} overflow="hidden">
           <Box flexShrink={0}>
             <Header
               workspaceName={workspaceName}
@@ -860,23 +896,32 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   return (
     <ThemeProvider>
+      <Static key={staticTranscriptRevision} items={staticTranscriptItems}>
+        {item => (
+          item.kind === 'header'
+            ? (
+              <Box key={item.id} flexDirection="column" paddingX={1}>
+                <Header
+                  workspaceName={workspaceName}
+                  model={config.model}
+                  mood="idle"
+                  hasApiKey={!!config.apiKey}
+                />
+              </Box>
+            )
+            : (
+              <Box key={item.id} flexDirection="column" paddingX={1}>
+                <MessageList
+                  messages={[item.message]}
+                  verbose={verbose}
+                  diffMaxRows={MAX_INLINE_DIFF_RENDER_ROWS}
+                />
+              </Box>
+            )
+        )}
+      </Static>
+
       <Box flexDirection="column" paddingX={1}>
-        {/* Header: Logo + workspace info */}
-        <Header
-          workspaceName={workspaceName}
-          model={config.model}
-          mood={mood}
-          hasApiKey={!!config.apiKey}
-        />
-
-        {/* Messages area */}
-        <MessageList
-          messages={dynamicMessages}
-          verbose={verbose}
-          diffMaxRows={MAX_INLINE_DIFF_RENDER_ROWS}
-          selectedIndex={visibleSelectedIndex}
-        />
-
         {/* Streaming / loading area */}
         {runningNode}
 
@@ -893,6 +938,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
         {/* Input area */}
         {cursorHint}
+        {cursorPreviewNode}
         {promptNode}
 
         {/* Status line at bottom */}

@@ -2,6 +2,7 @@ import React from 'react'
 import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
+import { getSafeFrameWidth } from '../../terminalLayout'
 import { renderLogo, type MascotMood } from './Mascot'
 
 interface HeaderProps {
@@ -24,6 +25,7 @@ export function Header({ workspaceName, model, mood, hasApiKey }: HeaderProps) {
 
   const leftWidth = 24
   const isNarrow = columns < 60
+  const frameWidth = getSafeFrameWidth(columns)
   const sessionLabel = mood === 'error'
     ? 'Attention needed'
     : mood === 'thinking'
@@ -41,7 +43,7 @@ export function Header({ workspaceName, model, mood, hasApiKey }: HeaderProps) {
         paddingX={1}
         paddingY={1}
         gap={isNarrow ? 0 : 1}
-        width={columns - 2}
+        width={frameWidth}
       >
         <Box flexDirection="column" width={isNarrow ? undefined : leftWidth} alignItems="center" justifyContent="center">
           <Box flexDirection="column">
@@ -80,11 +82,13 @@ export function Header({ workspaceName, model, mood, hasApiKey }: HeaderProps) {
         </Box>
       </Box>
 
-      {!hasApiKey && (
-        <Box paddingLeft={1}>
+      <Box paddingLeft={1} height={1}>
+        {!hasApiKey ? (
           <Text color={theme.brandShimmer}>No model provider configured. Run turboflux setup to connect one.</Text>
-        </Box>
-      )}
+        ) : (
+          <Text> </Text>
+        )}
+      </Box>
     </Box>
   )
 }
