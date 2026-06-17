@@ -711,6 +711,7 @@ export class AgentEngine {
     const baselineSystemPrompt = buildSystemPrompt(this.config.mode, {
       workspacePath: this.config.workspacePath,
       workspaceName: this.config.workspaceName,
+      profileSystemPrompt: this.config.profileSystemPrompt,
       enabledSkills: this.config.enabledSkills,
       shell: this.config.shell,
     })
@@ -1787,6 +1788,7 @@ Before retrying:
       workspacePath: this.config.workspacePath,
       workspaceName: this.config.workspaceName,
       systemPromptOverride: this.config.systemPromptOverride,
+      profileSystemPrompt: this.config.profileSystemPrompt,
       thinkingMode: this.resolvedThinkingMode,
       enabledSkills: this.config.enabledSkills,
       provider: activeConfig.provider,

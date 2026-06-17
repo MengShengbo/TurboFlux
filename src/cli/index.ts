@@ -62,20 +62,35 @@ program
   })
 
 program
-  .command('setup')
-  .description('Configure TurboFlux model provider and API key')
+  .command('setup [action]')
+  .description('Configure TurboFlux provider, language, persona, and custom behavior')
   .option('-p, --provider <provider>', 'provider preset (deepseek, openai, anthropic, openrouter, local-proxy)')
   .option('-k, --api-key <key>', 'provider API key')
   .option('-b, --base-url <url>', 'custom base URL')
   .option('-m, --model <model>', 'model name')
+  .option('--lang <lang>', 'set both setup UI and AI output language when possible')
+  .option('--all-lang <lang>', 'set both setup UI and AI output language when possible')
+  .option('--config-lang <lang>', 'setup UI/config language (zh-CN, en)')
+  .option('--ai-output-lang <lang>', 'AI output language (follow-user, zh-CN, en, ja, ko, or custom text)')
+  .option('-o, --output-style <styles>', 'comma-separated available personas, "all", or "skip"')
+  .option('-d, --default-output-style <style>', 'default persona/output style')
+  .option('--custom-instructions <text>', 'global custom instructions injected into TurboFlux')
   .option('-y, --yes', 'accept defaults for missing options')
-  .action(async (opts) => {
+  .action(async (action: string | undefined, opts) => {
     try {
       await runSetup({
+        action,
         provider: opts.provider,
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
         model: opts.model,
+        lang: opts.lang,
+        allLang: opts.allLang,
+        configLang: opts.configLang,
+        aiOutputLang: opts.aiOutputLang,
+        outputStyle: opts.outputStyle,
+        defaultOutputStyle: opts.defaultOutputStyle,
+        customInstructions: opts.customInstructions,
         yes: Boolean(opts.yes),
       })
     } catch (error) {

@@ -5,8 +5,7 @@
 <h1 align="center">TurboFlux CLI</h1>
 
 <p align="center">
-  本地优先的 AI 工作台，用于在真实项目中规划、阅读、修改、执行和恢复上下文。
-  <br />
+  本地优先的 AI 工作台，用于在真实项目中规划、阅读、修改、执行命令和恢复上下文。<br />
   A local-first AI workbench for planning, editing, command execution, checkpoints, and durable workspace context.
 </p>
 
@@ -29,9 +28,9 @@
 
 ### 项目定位
 
-TurboFlux CLI 是一个本地 AI 工作台。它提供终端交互界面、共享 Agent Runtime、工具执行层、会话记忆、检查点历史、MCP 扩展和模型供应商配置能力。
+TurboFlux CLI 是一个本地优先的 AI 工作台。它提供终端交互界面、Agent Runtime、工具执行层、会话记忆、检查点历史、MCP 扩展和模型供应商配置能力。
 
-TurboFlux 不绑定默认模型，也不要求先启动本地后端。首次使用时通过 `turboflux setup` 选择供应商并写入本机配置。
+TurboFlux 不绑定默认模型，也不要求先启动本地后端。首次使用时运行 `turboflux setup`，可以用交互菜单完成 API、模型、输出语言、人设风格和自定义全局指令配置。
 
 ### 架构
 
@@ -41,20 +40,21 @@ flowchart LR
   Runtime --> Tools["工具执行层\nsrc/tools"]
   Runtime --> Memory["记忆与上下文\nsrc/tools/memory"]
   Runtime --> MCP["MCP 客户端\nsrc/core/mcp"]
-  Runtime --> Provider["模型供应商\nDeepSeek / OpenAI / Anthropic / OpenRouter / Custom"]
+  Runtime --> Profile["用户配置\n~/.turboflux/profile.json"]
+  Runtime --> Provider["模型供应商\nOpenAI / Anthropic / OpenRouter / DeepSeek / Custom"]
   Runtime --> Proxy["可选本地代理\nsrc/server"]
   Tools --> Workspace["用户工作区"]
 ```
 
 ### 安装
 
-macOS / Linux / Git Bash：
+macOS / Linux / Git Bash:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.sh | bash
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.ps1 | iex
@@ -69,7 +69,7 @@ npm install
 npm install -g .
 ```
 
-### 配置模型
+### 初始化配置
 
 交互式配置：
 
@@ -77,20 +77,39 @@ npm install -g .
 turboflux setup
 ```
 
-非交互配置：
+常用子命令：
 
 ```bash
-turboflux setup --provider custom --api-key <your-api-key> --base-url https://api.example.com/v1 --model custom-model
-turboflux setup --provider openai --api-key <your-api-key> --model gpt-5.5
-turboflux setup --provider anthropic --api-key <your-api-key>
-turboflux setup --provider openrouter --api-key <your-api-key>
-turboflux setup --provider deepseek --api-key <your-api-key>
+turboflux setup init       # 完整初始化：语言 + API + 人设 + 自定义配置
+turboflux setup api        # 配置 API / 模型供应商
+turboflux setup language   # 配置界面语言和 AI 输出语言
+turboflux setup persona    # 配置人设 / 输出风格
+turboflux setup custom     # 编辑全局自定义指令
+turboflux setup show       # 查看当前配置
+turboflux setup reset      # 重置本机配置
 ```
 
-查看配置：
+非交互示例：
 
 ```bash
-turboflux config show
+turboflux setup init --provider openai --api-key <your-api-key> --model gpt-5.5 --all-lang zh-CN --yes
+turboflux setup api --provider custom --api-key <your-api-key> --base-url https://api.example.com/v1 --model custom-model
+turboflux setup api --provider openrouter --api-key <your-api-key>
+turboflux setup language --all-lang zh-CN --yes
+turboflux setup persona --output-style all --default-output-style engineer-professional --yes
+```
+
+兼容旧用法：
+
+```bash
+turboflux setup --provider openai --api-key <your-api-key> --model gpt-5.5
+```
+
+配置文件位置：
+
+```text
+~/.turboflux/config.json    # API、模型、上下文窗口等模型配置
+~/.turboflux/profile.json   # 界面语言、AI 输出语言、人设和自定义指令
 ```
 
 ### 使用
@@ -118,14 +137,16 @@ turboflux /path/to/project --command "summarize this repository"
 
 ```text
 /help                 查看命令
-/setup                查看模型配置命令
-/config               查看当前配置
+/setup                查看 setup 命令
+/config               查看当前模型配置
 /config apiKey VALUE  手动设置 API Key
 /model                选择模型
-/plan                 切换到计划/只读模式
+/plan                 切换到计划模式
 /vibe                 切换到自主执行模式
 /init                 创建 TURBOFLUX.md 项目指令
 /resume               打开历史会话
+/fastcontext          启动快速代码上下文扫描
+/thinking             设置思考模式
 ```
 
 ### 可选本地代理
@@ -134,7 +155,7 @@ turboflux /path/to/project --command "summarize this repository"
 
 ```bash
 npm run server
-turboflux setup --provider local-proxy --yes
+turboflux setup api --provider local-proxy --yes
 ```
 
 管理页面：
@@ -148,8 +169,8 @@ http://127.0.0.1:8787/admin
 ```text
 bin/           CLI 启动入口
 src/cli/       Ink 终端 UI、斜杠命令、会话存储
-src/core/      Agent Runtime、模型配置、权限、MCP、Skills
-src/server/    可选本地 OpenAI-compatible 代理和管理页面
+src/core/      Agent Runtime、模型配置、权限、MCP、Skills、Profile
+src/server/    可选本地 OpenAI-compatible 代理和管理页
 src/state/     模型与共享状态契约
 src/tools/     工具执行、本地历史、记忆工具
 src/shared/    跨层共享类型
@@ -169,10 +190,11 @@ npm run build
 
 ### 安全
 
-- API Key 存储在本机 `~/.turboflux/config.json`。
-- 工具执行默认限制在工作区内。
-- 高风险命令会在非 full-auto 策略下要求审批。
-- `.env`、本地状态、构建产物、日志、临时文件和依赖目录不应入库。
+- API Key 仅存储在本机 `~/.turboflux/config.json`。
+- 人设、语言和自定义指令存储在 `~/.turboflux/profile.json`。
+- 工作区工具执行默认使用 workspace sandbox。
+- 高风险命令会根据权限策略请求确认。
+- Secrets、本地状态、构建输出、日志、临时文件和依赖目录不应提交到仓库。
 
 ---
 
@@ -180,19 +202,20 @@ npm run build
 
 ### What It Is
 
-TurboFlux CLI is a local-first AI workbench for planning, editing, command execution, checkpoints, and durable workspace context.
+TurboFlux CLI is a local-first AI workbench for real projects. It includes a terminal UI, Agent Runtime, tool execution, conversation memory, checkpoint history, MCP extensions, and provider configuration.
 
-TurboFlux does not bind to a default model provider. Run `turboflux setup` before the first model call.
+TurboFlux does not bind to a default model provider. Run `turboflux setup` before the first model call to configure API access, output language, persona style, and custom instructions.
 
 ### Architecture
 
 ```mermaid
 flowchart LR
-  CLI["Ink CLI\nsrc/cli"] --> Runtime["Agent Runtime\nsrc/core"]
-  Runtime --> Tools["Tool Executor\nsrc/tools"]
+  CLI["Ink Terminal CLI\nsrc/cli"] --> Runtime["Agent Runtime\nsrc/core"]
+  Runtime --> Tools["Tool Execution\nsrc/tools"]
   Runtime --> Memory["Memory + Context\nsrc/tools/memory"]
   Runtime --> MCP["MCP Client\nsrc/core/mcp"]
-  Runtime --> Provider["Model Provider\nDeepSeek / OpenAI / Anthropic / OpenRouter / Custom"]
+  Runtime --> Profile["User Profile\n~/.turboflux/profile.json"]
+  Runtime --> Provider["Model Provider\nOpenAI / Anthropic / OpenRouter / DeepSeek / Custom"]
   Runtime --> Proxy["Optional Local Proxy\nsrc/server"]
   Tools --> Workspace["User Workspace"]
 ```
@@ -222,18 +245,31 @@ npm install -g .
 
 ### Configure
 
+Interactive setup:
+
 ```bash
 turboflux setup
+```
+
+Useful setup commands:
+
+```bash
+turboflux setup init
+turboflux setup api
+turboflux setup language
+turboflux setup persona
+turboflux setup custom
+turboflux setup show
+turboflux setup reset
 ```
 
 Non-interactive examples:
 
 ```bash
-turboflux setup --provider custom --api-key <your-api-key> --base-url https://api.example.com/v1 --model custom-model
-turboflux setup --provider openai --api-key <your-api-key> --model gpt-5.5
-turboflux setup --provider anthropic --api-key <your-api-key>
-turboflux setup --provider openrouter --api-key <your-api-key>
-turboflux setup --provider deepseek --api-key <your-api-key>
+turboflux setup init --provider openai --api-key <your-api-key> --model gpt-5.5 --all-lang en --yes
+turboflux setup api --provider custom --api-key <your-api-key> --base-url https://api.example.com/v1 --model custom-model
+turboflux setup language --all-lang en --yes
+turboflux setup persona --output-style all --default-output-style engineer-professional --yes
 ```
 
 ### Use
@@ -247,7 +283,7 @@ turboflux /path/to/project --command "summarize this repository"
 
 ```bash
 npm run server
-turboflux setup --provider local-proxy --yes
+turboflux setup api --provider local-proxy --yes
 ```
 
 Admin console:
@@ -270,8 +306,9 @@ npm run build
 ### Safety
 
 - API keys are stored locally in `~/.turboflux/config.json`.
+- Language, persona, and custom instructions are stored in `~/.turboflux/profile.json`.
 - Workspace tool execution defaults to a workspace sandbox.
-- High-risk commands require approval outside full-auto policy.
+- High-risk commands require approval depending on the active permission policy.
 - Secrets, local state, build output, logs, temporary files, and dependencies should not be committed.
 
 ## License

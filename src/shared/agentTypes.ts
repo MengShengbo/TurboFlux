@@ -208,6 +208,7 @@ export interface AgentConfig {
   workspaceName?: string
   systemPromptOverride?: string
   appendSystemPrompt?: string
+  profileSystemPrompt?: string
   disabledTools?: string[]
   enabledSkills?: Array<{ id: string; name: string; command: string; description: string; capabilities?: { can?: string[]; cannot?: string[] }; principles?: string[]; systemPrompt?: string }>
   /** Detected shell id from the main process (e.g. 'pwsh', 'powershell', 'cmd', 'bash', 'zsh'). */

@@ -6,6 +6,7 @@ import { SkillRuntime } from '../skills/runtime'
 import { syncAgentSkills } from '../subAgent'
 import { NodeToolExecutor } from './nodeToolExecutor'
 import { DefaultAgentStateProvider, type AgentRuntimeConfig } from './stateProvider'
+import { buildProfileSystemPromptSection, loadProfile } from '../profile'
 
 export interface CreateAgentRuntimeOptions {
   workspacePath: string
@@ -44,6 +45,7 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
     maxTurns: 25,
     workspacePath: options.workspacePath,
     workspaceName: options.workspaceName,
+    profileSystemPrompt: buildProfileSystemPromptSection(loadProfile()),
     conversationId: options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`,
     contextWindow: options.config.contextWindow,
     contextPolicy: 'normal',

@@ -75,17 +75,24 @@ commandRegistry.register({
 // /setup
 commandRegistry.register({
   name: 'setup',
-  description: 'Show setup command for model provider configuration',
+  description: 'Show setup command for provider, language, and persona configuration',
   type: 'local',
   execute: () => {
     return [
       'Run this outside the TurboFlux session:',
       '',
       '  turboflux setup',
+      '  turboflux setup init',
+      '  turboflux setup api',
+      '  turboflux setup language',
+      '  turboflux setup persona',
+      '  turboflux setup show',
       '',
       'Examples:',
-      '  turboflux setup --provider deepseek --api-key <key>',
-      '  turboflux setup --provider openai --api-key <key> --model gpt-5.5',
+      '  turboflux setup init --provider openai --api-key <key> --model gpt-5.5 --yes',
+      '  turboflux setup api --provider deepseek --api-key <key>',
+      '  turboflux setup language --all-lang zh-CN --yes',
+      '  turboflux setup persona --output-style all --default-output-style engineer-professional --yes',
       '  turboflux setup --provider local-proxy --yes',
     ].join('\n')
   },

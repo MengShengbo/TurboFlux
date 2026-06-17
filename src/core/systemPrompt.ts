@@ -26,6 +26,7 @@ interface SystemPromptOptions {
   workspacePath?: string
   workspaceName?: string
   systemPromptOverride?: string
+  profileSystemPrompt?: string
   codemapSummary?: string
   workspaceMemory?: string
   gitStatus?: string
@@ -231,6 +232,10 @@ export function buildSystemPrompt(mode: AgentMode, options: SystemPromptOptions 
   const staticPart = buildStaticSections(mode)
 
   const dynamicSections: string[] = [buildEnvironmentSection(options)]
+
+  if (options.profileSystemPrompt) {
+    dynamicSections.push(options.profileSystemPrompt)
+  }
 
   if (options.thinkingMode && options.thinkingMode !== 'off') {
     dynamicSections.push(buildThinkingSection(options.thinkingMode))

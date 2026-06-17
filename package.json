@@ -38,6 +38,7 @@
     "highlight.js": "^11.11.1",
     "ink": "^7.0.3",
     "ink-text-input": "^6.0.0",
+    "inquirer": "^14.0.2",
     "js-tiktoken": "^1.0.21",
     "marked": "^18.0.4",
     "react": "^19.2.6",
