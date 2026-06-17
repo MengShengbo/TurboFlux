@@ -54,6 +54,31 @@ flowchart LR
 - npm
 - 可选：`rg` / ripgrep，用于更快的代码搜索
 
+### 一行公网安装
+
+不注册 npm 也可以用 GitHub 公网脚本安装。脚本会检查 Node.js/npm，然后执行 `npm install -g github:MengShengbo/TurboFluxCli`。
+
+macOS / Linux / Git Bash：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.sh | bash
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.ps1 | iex
+```
+
+安装后验证：
+
+```bash
+turboflux --version
+turboflux --help
+```
+
+> 安装脚本是公开文件，执行前可以先打开 `install.sh` 或 `install.ps1` 查看内容。它只会检查 Node/npm、安装 TurboFlux CLI、输出版本号。
+
 ### 从源码全局安装
 
 普通用户下载源码后，推荐直接在项目根目录执行全局安装：
@@ -244,6 +269,20 @@ flowchart LR
 ```
 
 ### Install From Source
+
+Install directly from GitHub without publishing to npm:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.ps1 | iex
+```
+
+Manual source install:
 
 ```bash
 git clone https://github.com/MengShengbo/TurboFluxCli.git
