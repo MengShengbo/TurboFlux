@@ -41,7 +41,7 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
   }
 
   getActiveConfig(): APIConfig | null {
-    if (!this.config.apiKey) return null
+    if (!this.config.apiKey || !this.config.baseUrl || !this.config.model) return null
     return {
       provider: this.config.provider,
       apiKey: this.config.apiKey,

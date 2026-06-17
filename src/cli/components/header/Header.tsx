@@ -82,7 +82,7 @@ export function Header({ workspaceName, model, mood, hasApiKey }: HeaderProps) {
 
       {!hasApiKey && (
         <Box paddingLeft={1}>
-          <Text color={theme.brandShimmer}>No model connection configured. Run /config apiKey {'<key>'} to connect one.</Text>
+          <Text color={theme.brandShimmer}>No model provider configured. Run turboflux setup to connect one.</Text>
         </Box>
       )}
     </Box>

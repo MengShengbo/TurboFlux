@@ -72,6 +72,25 @@ commandRegistry.register({
   },
 })
 
+// /setup
+commandRegistry.register({
+  name: 'setup',
+  description: 'Show setup command for model provider configuration',
+  type: 'local',
+  execute: () => {
+    return [
+      'Run this outside the TurboFlux session:',
+      '',
+      '  turboflux setup',
+      '',
+      'Examples:',
+      '  turboflux setup --provider deepseek --api-key <key>',
+      '  turboflux setup --provider openai --api-key <key> --model gpt-5.5',
+      '  turboflux setup --provider local-proxy --yes',
+    ].join('\n')
+  },
+})
+
 // /model
 commandRegistry.register({
   name: 'model',

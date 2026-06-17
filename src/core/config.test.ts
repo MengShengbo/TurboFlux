@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, setConfigValue, type TurboFluxConfig } from './config'
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  configFromProviderPreset,
+  getProviderPreset,
+  setConfigValue,
+  type TurboFluxConfig,
+} from './config'
 
 const baseConfig: TurboFluxConfig = {
   provider: 'custom',
@@ -33,5 +40,43 @@ describe('setConfigValue', () => {
 
   it('rejects unknown keys', () => {
     expect(() => setConfigValue(baseConfig, 'debugMode', 'true')).toThrow(/Unknown config key/)
+  })
+})
+
+describe('provider presets', () => {
+  it('keeps provider defaults explicit instead of using the local backend proxy', () => {
+    const preset = getProviderPreset('deepseek')
+
+    expect(preset?.baseUrl).toBe('https://api.deepseek.com')
+    expect(preset?.defaultModel).toBe('deepseek-v4-flash')
+  })
+
+  it('creates complete direct provider config', () => {
+    const preset = getProviderPreset('openai')!
+    const config = configFromProviderPreset(preset, 'sk-test', 'gpt-5.5')
+
+    expect(config.provider).toBe('openai')
+    expect(config.apiKey).toBe('sk-test')
+    expect(config.baseUrl).toBe('https://api.openai.com/v1')
+    expect(config.model).toBe('gpt-5.5')
+    expect(config.contextWindow).toBeGreaterThan(100_000)
+  })
+
+  it('supports custom OpenAI-compatible endpoints', () => {
+    const preset = getProviderPreset('custom')!
+    const config = configFromProviderPreset(preset, 'key', 'custom-model', 'https://api.example.com/v1')
+
+    expect(config.provider).toBe('custom')
+    expect(config.baseUrl).toBe('https://api.example.com/v1')
+    expect(config.model).toBe('custom-model')
+  })
+
+  it('keeps the local proxy preset usable without manual token input', () => {
+    const preset = getProviderPreset('local-proxy')!
+    const config = configFromProviderPreset(preset, '')
+
+    expect(config.provider).toBe('custom')
+    expect(config.apiKey).toBe('turboflux-local')
+    expect(config.baseUrl).toBe('http://127.0.0.1:8787')
   })
 })

@@ -3,6 +3,7 @@ import { resolve } from 'path'
 import { Command } from 'commander'
 import { startRepl } from './repl'
 import { loadConfig, saveConfig, setConfigValue } from '../core/config'
+import { runSetup } from './setup'
 
 const program = new Command()
 
@@ -11,8 +12,8 @@ program
   .description('TurboFlux - workspace assistant CLI')
   .version('0.1.0')
   .argument('[workspace]', 'workspace directory', '.')
-  .option('-m, --model <model>', 'model to use')
-  .option('-p, --provider <provider>', 'API provider (deepseek, openai, anthropic, openrouter)')
+  .option('--model-override <model>', 'temporarily override model for this session')
+  .option('--provider-override <provider>', 'temporarily override API provider for this session')
   .option('-c, --command <prompt>', 'single-shot mode: run prompt and exit')
   .option('-v, --verbose', 'show tool call details')
   .option('--no-flicker', 'use a fixed alternate-screen viewport to reduce redraw flicker')
@@ -21,8 +22,8 @@ program
     const workspacePath = resolve(workspace)
     const config = await loadConfig()
 
-    if (opts.model) config.model = opts.model
-    if (opts.provider) config.provider = opts.provider
+    if (opts.modelOverride) config.model = opts.modelOverride
+    if (opts.providerOverride) config.provider = opts.providerOverride
 
     await startRepl({
       workspacePath,
@@ -57,6 +58,29 @@ program
     } else {
       console.log('Usage: turboflux config set <key> <value>')
       console.log('       turboflux config show')
+    }
+  })
+
+program
+  .command('setup')
+  .description('Configure TurboFlux model provider and API key')
+  .option('-p, --provider <provider>', 'provider preset (deepseek, openai, anthropic, openrouter, local-proxy)')
+  .option('-k, --api-key <key>', 'provider API key')
+  .option('-b, --base-url <url>', 'custom base URL')
+  .option('-m, --model <model>', 'model name')
+  .option('-y, --yes', 'accept defaults for missing options')
+  .action(async (opts) => {
+    try {
+      await runSetup({
+        provider: opts.provider,
+        apiKey: opts.apiKey,
+        baseUrl: opts.baseUrl,
+        model: opts.model,
+        yes: Boolean(opts.yes),
+      })
+    } catch (error) {
+      console.error(`Setup error: ${error instanceof Error ? error.message : String(error)}`)
+      process.exitCode = 1
     }
   })
 

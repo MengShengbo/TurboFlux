@@ -560,7 +560,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const runPrompt = useCallback(async (prompt: string) => {
     appendMessages([{ id: genMsgId(), role: 'user', content: prompt }])
     if (!config.apiKey) {
-      appendMessages([{ id: genMsgId(), role: 'system', content: 'No model connection configured yet. Run /config apiKey <key> to connect one.' }])
+      appendMessages([{ id: genMsgId(), role: 'system', content: 'No model provider is configured yet. Exit and run `turboflux setup`, or set `/config apiKey <key>` manually.' }])
       if (singleShot) exit()
       return
     }

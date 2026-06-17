@@ -1842,7 +1842,7 @@ Before retrying:
     startTime: number,
     turnStrategy?: TurnStrategy | null,
   ): Promise<AgentTurn> {
-    const url = config.baseUrl || 'https://api.anthropic.com/v1/messages'
+    const url = `${config.baseUrl.replace(/\/+$/, '')}/messages`
     // Bug 3 fix: token-efficient-tools-2025-02-19 is a Claude 3.7 Sonnet
     // beta. Sonnet 3.5 / Sonnet 4 / Opus 4 / Haiku-3 reject the header on
     // some baseUrl proxies and the request 4xx's. Only opt in for models
