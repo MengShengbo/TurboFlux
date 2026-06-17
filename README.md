@@ -5,14 +5,14 @@
 <h1 align="center">TurboFlux CLI</h1>
 
 <p align="center">
-  A local AI workbench for turning workspace tasks into plans, edits, command runs, checkpoints, and durable context.
-  <br />
   一个本地 AI 工作台：把工作区任务转成计划、代码修改、命令执行、检查点和可延续上下文。
+  <br />
+  A local AI workbench for plans, edits, command runs, checkpoints, and durable workspace context.
 </p>
 
 <p align="center">
-  <a href="#english">English</a> ·
-  <a href="#中文">中文</a>
+  <a href="#中文文档">中文</a> ·
+  <a href="#english">English</a>
 </p>
 
 <p align="center">
@@ -26,28 +26,161 @@
 
 ---
 
+## 中文文档
+
+### 项目定位
+
+TurboFlux 是一个实验性的本地 AI 工作台。它把终端 CLI、共享 Agent Runtime、工具执行层、记忆与上下文、检查点历史、可选 Electron 桌面壳，以及本地 OpenAI-compatible 模型代理组合在一起。
+
+它更像开发者本机的工作流工具，而不是托管 SaaS 后端。核心目标是让 AI 能够在一个真实工作区里读代码、制定计划、执行命令、修改文件、保留上下文，并在必要时通过权限和检查点降低误操作风险。
+
+### 系统架构
+
+```mermaid
+flowchart LR
+  CLI["Ink 终端 CLI\nsrc/cli"] --> Runtime["Agent Runtime\nsrc/core"]
+  Desktop["Electron 桌面工作台\nsrc-desktop"] --> Runtime
+  Runtime --> Tools["工具执行层\nsrc/tools"]
+  Runtime --> Memory["记忆与上下文\nsrc/tools/memory"]
+  Runtime --> MCP["MCP 客户端\nsrc/core/mcp"]
+  Runtime --> Proxy["本地模型代理\nsrc/server"]
+  Proxy --> Provider["OpenAI-compatible\n或上游模型服务"]
+  Tools --> Workspace["用户工作区"]
+```
+
+### 核心能力
+
+- 终端原生体验：基于 Ink 构建，支持流式输出、斜杠命令、模型选择、历史会话、回退和固定视口模式。
+- 共享 Agent Runtime：支持计划模式、执行模式、任务树、上下文压缩、子代理、Skills、MCP 工具和多模型请求适配。
+- 工作区工具层：提供文件读写、命令执行、本地历史、记忆工具等能力，并带有沙箱与审批策略。
+- 检查点与会话：本地保存对话和检查点，方便恢复、回退和审查。
+- 本地模型代理：把上游 API Key 留在本地后端侧，CLI 和管理界面通过本地代理访问模型。
+- 桌面壳源码：`src-desktop/` 内包含 Electron main、preload、renderer 相关代码。
+
+### 目录结构
+
+```text
+bin/           CLI 启动入口
+src/cli/       Ink 终端 UI、斜杠命令、会话存储
+src/core/      Agent Runtime、模型配置、权限、MCP、Skills
+src/server/    本地 OpenAI-compatible 代理和管理页面
+src/state/     模型与共享状态契约
+src/tools/     工具执行、本地历史、记忆工具
+src/shared/    跨层共享类型
+src-desktop/   Electron main / preload / renderer
+docs/assets/   README 与文档资源
+```
+
+### 运行要求
+
+- Node.js 20 或更新版本
+- npm
+- 可选：`rg` / ripgrep，用于更快的代码搜索
+
+### 快速开始
+
+```bash
+npm install
+npm start
+```
+
+指定工作区启动：
+
+```bash
+npm start -- /path/to/project
+```
+
+执行单次任务后退出：
+
+```bash
+npm start -- --command "summarize this repository"
+```
+
+常用斜杠命令：
+
+```text
+/help                 查看命令
+/config               查看当前配置
+/config apiKey VALUE  设置本地代理令牌或模型 Key
+/model                选择模型
+/plan                 切换到计划/只读模式
+/vibe                 切换到自主执行模式
+/init                 创建 TURBOFLUX.md 项目指令
+/resume               打开历史会话
+```
+
+CLI 启动时不会自动写入 `TURBOFLUX.md`。需要项目指令文件时，手动执行 `/init`。
+
+### 本地模型代理
+
+默认 CLI 配置：
+
+```text
+baseUrl: http://127.0.0.1:8787
+apiKey: turboflux-local
+model: gpt-5.5
+```
+
+启动代理：
+
+```bash
+npm run server
+```
+
+打开管理页面：
+
+```text
+http://127.0.0.1:8787/admin
+```
+
+从 `.env.example` 创建 `.env`：
+
+```bash
+TURBOFLUX_FREE_MODEL_API_KEY=<your-upstream-api-key>
+TURBOFLUX_FREE_MODEL_BASE_URL=https://api.example.com/v1
+TURBOFLUX_FREE_MODEL=gpt-5.5
+```
+
+如果代理绑定到非 localhost 地址，必须设置 `TURBOFLUX_PROXY_AUTH_TOKEN`。没有该 token 时，TurboFlux 会拒绝非本机绑定，避免代理被误暴露。
+
+### 开发命令
+
+```bash
+npm run dev:cli        # 监听 CLI
+npm run dev:server     # 监听本地代理
+npm run dev            # 启动 Electron 开发工作台
+npm run type-check     # TypeScript 检查
+npm test               # Vitest 测试
+npm run build          # 编译 src/
+npm run build:desktop  # 构建 Electron bundles
+```
+
+### 安全设计
+
+- 默认工具执行限制在工作区内，绝对路径和 `..` 穿越会被拦截，除非显式配置为 full access。
+- 强制推送、硬重置、递归删除、数据库 drop 等高风险命令会在非 full-auto 策略下要求审批。
+- 本地代理不会在管理接口中返回真实上游 API Key。
+- `.env`、本地状态、构建产物、日志、临时文件、参考资料和依赖目录都应保持不入库。
+
+### 验证命令
+
+```bash
+npm run type-check
+npm test
+npm audit --audit-level=high --registry=https://registry.npmjs.org
+```
+
+当前快照：TypeScript 检查通过，测试通过，npm audit 无已知高危漏洞。
+
+---
+
 ## English
 
 ### What It Is
 
-TurboFlux is an experimental local AI workbench. It combines a terminal CLI,
-shared agent runtime, tool execution layer, memory utilities, checkpoint
-history, optional Electron desktop shell, and a local OpenAI-compatible proxy.
+TurboFlux is an experimental local AI workbench. It combines a terminal CLI, shared agent runtime, tool execution layer, memory utilities, checkpoint history, optional Electron desktop shell, and a local OpenAI-compatible proxy.
 
-It is designed for local developer workflows, not as a hosted SaaS backend.
-
-### Highlights
-
-- Terminal-native assistant built with Ink, including streaming output,
-  slash commands, model picker, conversation history, rewind, and fixed
-  viewport mode for terminals that flicker.
-- Shared agent runtime with plan/vibe modes, task trees, context compaction,
-  subagents, skills, MCP tools, and provider-aware model requests.
-- Workspace sandbox for file and command tools, plus approval gates for
-  destructive or high-risk operations.
-- Local checkpoints and conversation storage for safer iteration.
-- Local model proxy that keeps upstream API keys on the backend side.
-- Optional Electron desktop workbench source under `src-desktop/`.
+It is designed for local developer workflows rather than a hosted SaaS backend.
 
 ### Architecture
 
@@ -62,6 +195,15 @@ flowchart LR
   Proxy --> Provider["OpenAI-compatible\nor upstream provider"]
   Tools --> Workspace["User Workspace"]
 ```
+
+### Highlights
+
+- Terminal-native assistant built with Ink, including streaming output, slash commands, model picker, conversation history, rewind, and fixed viewport mode.
+- Shared agent runtime with plan/vibe modes, task trees, context compaction, subagents, skills, MCP tools, and provider-aware model requests.
+- Workspace sandbox for file and command tools, plus approval gates for destructive or high-risk operations.
+- Local checkpoints and conversation storage for safer iteration.
+- Local model proxy that keeps upstream API keys on the backend side.
+- Optional Electron desktop workbench source under `src-desktop/`.
 
 ### Repository Layout
 
@@ -115,26 +257,13 @@ Useful slash commands:
 /resume               open saved conversations
 ```
 
-TurboFlux does not write `TURBOFLUX.md` automatically when the CLI starts. Use
-`/init` when you want to create project instructions in the current workspace.
-
 ### Local Model Proxy
-
-Default CLI config:
-
-```text
-baseUrl: http://127.0.0.1:8787
-apiKey: turboflux-local
-model: gpt-5.5
-```
-
-Start the proxy:
 
 ```bash
 npm run server
 ```
 
-Open the admin console:
+Admin console:
 
 ```text
 http://127.0.0.1:8787/admin
@@ -148,160 +277,26 @@ TURBOFLUX_FREE_MODEL_BASE_URL=https://api.example.com/v1
 TURBOFLUX_FREE_MODEL=gpt-5.5
 ```
 
-If you bind the proxy outside localhost, set `TURBOFLUX_PROXY_AUTH_TOKEN`.
-TurboFlux refuses non-localhost binds without that token.
+If the proxy binds outside localhost, set `TURBOFLUX_PROXY_AUTH_TOKEN`.
 
 ### Development
 
 ```bash
-npm run dev:cli        # watch CLI
-npm run dev:server     # watch local proxy
-npm run dev            # launch Electron development workbench
-npm run type-check     # TypeScript check
-npm test               # Vitest suite
-npm run build          # compile src/
-npm run build:desktop  # build Electron bundles
+npm run dev:cli
+npm run dev:server
+npm run dev
+npm run type-check
+npm test
+npm run build
+npm run build:desktop
 ```
 
 ### Safety Notes
 
-- Workspace tool execution defaults to a workspace sandbox. Absolute paths and
-  `..` traversal outside the workspace are blocked unless explicitly configured
-  for full access.
-- High-risk commands such as force pushes, hard resets, recursive deletes, and
-  database drops require approval outside full-auto policy.
+- Workspace tool execution defaults to a workspace sandbox.
+- High-risk commands such as force pushes, hard resets, recursive deletes, and database drops require approval outside full-auto policy.
 - The local proxy redacts upstream API keys from admin responses.
-- Secrets, local state, build output, logs, temporary files, reference dumps,
-  and dependencies are ignored by Git.
-
----
-
-## 中文
-
-### 项目定位
-
-TurboFlux 是一个实验性的本地 AI 工作台。它把终端 CLI、共享 Agent Runtime、工具执行层、记忆与上下文、检查点历史、可选 Electron 桌面壳，以及本地 OpenAI-compatible 模型代理组合在一起。
-
-它更像开发者本地工具箱，而不是一个托管 SaaS 后端。
-
-### 核心能力
-
-- 基于 Ink 的终端助手：流式输出、斜杠命令、模型选择、会话历史、回退和固定视口模式。
-- 共享 Agent Runtime：计划/执行模式、任务树、上下文压缩、子代理、Skills、MCP 工具和多模型请求适配。
-- 工作区沙箱：文件和命令工具默认限制在工作区内，高风险操作需要审批。
-- 本地检查点和会话存储，让迭代更安全。
-- 本地模型代理：上游 API Key 留在后端，不直接放到 CLI 或桌面 UI。
-- `src-desktop/` 内包含可选 Electron 桌面工作台源码。
-
-### 目录结构
-
-```text
-bin/           CLI 启动入口
-src/cli/       Ink 终端 UI、斜杠命令、会话存储
-src/core/      Agent Runtime、模型配置、权限、MCP、Skills
-src/server/    本地 OpenAI-compatible 代理和管理页
-src/state/     模型和状态契约
-src/tools/     工具执行、本地历史、记忆工具
-src/shared/    跨层共享类型
-src-desktop/   Electron main / preload / renderer
-docs/assets/   README 和文档资源
-```
-
-### 快速开始
-
-```bash
-npm install
-npm start
-```
-
-指定工作区：
-
-```bash
-npm start -- /path/to/project
-```
-
-单次任务模式：
-
-```bash
-npm start -- --command "summarize this repository"
-```
-
-常用命令：
-
-```text
-/help                 查看命令
-/config               查看配置
-/config apiKey VALUE  设置本地代理令牌或模型 Key
-/model                选择模型
-/plan                 切换到计划模式
-/vibe                 切换到自主执行模式
-/init                 创建 TURBOFLUX.md 项目指令
-/resume               打开历史会话
-```
-
-CLI 启动时不会自动写入 `TURBOFLUX.md`。需要项目指令文件时手动执行 `/init`。
-
-### 本地模型代理
-
-默认配置：
-
-```text
-baseUrl: http://127.0.0.1:8787
-apiKey: turboflux-local
-model: gpt-5.5
-```
-
-启动代理：
-
-```bash
-npm run server
-```
-
-管理页：
-
-```text
-http://127.0.0.1:8787/admin
-```
-
-从 `.env.example` 创建 `.env`：
-
-```bash
-TURBOFLUX_FREE_MODEL_API_KEY=<your-upstream-api-key>
-TURBOFLUX_FREE_MODEL_BASE_URL=https://api.example.com/v1
-TURBOFLUX_FREE_MODEL=gpt-5.5
-```
-
-如果代理绑定到非 localhost，必须设置 `TURBOFLUX_PROXY_AUTH_TOKEN`，否则 TurboFlux 会拒绝启动。
-
-### 开发命令
-
-```bash
-npm run dev:cli        # 监听 CLI
-npm run dev:server     # 监听本地代理
-npm run dev            # 启动 Electron 开发工作台
-npm run type-check     # TypeScript 检查
-npm test               # Vitest 测试
-npm run build          # 编译 src/
-npm run build:desktop  # 构建 Electron bundles
-```
-
-### 安全说明
-
-- 默认工具执行限制在工作区内，除非显式切换到 full access。
-- 强制推送、硬重置、递归删除、数据库 drop 等高风险命令需要审批。
-- 本地代理不会在管理接口返回真实上游 Key。
-- `.env`、本地状态、构建产物、日志、临时文件、参考资料和依赖目录都应保持不入库。
-
-## Verification
-
-```bash
-npm run type-check
-npm test
-npm audit --audit-level=high --registry=https://registry.npmjs.org
-```
-
-Current snapshot: TypeScript passes, 259 tests pass, and npm audit reports 0
-known vulnerabilities.
+- Secrets, local state, build output, logs, temporary files, reference dumps, and dependencies are ignored by Git.
 
 ## License
 
