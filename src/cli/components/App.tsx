@@ -4,6 +4,7 @@ import { ThemeProvider } from '../theme/index'
 import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
 import { ToolCallTree, type ToolStatus } from './tools/ToolCallTree'
+import { FileEditStatus, isFileEditToolName } from './tools/FileEditStatus'
 import { FastContextBanner } from './tools/FastContextBanner'
 import { ConversationHistory, type ConversationEntry } from './ConversationHistory'
 import { RewindSelector } from './input/RewindSelector'
@@ -713,7 +714,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <Box flexDirection="column" marginBottom={1}>
       {(fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} isActive={fcActive} />}
       {activeTask && <TaskProgressLine task={activeTask} />}
-      {currentTools.length > 0 && <ToolCallTree tools={currentTools} verbose={verbose} />}
+      <FileEditStatus tools={currentTools} />
+      {currentTools.filter(tool => !(tool.status === 'running' && isFileEditToolName(tool.name))).length > 0 && (
+        <ToolCallTree
+          tools={currentTools.filter(tool => !(tool.status === 'running' && isFileEditToolName(tool.name)))}
+          verbose={verbose}
+        />
+      )}
       {streamTextForDisplay && <Text>{formatMarkdown(streamTextForDisplay)}</Text>}
       {!visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk && (
         <Box><SpinnerGlyph lastActivity={lastActivity} label="Thinking..." /></Box>

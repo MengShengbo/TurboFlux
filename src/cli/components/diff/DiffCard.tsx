@@ -4,7 +4,7 @@ import { useTheme } from '../../theme/index'
 import { canComputeDiff, computeHunks, summarizeHunks } from '../../../core/diffCompute'
 import { DiffHunks } from './DiffHunks'
 
-export const MAX_INLINE_DIFF_RENDER_ROWS = 400
+export const MAX_INLINE_DIFF_RENDER_ROWS = 96
 
 interface DiffCardProps {
   filename: string
@@ -58,7 +58,7 @@ export function DiffCard({
       )}
       {canRenderDiff && maxDiffRows <= 0 && hunks.length > 0 && (
         <Box marginLeft={2}>
-          <Text color={theme.inactive}>diff collapsed: {hunks.length} hunk{hunks.length === 1 ? '' : 's'}</Text>
+          <Text color={theme.inactive}>diff collapsed: {hunks.length} hunk{hunks.length === 1 ? '' : 's'} hidden</Text>
         </Box>
       )}
       {hasSnapshots && !canRenderDiff && (
