@@ -58,11 +58,11 @@ describe('TurboFlux profile', () => {
 
   it('enables the richer built-in persona set by default', () => {
     expect(DEFAULT_PROFILE.enabledPersonaIds).toEqual(expect.arrayContaining([
+      'default',
+      'engineer-professional',
       'nekomata-engineer',
-      'laowang-engineer',
-      'ojousama-engineer',
-      'leibus-engineer',
-      'rem-engineer',
+      'architect',
+      'product-builder',
     ]))
   })
 })
