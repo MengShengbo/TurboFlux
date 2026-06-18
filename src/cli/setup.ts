@@ -90,7 +90,7 @@ function uiText(profile: TurboFluxProfile, zh: string, en: string): string {
 }
 
 function printBanner(profile = loadProfile()): void {
-  const line = '─'.repeat(62)
+  const line = '-'.repeat(62)
   console.log('')
   console.log(chalk.dim(line))
   console.log(chalk.cyan.bold('  TurboFlux Setup'))
@@ -168,7 +168,7 @@ async function configureLanguage(options: SetupOptions = {}): Promise<TurboFluxP
   }
 
   const { interfaceLanguage } = await inquirer.prompt<{ interfaceLanguage: TurboFluxInterfaceLanguage }>({
-    type: 'list',
+    type: 'select',
     name: 'interfaceLanguage',
     message: uiText(profile, '选择 TurboFlux Setup 显示语言', 'Select TurboFlux Setup display language'),
     default: profile.interfaceLanguage,
@@ -181,7 +181,7 @@ async function configureLanguage(options: SetupOptions = {}): Promise<TurboFluxP
   profile = saveProfile({ interfaceLanguage })
 
   const { aiOutputLanguage } = await inquirer.prompt<{ aiOutputLanguage: TurboFluxAiOutputLanguage }>({
-    type: 'list',
+    type: 'select',
     name: 'aiOutputLanguage',
     message: uiText(profile, '选择 AI 默认输出语言', 'Select default AI output language'),
     default: profile.aiOutputLanguage,
@@ -256,7 +256,7 @@ async function configureApi(options: SetupOptions = {}): Promise<TurboFluxConfig
     }
     const defaultPreset = defaultProviderForOptions(options, current)
     const { providerId } = await inquirer.prompt<{ providerId: string }>({
-      type: 'list',
+      type: 'select',
       name: 'providerId',
       message: uiText(profile, '选择 API 提供商', 'Choose API provider'),
       choices: PROVIDER_PRESETS.map((item, index) => ({
@@ -393,7 +393,7 @@ async function configurePersona(options: SetupOptions = {}): Promise<TurboFluxPr
   ]
 
   const { defaultPersonaId } = await inquirer.prompt<{ defaultPersonaId: string }>({
-    type: 'list',
+    type: 'select',
     name: 'defaultPersonaId',
     message: uiText(profile, '选择默认人设/输出风格', 'Choose default persona/output style'),
     choices: defaultChoices,
@@ -500,7 +500,7 @@ async function resetAllConfiguration(options: SetupOptions = {}): Promise<void> 
 
 async function promptMainAction(profile: TurboFluxProfile): Promise<SetupAction> {
   const { action } = await inquirer.prompt<{ action: SetupAction }>({
-    type: 'list',
+    type: 'select',
     name: 'action',
     message: uiText(profile, '选择功能', 'Select action'),
     choices: [
