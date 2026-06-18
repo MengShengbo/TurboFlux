@@ -238,7 +238,6 @@ function hasDirectOptions(options: SetupOptions): boolean {
 
 function shouldKeepCurrentApiKey(current: TurboFluxConfig, preset: ProviderPreset, baseUrl: string): boolean {
   if (!current.apiKey) return false
-  if (preset.id === 'local-proxy') return false
   const currentBaseUrl = current.baseUrl.replace(/\/+$/, '')
   const nextBaseUrl = baseUrl.replace(/\/+$/, '')
   return current.provider === preset.provider && currentBaseUrl === nextBaseUrl
@@ -252,7 +251,7 @@ async function configureApi(options: SetupOptions = {}): Promise<TurboFluxConfig
 
   if (!preset) {
     if (options.yes) {
-      throw new Error('Missing provider. Use --provider deepseek, openai, anthropic, openrouter, local-proxy, or custom.')
+      throw new Error('Missing provider. Use --provider deepseek, openai, anthropic, openrouter, or custom.')
     }
     const defaultPreset = defaultProviderForOptions(options, current)
     const { providerId } = await inquirer.prompt<{ providerId: string }>({

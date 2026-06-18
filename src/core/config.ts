@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { getSupportedModelSpec, isSupportedModel, SUPPORTED_MODEL_SPECS } from './modelRegistry'
+import { getSupportedModelSpec, SUPPORTED_MODEL_SPECS } from './modelRegistry'
 
 export interface TurboFluxConfig {
   provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
@@ -40,8 +40,6 @@ const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const CONVERSATIONS_DIR = join(CONFIG_DIR, 'conversations')
 const CHECKPOINTS_DIR = join(CONFIG_DIR, 'checkpoints')
 
-export const LOCAL_PROXY_BASE_URL = 'http://127.0.0.1:8787'
-export const LOCAL_PROXY_API_KEY = 'turboflux-local'
 export const DEFAULT_FREE_MODEL = ''
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 export const DEFAULT_MAX_TOKENS = 16_384
@@ -88,14 +86,6 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     defaultModel: 'deepseek-v4-flash',
     description: 'OpenAI-compatible DeepSeek API.',
   },
-  {
-    id: 'local-proxy',
-    name: 'Local TurboFlux proxy',
-    provider: 'custom',
-    baseUrl: LOCAL_PROXY_BASE_URL,
-    defaultModel: 'gpt-5.5',
-    description: 'Optional local proxy server for advanced users.',
-  },
 ]
 
 export function getProviderPreset(idOrProvider: string): ProviderPreset | undefined {
@@ -106,8 +96,8 @@ export function getProviderPreset(idOrProvider: string): ProviderPreset | undefi
 }
 
 export function baseUrlForProvider(provider: TurboFluxProvider): string {
-  return PROVIDER_PRESETS.find(p => p.provider === provider && p.id !== 'local-proxy')?.baseUrl
-    ?? LOCAL_PROXY_BASE_URL
+  return PROVIDER_PRESETS.find(p => p.provider === provider && p.id !== 'custom')?.baseUrl
+    ?? ''
 }
 
 export const MODEL_PRESETS: ModelPreset[] = SUPPORTED_MODEL_SPECS.map(spec => ({
@@ -120,23 +110,6 @@ export const MODEL_PRESETS: ModelPreset[] = SUPPORTED_MODEL_SPECS.map(spec => ({
   maxTokens: spec.defaultRequestTokens,
   description: spec.description,
 }))
-
-interface BackendModelConfig {
-  id?: unknown
-  model?: unknown
-  name?: unknown
-  contextWindow?: unknown
-  context_window?: unknown
-  maxTokens?: unknown
-  max_tokens?: unknown
-  description?: unknown
-}
-
-interface BackendConfigResponse {
-  upstreamBaseUrl?: unknown
-  defaultModel?: unknown
-  models?: unknown
-}
 
 const DEFAULT_CONFIG: TurboFluxConfig = {
   provider: 'custom',
@@ -164,10 +137,15 @@ function looksLikeLegacyBundledDefault(config: Partial<TurboFluxConfig>): boolea
 }
 
 function looksLikeLegacyLocalProxyDefault(config: Partial<TurboFluxConfig>): boolean {
-  const baseUrl = config.baseUrl?.replace(/\/+$/, '')
+  const rawBaseUrl = typeof config.baseUrl === 'string' ? config.baseUrl.trim() : ''
+  let isRetiredLocalEndpoint = false
+  try {
+    const parsed = new URL(rawBaseUrl)
+    isRetiredLocalEndpoint = ['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname) && parsed.port === '8787'
+  } catch {}
   return (config.provider === 'custom' || config.provider === undefined)
-    && baseUrl === LOCAL_PROXY_BASE_URL
-    && (config.apiKey === LOCAL_PROXY_API_KEY || config.apiKey === undefined || config.apiKey === '')
+    && isRetiredLocalEndpoint
+    && (config.apiKey === 'turboflux-local' || config.apiKey === undefined || config.apiKey === '')
     && (!config.model || config.model === 'gpt-5.5' || config.model === 'deepseek-v4-pro')
 }
 
@@ -206,7 +184,7 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
       try {
         new URL(value)
       } catch {
-        throw new Error('Invalid baseUrl. Use a full URL such as http://127.0.0.1:8787')
+        throw new Error('Invalid baseUrl. Use a full URL such as https://api.example.com/v1')
       }
       return { ...config, baseUrl: value.replace(/\/+$/, '') }
     }
@@ -226,74 +204,8 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
   }
 }
 
-function normalizeBackendModel(raw: BackendModelConfig): ModelPreset | null {
-  const id = typeof (raw.id ?? raw.model) === 'string' ? String(raw.id ?? raw.model).trim() : ''
-  const spec = getSupportedModelSpec(id)
-  if (!id || !spec) return null
-  return {
-    id: spec.id,
-    name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : spec.name,
-    model: spec.id,
-    provider: providerForModel(spec.id),
-    baseUrl: LOCAL_PROXY_BASE_URL,
-    contextWindow: positiveInteger(raw.contextWindow ?? raw.context_window, spec.contextWindow),
-    maxTokens: positiveInteger(raw.maxTokens ?? raw.max_tokens, spec.defaultRequestTokens),
-    description: typeof raw.description === 'string' && raw.description.trim() ? raw.description.trim() : spec.description,
-  }
-}
-
-function normalizeBackendModels(models: unknown, defaultModel?: unknown): ModelPreset[] {
-  const normalized = Array.isArray(models)
-    ? models.flatMap(item => {
-      if (!item || typeof item !== 'object') return []
-      const model = normalizeBackendModel(item as BackendModelConfig)
-      return model ? [model] : []
-    })
-    : []
-  const deduped = [...new Map(normalized.map(model => [model.model, model])).values()]
-  const fallbackDefault = typeof defaultModel === 'string' && defaultModel.trim() ? defaultModel.trim() : ''
-  const fallbackSpec = getSupportedModelSpec(fallbackDefault)
-  if (fallbackDefault && !deduped.some(model => model.model === fallbackDefault)) {
-    if (fallbackSpec) deduped.unshift({
-      id: fallbackSpec.id,
-      name: fallbackSpec.name,
-      model: fallbackSpec.id,
-      provider: providerForModel(fallbackSpec.id),
-      baseUrl: LOCAL_PROXY_BASE_URL,
-      contextWindow: fallbackSpec.contextWindow,
-      maxTokens: fallbackSpec.defaultRequestTokens,
-      description: fallbackSpec.description,
-    })
-  }
-  return deduped
-}
-
-export async function fetchLocalBackendPresets(baseUrl = LOCAL_PROXY_BASE_URL): Promise<ModelPreset[]> {
-  if (!isLocalProxyBaseUrl(baseUrl)) return []
-  try {
-    const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/admin/api/config`, {
-      headers: { Accept: 'application/json' },
-    })
-    if (!response.ok) return []
-    const payload = await response.json() as BackendConfigResponse
-    return normalizeBackendModels(payload.models, payload.defaultModel)
-  } catch {
-    return []
-  }
-}
-
-function isLocalProxyBaseUrl(baseUrl: string): boolean {
-  try {
-    const url = new URL(baseUrl)
-    return ['127.0.0.1', 'localhost', '::1'].includes(url.hostname) && url.port === '8787'
-  } catch {
-    return false
-  }
-}
-
-export async function getModelPresets(baseUrl = LOCAL_PROXY_BASE_URL): Promise<ModelPreset[]> {
-  const backendPresets = await fetchLocalBackendPresets(baseUrl)
-  return backendPresets.length > 0 ? backendPresets : MODEL_PRESETS
+export async function getModelPresets(_baseUrl?: string): Promise<ModelPreset[]> {
+  return MODEL_PRESETS
 }
 
 function applyKnownModelMetadata(config: TurboFluxConfig, presets: ModelPreset[]): TurboFluxConfig {
@@ -320,8 +232,7 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
   ensureDirectories()
 
   if (!existsSync(CONFIG_FILE)) {
-    const presets = await getModelPresets()
-    const initial = applyKnownModelMetadata({ ...DEFAULT_CONFIG }, presets)
+    const initial = applyKnownModelMetadata({ ...DEFAULT_CONFIG }, MODEL_PRESETS)
     writeFileSync(CONFIG_FILE, JSON.stringify(initial, null, 2), 'utf-8')
     return initial
   }
@@ -345,16 +256,7 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
       writeFileSync(CONFIG_FILE, JSON.stringify(migrated, null, 2), 'utf-8')
       return migrated
     }
-    const presets = await getModelPresets(merged.baseUrl || LOCAL_PROXY_BASE_URL)
-    const withBackendMetadata = applyKnownModelMetadata(merged, presets)
-    if (
-      withBackendMetadata.contextWindow === 128_000 &&
-      withBackendMetadata.baseUrl.replace(/\/+$/, '') === LOCAL_PROXY_BASE_URL &&
-      (withBackendMetadata.model === DEFAULT_FREE_MODEL || withBackendMetadata.model === 'deepseek-v4-pro')
-    ) {
-      withBackendMetadata.contextWindow = DEFAULT_CONTEXT_WINDOW
-      writeFileSync(CONFIG_FILE, JSON.stringify(withBackendMetadata, null, 2), 'utf-8')
-    }
+    const withBackendMetadata = applyKnownModelMetadata(merged, MODEL_PRESETS)
     if (
       withBackendMetadata.contextWindow !== merged.contextWindow ||
       withBackendMetadata.maxTokens !== merged.maxTokens ||
@@ -410,7 +312,7 @@ export function applyPreset(config: TurboFluxConfig, preset: ModelPreset): Turbo
 export function configFromProviderPreset(preset: ProviderPreset, apiKey: string, model?: string, baseUrl?: string): TurboFluxConfig {
   const selectedModel = model?.trim() || preset.defaultModel
   const spec = getSupportedModelSpec(selectedModel)
-  const selectedApiKey = apiKey || (preset.id === 'local-proxy' ? LOCAL_PROXY_API_KEY : '')
+  const selectedApiKey = apiKey || ''
   return {
     provider: preset.provider,
     apiKey: selectedApiKey,

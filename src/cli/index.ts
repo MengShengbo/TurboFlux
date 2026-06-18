@@ -64,7 +64,7 @@ program
 program
   .command('setup [action]')
   .description('Configure TurboFlux provider, language, persona, and custom behavior')
-  .option('-p, --provider <provider>', 'provider preset (deepseek, openai, anthropic, openrouter, local-proxy)')
+  .option('-p, --provider <provider>', 'provider preset (deepseek, openai, anthropic, openrouter, custom)')
   .option('-k, --api-key <key>', 'provider API key')
   .option('-b, --base-url <url>', 'custom base URL')
   .option('-m, --model <model>', 'model name')

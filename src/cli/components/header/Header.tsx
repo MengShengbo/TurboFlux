@@ -35,7 +35,7 @@ export function Header({ workspaceName, model, mood, hasApiKey }: HeaderProps) {
         : 'Session live'
 
   return (
-    <Box flexDirection="column" marginBottom={2}>
+    <Box flexDirection="column" marginBottom={0}>
       <Box
         flexDirection={isNarrow ? 'column' : 'row'}
         borderStyle="round"
@@ -82,13 +82,11 @@ export function Header({ workspaceName, model, mood, hasApiKey }: HeaderProps) {
         </Box>
       </Box>
 
-      <Box paddingLeft={1} height={1}>
-        {!hasApiKey ? (
+      {!hasApiKey && (
+        <Box paddingLeft={1} height={1}>
           <Text color={theme.brandShimmer}>No model provider configured. Run turboflux setup to connect one.</Text>
-        ) : (
-          <Text> </Text>
-        )}
-      </Box>
+        </Box>
+      )}
     </Box>
   )
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_PROFILE,
   buildProfileSystemPromptSection,
   normalizeProfile,
 } from './profile'
@@ -40,5 +41,28 @@ describe('TurboFlux profile', () => {
 
     expect(section).toContain('name="Strict Reviewer"')
     expect(section).toContain('Review every claim carefully.')
+  })
+
+  it('includes the nekomata engineer output style prompt', () => {
+    const section = buildProfileSystemPromptSection({
+      defaultPersonaId: 'nekomata-engineer',
+      enabledPersonaIds: ['nekomata-engineer'],
+    })
+
+    expect(section).toContain('id="nekomata-engineer"')
+    expect(section).toContain('猫娘 幽浮喵')
+    expect(section).toContain('浮浮酱')
+    expect(section).toContain('主人')
+    expect(section).toContain('KISS')
+  })
+
+  it('enables the richer built-in persona set by default', () => {
+    expect(DEFAULT_PROFILE.enabledPersonaIds).toEqual(expect.arrayContaining([
+      'nekomata-engineer',
+      'laowang-engineer',
+      'ojousama-engineer',
+      'leibus-engineer',
+      'rem-engineer',
+    ]))
   })
 })

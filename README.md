@@ -42,7 +42,6 @@ flowchart LR
   Runtime --> MCP["MCP 客户端\nsrc/core/mcp"]
   Runtime --> Profile["用户配置\n~/.turboflux/profile.json"]
   Runtime --> Provider["模型供应商\nOpenAI / Anthropic / OpenRouter / DeepSeek / Custom"]
-  Runtime --> Proxy["可选本地代理\nsrc/server"]
   Tools --> Workspace["用户工作区"]
 ```
 
@@ -149,28 +148,12 @@ turboflux /path/to/project --command "summarize this repository"
 /thinking             设置思考模式
 ```
 
-### 可选本地代理
-
-本地代理用于自建 OpenAI-compatible 转发和管理，不是必需组件。
-
-```bash
-npm run server
-turboflux setup api --provider local-proxy --yes
-```
-
-管理页面：
-
-```text
-http://127.0.0.1:8787/admin
-```
-
 ### 目录结构
 
 ```text
 bin/           CLI 启动入口
 src/cli/       Ink 终端 UI、斜杠命令、会话存储
 src/core/      Agent Runtime、模型配置、权限、MCP、Skills、Profile
-src/server/    可选本地 OpenAI-compatible 代理和管理页
 src/state/     模型与共享状态契约
 src/tools/     工具执行、本地历史、记忆工具
 src/shared/    跨层共享类型
@@ -181,7 +164,6 @@ docs/assets/   README 与文档资源
 
 ```bash
 npm run dev:cli
-npm run dev:server
 npm run dev
 npm run type-check
 npm test
@@ -216,7 +198,6 @@ flowchart LR
   Runtime --> MCP["MCP Client\nsrc/core/mcp"]
   Runtime --> Profile["User Profile\n~/.turboflux/profile.json"]
   Runtime --> Provider["Model Provider\nOpenAI / Anthropic / OpenRouter / DeepSeek / Custom"]
-  Runtime --> Proxy["Optional Local Proxy\nsrc/server"]
   Tools --> Workspace["User Workspace"]
 ```
 
@@ -279,24 +260,10 @@ turboflux /path/to/project
 turboflux /path/to/project --command "summarize this repository"
 ```
 
-### Optional Local Proxy
-
-```bash
-npm run server
-turboflux setup api --provider local-proxy --yes
-```
-
-Admin console:
-
-```text
-http://127.0.0.1:8787/admin
-```
-
 ### Development
 
 ```bash
 npm run dev:cli
-npm run dev:server
 npm run dev
 npm run type-check
 npm test

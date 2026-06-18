@@ -93,7 +93,6 @@ commandRegistry.register({
       '  turboflux setup api --provider deepseek --api-key <key>',
       '  turboflux setup language --all-lang zh-CN --yes',
       '  turboflux setup persona --output-style all --default-output-style engineer-professional --yes',
-      '  turboflux setup --provider local-proxy --yes',
     ].join('\n')
   },
 })

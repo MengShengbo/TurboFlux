@@ -13,14 +13,13 @@ This public repository contains:
 - Ink CLI surface in `src/cli/`.
 - Shared agent runtime, system prompt, model config, skills, MCP, and task logic in `src/core/`.
 - Tool implementations, local history, and memory utilities in `src/tools/`.
-- Local OpenAI-compatible model proxy in `src/server/`.
 - Shared contracts in `src/shared/` and `src/state/`.
 
 ## Working Rules
 
 - Keep CLI UI code in `src/cli/`.
 - Shared assistant behavior belongs in `src/core/`, `src/tools/`, `src/shared/`, or `src/state/`.
-- Keep provider credentials in local environment files or the local proxy, never in committed source.
+- Keep provider credentials in local configuration or environment files, never in committed source.
 - Keep the assistant identity broad: TurboFlux is a local workbench assistant, not a narrow command runner.
 
 ## Verification

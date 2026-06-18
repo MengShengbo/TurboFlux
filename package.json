@@ -13,9 +13,7 @@
     "dev": "npm run dev:cli",
     "dev:cli": "tsx watch src/cli/index.ts",
     "dev:once": "tsx src/cli/index.ts",
-    "dev:server": "tsx watch src/server/index.ts",
     "start": "tsx src/cli/index.ts",
-    "server": "tsx src/server/index.ts",
     "build": "tsc",
     "type-check": "tsc --noEmit",
     "test": "vitest run"
@@ -24,8 +22,7 @@
     "@types/node": "^20.10.0",
     "@types/react": "^19.2.15",
     "typescript": "^5.3.3",
-    "vitest": "^4.1.7",
-    "wait-on": "^9.0.10"
+    "vitest": "^4.1.7"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -33,7 +30,6 @@
     "cli-truncate": "^6.0.0",
     "commander": "^12.1.0",
     "diff": "^9.0.0",
-    "dotenv": "^17.4.2",
     "figures": "^6.1.0",
     "highlight.js": "^11.11.1",
     "ink": "^7.0.3",

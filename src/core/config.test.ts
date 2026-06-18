@@ -10,8 +10,8 @@ import {
 
 const baseConfig: TurboFluxConfig = {
   provider: 'custom',
-  apiKey: 'turboflux-local',
-  baseUrl: 'http://127.0.0.1:8787',
+  apiKey: 'test-key',
+  baseUrl: 'https://api.example.com/v1',
   model: 'gpt-5.5',
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
@@ -44,7 +44,7 @@ describe('setConfigValue', () => {
 })
 
 describe('provider presets', () => {
-  it('keeps provider defaults explicit instead of using the local backend proxy', () => {
+  it('keeps provider defaults explicit', () => {
     const preset = getProviderPreset('deepseek')
 
     expect(preset?.baseUrl).toBe('https://api.deepseek.com')
@@ -69,14 +69,5 @@ describe('provider presets', () => {
     expect(config.provider).toBe('custom')
     expect(config.baseUrl).toBe('https://api.example.com/v1')
     expect(config.model).toBe('custom-model')
-  })
-
-  it('keeps the local proxy preset usable without manual token input', () => {
-    const preset = getProviderPreset('local-proxy')!
-    const config = configFromProviderPreset(preset, '')
-
-    expect(config.provider).toBe('custom')
-    expect(config.apiKey).toBe('turboflux-local')
-    expect(config.baseUrl).toBe('http://127.0.0.1:8787')
   })
 })

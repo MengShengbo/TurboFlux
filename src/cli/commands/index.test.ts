@@ -11,7 +11,7 @@ function contextWithUsage(usage: { input?: number; output?: number; source?: 'pr
     config: {
       provider: 'custom',
       apiKey: 'test',
-      baseUrl: 'http://127.0.0.1:8787',
+      baseUrl: 'https://api.example.com/v1',
       model: 'test-model',
       contextWindow: 1_000_000,
       maxTokens: 16_384,

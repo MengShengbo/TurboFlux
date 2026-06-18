@@ -665,38 +665,11 @@ export class NodeToolExecutor implements ToolExecutor {
 
   private formatHttpError(url: string, status: number, text: string): string {
     const detail = text.trim() || 'empty response'
-    if (this.isLocalTurboFluxBackend(url)) {
-      return `TurboFlux backend returned HTTP ${status} at ${this.originOf(url)}. ${detail}`
-    }
     return `HTTP ${status}: ${detail}`
   }
 
   private formatNetworkError(url: string, error: unknown): string {
     const message = error instanceof Error ? error.message : String(error)
-    if (this.isLocalTurboFluxBackend(url)) {
-      return [
-        `TurboFlux backend is not reachable at ${this.originOf(url)}.`,
-        'Start it with `npm run server`, then retry the message.',
-        `Last error: ${message}`,
-      ].join(' ')
-    }
     return message
-  }
-
-  private isLocalTurboFluxBackend(url: string): boolean {
-    try {
-      const parsed = new URL(url)
-      return ['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)
-    } catch {
-      return false
-    }
-  }
-
-  private originOf(url: string): string {
-    try {
-      return new URL(url).origin
-    } catch {
-      return url
-    }
   }
 }
