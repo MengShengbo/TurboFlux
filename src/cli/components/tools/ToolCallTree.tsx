@@ -24,13 +24,14 @@ interface ToolCallTreeProps {
 export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
+  const visibleTools = verbose ? tools : tools.filter(tool => !isQuietSuccessfulRead(tool))
 
-  if (tools.length === 0) return null
-  const allSettled = tools.every(tool => tool.status !== 'running')
+  if (visibleTools.length === 0) return null
+  const allSettled = visibleTools.every(tool => tool.status !== 'running')
 
   if (!verbose && allSettled) {
-    const failed = tools.filter(tool => tool.status === 'error')
-    const summary = summarizeTools(tools, columns)
+    const failed = visibleTools.filter(tool => tool.status === 'error')
+    const summary = summarizeTools(visibleTools, columns)
     return (
       <Box marginBottom={0}>
         <Text color={theme.inactive}>Activity </Text>
@@ -43,8 +44,8 @@ export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Text color={theme.inactive}>Activity</Text>
-      {tools.map((tool, i) => {
-        const isLast = i === tools.length - 1
+      {visibleTools.map((tool, i) => {
+        const isLast = i === visibleTools.length - 1
         const connector = isLast ? '`-' : '|-'
         return (
           <Box key={tool.id ?? i} flexDirection="column">
@@ -62,6 +63,10 @@ export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
       })}
     </Box>
   )
+}
+
+function isQuietSuccessfulRead(tool: ToolStatus): boolean {
+  return tool.status === 'done' && (tool.name === 'read_file' || tool.name === 'read_file_full')
 }
 
 function summarizeTools(tools: ToolStatus[], columns: number): string {

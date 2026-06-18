@@ -1123,7 +1123,7 @@ export class AgentEngine {
 
     let longRunNoticeShown = false
     let consecutiveToolErrors = 0
-    const MAX_CONSECUTIVE_ERRORS = 3
+    const MAX_CONSECUTIVE_ERRORS = 1
 
     try {
       let turnCount = 0
@@ -1643,11 +1643,24 @@ ${recentContext}`
 
     const errorSummary = errors.map(e => `- ${e.name}: ${e.output.slice(0, 120)}`).join('\n')
     const toolNames = [...new Set(failedToolCalls.map(tc => tc.name))].join(', ')
+    const editMatchFailed = errors.some(e =>
+      (e.name === 'edit_file' || e.name === 'multi_edit')
+      && /(old_string not found|found \d+ occurrences|Match must be exact|multi_edit is atomic)/i.test(e.output)
+    )
+    const editGuidance = editMatchFailed
+      ? `
+Exact edit matching failed. Do not retry another similar edit_file/multi_edit call against the same snippet.
+Use one of these safer paths:
+- For small changes: read the nearest surrounding lines, then use a longer unique old_string with stable context.
+- For broad or fragile changes: use replace_file with the complete final file content.
+`
+      : ''
 
     return `<tool_retry_hint>
 The last tool call(s) failed: ${toolNames}.
 Errors:
 ${errorSummary}
+${editGuidance}
 
 Before retrying:
 1. Identify the root cause of each failure (wrong path? missing file? syntax error?)
@@ -2019,15 +2032,12 @@ Before retrying:
             const block = toolCallMap.get(`idx-${index}`)
             if (block) {
               block.inputJson += delta.partial_json
-              const parsed = this.tryParsePartialJson(block.inputJson)
-              if (parsed) {
-                this.emit({
-                  type: 'stream:tool_call_delta',
-                  toolCallId: block.id,
-                  toolName: block.name,
-                  partialJson: block.inputJson,
-                })
-              }
+              this.emit({
+                type: 'stream:tool_call_delta',
+                toolCallId: block.id,
+                toolName: block.name,
+                partialJson: block.inputJson,
+              })
             }
           }
         } else if (eventType === 'content_block_start') {
@@ -3165,8 +3175,8 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private isToolOutputFailure(name: string, output: string): boolean {
-    if (name === 'read_file' || name === 'read_file_full') return false
     const trimmed = output.trim()
+    if ((name === 'read_file' || name === 'read_file_full') && !/^Error(?:\s|\(|:)/.test(trimmed)) return false
     return /^Error(?:\s|\(|:)/.test(trimmed)
       || /^Tool execution error:/i.test(trimmed)
       || /^Unknown tool:/i.test(trimmed)
@@ -3687,7 +3697,8 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const filePath = this.resolvePath(basePath, args.path as string)
         const isFullRead = name === 'read_file_full'
         const offset = isFullRead ? undefined : args.offset as number | undefined
-        const limit = isFullRead ? undefined : args.limit as number | undefined
+        const requestedLimit = isFullRead ? undefined : args.limit as number | undefined
+        const limit = isFullRead ? undefined : requestedLimit ?? 180
         // with_line_numbers defaults true: cat -n style output makes
         // edit_file / multi_edit far more reliable because the model can
         // see exact line positions when planning targeted edits.
@@ -3730,11 +3741,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         }
         this.readCache.set(cacheKey, { content, timestamp: Date.now() })
 
-        // If the model explicitly requested a range and there's more, hint continuation
+        // If there is more content, hint continuation. Default read_file is
+        // intentionally sliced so the model does not pull a huge file into
+        // context when it only needs a local region.
         const truncated = (start + returnedLines) < totalLines
         if (!isFullRead && limit && truncated) {
           const nextOffset = startLine + returnedLines
-          return `[lines ${startLine}-${startLine - 1 + returnedLines} of ${totalLines}; call read_file with offset=${nextOffset} to continue]\n${content}`
+          const fullHint = requestedLimit
+            ? `call read_file with offset=${nextOffset}, limit=${limit} to continue`
+            : `showing the first ${returnedLines} lines by default; call read_file with offset=${nextOffset}, limit=${limit} to continue, or read_file_full only when exact complete file content is required`
+          return `[lines ${startLine}-${startLine - 1 + returnedLines} of ${totalLines}; ${fullHint}]\n${content}`
         }
         return content
       }

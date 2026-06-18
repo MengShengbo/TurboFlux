@@ -4,7 +4,7 @@ import type { EnhancedToolDef } from '../shared/toolTypes'
 const tools: EnhancedToolDef[] = [
   {
     name: 'read_file',
-    description: 'Read a file or line-range slice. Output is line-numbered (cat -n style). Use offset/limit for long files. Use read_file_full only when the exact complete file is needed.',
+    description: 'Read a file or line-range slice. Defaults to the first 180 lines when limit is omitted. Output is line-numbered (cat -n style). Continue with offset/limit. Use read_file_full only when exact complete content is required.',
     category: 'read',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
@@ -73,7 +73,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'multi_edit',
-    description: 'Apply multiple edits to one file atomically. All succeed or none are written. Prefer over repeated edit_file for 2+ changes.',
+    description: 'Apply multiple exact-snippet edits to one file atomically. All succeed or none are written. If matching is fragile or an old_string fails, switch to replace_file with complete final content instead of retrying similar snippets.',
     category: 'write',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },

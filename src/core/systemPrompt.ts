@@ -137,9 +137,11 @@ function buildToolUsageSection(_mode: AgentMode): string {
 - For named code (function/class/export), use search_symbols. For exact strings or regex patterns, use search_content. For mapping a feature area to a small set of files, use get_codemap. These are MUCH cheaper than recursive list_directory + read_file.
 - Avoid recursive list_directory and whole-project scans unless the user explicitly asks for a broad inventory or narrower searches failed.
 - In ordinary mode, keep retrieval steady and targeted. Do not use FastContext as a first move unless the user asked for it.
+- read_file without limit returns a bounded slice. Continue with offset/limit for nearby regions; do not page through an entire file unless necessary.
+- read_file_full: use only when exact complete file content is required for a whole-file rewrite, audit, or generated replacement.
 - edit_file: old_content must match exactly and uniquely. Add context lines if ambiguous.
+- multi_edit: if any exact snippet match fails, do not retry nearly identical snippets. Use replace_file with complete final content.
 - replace_file: use for whole-file rewrites or when exact snippet matching is unreliable; content must be the complete final file.
-- read_file_full: use sparingly for exact full-file context; otherwise prefer read_file with offset/limit.
 - All path parameters are workspace-relative (e.g. src/main/index.ts). No absolute paths.
 - After all modifications: create_checkpoint, then generate_change_summary (scale detail to change size).
 </tool_rules>

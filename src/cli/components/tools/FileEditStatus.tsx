@@ -10,24 +10,33 @@ const FILE_EDIT_TOOLS = new Set(['write_file', 'replace_file', 'edit_file', 'mul
 
 interface FileEditStatusProps {
   tools: ToolStatus[]
+  draft?: {
+    id: string
+    name: string
+    partialJson: string
+    startedAt: number
+    updatedAt: number
+  } | null
 }
 
-export function FileEditStatus({ tools }: FileEditStatusProps) {
+export function FileEditStatus({ tools, draft }: FileEditStatusProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const active = [...tools].reverse().find(tool => tool.status === 'running' && FILE_EDIT_TOOLS.has(tool.name))
 
-  if (!active) return null
+  if (!active && !(draft && FILE_EDIT_TOOLS.has(draft.name))) return null
 
-  const path = getPathFromArgs(active.args)
-  const verb = getVerb(active.name)
-  const label = path ? `${verb} ${path}` : `${verb} file`
+  const path = active ? getPathFromArgs(active.args) : getPathFromPartialJson(draft?.partialJson)
+  const name = active?.name ?? draft?.name ?? 'edit_file'
+  const verb = active ? getVerb(name) : getDraftVerb(name)
+  const size = !active && draft ? ` - ${formatBytes(draft.partialJson.length)} prepared` : ''
+  const label = `${path ? `${verb} ${path}` : `${verb} file`}${size}`
 
   return (
     <Box marginBottom={0}>
       <Text color={theme.inactive}>File </Text>
       <SpinnerGlyph
-        lastActivity={active.startTime}
+        lastActivity={active?.startTime ?? draft?.updatedAt}
         label={cliTruncate(label, Math.max(20, columns - 16), { position: 'middle' })}
       />
     </Box>
@@ -49,6 +58,17 @@ function getVerb(name: string): string {
   }
 }
 
+function getDraftVerb(name: string): string {
+  switch (name) {
+    case 'write_file': return 'Preparing write for'
+    case 'replace_file': return 'Preparing replacement for'
+    case 'edit_file': return 'Preparing edit for'
+    case 'multi_edit': return 'Preparing edits for'
+    case 'delete_file': return 'Preparing delete for'
+    default: return 'Preparing edit for'
+  }
+}
+
 function getPathFromArgs(argsJson?: string): string {
   if (!argsJson) return ''
   try {
@@ -57,4 +77,26 @@ function getPathFromArgs(argsJson?: string): string {
   } catch {
     return ''
   }
+}
+
+function getPathFromPartialJson(partialJson?: string): string {
+  if (!partialJson) return ''
+  try {
+    const args = JSON.parse(partialJson) as Record<string, unknown>
+    return typeof args.path === 'string' ? args.path : ''
+  } catch {
+    const match = partialJson.match(/"path"\s*:\s*"((?:\\.|[^"\\])*)"/)
+    if (!match) return ''
+    try {
+      return JSON.parse(`"${match[1]}"`)
+    } catch {
+      return match[1] || ''
+    }
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }

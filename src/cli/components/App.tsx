@@ -45,6 +45,14 @@ type StaticTranscriptItem =
   | { kind: 'header'; id: string }
   | { kind: 'message'; id: string; message: Message }
 
+type StreamingToolDraft = {
+  id: string
+  name: string
+  partialJson: string
+  startedAt: number
+  updatedAt: number
+}
+
 function isMessageRole(role: string): role is Message['role'] {
   return role === 'user' || role === 'assistant' || role === 'system'
 }
@@ -68,6 +76,33 @@ function TaskProgressLine({ task }: { task: ActiveTaskContext }) {
   )
 }
 
+function shouldHideToolInActivity(tool: ToolStatus): boolean {
+  if (tool.status === 'running' && isFileEditToolName(tool.name)) return true
+  if (tool.status === 'done' && (tool.name === 'read_file' || tool.name === 'read_file_full')) return true
+  return false
+}
+
+function serializeToolArgsForUi(args: Record<string, unknown> | undefined): string | undefined {
+  if (!args) return undefined
+  const clone: Record<string, unknown> = { ...args }
+  for (const key of ['content', 'old_content', 'new_content', 'old_string', 'new_string']) {
+    if (typeof clone[key] === 'string') {
+      clone[key] = `<${(clone[key] as string).length} chars>`
+    }
+  }
+  if (Array.isArray(clone.edits)) {
+    clone.edits = clone.edits.map((edit) => {
+      if (!edit || typeof edit !== 'object') return edit
+      const next: Record<string, unknown> = { ...(edit as Record<string, unknown>) }
+      for (const key of ['old_string', 'new_string']) {
+        if (typeof next[key] === 'string') next[key] = `<${(next[key] as string).length} chars>`
+      }
+      return next
+    })
+  }
+  return JSON.stringify(clone)
+}
+
 function turnsToMessages(turns: AgentTurn[]): Message[] {
   const resultByToolCallId = new Map<string, NonNullable<AgentTurn['toolResults']>[number]>()
   for (const turn of turns) {
@@ -83,7 +118,7 @@ function turnsToMessages(turns: AgentTurn[]): Message[] {
         id: toolCall.id,
         name: toolCall.name,
         status: result?.isError ? 'error' as const : 'done' as const,
-        args: JSON.stringify(toolCall.arguments).slice(0, 80),
+        args: serializeToolArgsForUi(toolCall.arguments),
         output: result?.output?.slice(0, 200),
         startTime: turn.timestamp,
         endTime: result ? turn.timestamp + 1 : undefined,
@@ -267,6 +302,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [isRunning, setIsRunning] = useState(false)
   const [streamText, setStreamText] = useState('')
   const [currentTools, setCurrentTools] = useState<ToolStatus[]>([])
+  const [streamingToolDraft, setStreamingToolDraft] = useState<StreamingToolDraft | null>(null)
   const [mood, setMood] = useState<MascotMood>('idle')
   const [tokenUsage, setTokenUsage] = useState<TokenUsage>({ source: 'unknown' })
   const [currentMode, setCurrentMode] = useState<'vibe' | 'plan'>('vibe')
@@ -353,6 +389,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setTokenUsage(engine.getContextUsage())
     setGitEnabled(engine.isGitEnabled())
     setCurrentTools([])
+    setStreamingToolDraft(null)
     setChangeSummaries([])
     streamBufferRef.current = ''
     clearStreamFlushTimer()
@@ -398,6 +435,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       switch (event.type) {
         case 'stream:start':
           setIsRunning(true)
+          setStreamingToolDraft(null)
           streamBufferRef.current = ''
           clearStreamFlushTimer()
           break
@@ -436,16 +474,34 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'tool:call':
           if (event.toolCall.name === 'spawn_agent') break
+          setIsRunning(true)
+          setStreamingToolDraft(prev => prev?.id === event.toolCall.id ? null : prev)
           setCurrentTools(prev => [...prev, {
             id: event.toolCall.id,
             name: event.toolCall.name,
             status: 'running',
-            args: event.toolCall.arguments ? JSON.stringify(event.toolCall.arguments).slice(0, 80) : undefined,
+            args: serializeToolArgsForUi(event.toolCall.arguments),
             startTime: Date.now(),
           }])
           setLastActivity(Date.now())
           break
+        case 'stream:tool_call_delta':
+          setIsRunning(true)
+          setStreamingToolDraft(prev => ({
+            id: event.toolCallId,
+            name: event.toolName || prev?.name || 'tool',
+            partialJson: event.partialJson,
+            startedAt: prev?.id === event.toolCallId ? prev.startedAt : Date.now(),
+            updatedAt: Date.now(),
+          }))
+          setLastActivity(Date.now())
+          break
         case 'tool:result':
+          setIsRunning(true)
+          setStreamingToolDraft(prev => {
+            if (!prev) return null
+            return prev.id === event.toolResult.toolCallId ? null : prev
+          })
           setCurrentTools(prev =>
             prev.map(t => t.id === event.toolResult.toolCallId
               ? { ...t, status: event.toolResult.isError ? 'error' : 'done', output: event.toolResult.output?.slice(0, 200), endTime: Date.now() }
@@ -485,9 +541,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'error':
           streamBufferRef.current = ''
           clearStreamFlushTimer()
-          setStreamText('')
-          appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${event.error}` }])
-          setIsRunning(false)
+      setStreamText('')
+      appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${event.error}` }])
+      setStreamingToolDraft(null)
+      setIsRunning(false)
           setMood('error')
           setTimeout(() => setMood('idle'), 4000)
           break
@@ -586,6 +643,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     clearStreamFlushTimer()
     setStreamText('')
     setCurrentTools([])
+    setStreamingToolDraft(null)
     setFcEvents([])
     setFcActive(false)
     setActiveTask(null)
@@ -608,6 +666,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       streamBufferRef.current = ''
       clearStreamFlushTimer()
       setStreamText('')
+      setStreamingToolDraft(null)
       appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${e.message}` }])
       setIsRunning(false)
       setMood('error')
@@ -714,10 +773,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <Box flexDirection="column" marginBottom={1}>
       {(fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} isActive={fcActive} />}
       {activeTask && <TaskProgressLine task={activeTask} />}
-      <FileEditStatus tools={currentTools} />
-      {currentTools.filter(tool => !(tool.status === 'running' && isFileEditToolName(tool.name))).length > 0 && (
+      <FileEditStatus tools={currentTools} draft={streamingToolDraft} />
+      {currentTools.filter(tool => !shouldHideToolInActivity(tool)).length > 0 && (
         <ToolCallTree
-          tools={currentTools.filter(tool => !(tool.status === 'running' && isFileEditToolName(tool.name)))}
+          tools={currentTools.filter(tool => !shouldHideToolInActivity(tool))}
           verbose={verbose}
         />
       )}
