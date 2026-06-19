@@ -24,7 +24,7 @@ interface ToolCallTreeProps {
 export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
-  const visibleTools = verbose ? tools : tools.filter(tool => !isQuietSuccessfulRead(tool))
+  const visibleTools = verbose ? tools : tools.filter(tool => shouldPersistToolForHistory(tool))
 
   if (visibleTools.length === 0) return null
   const allSettled = visibleTools.every(tool => tool.status !== 'running')
@@ -65,8 +65,25 @@ export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
   )
 }
 
-function isQuietSuccessfulRead(tool: ToolStatus): boolean {
-  return tool.status === 'done' && (tool.name === 'read_file' || tool.name === 'read_file_full')
+export function shouldPersistToolForHistory(tool: ToolStatus): boolean {
+  if (tool.status !== 'done') return true
+  if (isQuietExploreTool(tool.name)) return false
+  if (tool.name === 'create_checkpoint') return false
+  if (tool.name === 'list_tasks' || tool.name === 'update_task' || tool.name === 'create_task' || tool.name === 'create_tasks') return false
+  return true
+}
+
+function isQuietExploreTool(name: string): boolean {
+  return [
+    'read_file',
+    'read_file_full',
+    'list_directory',
+    'search_files',
+    'search_content',
+    'search_symbols',
+    'search_semantic',
+    'get_codemap',
+  ].includes(name)
 }
 
 function summarizeTools(tools: ToolStatus[], columns: number): string {
@@ -109,13 +126,13 @@ function formatToolName(name: string): string {
   }
 }
 
-function formatToolLabel(name: string, argsJson?: string): string {
+export function formatToolLabelForHistory(name: string, argsJson?: string): string {
   if (!argsJson) return name
   try {
     const args = JSON.parse(argsJson) as Record<string, unknown>
     const str = (key: string) => typeof args[key] === 'string' ? String(args[key]) : ''
     switch (name) {
-      case 'read_file': return `Read ${str('path')}`
+      case 'read_file': return `Read ${str('path')}${formatRange(args)}`
       case 'read_file_full': return `Read full ${str('path')}`
       case 'list_directory': return `List ${str('path')}${args['recursive'] ? '/' : ''}`
       case 'write_file': return `Write ${str('path')}`
@@ -144,9 +161,16 @@ function formatToolLabel(name: string, argsJson?: string): string {
   }
 }
 
+function formatRange(args: Record<string, unknown>): string {
+  const offset = typeof args.offset === 'number' ? args.offset : 0
+  const limit = typeof args.limit === 'number' ? args.limit : undefined
+  if (!limit) return ''
+  return `:${offset + 1}-${offset + limit}`
+}
+
 function ToolCallStatus({ tool, columns }: { tool: ToolStatus; columns: number }) {
   const theme = useTheme()
-  const label = formatToolLabel(tool.name, tool.args)
+  const label = formatToolLabelForHistory(tool.name, tool.args)
 
   if (tool.status === 'running') {
     return <SpinnerGlyph lastActivity={tool.startTime} label={cliTruncate(label, columns - 12, { position: 'end' })} />

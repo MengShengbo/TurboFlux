@@ -3,8 +3,8 @@ import { render, Box, Static, Text, useInput, useApp } from 'ink'
 import { ThemeProvider } from '../theme/index'
 import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
-import { ToolCallTree, type ToolStatus } from './tools/ToolCallTree'
-import { FileEditStatus, isFileEditToolName } from './tools/FileEditStatus'
+import type { ToolStatus } from './tools/ToolCallTree'
+import { ActiveWorkPanel, type StreamingToolDraft } from './tools/ActiveWorkPanel'
 import { FastContextBanner } from './tools/FastContextBanner'
 import { ConversationHistory, type ConversationEntry } from './ConversationHistory'
 import { RewindSelector } from './input/RewindSelector'
@@ -17,7 +17,6 @@ import type { FastContextScanEvent } from '../../core/fastContextTypes'
 import type { AgentTurn, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
 import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
-import { SpinnerGlyph } from './spinner/SpinnerGlyph'
 import { formatMarkdown } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
@@ -45,14 +44,6 @@ type StaticTranscriptItem =
   | { kind: 'header'; id: string }
   | { kind: 'message'; id: string; message: Message }
 
-type StreamingToolDraft = {
-  id: string
-  name: string
-  partialJson: string
-  startedAt: number
-  updatedAt: number
-}
-
 function isMessageRole(role: string): role is Message['role'] {
   return role === 'user' || role === 'assistant' || role === 'system'
 }
@@ -74,12 +65,6 @@ function TaskProgressLine({ task }: { task: ActiveTaskContext }) {
       <Text dimColor>{suffix}</Text>
     </Box>
   )
-}
-
-function shouldHideToolInActivity(tool: ToolStatus): boolean {
-  if (tool.status === 'running' && isFileEditToolName(tool.name)) return true
-  if (tool.status === 'done' && (tool.name === 'read_file' || tool.name === 'read_file_full')) return true
-  return false
 }
 
 function serializeToolArgsForUi(args: Record<string, unknown> | undefined): string | undefined {
@@ -773,17 +758,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <Box flexDirection="column" marginBottom={1}>
       {(fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} isActive={fcActive} />}
       {activeTask && <TaskProgressLine task={activeTask} />}
-      <FileEditStatus tools={currentTools} draft={streamingToolDraft} />
-      {currentTools.filter(tool => !shouldHideToolInActivity(tool)).length > 0 && (
-        <ToolCallTree
-          tools={currentTools.filter(tool => !shouldHideToolInActivity(tool))}
-          verbose={verbose}
-        />
-      )}
-      {streamTextForDisplay && <Text>{formatMarkdown(streamTextForDisplay)}</Text>}
-      {!visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk && (
-        <Box><SpinnerGlyph lastActivity={lastActivity} label="Thinking..." /></Box>
-      )}
+      <ActiveWorkPanel
+        tools={currentTools}
+        draft={streamingToolDraft}
+        streamText={streamTextForDisplay}
+        lastActivity={lastActivity}
+        verbose={verbose}
+        idleLabel={!visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
+      />
     </Box>
   ) : null
 
