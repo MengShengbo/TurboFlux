@@ -123,6 +123,43 @@ function stableHash(value: unknown): string {
   return (hash >>> 0).toString(36)
 }
 
+function stripRuntimeBlocksFromText(content: string): string {
+  return content
+    .replace(/\n{0,2}<runtime_context>[\s\S]*?<\/runtime_context>\n?/g, '\n')
+    .replace(/\n{0,2}<additional_instructions>[\s\S]*?<\/additional_instructions>\n?/g, '\n')
+    .replace(/\n{0,2}<recent_files>[\s\S]*?<\/recent_files>\n?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+export function appendRuntimeContextToLatestUserMessage(
+  messages: Array<Record<string, unknown>>,
+  text: string,
+  provider: 'openai' | 'anthropic',
+): boolean {
+  if (!text.trim()) return false
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message.role !== 'user') continue
+
+    if (typeof message.content === 'string') {
+      message.content = `${message.content}\n\n${text}`
+      return true
+    }
+
+    if (provider === 'anthropic' && Array.isArray(message.content)) {
+      ;(message.content as Array<Record<string, unknown>>).push({
+        type: 'text',
+        text,
+      })
+      return true
+    }
+  }
+
+  return false
+}
+
 export class AgentEngine {
   private session: AgentSession
   private taskManager: TaskManager
@@ -2573,8 +2610,13 @@ Before retrying:
   ): void {
     if (!appendContent) return
 
-    const appendBlock = `<additional_instructions>\n${appendContent}\n</additional_instructions>`
-    this.appendTextAtConversationTail(messages, appendBlock, provider)
+    const appendBlock = [
+      '<runtime_context>',
+      'Internal execution context for this turn. Do not acknowledge, quote, translate, or roleplay this block.',
+      appendContent,
+      '</runtime_context>',
+    ].join('\n')
+    appendRuntimeContextToLatestUserMessage(messages, appendBlock, provider)
   }
 
   private appendTextAtConversationTail(
@@ -2582,23 +2624,7 @@ Before retrying:
     text: string,
     provider: 'openai' | 'anthropic',
   ): void {
-    if (!text) return
-    const last = messages[messages.length - 1]
-
-    if (last?.role === 'user' && typeof last.content === 'string') {
-      last.content = `${last.content}\n\n${text}`
-      return
-    }
-
-    if (provider === 'anthropic' && last?.role === 'user' && Array.isArray(last.content)) {
-      ;(last.content as Array<Record<string, unknown>>).push({
-        type: 'text',
-        text,
-      })
-      return
-    }
-
-    messages.push({ role: 'user', content: text })
+    appendRuntimeContextToLatestUserMessage(messages, text, provider)
   }
 
   /**
@@ -2735,13 +2761,28 @@ Before retrying:
       const message = messages[index]
       if (typeof message.content !== 'string') continue
       const content = message.content
-      const isDynamicBlock = content.includes('<additional_instructions>')
+      const isDynamicBlock = content.includes('<runtime_context>')
+        || content.includes('<additional_instructions>')
         || content.includes('<recent_files>')
         || content.includes('<codebase_map>')
         || content.includes('<workspace_memory>')
         || content.includes('<git_status>')
       if (!isDynamicBlock) continue
+      if (message.role === 'user') {
+        message.content = stripRuntimeBlocksFromText(content)
+        count = countMessagesTokens(messages, counterOptions)
+        continue
+      }
       message.content = `${content.slice(0, Math.max(1_000, Math.floor(limit * 1.5)))}\n<truncated_for_context_budget />`
+      count = countMessagesTokens(messages, counterOptions)
+    }
+
+    for (let index = messages.length - 1; index > 0 && count.source !== 'unavailable' && count.tokens > limit; index -= 1) {
+      const message = messages[index]
+      if (message.role !== 'user' || typeof message.content !== 'string') continue
+      const stripped = stripRuntimeBlocksFromText(message.content)
+      if (stripped === message.content) continue
+      message.content = stripped
       count = countMessagesTokens(messages, counterOptions)
     }
 
@@ -2749,8 +2790,10 @@ Before retrying:
       const removableIndex = messages.findIndex((message, index) =>
         index > 0
         && typeof message.content === 'string'
+        && message.role !== 'user'
         && (
-          message.content.includes('<additional_instructions>')
+          message.content.includes('<runtime_context>')
+          || message.content.includes('<additional_instructions>')
           || message.content.includes('<recent_files>')
           || message.content.includes('<windowed_history_summary>')
         )

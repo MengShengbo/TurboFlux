@@ -32,6 +32,16 @@ describe('text tool call markup', () => {
     expect(parsed.toolCalls[0]?.arguments).toEqual({ path: 'README.md' })
   })
 
+  it('hides leaked internal runtime context blocks from display', () => {
+    const text = `visible reply
+<runtime_context>
+internal strategy that should never render
+</runtime_context>
+done`
+
+    expect(stripTextToolCallMarkup(text)).toBe('visible reply\n\ndone')
+  })
+
   it('hides incomplete markup from the streaming display', () => {
     expect(stripTextToolCallMarkup('好的。\n<tool_calls>\n<invoke', { stripIncomplete: true })).toBe('好的。')
   })

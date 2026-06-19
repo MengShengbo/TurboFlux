@@ -15,6 +15,12 @@ const COMPLETE_TOOL_BLOCKS = [
 
 const TOOL_MARKUP_START = /<\s*(?:tool_calls|invoke)\b|<｜｜DSML｜｜(?:tool_calls|invoke)\b/i
 
+const INTERNAL_CONTEXT_BLOCKS = [
+  /<\s*runtime_context\s*>[\s\S]*?<\s*\/\s*runtime_context\s*>/gi,
+  /<\s*additional_instructions\s*>[\s\S]*?<\s*\/\s*additional_instructions\s*>/gi,
+  /<\s*recent_files\s*>[\s\S]*?<\s*\/\s*recent_files\s*>/gi,
+]
+
 function decodeEntities(value: string): string {
   return value
     .replace(/&quot;/g, '"')
@@ -95,6 +101,9 @@ export function stripTextToolCallMarkup(
 ): string {
   let cleaned = text
   for (const pattern of COMPLETE_TOOL_BLOCKS) {
+    cleaned = cleaned.replace(pattern, '')
+  }
+  for (const pattern of INTERNAL_CONTEXT_BLOCKS) {
     cleaned = cleaned.replace(pattern, '')
   }
 
