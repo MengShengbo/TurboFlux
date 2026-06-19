@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from 'fs'
 import { join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
-import { execFile, spawn } from 'child_process'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { homedir } from 'os'
 import { promisify } from 'util'
 
@@ -10,6 +10,7 @@ import type { TreeNode } from '../../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../../shared/memoryTypes'
 import type { SandboxPolicy } from '../../shared/agentTypes'
+import type { TerminalOutputChunk, TerminalSessionInfo } from '../../shared/terminalTypes'
 import { MemoryService } from '../../tools/memory/service'
 import { LocalHistoryService } from '../../tools/localHistory/service'
 
@@ -20,11 +21,28 @@ export interface NodeToolExecutorOptions {
   sandboxPolicy?: SandboxPolicy
 }
 
+interface BackgroundTerminalSession {
+  info: TerminalSessionInfo
+  proc: ChildProcessWithoutNullStreams
+  chunks: TerminalOutputChunk[]
+  nextSeq: number
+}
+
+const MAX_TERMINAL_CHUNKS = 500
+const TERMINAL_KILL_TIMEOUT_MS = 5000
+const DEFAULT_TERMINAL_SHELL = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
+const DEFAULT_TERMINAL_SHELL_ARGS = process.platform === 'win32'
+  ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass']
+  : []
+const DEFAULT_TERMINAL_SHELL_ID = process.platform === 'win32' ? 'powershell' : 'bash'
+const DEFAULT_TERMINAL_SHELL_LABEL = process.platform === 'win32' ? 'PowerShell' : 'Bash'
+
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
   private localHistoryService: LocalHistoryService
   private workspaceRoot: string
   private sandboxPolicy: SandboxPolicy
+  private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
 
   constructor(private workspacePath: string, options: NodeToolExecutorOptions = {}) {
     this.memoryService = new MemoryService()
@@ -349,12 +367,12 @@ export class NodeToolExecutor implements ToolExecutor {
     return new Promise((resolve) => {
       let safeCwd: string
       try {
-        safeCwd = this.ensureAllowedPath(cwd)
-        const sandboxError = this.checkCommandSandbox(command, safeCwd)
-        if (sandboxError) {
-          resolve({ success: false, error: sandboxError, data: { stdout: '', stderr: sandboxError, exitCode: 1 } })
+        const validation = this.validateCommandSync(command, cwd)
+        if (!validation.success) {
+          resolve({ success: false, error: validation.error, data: { stdout: '', stderr: validation.error || '', exitCode: 1 } })
           return
         }
+        safeCwd = validation.cwd
       } catch (error) {
         resolve({ success: false, error: error instanceof Error ? error.message : String(error) })
         return
@@ -383,6 +401,223 @@ export class NodeToolExecutor implements ToolExecutor {
       proc.on('error', (err) => {
         resolve({ success: false, error: err.message })
       })
+    })
+  }
+
+  async validateCommand(command: string, cwd: string): Promise<Result<void>> {
+    const validation = this.validateCommandSync(command, cwd)
+    if (!validation.success) return { success: false, error: validation.error }
+    return { success: true }
+  }
+
+  private validateCommandSync(command: string, cwd: string): { success: true; cwd: string } | { success: false; error: string } {
+    try {
+      const safeCwd = this.ensureAllowedPath(cwd)
+      const sandboxError = this.checkCommandSandbox(command, safeCwd)
+      if (sandboxError) return { success: false, error: sandboxError }
+      return { success: true, cwd: safeCwd }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async ptyCreate(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session: TerminalSessionInfo }>> {
+    try {
+      const safeCwd = this.ensureAllowedPath(options?.cwd || this.workspaceRoot)
+      const shell = options?.shell || DEFAULT_TERMINAL_SHELL
+      const shellArgs = options?.shell ? [] : DEFAULT_TERMINAL_SHELL_ARGS
+      const shellId = options?.shell ? 'custom' : DEFAULT_TERMINAL_SHELL_ID
+      const shellLabel = options?.shell ? shell : DEFAULT_TERMINAL_SHELL_LABEL
+      const now = Date.now()
+      const sessionId = `term_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+      const proc = spawn(shell, shellArgs, {
+        cwd: safeCwd,
+        env: { ...process.env, ...options?.env },
+        detached: process.platform !== 'win32',
+        windowsHide: true,
+      })
+      const info: TerminalSessionInfo = {
+        id: sessionId,
+        pid: proc.pid ?? 0,
+        shell,
+        shellId,
+        shellLabel,
+        cwd: safeCwd,
+        status: 'running',
+        createdAt: now,
+        updatedAt: now,
+        isAgentSession: true,
+        title: shell,
+      }
+      const session: BackgroundTerminalSession = {
+        info,
+        proc,
+        chunks: [],
+        nextSeq: 1,
+      }
+      this.backgroundTerminals.set(sessionId, session)
+
+      const append = (data: Buffer | string) => {
+        const text = data.toString()
+        if (!text) return
+        session.chunks.push({
+          seq: session.nextSeq++,
+          data: text,
+          timestamp: Date.now(),
+        })
+        if (session.chunks.length > MAX_TERMINAL_CHUNKS) {
+          session.chunks.splice(0, session.chunks.length - MAX_TERMINAL_CHUNKS)
+        }
+        session.info.updatedAt = Date.now()
+      }
+
+      proc.stdout.on('data', append)
+      proc.stderr.on('data', append)
+      proc.on('error', (err) => {
+        session.info.status = 'error'
+        session.info.error = err.message
+        session.info.updatedAt = Date.now()
+        append(`\n[terminal error] ${err.message}\n`)
+      })
+      proc.on('close', (code, signal) => {
+        session.info.status = 'exited'
+        session.info.exitCode = code
+        session.info.exitSignal = signal ?? null
+        session.info.updatedAt = Date.now()
+      })
+
+      return { success: true, data: { sessionId, session: info }, session, sessionId }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  async ptyWrite(sessionId: string, data: string): Promise<Result<void>> {
+    const session = this.backgroundTerminals.get(sessionId)
+    if (!session) return { success: false, error: `Terminal not found: ${sessionId}` }
+    if (session.info.status !== 'running') return { success: false, error: `Terminal ${sessionId} is ${session.info.status}` }
+
+    try {
+      session.proc.stdin.write(data)
+      session.info.updatedAt = Date.now()
+      const firstLine = data.split(/\r?\n/).find(line => line.trim())
+      if (firstLine) session.info.title = firstLine.trim()
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  async ptyGetBuffer(sessionId: string): Promise<Result<string>> {
+    const session = this.backgroundTerminals.get(sessionId)
+    if (!session) return { success: false, error: `Terminal not found: ${sessionId}` }
+    return {
+      success: true,
+      data: session.chunks.map(chunk => chunk.data).join(''),
+      chunks: [...session.chunks],
+      session: { ...session.info },
+    }
+  }
+
+  async ptyInterruptCommand(sessionId: string): Promise<Result<void>> {
+    const session = this.backgroundTerminals.get(sessionId)
+    if (!session) return { success: false, error: `Terminal not found: ${sessionId}` }
+    if (session.info.status !== 'running') return { success: false, error: `Terminal ${sessionId} is ${session.info.status}` }
+
+    try {
+      if (process.platform === 'win32') {
+        session.proc.kill('SIGINT')
+      } else {
+        session.proc.stdin.write('\x03')
+      }
+      session.info.updatedAt = Date.now()
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  async ptyKill(sessionId: string): Promise<Result<void>> {
+    const session = this.backgroundTerminals.get(sessionId)
+    if (!session) return { success: false, error: `Terminal not found: ${sessionId}` }
+
+    try {
+      if (session.info.status === 'running') {
+        const closed = this.waitForTerminalClose(session, TERMINAL_KILL_TIMEOUT_MS)
+        if (!session.proc.stdin.destroyed) {
+          session.proc.stdin.end()
+        }
+        const exitedAfterStdinClose = await this.waitForTerminalClose(session, 1000)
+        if (!exitedAfterStdinClose) {
+          await this.killTerminalProcessTree(session)
+        }
+        const didClose = await closed
+        if (!didClose && session.info.status === 'running') {
+          return { success: false, error: `Terminal ${sessionId} did not exit within ${TERMINAL_KILL_TIMEOUT_MS}ms` }
+        }
+      }
+      session.info.status = 'exited'
+      session.info.updatedAt = Date.now()
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  async ptyList(): Promise<Result<TerminalSessionInfo[]>> {
+    const sessions = Array.from(this.backgroundTerminals.values())
+      .map(session => ({ ...session.info }))
+      .sort((a, b) => a.createdAt - b.createdAt)
+    return { success: true, data: sessions, sessions }
+  }
+
+  async ptyKillAll(): Promise<Result<void>> {
+    const errors: string[] = []
+    for (const sessionId of this.backgroundTerminals.keys()) {
+      const result = await this.ptyKill(sessionId)
+      if (!result.success) errors.push(`${sessionId}: ${result.error || 'unknown error'}`)
+    }
+    if (errors.length > 0) return { success: false, error: errors.join('\n') }
+    return { success: true }
+  }
+
+  private async killTerminalProcessTree(session: BackgroundTerminalSession): Promise<void> {
+    const pid = session.info.pid
+    if (!pid) {
+      session.proc.kill()
+      return
+    }
+
+    if (process.platform === 'win32') {
+      try {
+        await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'])
+        return
+      } catch {
+        session.proc.kill()
+        return
+      }
+    }
+
+    try {
+      process.kill(-pid, 'SIGTERM')
+      return
+    } catch {
+      session.proc.kill('SIGTERM')
+    }
+  }
+
+  private waitForTerminalClose(session: BackgroundTerminalSession, timeoutMs: number): Promise<boolean> {
+    if (session.info.status !== 'running') return Promise.resolve(true)
+    return new Promise(resolve => {
+      let settled = false
+      const done = (closed: boolean) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(closed)
+      }
+      const timer = setTimeout(() => done(false), timeoutMs)
+      session.proc.once('close', () => done(true))
     })
   }
 

@@ -108,6 +108,7 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
     disconnect,
     destroy: async () => {
       await disconnect()
+      await toolExecutor.ptyKillAll?.()
       engine.destroy()
     },
   }

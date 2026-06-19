@@ -142,3 +142,45 @@ windowsIt('does not mistake Windows command switches for absolute paths', async 
   expect(result.success).toBe(true)
   expect(result.data?.stdout).toContain('ok')
 }))
+
+it('runs and inspects an agent background terminal session', async () => withWorkspace(async ({ workspace }) => {
+  const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+  const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh'
+  const created = await executor.ptyCreate?.({ cwd: workspace, shell })
+  expect(created?.success).toBe(true)
+  const sessionId = created?.data?.sessionId
+  expect(sessionId).toBeTruthy()
+
+  const command = process.platform === 'win32'
+    ? 'echo turbo-terminal-ok && exit'
+    : 'printf "turbo-terminal-ok\\n"; exit'
+  const written = await executor.ptyWrite?.(sessionId!, `${command}\n`)
+  expect(written?.success).toBe(true)
+
+  let buffer = await executor.ptyGetBuffer?.(sessionId!)
+  for (let i = 0; i < 20 && !String(buffer?.data || '').includes('turbo-terminal-ok'); i++) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+    buffer = await executor.ptyGetBuffer?.(sessionId!)
+  }
+
+  expect(buffer?.success).toBe(true)
+  expect(String(buffer?.data || '')).toContain('turbo-terminal-ok')
+
+  const listed = await executor.ptyList?.()
+  expect(listed?.success).toBe(true)
+  expect(listed?.sessions?.some((session: any) => session.id === sessionId)).toBe(true)
+
+  for (let i = 0; i < 20; i++) {
+    const sessions = await executor.ptyList?.()
+    const session = sessions?.sessions?.find((item: any) => item.id === sessionId)
+    if (session?.status === 'exited') break
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
+  const killed = await executor.ptyKillAll?.()
+  expect(killed?.success).toBe(true)
+
+  const afterKill = await executor.ptyList?.()
+  expect(afterKill?.sessions?.find((session: any) => session.id === sessionId)?.status).toBe('exited')
+}))

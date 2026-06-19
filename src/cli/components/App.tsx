@@ -15,6 +15,7 @@ import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
 import type { AgentTurn, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
+import type { TerminalSessionInfo } from '../../shared/terminalTypes'
 import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
 import { formatMarkdown } from './markdown/index'
@@ -30,6 +31,7 @@ import { stripTextToolCallMarkup } from '../../shared/toolCallMarkup'
 import { useTerminalSize } from '../hooks/useTerminalSize'
 import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
 import { getSafeViewportWidth } from '../terminalLayout'
+import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 
 interface AppProps {
   workspacePath: string
@@ -54,17 +56,62 @@ function TaskProgressLine({ task }: { task: ActiveTaskContext }) {
   ).length
   const total = task.toolCalls.length
   const errored = task.toolCalls.filter(call => call.status === 'error').length
-  const suffix = total > 0
-    ? ` - tools ${completed}/${total}${errored > 0 ? `, ${errored} error${errored === 1 ? '' : 's'}` : ''}`
-    : ''
+  const running = task.toolCalls.filter(call => call.status === 'running').length
+  const latest = [...task.toolCalls].reverse().find(call => call.status === 'running') ?? task.toolCalls[task.toolCalls.length - 1]
+  const toolSummary = formatTaskToolSummary(completed, total, running, errored)
+  const elapsed = formatElapsed(Date.now() - task.startedAt)
+  const progress = formatTaskProgressLabel(task.progress)
   return (
     <Box>
       <Text dimColor>Task </Text>
       <Text>{task.title}</Text>
-      <Text dimColor>{` ${Math.round(task.progress)}%`}</Text>
-      <Text dimColor>{suffix}</Text>
+      <Text dimColor>{` - ${toolSummary}`}</Text>
+      {latest && <Text dimColor>{` - ${formatTaskToolName(latest.toolName)}`}</Text>}
+      <Text dimColor>{` - ${elapsed}`}</Text>
+      {progress && <Text dimColor>{` - ${progress}`}</Text>}
     </Box>
   )
+}
+
+export function formatTaskToolSummary(completed: number, total: number, running: number, errored: number): string {
+  if (total === 0) return 'planning'
+  const parts = [`tools ${completed}/${total}`]
+  if (running > 0) parts.push(`${running} running`)
+  if (errored > 0) parts.push(`${errored} failed`)
+  return parts.join(', ')
+}
+
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return '0s'
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return `${minutes}m${rest.toString().padStart(2, '0')}s`
+}
+
+export function formatTaskProgressLabel(progress: number): string {
+  if (progress >= 95 && progress < 100) return 'finishing'
+  if (progress > 0 && progress < 95) return `${Math.round(progress)}%`
+  return ''
+}
+
+function formatTaskToolName(name: string): string {
+  switch (name) {
+    case 'read_file': return 'read'
+    case 'read_file_full': return 'read full'
+    case 'search_content': return 'search'
+    case 'search_files': return 'find files'
+    case 'write_file': return 'write'
+    case 'replace_file': return 'replace'
+    case 'edit_file': return 'edit'
+    case 'multi_edit': return 'multi-edit'
+    case 'run_command': return 'shell'
+    case 'read_terminal': return 'read terminal'
+    case 'list_terminals': return 'list terminals'
+    case 'kill_terminal': return 'stop terminal'
+    default: return name
+  }
 }
 
 function serializeToolArgsForUi(args: Record<string, unknown> | undefined): string | undefined {
@@ -298,6 +345,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
   const [fcActive, setFcActive] = useState(false)
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
+  const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
   const [changeSummaries, setChangeSummaries] = useState<ChangeSummary[]>([])
   const [pendingAsk, setPendingAsk] = useState<{
     question: string
@@ -382,6 +430,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setFcEvents([])
     setFcActive(false)
     setActiveTask(null)
+    setTerminalSessions([])
     setPendingAsk(null)
     setAskInput('')
     setCursorMode(false)
@@ -508,6 +557,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'active:task':
           setActiveTask(event.context)
+          break
+        case 'terminal:sessions':
+          setTerminalSessions(event.sessions)
           break
         case 'ask:user':
           setPendingAsk({
@@ -934,6 +986,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               {pendingAskNode}
               {cursorHint}
               {promptNode}
+              <TerminalSessionsFooter sessions={terminalSessions} />
               <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
             </Box>
           </Box>
@@ -988,6 +1041,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {cursorHint}
         {cursorPreviewNode}
         {promptNode}
+        <TerminalSessionsFooter sessions={terminalSessions} />
 
         {/* Status line at bottom */}
         <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />

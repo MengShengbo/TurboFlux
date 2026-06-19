@@ -4,6 +4,8 @@ import {
   clipTextToRows,
   getNextTranscriptOffsetAfterAppend,
   getEngineUserOrdinalForUiMessage,
+  formatTaskProgressLabel,
+  formatTaskToolSummary,
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
 } from './App'
@@ -145,6 +147,21 @@ describe('transcript offset behavior', () => {
 
   it('preserves the current history view when new messages append', () => {
     expect(getNextTranscriptOffsetAfterAppend(3, 2, false)).toBe(5)
+  })
+})
+
+describe('task progress labels', () => {
+  it('does not surface 99% as the primary task state', () => {
+    expect(formatTaskProgressLabel(0)).toBe('')
+    expect(formatTaskProgressLabel(42)).toBe('42%')
+    expect(formatTaskProgressLabel(99)).toBe('finishing')
+    expect(formatTaskProgressLabel(100)).toBe('')
+  })
+
+  it('summarizes task tools without a fake percentage', () => {
+    expect(formatTaskToolSummary(0, 0, 0, 0)).toBe('planning')
+    expect(formatTaskToolSummary(2, 4, 1, 0)).toBe('tools 2/4, 1 running')
+    expect(formatTaskToolSummary(3, 4, 0, 1)).toBe('tools 3/4, 1 failed')
   })
 })
 

@@ -28,7 +28,7 @@ export interface TerminalSessionInfo {
   isAgentSession: boolean
   title: string
   exitCode?: number | null
-  exitSignal?: number | null
+  exitSignal?: string | null
   error?: string
 }
 
@@ -89,7 +89,7 @@ export interface TerminalDataEvent {
 export interface TerminalExitEvent {
   sessionId: string
   exitCode: number | null
-  exitSignal?: number | null
+  exitSignal?: string | null
   timestamp: number
 }
 

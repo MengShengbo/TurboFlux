@@ -29,6 +29,7 @@ import { resolveReasoningParam } from './modelRegistry'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import type { FastContextScanEvent, FastContextScanResult } from './fastContextTypes'
+import type { TerminalSessionInfo } from '../shared/terminalTypes'
 import { runFastContextSubagent } from './fastContextSubagent'
 import { isMcpTool, parseMcpToolName, executeMcpTool, getMcpAgentTools } from './mcp/toolBridge'
 import type { McpClient } from './mcp/client'
@@ -82,6 +83,7 @@ export type AgentEventType =
   | { type: 'stream:end' }
   | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string }
   | { type: 'active:task'; context: import('./taskManager').ActiveTaskContext | null }
+  | { type: 'terminal:sessions'; sessions: TerminalSessionInfo[] }
   | {
     type: 'task:system'
     context: import('./taskManager').ActiveTaskContext | null
@@ -3377,6 +3379,24 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     this.emitTaskSystem()
   }
 
+  private async emitTerminalSessions(): Promise<void> {
+    const result = await this.toolExecutor.ptyList?.()
+    if (!result?.success) {
+      this.emit({ type: 'terminal:sessions', sessions: [] })
+      return
+    }
+    const rawSessions = (result.sessions || result.data || []) as TerminalSessionInfo[]
+    const sessions = rawSessions.filter(s => s.isAgentSession || this.agentBackgroundSessions.has(s.id))
+    this.emit({ type: 'terminal:sessions', sessions })
+  }
+
+  private async getTerminalSession(sessionId: string): Promise<TerminalSessionInfo | undefined> {
+    const result = await this.toolExecutor.ptyList?.()
+    if (!result?.success) return undefined
+    const rawSessions = (result.sessions || result.data || []) as TerminalSessionInfo[]
+    return rawSessions.find(s => s.id === sessionId)
+  }
+
   private emitTaskSystem(creation?: TaskSystemCreationEvent | null): void {
     this.emit({
       type: 'task:system',
@@ -4005,15 +4025,25 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const runInBackground = args.run_in_background === true
 
         if (runInBackground) {
-          // Route through PTY for background commands
-          const ptyResult = await this.toolExecutor.ptyCreate?.({ cwd })
+          const command = args.command as string
+          const validation = await this.toolExecutor.validateCommand?.(command, cwd)
+          if (validation && !validation.success) {
+            return `Error: ${validation.error || 'command failed sandbox validation'}`
+          }
+
+          const ptyResult = await this.toolExecutor.ptyCreate?.({ cwd, env })
           const sessionId = ptyResult?.data?.sessionId
           if (!sessionId) {
-            return `Error: failed to spawn agent terminal`
+            return `Error: failed to spawn agent terminal${ptyResult?.error ? ` — ${ptyResult.error}` : ''}`
           }
-          const command = args.command as string
-          await this.toolExecutor.ptyWrite?.(sessionId, `${command}\n`)
+          const writeResult = await this.toolExecutor.ptyWrite?.(sessionId, `${command}\n`)
+          if (!writeResult?.success) {
+            await this.toolExecutor.ptyKill?.(sessionId)
+            await this.emitTerminalSessions()
+            return `Error: failed to start background command — ${writeResult?.error || 'unknown error'}`
+          }
           this.agentBackgroundSessions.set(sessionId, { command, startedAt: Date.now() })
+          await this.emitTerminalSessions()
           return `Background command started in agent terminal ${sessionId}\nCommand: ${command}\nUse read_terminal(session_id="${sessionId}") to view output, kill_terminal to stop.`
         }
 
@@ -4035,6 +4065,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const sinceSeq = typeof args.since_seq === 'number' ? args.since_seq : 0
         const result = await this.toolExecutor.ptyGetBuffer?.(sessionId)
         if (!result?.success) return `Error: ${result?.error || 'failed to read terminal buffer'}`
+        await this.emitTerminalSessions()
         const session = result.session as { status: string; exitCode?: number; cwd: string } | undefined
         const allChunks = (result.chunks || []) as Array<{ seq: number; data: string }>
         // Filter by since_seq so polling loops only see new output. Each
@@ -4072,12 +4103,23 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!hard) {
           const interrupt = await this.toolExecutor.ptyInterruptCommand?.(sessionId)
           if (interrupt && interrupt.success) {
-            return `Interrupt sent to terminal ${sessionId}.`
+            await new Promise(resolve => setTimeout(resolve, 750))
+            const session = await this.getTerminalSession(sessionId)
+            if (!session || session.status !== 'running') {
+              this.agentBackgroundSessions.delete(sessionId)
+              await this.emitTerminalSessions()
+              return `Terminal ${sessionId} interrupted and exited.`
+            }
+            // A plain stdin Ctrl+C is not reliable without a real PTY, so
+            // fall through to process-tree termination when the shell is
+            // still alive after the graceful attempt.
+            await this.emitTerminalSessions()
           }
         }
         const killed = await this.toolExecutor.ptyKill?.(sessionId)
         if (killed && killed.success) {
           this.agentBackgroundSessions.delete(sessionId)
+          await this.emitTerminalSessions()
           return `Terminal ${sessionId} terminated.`
         }
         return `Error: failed to kill terminal ${sessionId} — ${killed?.error || 'unknown error'}`
@@ -4088,6 +4130,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!result?.success) return `Error: ${result?.error || 'failed to list terminals'}`
         const rawSessions = (result.sessions || []) as Array<{ isAgentSession?: boolean; id: string; status: string; exitCode?: number; cwd: string }>
         const sessions = rawSessions.filter(s => s.isAgentSession || this.agentBackgroundSessions.has(s.id))
+        await this.emitTerminalSessions()
         if (sessions.length === 0) return 'No agent terminal sessions active.'
         const lines = sessions.map((s: { id: string; status: string; exitCode?: number; cwd: string }) => {
           const meta = this.agentBackgroundSessions.get(s.id)

@@ -1,6 +1,7 @@
 import type { TreeNode } from '../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../shared/memoryTypes'
+import type { TerminalBufferResult, TerminalSessionInfo } from '../shared/terminalTypes'
 
 export interface Result<T = any> {
   success: boolean
@@ -55,12 +56,14 @@ export interface ToolExecutor {
 
   // Terminal operations
   runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, approved?: boolean): Promise<Result<CommandOutput>>
-  ptyCreate?(options?: { shell?: string; cwd?: string }): Promise<Result<{ sessionId: string }>>
+  validateCommand?(command: string, cwd: string): Promise<Result<void>>
+  ptyCreate?(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session?: TerminalSessionInfo }>>
   ptyWrite?(sessionId: string, data: string): Promise<Result<void>>
-  ptyGetBuffer?(sessionId: string): Promise<Result<string>>
+  ptyGetBuffer?(sessionId: string): Promise<Result<string> & TerminalBufferResult>
   ptyInterruptCommand?(sessionId: string): Promise<Result<void>>
   ptyKill?(sessionId: string): Promise<Result<void>>
-  ptyList?(): Promise<Result<Array<{ sessionId: string; title?: string }>>>
+  ptyList?(): Promise<Result<TerminalSessionInfo[]>>
+  ptyKillAll?(): Promise<Result<void>>
 
   // Checkpoint operations
   checkpointCreate?(workspacePath: string, message: string, filePaths: string[], type: 'auto' | 'explicit', preimages?: any): Promise<Result<CheckpointResult>>
