@@ -34,7 +34,7 @@ import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
 import { ThinkingModeRail } from './tools/ThinkingModeRail'
-import { captureClipboardImageAttachment, hasImageReference, imagePlaceholderForIndex, resolveImagePrompt } from '../imageAttachments'
+import { captureClipboardImageAttachment, getClipboardImageStatus, hasImageReference, imagePlaceholderForIndex, resolveImagePrompt } from '../imageAttachments'
 
 interface AppProps {
   workspacePath: string
@@ -376,6 +376,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const streamBufferRef = useRef('')
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
+  const clipboardImageSequenceRef = useRef<string | null>(null)
+  const clipboardCaptureSequenceRef = useRef<string | null>(null)
   const genMsgId = useCallback(() => {
     messageIdRef.current += 1
     return `msg-${messageIdRef.current}`
@@ -758,18 +760,22 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     switchThinkingMode(getNextThinkingMode(engine.getThinkingMode()))
   }, [engine, switchThinkingMode])
 
-  const handlePasteImage = useCallback(() => {
+  const attachClipboardImage = useCallback((options?: { silentNoImage?: boolean; sequence?: string }) => {
+    if (options?.sequence && clipboardCaptureSequenceRef.current === options.sequence) return false
     const nextIndex = draftAttachmentsRef.current.length + 1
     const warnings: string[] = []
     const attachment = captureClipboardImageAttachment(nextIndex, warnings, workspacePath)
     if (!attachment) {
-      const visibleWarnings = warnings.length > 0 ? warnings : ['No image was found in the clipboard. Copy an image or paste an image file path.']
-      for (const warning of visibleWarnings) {
-        appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
+      if (!options?.silentNoImage) {
+        const visibleWarnings = warnings.length > 0 ? warnings : ['No image was found in the clipboard. Copy an image or paste an image file path.']
+        for (const warning of visibleWarnings) {
+          appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
+        }
       }
       return false
     }
 
+    if (options?.sequence) clipboardCaptureSequenceRef.current = options.sequence
     const placeholder = imagePlaceholderForIndex(nextIndex)
     const nextAttachments = [...draftAttachmentsRef.current, { ...attachment, id: `image${nextIndex}` }]
     draftAttachmentsRef.current = nextAttachments
@@ -780,6 +786,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     })
     return true
   }, [appendMessages, genMsgId, workspacePath])
+
+  const handlePasteImage = useCallback(() => {
+    return attachClipboardImage()
+  }, [attachClipboardImage])
 
   const handlePasteText = useCallback((pastedText: string, nextValue: string) => {
     if (!hasImageReference(pastedText)) return null
@@ -995,6 +1005,34 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay
   const showPrompt = !isRunning && !singleShot && activeOverlay === null && !cursorMode && !pendingAsk
+  useEffect(() => {
+    if (!showPrompt) return
+    let cancelled = false
+    const checkClipboardImage = () => {
+      const status = getClipboardImageStatus(workspacePath)
+      if (cancelled || !status) return
+      if (clipboardImageSequenceRef.current === null) {
+        clipboardImageSequenceRef.current = status.sequence
+        if (status.hasImage) {
+          attachClipboardImage({ silentNoImage: true, sequence: status.sequence })
+        }
+        return
+      }
+      if (status.sequence === clipboardImageSequenceRef.current) return
+      clipboardImageSequenceRef.current = status.sequence
+      if (status.hasImage) {
+        attachClipboardImage({ silentNoImage: true, sequence: status.sequence })
+      }
+    }
+
+    checkClipboardImage()
+    const timer = setInterval(checkClipboardImage, 700)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [attachClipboardImage, showPrompt, workspacePath])
+
   const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
     <Box marginTop={1}>

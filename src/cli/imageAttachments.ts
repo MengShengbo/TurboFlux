@@ -25,6 +25,11 @@ export interface ResolveImagePromptOptions {
   existingAttachments?: AgentAttachment[]
 }
 
+export interface ClipboardImageStatus {
+  sequence: string
+  hasImage: boolean
+}
+
 interface ImageRef {
   raw: string
   path: string
@@ -216,6 +221,44 @@ export function captureClipboardImageAttachment(index: number, warnings: string[
   return null
 }
 
+export function getClipboardImageStatus(workspacePath = process.cwd()): ClipboardImageStatus | null {
+  if (process.platform !== 'win32') return null
+
+  const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class NativeClipboard { [DllImport(\"user32.dll\")] public static extern uint GetClipboardSequenceNumber(); }'",
+    "$seq = [NativeClipboard]::GetClipboardSequenceNumber()",
+    "$hasImage = $false",
+    "if ([System.Windows.Forms.Clipboard]::ContainsImage()) { $hasImage = $true }",
+    "if (-not $hasImage -and [System.Windows.Forms.Clipboard]::ContainsFileDropList()) {",
+    "  $list = [System.Windows.Forms.Clipboard]::GetFileDropList()",
+    "  foreach ($item in $list) { if ([string]$item -match '(?i)\\.(png|jpe?g|webp|gif|bmp)$') { $hasImage = $true; break } }",
+    "}",
+    "if (-not $hasImage -and [System.Windows.Forms.Clipboard]::ContainsText()) {",
+    "  $text = [System.Windows.Forms.Clipboard]::GetText()",
+    "  if ($text -match '(?i)(<image|!\\[[^\\]]*\\]\\(|\\.(png|jpe?g|webp|gif|bmp))') { $hasImage = $true }",
+    "}",
+    "$payload = [pscustomobject]@{ sequence = [string]$seq; hasImage = [bool]$hasImage }",
+    "$payload | ConvertTo-Json -Compress",
+  ].join('; ')
+
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+    cwd: workspacePath,
+    encoding: 'utf-8',
+    windowsHide: true,
+  })
+  if (result.status !== 0 || !result.stdout.trim()) return null
+
+  try {
+    const parsed = JSON.parse(result.stdout.trim()) as { sequence?: unknown; hasImage?: unknown }
+    if (typeof parsed.sequence !== 'string') return null
+    return { sequence: parsed.sequence, hasImage: parsed.hasImage === true }
+  } catch {
+    return null
+  }
+}
+
 function captureClipboardBitmapAttachment(index: number, warnings: string[]): AgentAttachment | null {
   const targetDir = attachmentDir()
   mkdirSync(targetDir, { recursive: true })
@@ -224,8 +267,9 @@ function captureClipboardBitmapAttachment(index: number, warnings: string[]): Ag
     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "Add-Type -AssemblyName System.Windows.Forms",
     "Add-Type -AssemblyName System.Drawing",
-    "$img = [System.Windows.Forms.Clipboard]::GetImage()",
-    "if ($null -eq $img) { $img = Get-Clipboard -Format Image -ErrorAction SilentlyContinue }",
+    "$img = $null",
+    "if ([System.Windows.Forms.Clipboard]::ContainsImage()) { $img = [System.Windows.Forms.Clipboard]::GetImage() }",
+    "if ($null -eq $img) { try { $img = Get-Clipboard -Format Image -ErrorAction SilentlyContinue } catch {} }",
     "if ($null -eq $img) { exit 2 }",
     `$img.Save(${JSON.stringify(target)}, [System.Drawing.Imaging.ImageFormat]::Png)`,
     "$img.Dispose()",
