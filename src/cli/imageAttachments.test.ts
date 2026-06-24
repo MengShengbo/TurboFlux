@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { resolveImagePrompt } from './imageAttachments'
+import { hasImageReference, resolveImagePrompt } from './imageAttachments'
 
 const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64')
 
@@ -58,5 +58,32 @@ describe('resolveImagePrompt', () => {
     } finally {
       rmSync(workspace, { recursive: true, force: true })
     }
+  })
+
+  it('turns Codex image markup into a single image attachment', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'turboflux-image-workspace-'))
+    try {
+      const imagePath = join(workspace, 'screen.png')
+      writeFileSync(imagePath, TINY_PNG)
+
+      const result = resolveImagePrompt([
+        `please inspect <image name=[Image #1] path="${imagePath}">`,
+        'terminal screenshot text that should not be sent as user text',
+        '</image>',
+      ].join('\n'), workspace)
+
+      expect(result.warnings).toEqual([])
+      expect(result.attachments).toHaveLength(1)
+      expect(result.attachments[0]?.filename).toBe('screen.png')
+      expect(result.prompt).toBe('please inspect [Image #1]')
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('detects image references before routing pasted text through attachment handling', () => {
+    expect(hasImageReference('plain text only')).toBe(false)
+    expect(hasImageReference(String.raw`<image name=[Image #1] path="C:\Temp\shot.png">text</image>`)).toBe(true)
+    expect(hasImageReference('see ![screen](./shot.webp)')).toBe(true)
   })
 })

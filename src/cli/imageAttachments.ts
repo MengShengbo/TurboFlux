@@ -30,6 +30,10 @@ interface ImageRef {
   path: string
 }
 
+export function hasImageReference(input: string): boolean {
+  return collectImageRefs(input).length > 0
+}
+
 export function resolveImagePrompt(input: string, workspacePath: string, options: ResolveImagePromptOptions = {}): ResolvedImagePrompt {
   const refs = collectImageRefs(input)
   const placeholders = collectImagePlaceholders(input)
@@ -49,7 +53,7 @@ export function resolveImagePrompt(input: string, workspacePath: string, options
   }
 
   if (placeholders.length > 0 && attachments.length === 0) {
-    const attachment = captureClipboardImageAttachment(1, warnings)
+    const attachment = captureClipboardImageAttachment(1, warnings, workspacePath)
     if (attachment) attachments.push(attachment)
     if (attachment && placeholders.length > 1) {
       warnings.push('Only one image can be read from the clipboard at submit time. Paste image files or use Ctrl+V for each image while composing.')
@@ -87,6 +91,12 @@ function collectImageRefs(input: string): ImageRef[] {
     refs.push({ raw, path: cleaned })
   }
 
+  for (const match of input.matchAll(/<image\b[^>]*\bpath\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>[\s\S]*?<\/image>/gi)) {
+    add(match[0], decodeImagePathAttr(match[1] || match[2] || match[3] || ''))
+  }
+  for (const match of input.matchAll(/<image\b[^>]*\bpath\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*\/?>/gi)) {
+    add(match[0], decodeImagePathAttr(match[1] || match[2] || match[3] || ''))
+  }
   for (const match of input.matchAll(/!\[[^\]]*]\(([^)]+)\)/g)) {
     add(match[0], match[1])
   }
@@ -108,6 +118,15 @@ function collectImageRefs(input: string): ImageRef[] {
 
 function collectImagePlaceholders(input: string): string[] {
   return Array.from(input.matchAll(/(?:<image\d*>|\[Image\s*#?\s*\d+])/gi)).map(match => match[0])
+}
+
+function decodeImagePathAttr(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
 }
 
 function normalizeExistingAttachments(input: string, attachments: AgentAttachment[]): { prompt: string; attachments: AgentAttachment[] } {
@@ -181,19 +200,32 @@ function attachImageFile(filePath: string, index: number, warnings: string[]): A
   }
 }
 
-export function captureClipboardImageAttachment(index: number, warnings: string[] = []): AgentAttachment | null {
+export function captureClipboardImageAttachment(index: number, warnings: string[] = [], workspacePath = process.cwd()): AgentAttachment | null {
   if (process.platform !== 'win32') {
     warnings.push('Clipboard image paste is currently only available on Windows.')
     return null
   }
 
+  const fileAttachment = captureClipboardImageFileAttachment(index, warnings, workspacePath)
+  if (fileAttachment) return fileAttachment
+
+  const bitmapAttachment = captureClipboardBitmapAttachment(index, warnings)
+  if (bitmapAttachment) return bitmapAttachment
+
+  warnings.push('No image was found in the Windows clipboard. Paste an image path or copy an image first.')
+  return null
+}
+
+function captureClipboardBitmapAttachment(index: number, warnings: string[]): AgentAttachment | null {
   const targetDir = attachmentDir()
   mkdirSync(targetDir, { recursive: true })
   const target = join(targetDir, `clipboard-${Date.now()}-${index}.png`)
   const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "Add-Type -AssemblyName System.Windows.Forms",
     "Add-Type -AssemblyName System.Drawing",
     "$img = [System.Windows.Forms.Clipboard]::GetImage()",
+    "if ($null -eq $img) { $img = Get-Clipboard -Format Image -ErrorAction SilentlyContinue }",
     "if ($null -eq $img) { exit 2 }",
     `$img.Save(${JSON.stringify(target)}, [System.Drawing.Imaging.ImageFormat]::Png)`,
     "$img.Dispose()",
@@ -204,7 +236,6 @@ export function captureClipboardImageAttachment(index: number, warnings: string[
     windowsHide: true,
   })
   if (result.status !== 0 || !existsSync(target)) {
-    warnings.push('No image was found in the Windows clipboard. Paste an image path or copy an image first.')
     return null
   }
   const stat = statSync(target)
@@ -219,6 +250,52 @@ export function captureClipboardImageAttachment(index: number, warnings: string[
     mime: 'image/png',
     filename: basename(target),
     size: stat.size,
+  }
+}
+
+function captureClipboardImageFileAttachment(index: number, warnings: string[], workspacePath: string): AgentAttachment | null {
+  const refs = readClipboardImageRefs()
+  for (const ref of refs) {
+    const attachment = attachImageFile(resolveInputPath(ref, workspacePath), index, warnings)
+    if (attachment) return attachment
+  }
+  return null
+}
+
+function readClipboardImageRefs(): string[] {
+  const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$files = @()",
+    "if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {",
+    "  $list = [System.Windows.Forms.Clipboard]::GetFileDropList()",
+    "  foreach ($item in $list) { $files += [string]$item }",
+    "}",
+    "$text = ''",
+    "if ([System.Windows.Forms.Clipboard]::ContainsText()) { $text = [System.Windows.Forms.Clipboard]::GetText() }",
+    "$payload = [pscustomobject]@{ files = $files; text = $text }",
+    "$payload | ConvertTo-Json -Compress",
+  ].join('; ')
+
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+    encoding: 'utf-8',
+    windowsHide: true,
+  })
+  if (result.status !== 0 || !result.stdout.trim()) return []
+
+  try {
+    const parsed = JSON.parse(result.stdout.trim()) as { files?: unknown; text?: unknown }
+    const refs: string[] = []
+    const files = Array.isArray(parsed.files) ? parsed.files : typeof parsed.files === 'string' ? [parsed.files] : []
+    for (const file of files) {
+      if (typeof file === 'string' && isSupportedImagePath(file)) refs.push(file)
+    }
+    if (typeof parsed.text === 'string' && parsed.text.trim()) {
+      refs.push(...collectImageRefs(parsed.text).map(ref => ref.path))
+    }
+    return Array.from(new Set(refs))
+  } catch {
+    return []
   }
 }
 

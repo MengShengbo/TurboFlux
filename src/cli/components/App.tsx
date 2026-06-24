@@ -34,7 +34,7 @@ import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
 import { ThinkingModeRail } from './tools/ThinkingModeRail'
-import { captureClipboardImageAttachment, imagePlaceholderForIndex, resolveImagePrompt } from '../imageAttachments'
+import { captureClipboardImageAttachment, hasImageReference, imagePlaceholderForIndex, resolveImagePrompt } from '../imageAttachments'
 
 interface AppProps {
   workspacePath: string
@@ -756,9 +756,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const handlePasteImage = useCallback(() => {
     const nextIndex = draftAttachmentsRef.current.length + 1
     const warnings: string[] = []
-    const attachment = captureClipboardImageAttachment(nextIndex, warnings)
+    const attachment = captureClipboardImageAttachment(nextIndex, warnings, workspacePath)
     if (!attachment) {
-      for (const warning of warnings.filter(item => !item.startsWith('No image was found'))) {
+      const visibleWarnings = warnings.length > 0 ? warnings : ['No image was found in the clipboard. Copy an image or paste an image file path.']
+      for (const warning of visibleWarnings) {
         appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
       }
       return false
@@ -773,7 +774,20 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       return `${current}${spacer}${placeholder} `
     })
     return true
-  }, [appendMessages, genMsgId])
+  }, [appendMessages, genMsgId, workspacePath])
+
+  const handlePasteText = useCallback((pastedText: string, nextValue: string) => {
+    if (!hasImageReference(pastedText)) return null
+    const resolved = resolveImagePrompt(nextValue, workspacePath, { existingAttachments: draftAttachmentsRef.current })
+    if (resolved.attachments.length === draftAttachmentsRef.current.length) return null
+
+    for (const warning of resolved.warnings) {
+      appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
+    }
+    draftAttachmentsRef.current = resolved.attachments
+    setDraftAttachments(resolved.attachments)
+    return { value: resolved.prompt, cursorOffset: resolved.prompt.length }
+  }, [appendMessages, genMsgId, workspacePath])
 
   const handleSubmit = useCallback((value: string) => {
     const trimmed = value.trim()
@@ -1007,6 +1021,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         if (messages.length > 0) push('rewind')
       }}
       onPasteImage={handlePasteImage}
+      onPasteText={handlePasteText}
       mode={currentMode}
     />
   ) : null

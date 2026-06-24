@@ -1,10 +1,14 @@
-import React, { useState, useMemo, useRef } from 'react'
-import { Box, Text, useInput } from 'ink'
-import TextInput from 'ink-text-input'
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
+import { Box, Text, useInput, usePaste, type Key } from 'ink'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
 import { getSafeFrameWidth } from '../../terminalLayout'
+
+interface PasteTextResult {
+  value: string
+  cursorOffset?: number
+}
 
 interface PromptInputProps {
   value: string
@@ -12,15 +16,29 @@ interface PromptInputProps {
   onSubmit: (value: string) => void
   onDoubleEsc?: () => void
   onPasteImage?: () => boolean
+  onPasteText?: (pastedText: string, nextValue: string) => PasteTextResult | null
   mode?: string
 }
 
-export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteImage, mode }: PromptInputProps) {
+export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'meta'>): boolean {
+  const normalized = input?.toLowerCase()
+  return (key.ctrl && normalized === 'v') ||
+    (key.ctrl && input === '\u0016') ||
+    (key.meta && normalized === 'v')
+}
+
+function clampCursor(offset: number, value: string): number {
+  return Math.max(0, Math.min(offset, value.length))
+}
+
+export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteImage, onPasteText, mode }: PromptInputProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [selectedIdx, setSelectedIdx] = useState(0)
+  const [cursorOffset, setCursorOffset] = useState(value.length)
   const lastEscRef = useRef<number>(0)
+  const lastValueRef = useRef(value)
   const historyRef = useRef<string[]>([])
   const historyIdxRef = useRef<number>(-1)
 
@@ -31,8 +49,54 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
 
   const showCompletions = completions.length > 0
 
+  useEffect(() => {
+    const previous = lastValueRef.current
+    setCursorOffset(offset => value.startsWith(previous) && value.length > previous.length
+      ? value.length
+      : clampCursor(offset, value)
+    )
+    lastValueRef.current = value
+  }, [value])
+
+  const replaceValue = useCallback((nextValue: string, nextCursor = nextValue.length) => {
+    onChange(nextValue)
+    setCursorOffset(clampCursor(nextCursor, nextValue))
+    setSelectedIdx(0)
+    historyIdxRef.current = -1
+  }, [onChange])
+
+  const insertText = useCallback((text: string) => {
+    if (!text) return
+    const nextValue = value.slice(0, cursorOffset) + text + value.slice(cursorOffset)
+    replaceValue(nextValue, cursorOffset + text.length)
+  }, [cursorOffset, replaceValue, value])
+
+  const insertPastedText = useCallback((text: string) => {
+    if (!text) return
+    const nextValue = value.slice(0, cursorOffset) + text + value.slice(cursorOffset)
+    const transformed = onPasteText?.(text, nextValue)
+    if (transformed) {
+      replaceValue(transformed.value, transformed.cursorOffset ?? transformed.value.length)
+      return
+    }
+    replaceValue(nextValue, cursorOffset + text.length)
+  }, [cursorOffset, onPasteText, replaceValue, value])
+
+  const handleSubmit = useCallback((val: string) => {
+    if (val.trim()) {
+      historyRef.current.push(val)
+      historyIdxRef.current = -1
+    }
+    onSubmit(val)
+  }, [onSubmit])
+
+  usePaste((text) => {
+    insertPastedText(text)
+  }, { isActive: isInteractive })
+
   useInput((ch, key) => {
-    if (key.ctrl && ch?.toLowerCase() === 'v' && onPasteImage?.()) {
+    if (isImagePasteShortcut(ch, key)) {
+      onPasteImage?.()
       return
     }
 
@@ -57,7 +121,7 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
           ? historyIdxRef.current + 1
           : historyIdxRef.current
         historyIdxRef.current = nextIdx
-        onChange(history[history.length - 1 - nextIdx] ?? '')
+        replaceValue(history[history.length - 1 - nextIdx] ?? '')
       }
       return
     }
@@ -69,10 +133,10 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
         const history = historyRef.current
         if (historyIdxRef.current <= 0) {
           historyIdxRef.current = -1
-          onChange('')
+          replaceValue('')
         } else {
           historyIdxRef.current -= 1
-          onChange(history[history.length - 1 - historyIdxRef.current] ?? '')
+          replaceValue(history[history.length - 1 - historyIdxRef.current] ?? '')
         }
       }
       return
@@ -85,23 +149,61 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
     if (key.tab && showCompletions) {
       const cmd = completions[selectedIdx]
       if (cmd) {
-        onChange('/' + cmd.name + ' ')
+        replaceValue('/' + cmd.name + ' ')
         setSelectedIdx(0)
       }
+      return
     }
-  }, { isActive: isInteractive })
 
-  const handleSubmit = (val: string) => {
-    if (val.trim()) {
-      historyRef.current.push(val)
-      historyIdxRef.current = -1
+    if (key.return) {
+      handleSubmit(value)
+      return
     }
-    onSubmit(val)
-  }
+
+    if (key.leftArrow) {
+      setCursorOffset(offset => Math.max(0, offset - 1))
+      return
+    }
+
+    if (key.rightArrow) {
+      setCursorOffset(offset => Math.min(value.length, offset + 1))
+      return
+    }
+
+    if (key.home) {
+      setCursorOffset(0)
+      return
+    }
+
+    if (key.end) {
+      setCursorOffset(value.length)
+      return
+    }
+
+    if (key.backspace) {
+      if (cursorOffset > 0) {
+        replaceValue(value.slice(0, cursorOffset - 1) + value.slice(cursorOffset), cursorOffset - 1)
+      }
+      return
+    }
+
+    if (key.delete) {
+      if (cursorOffset < value.length) {
+        replaceValue(value.slice(0, cursorOffset) + value.slice(cursorOffset + 1), cursorOffset)
+      }
+      return
+    }
+
+    if (key.ctrl || key.meta) return
+    insertText(ch)
+  }, { isActive: isInteractive })
 
   const placeholder = mode === 'plan' ? 'Describe what to plan...'
     : 'What are we building today?'
   const frameWidth = getSafeFrameWidth(columns)
+  const cursorChar = value[cursorOffset] ?? ' '
+  const beforeCursor = value.slice(0, cursorOffset)
+  const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
 
   return (
     <Box flexDirection="column" marginTop={0}>
@@ -127,7 +229,18 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
         paddingRight={1}
       >
         <Text bold color={theme.brand}>{'> '}</Text>
-        <TextInput value={value} onChange={(v) => { onChange(v); setSelectedIdx(0) }} onSubmit={handleSubmit} placeholder={placeholder} />
+        {value ? (
+          <Text>
+            {beforeCursor}
+            <Text inverse>{cursorChar}</Text>
+            {afterCursor}
+          </Text>
+        ) : (
+          <Text>
+            <Text inverse>{placeholder[0] ?? ' '}</Text>
+            <Text color={theme.inactive}>{placeholder.slice(1)}</Text>
+          </Text>
+        )}
       </Box>
     </Box>
   )
