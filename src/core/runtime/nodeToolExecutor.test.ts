@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -104,6 +104,22 @@ describe('NodeToolExecutor sandbox policies', () => {
 
     expect(result.success).toBe(false)
     expect(result.error).toContain('Path outside workspace')
+  }))
+
+  it('builds code maps from an explicit feature path outside src', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'frontend', 'components'), { recursive: true })
+    writeFileSync(join(workspace, 'frontend', 'components', 'Card.tsx'), 'export function HolderCard() { return null }\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const result = await executor.getCodeMap({
+      workspacePath: workspace,
+      path: 'frontend',
+      query: '持卡人 名片',
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.data?.map?.[0]?.path).toBe('frontend')
+    expect(JSON.stringify(result.data?.map)).toContain('Card.tsx')
   }))
 
   it('creates local history checkpoints for workspace files', async () => withWorkspace(async ({ workspace }) => {

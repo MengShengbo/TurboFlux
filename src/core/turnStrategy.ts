@@ -69,8 +69,8 @@ export class TurnStrategyPlanner {
     const hasEvidence = hasRecentEvidence(session.turns)
     const hasTasks = hasOpenWork(session)
     const canWriteByMode = mode === 'vibe' || mode === 'plan'
-    const needsWorkspaceContext = hasTasks || errors.length > 0
-    const needsCodeMap = hasTasks || errors.length > 0
+    const needsWorkspaceContext = true
+    const needsCodeMap = true
     const requiresEvidence = false
 
     const reasons = [
@@ -78,6 +78,7 @@ export class TurnStrategyPlanner {
       hasTasks ? 'active task exists' : 'no active task',
       errors.length > 0 ? `recent tool errors=${errors.length}` : 'no recent tool errors',
       hasEvidence ? 'recent code evidence exists' : 'no recent code evidence',
+      'workspace context enabled by default',
     ]
 
     return {
@@ -115,11 +116,11 @@ export class TurnStrategyPlanner {
 
   private buildRetrievalPlan(mode: AgentMode, hasEvidence: boolean): string[] {
     const plan = [
-      'Use read/search/codemap tools only when the answer depends on repository state.',
-      'Use the narrowest tool that can ground the next claim; do not guess file paths.',
+      'For codebase, UI, file, keyword, component, route, or implementation questions: use search_content/search_files/search_symbols/get_codemap before asking the user where code is.',
+      'Use the narrowest tool that can ground the next claim; do not guess file paths or conclude from empty first-pass searches.',
     ]
     if (!hasEvidence) {
-      plan.push('Before making codebase claims, gather direct evidence with read_file, search_content, search_symbols, list_directory, or get_codemap.')
+      plan.push('Before making codebase claims, gather direct evidence with search_content/search_files/search_symbols/get_codemap, then read_file at least one high-signal hit.')
     }
     return plan
   }

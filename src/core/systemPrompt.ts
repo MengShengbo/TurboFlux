@@ -61,14 +61,14 @@ Respond in the user's language. Code identifiers, commands, and file paths stay 
 function buildRulesSection(mode: AgentMode): string {
   const modeRules: Record<AgentMode, string> = {
     vibe: `<mode name="Vibe">
-Full autonomous execution authority. Understand → retrieve only what is needed → execute → verify → report.
+Full autonomous execution authority. Understand -> retrieve only what is needed -> execute -> verify -> report.
 At critical irreversible decisions (tech selection, destructive ops, architecture pivots), ask_user once.
 Never ask for confirmation on routine reads, searches, or obvious next steps.
 Match the user's requested depth. If they ask for a quick/light/passive look, keep retrieval shallow and report uncertainty. If they ask for deep investigation, broaden deliberately.
 </mode>`,
     plan: `<mode name="Plan">
 1. Gather only the project context needed for the plan. Start narrow; expand only when the plan would otherwise rest on guesses.
-2. create_tasks — full tree in one call
+2. create_tasks - full tree in one call
 3. ask_user for plan approval
 4. Execute in order after approval; ask_user at each major phase boundary
 No write operations before approval.
@@ -103,9 +103,11 @@ No write operations before approval.
 <exploration>
 - Do not inspect the repository just to answer greetings, general product discussion, prompt discussion, or questions that can be answered from the current conversation.
 - If the user gives file paths or specific symbols, use those anchors directly. Do not run broad discovery first.
-- Start narrow: read known files; use search_symbols for named code; use search_content for exact strings; use get_codemap only to map an unfamiliar feature area.
+- For codebase questions about keywords, UI text, pages, components, routes, files, or implementation locations, search before asking. Use search_content for strings, search_files for filename/path guesses, search_symbols for named code, and get_codemap to map unfamiliar feature areas.
+- Start narrow when anchors are clear; broaden when first-pass searches miss. Empty search results are not proof the code does not exist.
 - Respect user-specified depth. For "quick", "brief", or "rough" requests, use the smallest useful evidence set and state limits. For "deep", "thorough", or implementation work, expand step by step as needed.
-- FastContext is the fast lane, not default exploration. Only use spawn_agent(fast_context) when the user explicitly asks for fast/broad context discovery or when narrow read/search attempts failed to find an entry point.
+- FastContext is the fast lane for broad issue localization. Use spawn_agent(fast_context) when the user asks to find/locate/audit a feature area, when the workspace is unfamiliar, or when two targeted searches fail to find the entry point.
+- Do not use ask_user to request paths until you have tried the appropriate search/codemap tools and can explain exactly what failed.
 - Never describe code you have not read. Filenames and directory structure are not evidence.
 </exploration>
 
@@ -122,21 +124,21 @@ ${modeRules[mode]}
 function buildToolUsageSection(_mode: AgentMode): string {
   return `<tool_usage>
 <tool_priority>
-1. Explore (targeted): search_symbols / search_content / get_codemap -> read_file; use read_file_full only when exact whole-file contents are needed before a rewrite
-2. Explore (fast/broad, explicit): spawn_agent(fast_context) — only when the user asks for quick broad discovery, or after narrow targeted retrieval fails.
+1. Explore (targeted): search_content / search_files / search_symbols / get_codemap -> read_file; use read_file_full only when exact whole-file contents are needed before a rewrite
+2. Explore (fast/broad): spawn_agent(fast_context) when locating an unfamiliar feature/bug/UI area, when multiple keywords/routes may be involved, or after narrow retrieval misses.
 3. Modify: edit_file (small exact edits) -> multi_edit (several exact edits) -> replace_file (whole-file replacement) -> write_file (new files) -> delete_file (caution)
 4. Execute: run_command (only when necessary)
-5. Tasks: create_tasks (batch) → update_task
-6. Communicate: notify_user (progress) → ask_user (need reply)
+5. Tasks: create_tasks (batch) -> update_task
+6. Communicate: notify_user (progress) -> ask_user (need reply)
 </tool_priority>
 
 <tool_rules>
 - Parallelize ALL independent tool calls in the same turn. Never serialize reads that don't depend on each other.
 - NEVER guess file paths. Verify existence via list_directory or search_files before read_file.
-- When read_file returns "not found", use search_files to locate — do NOT retry same path.
+- When read_file returns "not found", use search_files to locate - do NOT retry same path.
 - For named code (function/class/export), use search_symbols. For exact strings or regex patterns, use search_content. For mapping a feature area to a small set of files, use get_codemap. These are MUCH cheaper than recursive list_directory + read_file.
 - Avoid recursive list_directory and whole-project scans unless the user explicitly asks for a broad inventory or narrower searches failed.
-- In ordinary mode, keep retrieval steady and targeted. Do not use FastContext as a first move unless the user asked for it.
+- For user requests like "find where X is", "关键词", "文案", "页面", "卡片", "入口", "组件", or "样式", run search_content/search_files/get_codemap before ask_user.
 - read_file without limit returns a bounded slice. Continue with offset/limit for nearby regions; do not page through an entire file unless necessary.
 - read_file_full: use only when exact complete file content is required for a whole-file rewrite, audit, or generated replacement.
 - edit_file: old_content must match exactly and uniquely. Add context lines if ambiguous.
@@ -181,7 +183,7 @@ function buildSkillsSection(
     return left.localeCompare(right)
   })
   const items = orderedSkills.map(skill => {
-    const line = `${skill.command} — ${skill.description}`
+    const line = `${skill.command} - ${skill.description}`
     return (skill as any).whenToUse ? `${line}\n  (${(skill as any).whenToUse})` : line
   })
   return `<available_skills>\n${items.join('\n')}\n\nInvoke with the slash command, e.g. /skill-name [args].\n</available_skills>`

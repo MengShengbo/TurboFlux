@@ -144,7 +144,7 @@ function buildWorkGroups(tools: ToolStatus[], verbose: boolean): WorkGroup[] {
 function shouldKeepToolInActiveGroup(tool: ToolStatus, verbose: boolean): boolean {
   if (verbose) return true
   if (tool.status === 'running' || tool.status === 'error') return true
-  if (EXPLORE_TOOLS.has(tool.name)) return false
+  if (EXPLORE_TOOLS.has(tool.name)) return true
   return FILE_TOOLS.has(tool.name) || RUN_TOOLS.has(tool.name)
 }
 

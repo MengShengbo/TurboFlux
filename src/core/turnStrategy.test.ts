@@ -43,7 +43,8 @@ describe('TurnStrategyPlanner', () => {
     const strategy = planner.plan(sessionFor('anything'), 'vibe')
 
     expect(strategy?.requiresEvidence).toBe(false)
-    expect(strategy?.needsWorkspaceContext).toBe(false)
+    expect(strategy?.needsWorkspaceContext).toBe(true)
+    expect(strategy?.needsCodeMap).toBe(true)
     expect(strategy?.allowWrites).toBe(true)
   })
 

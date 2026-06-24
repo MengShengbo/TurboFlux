@@ -209,16 +209,16 @@ export class NodeToolExecutor implements ToolExecutor {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   }
 
-  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; depth?: number }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[] }>> {
+  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[] }>> {
     try {
       const basePath = this.ensureAllowedPath(query.workspacePath)
-      const targetPaths = query.targetPaths || ['src']
+      const targetPaths = this.resolveCodeMapTargets(basePath, query)
       const map: CodeMapNode[] = []
 
       for (const target of targetPaths) {
         const fullPath = this.ensureAllowedPath(isAbsolute(target) ? target : join(basePath, target))
         if (!existsSync(fullPath)) continue
-        const node = this.buildCodeMapNode(fullPath, basePath, query.depth || 2, 0)
+        const node = this.buildCodeMapNode(fullPath, basePath, query.depth || 2, 0, query.maxChildrenPerPath || 24)
         if (node) map.push(node)
       }
 
@@ -228,7 +228,31 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  private buildCodeMapNode(absPath: string, basePath: string, maxDepth: number, depth: number): CodeMapNode | null {
+  private resolveCodeMapTargets(basePath: string, query: { targetPaths?: string[]; path?: string; query?: string; maxPaths?: number }): string[] {
+    const explicit = query.targetPaths?.length ? query.targetPaths : query.path ? [query.path] : []
+    if (explicit.length > 0) return explicit
+
+    const roots = ['src', 'app', 'pages', 'components', 'packages', 'frontend', 'client', 'web', 'electron', 'main', 'renderer']
+      .filter(target => existsSync(join(basePath, target)))
+    const tokens = String(query.query || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_\u4e00-\u9fa5]+/g, ' ')
+      .split(/\s+/)
+      .filter(token => token.length >= 2)
+      .slice(0, 12)
+    const scored = roots
+      .map(root => {
+        const lower = root.toLowerCase()
+        const score = tokens.some(token => lower.includes(token) || token.includes(lower)) ? 2 : 1
+        return { root, score }
+      })
+      .sort((a, b) => b.score - a.score || a.root.localeCompare(b.root))
+      .map(item => item.root)
+
+    return (scored.length > 0 ? scored : ['src']).slice(0, query.maxPaths || 8)
+  }
+
+  private buildCodeMapNode(absPath: string, basePath: string, maxDepth: number, depth: number, maxChildrenPerPath: number): CodeMapNode | null {
     const relPath = relative(basePath, absPath).replace(/\\/g, '/')
     const stat = statSync(absPath)
 
@@ -257,8 +281,8 @@ export class NodeToolExecutor implements ToolExecutor {
         .filter(e => !e.name.startsWith('.'))
         .sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1))
 
-      for (const entry of entries.slice(0, 20)) {
-        const child = this.buildCodeMapNode(join(absPath, entry.name), basePath, maxDepth, depth + 1)
+      for (const entry of entries.slice(0, Math.max(1, maxChildrenPerPath))) {
+        const child = this.buildCodeMapNode(join(absPath, entry.name), basePath, maxDepth, depth + 1, maxChildrenPerPath)
         if (child) children.push(child)
       }
     } catch {}

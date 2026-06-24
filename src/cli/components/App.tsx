@@ -530,7 +530,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           convManager.scheduleSave()
           break
         case 'tool:call':
-          if (event.toolCall.name === 'spawn_agent') break
           setIsRunning(true)
           setStreamingToolDraft(prev => prev?.id === event.toolCall.id ? null : prev)
           setCurrentTools(prev => [...prev, {
@@ -736,10 +735,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit])
 
   const submitAskResponse = useCallback((response: string) => {
-    engine.submitAskUserResponse(response)
+    const trimmed = response.trim()
+    if (!trimmed) return
+    appendMessages([{ id: genMsgId(), role: 'user', content: trimmed }], { forceLatest: true })
+    engine.submitAskUserResponse(trimmed)
     setPendingAsk(null)
     setAskInput('')
-  }, [engine])
+    setIsRunning(true)
+    setMood('thinking')
+    setLastActivity(Date.now())
+  }, [appendMessages, engine, genMsgId])
 
   const isPermissionAsk = pendingAsk?.options?.includes('allow-once') ?? false
 

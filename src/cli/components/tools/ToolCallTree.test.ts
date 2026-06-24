@@ -15,10 +15,10 @@ function tool(name: string, status: ToolStatus['status'], args?: Record<string, 
 }
 
 describe('ToolCallTree history policy', () => {
-  it('hides quiet successful exploration tools from committed history', () => {
-    expect(shouldPersistToolForHistory(tool('read_file', 'done'))).toBe(false)
-    expect(shouldPersistToolForHistory(tool('search_content', 'done'))).toBe(false)
-    expect(shouldPersistToolForHistory(tool('get_codemap', 'done'))).toBe(false)
+  it('keeps successful exploration tools as compact committed history', () => {
+    expect(shouldPersistToolForHistory(tool('read_file', 'done'))).toBe(true)
+    expect(shouldPersistToolForHistory(tool('search_content', 'done'))).toBe(true)
+    expect(shouldPersistToolForHistory(tool('get_codemap', 'done'))).toBe(true)
   })
 
   it('keeps failed exploration tools visible', () => {

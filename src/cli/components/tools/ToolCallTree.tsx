@@ -67,23 +67,9 @@ export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
 
 export function shouldPersistToolForHistory(tool: ToolStatus): boolean {
   if (tool.status !== 'done') return true
-  if (isQuietExploreTool(tool.name)) return false
   if (tool.name === 'create_checkpoint') return false
   if (tool.name === 'list_tasks' || tool.name === 'update_task' || tool.name === 'create_task' || tool.name === 'create_tasks') return false
   return true
-}
-
-function isQuietExploreTool(name: string): boolean {
-  return [
-    'read_file',
-    'read_file_full',
-    'list_directory',
-    'search_files',
-    'search_content',
-    'search_symbols',
-    'search_semantic',
-    'get_codemap',
-  ].includes(name)
 }
 
 function summarizeTools(tools: ToolStatus[], columns: number): string {

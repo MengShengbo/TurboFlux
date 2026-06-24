@@ -390,7 +390,7 @@ const tools: EnhancedToolDef[] = [
     description: `Launch a specialized subagent to handle a focused task autonomously.
 
 Available types:
-- fast_context: Fast issue-localization code map. Use only when the user explicitly asks for quick/broad context discovery, or when narrow read/search attempts failed to find the entry point. It returns ranked candidate files, evidence roles, confidence, and line ranges.
+- fast_context: Fast issue-localization code map. Use when locating an unfamiliar feature/bug/UI area, when multiple keywords/routes may be involved, or when narrow read/search attempts failed. It returns ranked candidate files, evidence roles, confidence, and line ranges.
 - explorer: Deep investigation of a feature, call chain, or subsystem. Reads implementations and follows imports across multiple files.
 - reviewer: Code quality/security/bug review of a specific file or feature area.
 - git_inspector: Analyze recent git changes — what was modified, why, and what the diff shows.
@@ -399,7 +399,7 @@ When NOT to use spawn_agent:
 - If you know the exact file to read, use read_file directly.
 - For a specific symbol definition, use search_symbols.
 - For a known string pattern in a known area, use search_content.
-- For ordinary steady exploration, stay with targeted read/search tools.
+- For a tiny known lookup where one targeted search is enough, stay with targeted read/search tools.
 
 Launch multiple agents concurrently for independent topics — use parallel tool calls.
 Each invocation is stateless. Provide a highly specific objective.`,
