@@ -173,19 +173,6 @@ function stripRuntimeBlocksFromText(content: string): string {
     .trim()
 }
 
-export function shouldAutoFastContext(userMessage: string): boolean {
-  const text = userMessage.trim().toLowerCase()
-  if (!text || text.length < 4) return false
-  if (/\b(hi|hello|thanks|thank you)\b/.test(text) && text.length < 40) return false
-
-  const asksForLocation = /\b(find|locate|search|where|keyword|keywords|text|copy|route|page|component|style|css|ui|screen|view|entry|implementation|bug)\b/.test(text)
-  const asksForCode = /\b(code|file|files|repo|repository|workspace|source|function|class|symbol|import|export)\b/.test(text)
-  const asksInChinese = /[\u4e00-\u9fa5]/.test(text)
-    && /找|查|搜|关键词|文案|页面|组件|样式|入口|在哪|哪里|代码|文件|源码|实现|定位|相关|报错|错位|卡片/.test(text)
-
-  return asksInChinese || (asksForLocation && (asksForCode || text.length > 24))
-}
-
 export function appendRuntimeContextToLatestUserMessage(
   messages: Array<Record<string, unknown>>,
   text: string,
@@ -235,7 +222,6 @@ export class AgentEngine {
   private fastContextObjective: string | null = null
   private fastContextPack: string | null = null
   private fastContextRunPromise: Promise<FastContextScanResult | null> | null = null
-  private autoFastContextObjective: string | null = null
   private readCache: Map<string, { content: string; timestamp: number }> = new Map()
   // Registry of background PTY sessions the agent has spawned via
   // run_command(run_in_background=true). Tracks the command + start time so
@@ -1181,7 +1167,6 @@ export class AgentEngine {
     this.conclusionGuardAttempts = 0
     this.contextLimitRetryInProgress = false
     this.preservedFiles = []
-    this.prepareAutoFastContext(userMessage)
     this.codemapSummary = null
     this.codemapCacheKey = null
     this.workspaceMemoryText = null
@@ -1214,31 +1199,8 @@ export class AgentEngine {
       newTurns.push(fastContextPreludeTurn)
     }
 
-    const fastContextObjective = this.fastContextObjective || this.autoFastContextObjective
-    if (fastContextObjective && !this.fastContextPack) {
-      const syntheticFastContextTool: ToolCall | null = this.autoFastContextObjective
-        ? {
-            id: `auto_fast_context_${Date.now()}`,
-            name: 'spawn_agent',
-            arguments: { agent_type: 'fast_context', objective: fastContextObjective, trigger: 'auto' },
-          }
-        : null
-      if (syntheticFastContextTool) this.emit({ type: 'tool:call', toolCall: syntheticFastContextTool })
-      await this.runFastContextObjective(fastContextObjective)
-      if (syntheticFastContextTool) {
-        this.emit({
-          type: 'tool:result',
-          toolResult: {
-            toolCallId: syntheticFastContextTool.id,
-            name: 'spawn_agent',
-            output: this.fastContextPack ? 'FastContext evidence pack prepared.' : 'FastContext did not return high-signal files.',
-            isError: false,
-          },
-        })
-      }
-      if (this.autoFastContextObjective && this.fastContextObjective === this.autoFastContextObjective) {
-        this.fastContextObjective = null
-      }
+    if (this.fastContextObjective && !this.fastContextPack) {
+      await this.runFastContextObjective(this.fastContextObjective)
     }
 
     const effectiveMaxTurns = this.config.maxTurns || 30
@@ -1875,12 +1837,6 @@ Before retrying:
       })
     }
     return null
-  }
-
-  private prepareAutoFastContext(userMessage: string): void {
-    this.autoFastContextObjective = shouldAutoFastContext(userMessage)
-      ? userMessage.trim()
-      : null
   }
 
   private async callModel(): Promise<AgentTurn> {
@@ -4765,8 +4721,8 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private createFastContextPreludeTurn(userMessage: string): AgentTurn | null {
-    const objective = this.fastContextObjective || this.autoFastContextObjective
-    if (!objective) return null
+    if (!this.fastContextObjective) return null
+    const objective = this.fastContextObjective || userMessage
     const hasChinese = /[\u4e00-\u9fa5]/.test(objective)
     const text = hasChinese
       ? '我先快速检索相关实现代码。'

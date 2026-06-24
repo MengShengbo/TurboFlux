@@ -103,10 +103,10 @@ No write operations before approval.
 <exploration>
 - Do not inspect the repository just to answer greetings, general product discussion, prompt discussion, or questions that can be answered from the current conversation.
 - If the user gives file paths or specific symbols, use those anchors directly. Do not run broad discovery first.
-- For codebase questions about keywords, UI text, pages, components, routes, files, or implementation locations, search before asking. Use search_content for strings, search_files for filename/path guesses, search_symbols for named code, and get_codemap to map unfamiliar feature areas.
+- For codebase location questions, search before asking. Use semantic judgment: exact visible text or literals fit search_content; filename/path guesses fit search_files; named code fits search_symbols; unfamiliar feature areas fit get_codemap or spawn_agent(fast_context).
 - Start narrow when anchors are clear; broaden when first-pass searches miss. Empty search results are not proof the code does not exist.
 - Respect user-specified depth. For "quick", "brief", or "rough" requests, use the smallest useful evidence set and state limits. For "deep", "thorough", or implementation work, expand step by step as needed.
-- FastContext is the fast lane for broad issue localization. Use spawn_agent(fast_context) when the user asks to find/locate/audit a feature area, when the workspace is unfamiliar, or when two targeted searches fail to find the entry point.
+- FastContext is the fast lane for broad issue localization. Let the task shape decide: use spawn_agent(fast_context) when a request is likely spread across multiple files, the workspace area is unfamiliar, or targeted searches fail to reveal a trustworthy entry point.
 - Do not use ask_user to request paths until you have tried the appropriate search/codemap tools and can explain exactly what failed.
 - Never describe code you have not read. Filenames and directory structure are not evidence.
 </exploration>
@@ -138,7 +138,7 @@ function buildToolUsageSection(_mode: AgentMode): string {
 - When read_file returns "not found", use search_files to locate - do NOT retry same path.
 - For named code (function/class/export), use search_symbols. For exact strings or regex patterns, use search_content. For mapping a feature area to a small set of files, use get_codemap. These are MUCH cheaper than recursive list_directory + read_file.
 - Avoid recursive list_directory and whole-project scans unless the user explicitly asks for a broad inventory or narrower searches failed.
-- For user requests like "find where X is", "关键词", "文案", "页面", "卡片", "入口", "组件", or "样式", run search_content/search_files/get_codemap before ask_user.
+- For location requests, choose search_content/search_files/search_symbols/get_codemap or spawn_agent(fast_context) from the meaning of the request before ask_user. Do not rely on fixed trigger words.
 - read_file without limit returns a bounded slice. Continue with offset/limit for nearby regions; do not page through an entire file unless necessary.
 - read_file_full: use only when exact complete file content is required for a whole-file rewrite, audit, or generated replacement.
 - edit_file: old_content must match exactly and uniquely. Add context lines if ambiguous.

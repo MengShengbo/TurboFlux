@@ -116,7 +116,7 @@ export class TurnStrategyPlanner {
 
   private buildRetrievalPlan(mode: AgentMode, hasEvidence: boolean): string[] {
     const plan = [
-      'For codebase, UI, file, keyword, component, route, or implementation questions: use search_content/search_files/search_symbols/get_codemap before asking the user where code is.',
+      'For codebase location questions, use semantic judgment to choose search_content/search_files/search_symbols/get_codemap or spawn_agent(fast_context) before asking the user where code is.',
       'Use the narrowest tool that can ground the next claim; do not guess file paths or conclude from empty first-pass searches.',
     ]
     if (!hasEvidence) {
