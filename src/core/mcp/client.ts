@@ -26,7 +26,7 @@ export class McpClient {
     })
 
     const client = new Client(
-      { name: 'turboflux', version: '0.1.0' },
+      { name: 'turboflux', version: '0.1.1' },
       { capabilities: {} },
     )
 
