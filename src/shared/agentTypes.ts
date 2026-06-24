@@ -81,7 +81,17 @@ export interface AgentTurn {
     rawReasoningPayload?: RawReasoningPayload
     checkpointId?: string
     checkpointLabel?: string
+    attachments?: AgentAttachment[]
   }
+}
+
+export interface AgentAttachment {
+  id: string
+  type: 'image'
+  path: string
+  mime: string
+  filename: string
+  size: number
 }
 
 export interface TokenUsage {

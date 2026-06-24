@@ -1,4 +1,5 @@
-import type { AgentTurn, TokenUsage } from '../shared/agentTypes'
+import { existsSync, readFileSync } from 'node:fs'
+import type { AgentAttachment, AgentTurn, TokenUsage } from '../shared/agentTypes'
 import type { ContextSegment } from '../state/types'
 import type { ContextPolicyProfile } from './contextPolicy'
 import { effectiveInputWindow, resolveContextPolicyProfile } from './contextPolicy'
@@ -227,6 +228,69 @@ function tryParseJSON(text: string): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+const VISION_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const MAX_DIRECT_IMAGE_BYTES = 5 * 1024 * 1024
+
+function attachmentToDataUrl(attachment: AgentAttachment): string | null {
+  if (!VISION_IMAGE_MIMES.has(attachment.mime)) return null
+  if (!existsSync(attachment.path)) return null
+  const bytes = readFileSync(attachment.path)
+  if (bytes.length > MAX_DIRECT_IMAGE_BYTES) return null
+  return `data:${attachment.mime};base64,${bytes.toString('base64')}`
+}
+
+function attachmentManifestText(attachments: AgentAttachment[]): string {
+  return [
+    '<attachments>',
+    'Image attachments are saved locally and are also attached to this message when the provider supports vision input.',
+    ...attachments.map((attachment, index) =>
+      `<image name="[Image #${index + 1}]" path="${attachment.path}" mime="${attachment.mime}" filename="${attachment.filename}" size="${attachment.size}" />`
+    ),
+    '</attachments>',
+  ].join('\n')
+}
+
+function buildUserContentWithAttachments(
+  turn: AgentTurn,
+  provider: 'openai' | 'anthropic',
+): Array<Record<string, unknown>> | null {
+  const attachments = turn.metadata?.attachments?.filter(attachment => attachment.type === 'image') ?? []
+  if (attachments.length === 0) return null
+
+  const content: Array<Record<string, unknown>> = []
+  const text = [turn.content.trim(), attachmentManifestText(attachments)].filter(Boolean).join('\n\n')
+  content.push({ type: 'text', text })
+
+  for (const attachment of attachments) {
+    const dataUrl = attachmentToDataUrl(attachment)
+    if (!dataUrl) {
+      content.push({
+        type: 'text',
+        text: `[Image attachment unavailable for direct vision input: ${attachment.path} (${attachment.mime})]`,
+      })
+      continue
+    }
+    const base64 = dataUrl.slice(dataUrl.indexOf(';base64,') + ';base64,'.length)
+    if (provider === 'anthropic') {
+      content.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: attachment.mime,
+          data: base64,
+        },
+      })
+    } else {
+      content.push({
+        type: 'image_url',
+        image_url: { url: dataUrl },
+      })
+    }
+  }
+
+  return content
 }
 
 /**
@@ -795,6 +859,17 @@ export class ContextManager {
         }
       }
       return messages
+    }
+
+    if (turn.role === 'user') {
+      const attachmentContent = buildUserContentWithAttachments(turn, provider)
+      if (attachmentContent) {
+        messages.push({
+          role: 'user',
+          content: attachmentContent,
+        })
+        return messages
+      }
     }
 
     if (turn.role === 'assistant' && turn.toolCalls && turn.toolCalls.length > 0) {

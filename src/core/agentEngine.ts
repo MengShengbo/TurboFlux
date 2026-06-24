@@ -99,9 +99,50 @@ export type AgentEventType =
 
 export type AgentEventListener = (event: AgentEventType) => void
 
-function shouldOmitSamplingTemperature(model: string): boolean {
-  const reasoningParam = resolveReasoningParam(model, 'standard')
+function shouldOmitSamplingTemperature(model: string, provider: APIConfig['provider']): boolean {
+  const reasoningParam = resolveProviderReasoningParam(provider, model, 'standard')
   return reasoningParam?.kind === 'anthropic-adaptive'
+}
+
+function resolveProviderReasoningParam(provider: APIConfig['provider'], model: string, mode: ResolvedThinkingMode) {
+  if (provider === 'custom' || provider === 'openrouter') return null
+  return resolveReasoningParam(model, mode)
+}
+
+function extractUnsupportedRequestParam(error?: string): string | null {
+  if (!error) return null
+  const quoted = error.match(/Unsupported parameter:\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
+  if (quoted?.[1]) return quoted[1]
+  const named = error.match(/(?:unknown|unrecognized|unsupported|invalid)\s+(?:parameter|field|key|argument)\s*[:=]?\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
+  return named?.[1] || null
+}
+
+function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param: string): boolean {
+  const aliases = new Set<string>([param])
+  if (param === 'max_output_tokens' || param === 'max_completion_tokens' || param === 'max_tokens') {
+    aliases.add('max_output_tokens')
+    aliases.add('max_completion_tokens')
+    aliases.add('max_tokens')
+  }
+  if (param === 'tools' || param === 'tool_choice' || param === 'parallel_tool_calls') {
+    aliases.add('tools')
+    aliases.add('tool_choice')
+    aliases.add('parallel_tool_calls')
+  }
+  if (param === 'thinking' || param === 'reasoning_effort' || param === 'output_config') {
+    aliases.add('thinking')
+    aliases.add('reasoning_effort')
+    aliases.add('output_config')
+  }
+
+  let removed = false
+  for (const key of aliases) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) {
+      delete body[key]
+      removed = true
+    }
+  }
+  return removed
 }
 
 function stableHash(value: unknown): string {
@@ -148,7 +189,7 @@ export function appendRuntimeContextToLatestUserMessage(
       return true
     }
 
-    if (provider === 'anthropic' && Array.isArray(message.content)) {
+    if (Array.isArray(message.content)) {
       ;(message.content as Array<Record<string, unknown>>).push({
         type: 'text',
         text,
@@ -596,6 +637,7 @@ export class AgentEngine {
       resolvedThinkingMode?: ResolvedThinkingMode
       thinking?: NonNullable<AgentTurn['metadata']>['thinking']
       rawReasoningPayload?: NonNullable<AgentTurn['metadata']>['rawReasoningPayload']
+      attachments?: NonNullable<AgentTurn['metadata']>['attachments']
       toolCalls?: Array<{
         id?: string
         name: string
@@ -653,6 +695,9 @@ export class AgentEngine {
           role: 'user',
           content: msg.content,
           timestamp,
+          metadata: meta?.attachments?.length
+            ? { attachments: meta.attachments.map(attachment => ({ ...attachment })) }
+            : undefined,
         })
       } else if (msg.role === 'assistant') {
         // Reconstruct toolCalls from ChatMessage.metadata.toolCalls (ToolCallInfo[])
@@ -1105,7 +1150,7 @@ export class AgentEngine {
     }
   }
 
-  async run(userMessage: string, options?: { reuseLastUserTurn?: boolean }): Promise<AgentTurn[]> {
+  async run(userMessage: string, options?: { reuseLastUserTurn?: boolean; attachments?: NonNullable<AgentTurn['metadata']>['attachments'] }): Promise<AgentTurn[]> {
     if (this.currentRunPromise) {
       throw new Error('AgentEngine.run() called while a previous run is still in flight')
     }
@@ -1141,7 +1186,7 @@ export class AgentEngine {
 
     const newTurns: AgentTurn[] = []
     if (!canReuseLastUserTurn) {
-      const userTurn = this.createUserTurn(userMessage)
+      const userTurn = this.createUserTurn(userMessage, options?.attachments)
       this.session.turns.push(userTurn)
       this.emit({ type: 'turn:start', turn: userTurn })
       newTurns.push(userTurn)
@@ -2266,13 +2311,13 @@ Before retrying:
       messages: requestMessages,
       stream: true,
     }
-    if (!shouldOmitSamplingTemperature(config.defaultModel)) {
+    if (!shouldOmitSamplingTemperature(config.defaultModel, config.provider)) {
       body.temperature = this.config.temperature ?? config.temperature ?? 0.7
     }
     if (maxTokens > 0) {
       body.max_tokens = maxTokens
     }
-    const reasoningParam = resolveReasoningParam(config.defaultModel, this.resolvedThinkingMode)
+    const reasoningParam = resolveProviderReasoningParam(config.provider, config.defaultModel, this.resolvedThinkingMode)
     if (reasoningParam?.kind === 'openai-chat') {
       body.reasoning_effort = reasoningParam.effort
     } else if (reasoningParam?.kind === 'deepseek-chat') {
@@ -2321,8 +2366,6 @@ Before retrying:
       }
     }
     this.emitPromptModuleSnapshot((messages.find(m => m.role === 'system')?.content as string) || '', openaiTools, requestMessages)
-    const serializedBody = JSON.stringify(body)
-
     // Record prompt state for cache-break detection.
     this.cacheMonitor.recordPromptState({
       systemPrompt: (messages.find(m => m.role === 'system')?.content as string) || '',
@@ -2368,7 +2411,7 @@ Before retrying:
     const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
     this.currentStreamId = streamId
 
-    const result = await this.toolExecutor.streamMessage(url, headers, serializedBody, (line: string) => {
+    const handleStreamLine = (line: string) => {
       if (!line.startsWith('data:')) return
       const jsonStr = line.slice(5).trim()
       if (jsonStr === '[DONE]') return
@@ -2444,7 +2487,23 @@ Before retrying:
       } catch {
         // Malformed JSON chunk, skip
       }
-    })
+    }
+
+    let serializedBody = JSON.stringify(body)
+    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine)
+    for (let retry = 0; !result.success && retry < 4; retry += 1) {
+      if (this.abortController?.signal.aborted) break
+      if (result.status !== 400) break
+      const unsupportedParam = extractUnsupportedRequestParam(result.error)
+      if (!unsupportedParam || !removeOpenAICompatibleRequestParam(body, unsupportedParam)) break
+      this.emit({
+        type: 'notification',
+        level: 'warning',
+        message: `Provider rejected "${unsupportedParam}"; retrying without that request parameter.`,
+      })
+      serializedBody = JSON.stringify(body)
+      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine)
+    }
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
@@ -4642,12 +4701,15 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     return toWorkspaceRelative(basePath, filePath)
   }
 
-  private createUserTurn(content: string): AgentTurn {
+  private createUserTurn(content: string, attachments?: NonNullable<AgentTurn['metadata']>['attachments']): AgentTurn {
     return {
       id: generateTurnId(),
       role: 'user',
       content,
       timestamp: Date.now(),
+      metadata: attachments?.length
+        ? { attachments: attachments.map(attachment => ({ ...attachment })) }
+        : undefined,
     }
   }
 

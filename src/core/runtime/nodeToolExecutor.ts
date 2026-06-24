@@ -700,7 +700,7 @@ export class NodeToolExecutor implements ToolExecutor {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
             continue
           }
-          return { success: false, error }
+          return { success: false, error, status: response.status }
         }
         const reader = response.body?.getReader()
         if (!reader) return { success: false, error: 'No response body' }

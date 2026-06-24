@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { AgentTurn } from '../shared/agentTypes'
 import type { ContextSegment } from '../state/types'
 import { ContextManager } from './contextManager'
@@ -21,6 +24,83 @@ function segment(params: Partial<ContextSegment> & { summary: string }): Context
 }
 
 describe('ContextManager', () => {
+  it('converts image attachments into OpenAI-compatible image_url content blocks', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'turboflux-image-test-'))
+    try {
+      const imagePath = join(dir, 'sample.png')
+      writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'))
+      const manager = new ContextManager()
+      const messages = manager.buildMessages([
+        {
+          id: 'u1',
+          role: 'user',
+          content: '[Image #1] describe this image',
+          timestamp: 1,
+          metadata: {
+            attachments: [{
+              id: 'image1',
+              type: 'image',
+              path: imagePath,
+              mime: 'image/png',
+              filename: 'sample.png',
+              size: 68,
+            }],
+          },
+        },
+      ], 'system prompt', 1_000_000, 'openai', 4096, undefined, undefined, 'gpt-5.5')
+
+      const content = messages[1]?.content as Array<Record<string, any>>
+      expect(Array.isArray(content)).toBe(true)
+      expect(content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('[Image #1]') })
+      expect(content[0]?.text).toContain('<attachments>')
+      expect(content[0]?.text).toContain(imagePath)
+      expect(content[1]).toMatchObject({ type: 'image_url' })
+      expect(content[1]?.image_url.url).toMatch(/^data:image\/png;base64,/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('converts image attachments into Anthropic image content blocks', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'turboflux-image-test-'))
+    try {
+      const imagePath = join(dir, 'sample.png')
+      writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64'))
+      const manager = new ContextManager()
+      const messages = manager.buildMessages([
+        {
+          id: 'u1',
+          role: 'user',
+          content: '[Image #1] describe this image',
+          timestamp: 1,
+          metadata: {
+            attachments: [{
+              id: 'image1',
+              type: 'image',
+              path: imagePath,
+              mime: 'image/png',
+              filename: 'sample.png',
+              size: 68,
+            }],
+          },
+        },
+      ], 'system prompt', 1_000_000, 'anthropic', 4096, undefined, undefined, 'claude-opus-4-8')
+
+      const content = messages[1]?.content as Array<Record<string, any>>
+      expect(Array.isArray(content)).toBe(true)
+      expect(content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('[Image #1]') })
+      expect(content[0]?.text).toContain('<attachments>')
+      expect(content[0]?.text).toContain(imagePath)
+      expect(content[1]).toMatchObject({
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png' },
+      })
+      expect(content[1]?.source.data).toEqual(expect.any(String))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('injects valid compressed conversation segments as a cache-safe context message', () => {
     const manager = new ContextManager()
     const messages = manager.buildMessages(

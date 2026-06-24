@@ -3,12 +3,13 @@ import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import type { TurboFluxConfig } from '../../../core/config'
-import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
+import type { AgentMode, ThinkingMode, TokenUsage } from '../../../shared/agentTypes'
 
 interface StatusLineProps {
   config: TurboFluxConfig
   tokenUsage: TokenUsage
   mode?: AgentMode
+  thinkingMode?: ThinkingMode
   viewingHistory?: boolean
   gitEnabled?: boolean
 }
@@ -23,7 +24,14 @@ const MODE_LABELS: Record<AgentMode, string> = {
   plan: 'PLAN',
 }
 
-export function StatusLine({ config, tokenUsage, mode = 'vibe', viewingHistory = false, gitEnabled = false }: StatusLineProps) {
+const THINKING_LABELS: Record<ThinkingMode, string> = {
+  auto: 'auto',
+  off: 'off',
+  standard: 'standard',
+  max: 'max',
+}
+
+export function StatusLine({ config, tokenUsage, mode = 'vibe', thinkingMode = 'auto', viewingHistory = false, gitEnabled = false }: StatusLineProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const hasProviderUsage = tokenUsage.source === 'provider' && typeof tokenUsage.input === 'number'
@@ -44,6 +52,7 @@ export function StatusLine({ config, tokenUsage, mode = 'vibe', viewingHistory =
   const parts: string[] = []
   if (config.model) parts.push(config.model)
   if (config.provider) parts.push(config.provider)
+  parts.push(`think ${THINKING_LABELS[thinkingMode]}`)
   if (gitEnabled) parts.push('git')
   if (viewingHistory) parts.push('history view')
 

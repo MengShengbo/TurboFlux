@@ -14,7 +14,7 @@ import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
-import type { AgentTurn, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
+import type { AgentAttachment, AgentTurn, ChangeSummary, ThinkingMode, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
 import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
@@ -32,6 +32,9 @@ import { useTerminalSize } from '../hooks/useTerminalSize'
 import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
 import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
+import { AgentActivityLine } from './tools/AgentActivityLine'
+import { ThinkingModeRail } from './tools/ThinkingModeRail'
+import { captureClipboardImageAttachment, imagePlaceholderForIndex, resolveImagePrompt } from '../imageAttachments'
 
 interface AppProps {
   workspacePath: string
@@ -45,6 +48,13 @@ interface AppProps {
 type StaticTranscriptItem =
   | { kind: 'header'; id: string }
   | { kind: 'message'; id: string; message: Message }
+
+const THINKING_MODE_ORDER: ThinkingMode[] = ['auto', 'off', 'standard', 'max']
+
+export function getNextThinkingMode(mode: ThinkingMode): ThinkingMode {
+  const index = THINKING_MODE_ORDER.indexOf(mode)
+  return THINKING_MODE_ORDER[(index + 1) % THINKING_MODE_ORDER.length] ?? THINKING_MODE_ORDER[0]
+}
 
 function isMessageRole(role: string): role is Message['role'] {
   return role === 'user' || role === 'assistant' || role === 'system'
@@ -331,6 +341,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [messages, setMessages] = useState<Message[]>([])
   const [staticTranscriptRevision, setStaticTranscriptRevision] = useState(0)
   const [input, setInput] = useState('')
+  const [draftAttachments, setDraftAttachments] = useState<AgentAttachment[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const [streamText, setStreamText] = useState('')
   const [currentTools, setCurrentTools] = useState<ToolStatus[]>([])
@@ -338,6 +349,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [mood, setMood] = useState<MascotMood>('idle')
   const [tokenUsage, setTokenUsage] = useState<TokenUsage>({ source: 'unknown' })
   const [currentMode, setCurrentMode] = useState<'vibe' | 'plan'>('vibe')
+  const [thinkingMode, setThinkingMode] = useState<ThinkingMode>('auto')
+  const [thinkingModeNotice, setThinkingModeNotice] = useState<{ mode: ThinkingMode; changedAt: number } | null>(null)
   const [gitEnabled, setGitEnabled] = useState(false)
   const [modelPresets, setModelPresets] = useState<ModelPreset[]>([])
   const [lastActivity, setLastActivity] = useState<number>(Date.now())
@@ -362,6 +375,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const messageIdRef = useRef(0)
   const streamBufferRef = useRef('')
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const draftAttachmentsRef = useRef<AgentAttachment[]>([])
   const genMsgId = useCallback(() => {
     messageIdRef.current += 1
     return `msg-${messageIdRef.current}`
@@ -372,6 +386,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const changeSummariesRef = useRef<ChangeSummary[]>([])
   useEffect(() => { currentToolsRef.current = currentTools }, [currentTools])
   useEffect(() => { changeSummariesRef.current = changeSummaries }, [changeSummaries])
+  useEffect(() => { draftAttachmentsRef.current = draftAttachments }, [draftAttachments])
 
   const [runtime] = useState(() => createAgentRuntime({
     workspacePath,
@@ -382,6 +397,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
   const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath))
+
+  useEffect(() => {
+    setThinkingMode(engine.getThinkingMode())
+  }, [engine])
 
   const persistConfig = useCallback((nextConfig: TurboFluxConfig) => {
     stateProvider.updateConfig(nextConfig)
@@ -418,9 +437,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     engine.setContextSegments(contextSegments)
     replaceMessages(turnsToMessages(turns))
     setInput(nextInput)
+    draftAttachmentsRef.current = []
+    setDraftAttachments([])
     setTranscriptOffset(0)
     setTokenUsage(engine.getContextUsage())
     setGitEnabled(engine.isGitEnabled())
+    setThinkingMode(engine.getThinkingMode())
+    setThinkingModeNotice(null)
     setCurrentTools([])
     setStreamingToolDraft(null)
     setChangeSummaries([])
@@ -667,7 +690,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     transcriptEnd,
   ])
 
-  const runPrompt = useCallback(async (prompt: string) => {
+  const runPrompt = useCallback(async (prompt: string, attachments?: AgentAttachment[]) => {
     appendMessages([{ id: genMsgId(), role: 'user', content: prompt }])
     if (!config.apiKey) {
       appendMessages([{ id: genMsgId(), role: 'system', content: 'No model provider is configured yet. Exit and run `turboflux setup`, or set `/config apiKey <key>` manually.' }])
@@ -689,7 +712,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setAskInput('')
     setLastActivity(Date.now())
     try {
-      const turns = await engine.run(prompt)
+      const turns = await engine.run(prompt, { attachments })
       if (singleShot) {
         const finalAssistantTurn = [...turns].reverse().find(turn => turn.role === 'assistant' && turn.content.trim())
         const finalText = finalAssistantTurn
@@ -720,10 +743,45 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const isPermissionAsk = pendingAsk?.options?.includes('allow-once') ?? false
 
+  const switchThinkingMode = useCallback((mode: ThinkingMode, showNotice = true) => {
+    engine.setThinkingMode(mode)
+    setThinkingMode(mode)
+    if (showNotice) setThinkingModeNotice({ mode, changedAt: Date.now() })
+  }, [engine])
+
+  const cycleThinkingMode = useCallback(() => {
+    switchThinkingMode(getNextThinkingMode(engine.getThinkingMode()))
+  }, [engine, switchThinkingMode])
+
+  const handlePasteImage = useCallback(() => {
+    const nextIndex = draftAttachmentsRef.current.length + 1
+    const warnings: string[] = []
+    const attachment = captureClipboardImageAttachment(nextIndex, warnings)
+    if (!attachment) {
+      for (const warning of warnings.filter(item => !item.startsWith('No image was found'))) {
+        appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
+      }
+      return false
+    }
+
+    const placeholder = imagePlaceholderForIndex(nextIndex)
+    const nextAttachments = [...draftAttachmentsRef.current, { ...attachment, id: `image${nextIndex}` }]
+    draftAttachmentsRef.current = nextAttachments
+    setDraftAttachments(nextAttachments)
+    setInput(current => {
+      const spacer = current && !/\s$/.test(current) ? ' ' : ''
+      return `${current}${spacer}${placeholder} `
+    })
+    return true
+  }, [appendMessages, genMsgId])
+
   const handleSubmit = useCallback((value: string) => {
     const trimmed = value.trim()
     if (!trimmed) return
+    const pendingDraftAttachments = draftAttachmentsRef.current
     setInput('')
+    draftAttachmentsRef.current = []
+    setDraftAttachments([])
 
     if (commandRegistry.isCommand(trimmed)) {
       if (trimmed === '/model') {
@@ -750,6 +808,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const result = commandRegistry.execute(trimmed, ctx)
       setTokenUsage(engine.getContextUsage())
       setGitEnabled(engine.isGitEnabled())
+      const nextThinkingMode = engine.getThinkingMode()
+      if (nextThinkingMode !== thinkingMode) {
+        setThinkingMode(nextThinkingMode)
+        setThinkingModeNotice({ mode: nextThinkingMode, changedAt: Date.now() })
+      }
       switch (result.type) {
         case 'text':
           appendMessages([{ id: genMsgId(), role: 'system', content: result.text! }])
@@ -762,12 +825,21 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       }
       return
     }
-    runPrompt(trimmed)
-  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, workspacePath])
+    const resolved = resolveImagePrompt(trimmed, workspacePath, { existingAttachments: pendingDraftAttachments })
+    for (const warning of resolved.warnings) {
+      appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
+    }
+    runPrompt(resolved.prompt, resolved.attachments)
+  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, thinkingMode, workspacePath])
 
   useInput((ch, key) => {
     if (key.ctrl && ch === 'c') exit()
     if (activeOverlay !== null) return // overlays handle their own keys
+
+    if ((key.meta && ch.toLowerCase() === 't') || (key.shift && key.tab)) {
+      cycleThinkingMode()
+      return
+    }
 
     if (noFlickerActive && !cursorMode) {
       if (key.pageUp || (key.ctrl && key.upArrow)) {
@@ -934,6 +1006,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       onDoubleEsc={() => {
         if (messages.length > 0) push('rewind')
       }}
+      onPasteImage={handlePasteImage}
       mode={currentMode}
     />
   ) : null
@@ -987,7 +1060,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               {cursorHint}
               {promptNode}
               <TerminalSessionsFooter sessions={terminalSessions} />
-              <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
+              <ThinkingModeRail notice={thinkingModeNotice} onDone={() => setThinkingModeNotice(null)} />
+              <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} thinkingMode={thinkingMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
+              <AgentActivityLine active={isRunning} />
             </Box>
           </Box>
         </Box>
@@ -1042,9 +1117,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {cursorPreviewNode}
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
+        <ThinkingModeRail notice={thinkingModeNotice} onDone={() => setThinkingModeNotice(null)} />
 
         {/* Status line at bottom */}
-        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
+        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} thinkingMode={thinkingMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
+        <AgentActivityLine active={isRunning} />
       </Box>
     </ThemeProvider>
   )

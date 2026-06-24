@@ -11,10 +11,11 @@ interface PromptInputProps {
   onChange: (value: string) => void
   onSubmit: (value: string) => void
   onDoubleEsc?: () => void
+  onPasteImage?: () => boolean
   mode?: string
 }
 
-export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, mode }: PromptInputProps) {
+export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteImage, mode }: PromptInputProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -31,6 +32,10 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, mode }: Pr
   const showCompletions = completions.length > 0
 
   useInput((ch, key) => {
+    if (key.ctrl && ch?.toLowerCase() === 'v' && onPasteImage?.()) {
+      return
+    }
+
     if (key.escape) {
       const now = Date.now()
       if (now - lastEscRef.current < 300) {
@@ -70,6 +75,10 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, mode }: Pr
           onChange(history[history.length - 1 - historyIdxRef.current] ?? '')
         }
       }
+      return
+    }
+
+    if (key.shift && key.tab) {
       return
     }
 

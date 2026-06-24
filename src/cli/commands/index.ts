@@ -249,7 +249,7 @@ commandRegistry.register({
       return `Usage: /thinking <${modes.join('|')}>\nCurrent: ${ctx.engine.getThinkingMode()}`
     }
     ctx.engine.setThinkingMode(mode)
-    return `Thinking mode set to: ${mode}`
+    return
   },
 })
 
