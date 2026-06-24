@@ -10,7 +10,7 @@ const program = new Command()
 program
   .name('turboflux')
   .description('TurboFlux - workspace assistant CLI')
-  .version('0.1.2')
+  .version('0.1.4')
   .argument('[workspace]', 'workspace directory', '.')
   .option('--model-override <model>', 'temporarily override model for this session')
   .option('--provider-override <provider>', 'temporarily override API provider for this session')

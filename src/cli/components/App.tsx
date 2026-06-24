@@ -34,7 +34,7 @@ import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
 import { ThinkingModeRail } from './tools/ThinkingModeRail'
-import { captureClipboardImageAttachment, getClipboardImageStatus, hasImageReference, imagePlaceholderForIndex, resolveImagePrompt } from '../imageAttachments'
+import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
 
 interface AppProps {
   workspacePath: string
@@ -375,9 +375,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const messageIdRef = useRef(0)
   const streamBufferRef = useRef('')
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inputRef = useRef('')
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
-  const clipboardImageSequenceRef = useRef<string | null>(null)
-  const clipboardCaptureSequenceRef = useRef<string | null>(null)
+  const lastClipboardImageRef = useRef<{ fingerprint: string; at: number } | null>(null)
   const genMsgId = useCallback(() => {
     messageIdRef.current += 1
     return `msg-${messageIdRef.current}`
@@ -438,6 +438,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     engine.restoreFromTurns(turns)
     engine.setContextSegments(contextSegments)
     replaceMessages(turnsToMessages(turns))
+    inputRef.current = nextInput
     setInput(nextInput)
     draftAttachmentsRef.current = []
     setDraftAttachments([])
@@ -471,6 +472,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       return segment.createdAt <= boundaryTime
     })
   }, [stateProvider])
+
+  const setComposedInput = useCallback((nextValue: string | ((current: string) => string)) => {
+    const rawValue = typeof nextValue === 'function' ? nextValue(inputRef.current) : nextValue
+    const reconciled = reconcileDraftImagePrompt(rawValue, draftAttachmentsRef.current)
+    inputRef.current = reconciled.prompt
+    draftAttachmentsRef.current = reconciled.attachments
+    setDraftAttachments(reconciled.attachments)
+    setInput(reconciled.prompt)
+  }, [])
 
   useEffect(() => {
     stateProvider.updateConfig(config)
@@ -760,8 +770,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     switchThinkingMode(getNextThinkingMode(engine.getThinkingMode()))
   }, [engine, switchThinkingMode])
 
-  const attachClipboardImage = useCallback((options?: { silentNoImage?: boolean; sequence?: string }) => {
-    if (options?.sequence && clipboardCaptureSequenceRef.current === options.sequence) return false
+  const attachClipboardImage = useCallback((options?: { silentNoImage?: boolean }) => {
     const nextIndex = draftAttachmentsRef.current.length + 1
     const warnings: string[] = []
     const attachment = captureClipboardImageAttachment(nextIndex, warnings, workspacePath)
@@ -775,17 +784,21 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       return false
     }
 
-    if (options?.sequence) clipboardCaptureSequenceRef.current = options.sequence
+    const fingerprint = imageAttachmentFingerprint(attachment)
+    const lastClipboardImage = lastClipboardImageRef.current
+    if (fingerprint && lastClipboardImage?.fingerprint === fingerprint && Date.now() - lastClipboardImage.at < 1500) return false
+    if (fingerprint) lastClipboardImageRef.current = { fingerprint, at: Date.now() }
+
     const placeholder = imagePlaceholderForIndex(nextIndex)
     const nextAttachments = [...draftAttachmentsRef.current, { ...attachment, id: `image${nextIndex}` }]
     draftAttachmentsRef.current = nextAttachments
     setDraftAttachments(nextAttachments)
-    setInput(current => {
+    setComposedInput(current => {
       const spacer = current && !/\s$/.test(current) ? ' ' : ''
       return `${current}${spacer}${placeholder} `
     })
     return true
-  }, [appendMessages, genMsgId, workspacePath])
+  }, [appendMessages, genMsgId, setComposedInput, workspacePath])
 
   const handlePasteImage = useCallback(() => {
     return attachClipboardImage()
@@ -808,6 +821,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     const trimmed = value.trim()
     if (!trimmed) return
     const pendingDraftAttachments = draftAttachmentsRef.current
+    inputRef.current = ''
     setInput('')
     draftAttachmentsRef.current = []
     setDraftAttachments([])
@@ -1005,34 +1019,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay
   const showPrompt = !isRunning && !singleShot && activeOverlay === null && !cursorMode && !pendingAsk
-  useEffect(() => {
-    if (!showPrompt) return
-    let cancelled = false
-    const checkClipboardImage = () => {
-      const status = getClipboardImageStatus(workspacePath)
-      if (cancelled || !status) return
-      if (clipboardImageSequenceRef.current === null) {
-        clipboardImageSequenceRef.current = status.sequence
-        if (status.hasImage) {
-          attachClipboardImage({ silentNoImage: true, sequence: status.sequence })
-        }
-        return
-      }
-      if (status.sequence === clipboardImageSequenceRef.current) return
-      clipboardImageSequenceRef.current = status.sequence
-      if (status.hasImage) {
-        attachClipboardImage({ silentNoImage: true, sequence: status.sequence })
-      }
-    }
-
-    checkClipboardImage()
-    const timer = setInterval(checkClipboardImage, 700)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [attachClipboardImage, showPrompt, workspacePath])
-
   const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
     <Box marginTop={1}>
@@ -1058,7 +1044,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const promptNode = showPrompt ? (
     <PromptInput
       value={input}
-      onChange={setInput}
+      onChange={setComposedInput}
       onSubmit={handleSubmit}
       onDoubleEsc={() => {
         if (messages.length > 0) push('rewind')

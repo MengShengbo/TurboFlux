@@ -23,12 +23,53 @@ interface PromptInputProps {
 export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'meta'>): boolean {
   const normalized = input?.toLowerCase()
   return (key.ctrl && normalized === 'v') ||
-    (key.ctrl && input === '\u0016') ||
+    input === '\u0016' ||
     (key.meta && normalized === 'v')
 }
 
 function clampCursor(offset: number, value: string): number {
   return Math.max(0, Math.min(offset, value.length))
+}
+
+export function getImageTokenBefore(value: string, offset: number): { start: number; end: number } | null {
+  const prefix = value.slice(0, offset)
+  const match = prefix.match(/\[Image\s*#\s*\d+]$/i)
+  return match?.index === undefined ? null : { start: match.index, end: offset }
+}
+
+export function getImageTokenAfter(value: string, offset: number): { start: number; end: number } | null {
+  const suffix = value.slice(offset)
+  const match = suffix.match(/^\[Image\s*#\s*\d+]/i)
+  return match ? { start: offset, end: offset + match[0].length } : null
+}
+
+export function getImageTokenRangeBeforeDelete(value: string, offset: number): { start: number; end: number } | null {
+  const prefix = value.slice(0, offset)
+  const match = prefix.match(/(\s*)\[Image\s*#\s*\d+](\s*)$/i)
+  if (match?.index === undefined) return null
+  const rawStart = match.index
+  const leading = match[1] ?? ''
+  const trailing = match[2] ?? ''
+  const tokenStart = rawStart + leading.length
+  const hasTextAfterCursor = /\S/.test(value.slice(offset))
+  const start = trailing.length > 0 && hasTextAfterCursor
+    ? tokenStart
+    : tokenStart > 0 && value[tokenStart - 1] === ' '
+      ? tokenStart - 1
+      : rawStart
+  return { start, end: offset }
+}
+
+export function getImageTokenRangeAfterDelete(value: string, offset: number): { start: number; end: number } | null {
+  const suffix = value.slice(offset)
+  const match = suffix.match(/^(\s*)\[Image\s*#\s*\d+](\s*)/i)
+  if (!match) return null
+  const leading = match[1] ?? ''
+  const trailing = match[2] ?? ''
+  const tokenEnd = offset + match[0].length - trailing.length
+  const fullEnd = offset + match[0].length
+  if (leading.length > 0) return { start: offset, end: tokenEnd }
+  return { start: offset, end: fullEnd }
 }
 
 export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteImage, onPasteText, mode }: PromptInputProps) {
@@ -91,6 +132,7 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
   }, [onSubmit])
 
   usePaste((text) => {
+    if (text.length === 0 && onPasteImage?.()) return
     insertPastedText(text)
   }, { isActive: isInteractive })
 
@@ -161,12 +203,12 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
     }
 
     if (key.leftArrow) {
-      setCursorOffset(offset => Math.max(0, offset - 1))
+      setCursorOffset(offset => getImageTokenBefore(value, offset)?.start ?? Math.max(0, offset - 1))
       return
     }
 
     if (key.rightArrow) {
-      setCursorOffset(offset => Math.min(value.length, offset + 1))
+      setCursorOffset(offset => getImageTokenAfter(value, offset)?.end ?? Math.min(value.length, offset + 1))
       return
     }
 
@@ -182,14 +224,24 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
 
     if (key.backspace) {
       if (cursorOffset > 0) {
-        replaceValue(value.slice(0, cursorOffset - 1) + value.slice(cursorOffset), cursorOffset - 1)
+        const token = getImageTokenRangeBeforeDelete(value, cursorOffset)
+        if (token) {
+          replaceValue(value.slice(0, token.start) + value.slice(token.end), token.start)
+        } else {
+          replaceValue(value.slice(0, cursorOffset - 1) + value.slice(cursorOffset), cursorOffset - 1)
+        }
       }
       return
     }
 
     if (key.delete) {
       if (cursorOffset < value.length) {
-        replaceValue(value.slice(0, cursorOffset) + value.slice(cursorOffset + 1), cursorOffset)
+        const token = getImageTokenRangeAfterDelete(value, cursorOffset)
+        if (token) {
+          replaceValue(value.slice(0, token.start) + value.slice(token.end), token.start)
+        } else {
+          replaceValue(value.slice(0, cursorOffset) + value.slice(cursorOffset + 1), cursorOffset)
+        }
       }
       return
     }

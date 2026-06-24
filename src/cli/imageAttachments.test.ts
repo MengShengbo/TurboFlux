@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { hasImageReference, resolveImagePrompt } from './imageAttachments'
+import { hasImageReference, reconcileDraftImagePrompt, resolveImagePrompt } from './imageAttachments'
 
 const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64')
 
@@ -85,5 +85,19 @@ describe('resolveImagePrompt', () => {
     expect(hasImageReference('plain text only')).toBe(false)
     expect(hasImageReference(String.raw`<image name=[Image #1] path="C:\Temp\shot.png">text</image>`)).toBe(true)
     expect(hasImageReference('see ![screen](./shot.webp)')).toBe(true)
+  })
+
+  it('renumbers draft image placeholders after deletion', () => {
+    const attachments = [
+      { id: 'image1', type: 'image' as const, path: 'one.png', mime: 'image/png', filename: 'one.png', size: 1 },
+      { id: 'image2', type: 'image' as const, path: 'two.png', mime: 'image/png', filename: 'two.png', size: 1 },
+    ]
+
+    const result = reconcileDraftImagePrompt('[Image #2] explain', attachments)
+
+    expect(result.prompt).toBe('[Image #1] explain')
+    expect(result.attachments).toHaveLength(1)
+    expect(result.attachments[0]?.filename).toBe('two.png')
+    expect(result.attachments[0]?.id).toBe('image1')
   })
 })
