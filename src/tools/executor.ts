@@ -19,6 +19,14 @@ export interface SearchContentHit {
   context?: string
 }
 
+export interface WebSearchResult {
+  title: string
+  url: string
+  snippet: string
+  source?: string
+  publishedDate?: string
+}
+
 export interface CommandOutput {
   stdout: string
   stderr: string
@@ -42,6 +50,7 @@ export interface ToolExecutor {
   // Search operations
   searchFiles(pattern: string, basePath: string): Promise<Result<{ matches: string[]; truncated?: boolean }>>
   searchContent(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean): Promise<Result<SearchContentHit[]>>
+  webSearch?(query: Record<string, any>): Promise<Result<{ results: WebSearchResult[]; provider: string; query: string }>>
 
   // Code lookup operations
   searchCodeSymbols(query: Record<string, any>): Promise<Result<any>>

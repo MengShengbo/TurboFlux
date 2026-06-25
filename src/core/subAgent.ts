@@ -1,3 +1,5 @@
+import { isAbsolute, join, relative } from 'path'
+import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
@@ -17,6 +19,50 @@ export function loadDynamicAgents(workspacePath: string): void {
   const loaded = loadAgentsFromDir(workspacePath)
   for (const agent of loaded) {
     dynamicAgents.set(agent.id, agent)
+  }
+}
+
+function resolveWorkspacePath(workspacePath: string, pathValue: unknown): string {
+  const path = String(pathValue || '')
+  if (!path) return workspacePath
+  return isAbsolute(path) ? path : join(workspacePath, path)
+}
+
+function toWorkspaceRelative(workspacePath: string, filePath: string): string {
+  const rel = isAbsolute(filePath) ? relative(workspacePath, filePath) : filePath
+  return rel.replace(/\\/g, '/').replace(/^[./]+/, '')
+}
+
+function normalizeCodeSearchHits(value: unknown): CodeSearchHit[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is CodeSearchHit => item && typeof item === 'object' && typeof (item as CodeSearchHit).path === 'string')
+}
+
+function collectCodeMapEvidence(nodes: CodeMapNode[], workspacePath: string): SubAgentEvidence[] {
+  const evidence: SubAgentEvidence[] = []
+  const visit = (node: CodeMapNode): void => {
+    if (node.path) {
+      evidence.push({
+        path: toWorkspaceRelative(workspacePath, node.path),
+        startLine: node.startLine || node.line || 1,
+        endLine: node.endLine || node.line || 1,
+        preview: `${node.title}${node.summary ? ` - ${node.summary}` : ''}`,
+        reason: 'codemap',
+        symbol: node.kind === 'symbol' ? node.title : undefined,
+      })
+    }
+    for (const child of node.children || []) visit(child)
+  }
+  for (const node of nodes) visit(node)
+  return evidence
+}
+
+function formatCodeMapNode(node: CodeMapNode, lines: string[], depth = 0): void {
+  const indent = '  '.repeat(depth)
+  const loc = node.path ? ` ${node.path}${node.line ? `:${node.line}` : ''}` : ''
+  lines.push(`${indent}- ${node.title}${loc}${node.summary ? ` - ${node.summary}` : ''}`)
+  for (const child of (node.children || []).slice(0, 12)) {
+    formatCodeMapNode(child, lines, depth + 1)
   }
 }
 
@@ -158,22 +204,29 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
 }
 
 function FAST_CONTEXT_SYSTEM_PROMPT(): string {
-  return `You are FastContext, a code-map locator for large repositories. Your job is not to read broadly. Your job is to identify the smallest ranked set of files and line ranges that are likely to locate the issue, entry point, or root cause.
+  return `You are FastContext, a read-only code exploration subagent for large repositories. Local code does not decide meaning; you do. Your job is to plan searches, run tools in parallel, read high-signal slices, and return a compact ranked code map grounded in files and line ranges.
 
-Tools: search_content(pattern, path?), read_file(path, offset?, limit?), search_files(pattern)
+Tools:
+- search_content(pattern, path?, file_pattern?, case_sensitive?)
+- search_files(pattern)
+- search_symbols(query, path?, symbol_kind?)
+- get_codemap(query, path?)
+- read_file(path, offset?, limit?)
 
 Strategy:
-1. Extract identifiers, error text, feature names, file hints, and UI/API labels from the objective.
-2. Map likely entry points first: routes, IPC handlers, commands, components, server endpoints, model/config boundaries.
-3. Search multiple high-signal patterns in parallel. Prefer exact strings and symbols over generic words.
-4. Read only the top candidate slices to confirm role and exact line ranges.
-5. Return evidence that can become a ranked code map: entry, implementation, caller, config, schema, test, or suspected root_cause.
+1. Plan semantically from the objective. Infer likely visible text, symbols, routes, components, style classes, file globs, and aliases. Do not rely on fixed trigger words.
+2. Run independent searches in parallel. Use search_symbols for code names, search_content for visible text/literals, search_files for likely filenames, and get_codemap for unfamiliar areas.
+3. Read the top candidate slices after search. A filename, codemap node, or search hit is not proof; confirm role and exact line ranges with read_file.
+4. Rank candidates yourself from the evidence you read. Prefer true entry points, implementations, style/source files, schemas/config, tests, and suspected root causes over incidental references.
+5. Return a concise final report that starts with exactly "RANKED_CODE_MAP". Include 3-7 ranked candidates with path, line range, role, confidence, and why. Then list "SEARCHES_TRIED" and "UNCERTAINTY".
 
 Rules:
 - Never describe files you have not read.
 - Prioritize source, entry, schema/config, and failing-path files over README-style context.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Avoid dumping many related files. Five strong candidates beat twenty weak ones.
+- If the objective contains Chinese or mixed UI text, search both exact text and nearby component/style naming guesses.
+- Your final report is the ranking authority. Local scoring is only a fallback if your report is missing or unusable.
 - Do NOT expose hidden reasoning. Call tools and return concise, evidence-backed findings.`
 }
 
@@ -226,7 +279,16 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       function: {
         name: 'search_content',
         description: 'Grep for a regex pattern across the codebase',
-        parameters: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' } }, required: ['pattern'] },
+        parameters: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string' },
+            path: { type: 'string' },
+            file_pattern: { type: 'string' },
+            case_sensitive: { type: 'boolean' },
+          },
+          required: ['pattern'],
+        },
       },
     },
     {
@@ -243,6 +305,37 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         name: 'search_files',
         description: 'Find files by glob pattern',
         parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'search_symbols',
+        description: 'Search code symbols such as functions, classes, interfaces, types, constants, and components',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            path: { type: 'string' },
+            symbol_kind: { type: 'string', enum: ['class', 'function', 'interface', 'type', 'enum', 'constant'] },
+          },
+          required: ['query'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'get_codemap',
+        description: 'Generate a compact project map for a feature area or path before drilling into files',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            path: { type: 'string' },
+          },
+          required: ['query'],
+        },
       },
     },
   ]
@@ -300,20 +393,31 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
 
     messages.push({ role: 'assistant', content: msg.content || '', tool_calls: msg.tool_calls })
 
-    const toolCalls = msg.tool_calls as ToolCallRequest[]
-    let callCount = 0
-
-    for (const tc of toolCalls.slice(0, definition.maxParallel)) {
-      if (abortSignal?.aborted) break
-      callCount++
-
+    const toolCalls = (msg.tool_calls as ToolCallRequest[]).slice(0, definition.maxParallel)
+    const entries = toolCalls.map(tc => {
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.function.arguments) } catch {}
-
       emit({ type: 'tool_call', tool: tc.function.name, args, turn })
+      return { tc, args }
+    })
+    const results = await Promise.all(entries.map(async entry => {
+      if (abortSignal?.aborted) {
+        return {
+          entry,
+          result: {
+            ok: false,
+            output: 'Aborted.',
+            summary: `${entry.tc.function.name} aborted`,
+            evidence: [],
+          } satisfies ToolExecResult,
+        }
+      }
+      const result = await executeSubAgentTool(entry.tc.function.name, entry.args, workspacePath, toolExecutor)
+      return { entry, result }
+    }))
 
-      const result = await executeSubAgentTool(tc.function.name, args, workspacePath, toolExecutor)
-
+    for (const { entry, result } of results) {
+      const { tc } = entry
       emit({ type: 'tool_result', tool: tc.function.name, ok: result.ok, summary: result.summary, turn })
 
       for (const ev of result.evidence) {
@@ -323,7 +427,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result.output })
     }
 
-    emit({ type: 'turn_complete', turn, calls: callCount })
+    emit({ type: 'turn_complete', turn, calls: results.length })
   }
 
   return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, truncated: turn >= definition.maxTurns }
@@ -342,15 +446,17 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
   switch (name) {
     case 'search_content': {
       const pattern = args.pattern || ''
-      const basePath = args.path ? `${workspacePath}/${args.path}` : workspacePath
-      const res = await executor.searchContent(pattern, basePath, undefined, true)
+      const basePath = args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath
+      const filePattern = typeof args.file_pattern === 'string' ? args.file_pattern : undefined
+      const caseInsensitive = args.case_sensitive === true ? false : true
+      const res = await executor.searchContent(pattern, basePath, filePattern, caseInsensitive)
       if (!res.success || !res.data || res.data.length === 0) {
         return { ok: true, output: 'No matches found.', summary: `grep "${pattern}" → 0 hits`, evidence }
       }
       const hits = res.data.slice(0, 15)
       const lines: string[] = []
       for (const hit of hits) {
-        const relPath = hit.file.replace(workspacePath, '').replace(/^[\\/]/, '').replace(/\\/g, '/')
+        const relPath = toWorkspaceRelative(workspacePath, hit.file)
         lines.push(`${relPath}:${hit.line}: ${hit.text}`)
         evidence.push({
           path: relPath,
@@ -364,7 +470,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
     }
 
     case 'read_file': {
-      const filePath = `${workspacePath}/${args.path}`
+      const filePath = resolveWorkspacePath(workspacePath, args.path)
       const res = await executor.readFile(filePath)
       if (!res.success || !res.data) {
         return { ok: false, output: `File not found: ${args.path}`, summary: `read ${args.path} → not found`, evidence }
@@ -391,8 +497,69 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         return { ok: true, output: 'No files found.', summary: `glob "${pattern}" → 0 files`, evidence }
       }
       const matches = res.data.matches.slice(0, 20)
-      const relPaths = matches.map(m => m.replace(workspacePath, '').replace(/^[\\/]/, '').replace(/\\/g, '/'))
+      const relPaths = matches.map(m => toWorkspaceRelative(workspacePath, m))
+      for (const relPath of relPaths.slice(0, 8)) {
+        evidence.push({
+          path: relPath,
+          startLine: 1,
+          endLine: 1,
+          preview: relPath,
+          reason: `glob: ${pattern}`,
+        })
+      }
       return { ok: true, output: relPaths.join('\n'), summary: `glob "${pattern}" → ${matches.length} files`, evidence }
+    }
+
+    case 'search_symbols': {
+      const query = String(args.query || '').trim()
+      if (!query) return { ok: true, output: 'No symbol query provided.', summary: 'symbol search skipped', evidence }
+      const res = await executor.searchCodeSymbols({
+        workspacePath,
+        query,
+        path: typeof args.path === 'string' ? args.path : undefined,
+        kind: typeof args.symbol_kind === 'string' ? args.symbol_kind : undefined,
+        kinds: typeof args.symbol_kind === 'string' ? [args.symbol_kind] : undefined,
+        limit: 20,
+      })
+      const hits = normalizeCodeSearchHits(res.data).slice(0, 15)
+      if (!res.success || hits.length === 0) {
+        return { ok: true, output: 'No symbols found.', summary: `symbols "${query}" -> 0 hits`, evidence }
+      }
+      const lines = hits.map(hit => {
+        const relPath = toWorkspaceRelative(workspacePath, hit.path)
+        evidence.push({
+          path: relPath,
+          startLine: hit.startLine || hit.line || 1,
+          endLine: hit.endLine || hit.line || 1,
+          preview: hit.preview || hit.subtitle || hit.title,
+          reason: `symbol: ${query}`,
+          symbol: hit.symbolName || hit.title,
+        })
+        return `${relPath}:${hit.line || hit.startLine || 1}: ${hit.title} (${hit.symbolKind || hit.source}) ${hit.preview || hit.subtitle || ''}`.trim()
+      })
+      return { ok: true, output: lines.join('\n'), summary: `symbols "${query}" -> ${hits.length} hits`, evidence }
+    }
+
+    case 'get_codemap': {
+      const query = String(args.query || args.path || '').trim()
+      const res = await executor.getCodeMap({
+        workspacePath,
+        query,
+        targetPaths: typeof args.path === 'string' ? [args.path] : undefined,
+        path: typeof args.path === 'string' ? args.path : undefined,
+        maxPaths: 8,
+        maxChildrenPerPath: 5,
+      })
+      const map = res.data?.map
+      const nodes = Array.isArray(map) ? map : map ? [map] : []
+      if (!res.success || nodes.length === 0) {
+        return { ok: true, output: 'No codemap found.', summary: `codemap "${query}" -> 0 nodes`, evidence }
+      }
+      const lines: string[] = []
+      const nodeEvidence = collectCodeMapEvidence(nodes, workspacePath)
+      for (const ev of nodeEvidence.slice(0, 12)) evidence.push(ev)
+      for (const node of nodes) formatCodeMapNode(node, lines)
+      return { ok: true, output: lines.join('\n'), summary: `codemap "${query}" -> ${nodeEvidence.length} anchors`, evidence }
     }
 
     default:

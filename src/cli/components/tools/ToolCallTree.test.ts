@@ -16,9 +16,11 @@ function tool(name: string, status: ToolStatus['status'], args?: Record<string, 
 
 describe('ToolCallTree history policy', () => {
   it('keeps successful exploration tools as compact committed history', () => {
-    expect(shouldPersistToolForHistory(tool('read_file', 'done'))).toBe(true)
-    expect(shouldPersistToolForHistory(tool('search_content', 'done'))).toBe(true)
-    expect(shouldPersistToolForHistory(tool('get_codemap', 'done'))).toBe(true)
+    expect(shouldPersistToolForHistory(tool('read_file', 'done'))).toBe(false)
+    expect(shouldPersistToolForHistory(tool('search_content', 'done'))).toBe(false)
+    expect(shouldPersistToolForHistory(tool('get_codemap', 'done'))).toBe(false)
+    expect(shouldPersistToolForHistory(tool('explore_code', 'done'))).toBe(true)
+    expect(shouldPersistToolForHistory(tool('web_search', 'done'))).toBe(true)
   })
 
   it('keeps failed exploration tools visible', () => {
@@ -36,5 +38,17 @@ describe('ToolCallTree history policy', () => {
       offset: 180,
       limit: 60,
     }))).toBe('Read src/App.tsx:181-240')
+  })
+
+  it('formats broad code exploration as an Explore activity', () => {
+    expect(formatToolLabelForHistory('explore_code', JSON.stringify({
+      objective: 'find the terminal paste image handling flow',
+    }))).toBe('Explore "find the terminal paste image handling flow"')
+  })
+
+  it('formats web search as a Web activity', () => {
+    expect(formatToolLabelForHistory('web_search', JSON.stringify({
+      query: 'latest Node.js fetch docs',
+    }))).toBe('Web "latest Node.js fetch docs"')
   })
 })

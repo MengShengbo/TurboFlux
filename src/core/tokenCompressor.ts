@@ -71,6 +71,7 @@ export function compressToolResult(
       return spanFoldCompress(output, options)
     case 'search_content':
     case 'search_files':
+    case 'web_search':
     case 'grep':
       return searchAggregateCompress(output, options)
     default:

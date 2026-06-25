@@ -1,6 +1,6 @@
 {
   "name": "turboflux",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "TurboFlux CLI - local AI workbench assistant for developer workflows",
   "main": "dist/cli/index.js",
   "bin": {

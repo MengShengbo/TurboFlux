@@ -61,14 +61,47 @@ function trimText(value: string, max = 220): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}...` : flat
 }
 
-function objectiveTokens(objective: string): string[] {
-  return Array.from(new Set(
-    objective
-      .toLowerCase()
-      .split(/[^a-z0-9_.$/-]+/i)
-      .map(token => token.trim())
-      .filter(token => token.length >= 3 && !STOP_WORDS.has(token)),
-  )).slice(0, 16)
+export function __testObjectiveTokens(objective: string): string[] {
+  const tokens: string[] = []
+  const add = (token: string): void => {
+    const value = token.trim().toLowerCase()
+    if (!value || STOP_WORDS.has(value)) return
+    if (/^[a-z0-9_.$/-]+$/i.test(value) && value.length < 2) return
+    if (/^[\u4e00-\u9fff]+$/u.test(value) && value.length < 2) return
+    tokens.push(value)
+  }
+
+  for (const quoted of objective.matchAll(/["'`“”‘’]([^"'`“”‘’]{2,})["'`“”‘’]/g)) {
+    add(quoted[1])
+  }
+
+  for (const raw of objective.match(/[A-Za-z0-9_.$/-]+/g) || []) {
+    add(raw)
+    for (const part of raw
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .split(/[_.$/-]+|\s+/)
+      .filter(Boolean)) {
+      add(part)
+    }
+  }
+
+  for (const raw of objective.match(/[\u4e00-\u9fff]+/gu) || []) {
+    add(raw)
+    for (let size = Math.min(4, raw.length); size >= 2; size--) {
+      for (let i = 0; i <= raw.length - size; i++) add(raw.slice(i, i + size))
+    }
+  }
+
+  return Array.from(new Set(tokens)).slice(0, 32)
+}
+
+function countTokenMatches(value: string, tokens: string[]): number {
+  const lower = value.toLowerCase()
+  let count = 0
+  for (const token of tokens) {
+    if (lower.includes(token)) count++
+  }
+  return count
 }
 
 function basename(path: string): string {
@@ -80,7 +113,7 @@ function inferKind(hit: SubAgentEvidence, tokens: string[]): FastContextEvidence
   const base = basename(path)
   const preview = hit.preview.toLowerCase()
   const reason = hit.reason.toLowerCase()
-  const objectiveMatches = tokens.filter(token => path.includes(token) || preview.includes(token)).length
+  const objectiveMatches = countTokenMatches(`${path}\n${preview}`, tokens)
   const looksLikeFailureSite = /\b(throw|error|exception|failed|failure|invalid|missing|undefined|null|abort|reject)\b/.test(preview)
 
   if (looksLikeFailureSite && objectiveMatches >= 2) return 'root_cause'
@@ -88,7 +121,7 @@ function inferKind(hit: SubAgentEvidence, tokens: string[]): FastContextEvidence
   if (/\b(schema|types?|interface|contract|protocol|ipc|dto)\b/.test(path)) return 'schema'
   if (/(\.config\.|config|settings|package\.json|tsconfig|vite|webpack|rollup|eslint|env)/.test(path)) return 'config'
   if (/^(index|main|app|server|client|router|routes|cli)\./.test(base) || /\b(routes?|entry|bootstrap)\b/.test(path)) return 'entry'
-  if (reason.includes('grep') && /\b(import|from|require|use[A-Z]|\w+\()/.test(hit.preview)) return 'caller'
+  if ((reason.includes('grep') || reason.includes('symbol')) && /\b(import|from|require|use[A-Z]|\w+\()/.test(hit.preview)) return 'caller'
   if (reason.includes('file read') || /\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|cs|cpp|c|swift|kt)$/.test(path)) return 'implementation'
   return 'supporting'
 }
@@ -105,8 +138,8 @@ function scoreHit(hit: SubAgentEvidence, kind: FastContextEvidenceKind, tokens: 
   const path = hit.path.toLowerCase()
   const preview = hit.preview.toLowerCase()
   const reason = hit.reason.toLowerCase()
-  const pathMatches = tokens.filter(token => path.includes(token)).length
-  const previewMatches = tokens.filter(token => preview.includes(token)).length
+  const pathMatches = countTokenMatches(path, tokens)
+  const previewMatches = countTokenMatches(preview, tokens)
   const kindWeight: Record<FastContextEvidenceKind, number> = {
     root_cause: 78,
     entry: 72,
@@ -117,7 +150,15 @@ function scoreHit(hit: SubAgentEvidence, kind: FastContextEvidenceKind, tokens: 
     test: 54,
     supporting: 44,
   }
-  const sourceWeight = reason.includes('file read') ? 8 : reason.includes('grep') ? 3 : 0
+  const sourceWeight = reason.includes('file read')
+    ? 10
+    : reason.includes('symbol')
+      ? 8
+      : reason.includes('codemap')
+        ? 5
+        : reason.includes('grep') || reason.includes('glob')
+          ? 3
+          : 0
   const lineSpan = Math.max(1, hit.endLine - hit.startLine + 1)
   const spanPenalty = lineSpan > 90 ? 6 : 0
   return clamp(kindWeight[kind] + pathMatches * 8 + previewMatches * 4 + sourceWeight - spanPenalty, 20, 98)
@@ -171,35 +212,45 @@ function summarizeCandidates(candidates: Map<string, FastContextScanHit[]>): Can
     .sort((a, b) => b.score - a.score)
 }
 
-function buildEvidencePack(
+export function __testBuildEvidencePack(
   objective: string,
   candidates: Map<string, FastContextScanHit[]>,
   elapsedMs: number,
   turns: number,
   truncated: boolean,
+  llmReport?: string,
 ): string {
-  const ranked = summarizeCandidates(candidates).slice(0, 7)
+  const fallbackRanked = summarizeCandidates(candidates).slice(0, 7)
+  const finalReport = trimLlmReport(llmReport)
   const lines: string[] = [
     '<fast_context_pack role="code_map_locator">',
     `objective: ${objective}`,
     `retrieval: ${turns} turn(s), ${elapsedMs}ms`,
-    'isolation: subagent tool history is not injected; only this ranked evidence pack enters the main context.',
+    'authority: llm_subagent_report_first; local evidence ranking is only a fallback/checksum.',
+    'isolation: subagent raw tool history is not injected; only this compact report and fallback evidence enter the main context.',
     '',
     'use_policy:',
     '- Treat this as an issue-localization map, not a complete proof.',
-    '- Read only the candidate files/ranges needed for the current task.',
-    '- Prefer high-confidence entry/root_cause/implementation candidates first.',
+    '- Prefer the LLM-ranked code map when present; read only the files/ranges needed for the current task.',
+    '- Use fallback evidence only to sanity-check or recover from missing LLM ranking.',
     truncated ? '- Retrieval was truncated; run targeted search if a candidate looks incomplete.' : '',
     '',
-    'ranked_candidates:',
   ].filter(Boolean)
 
-  if (ranked.length === 0) {
-    lines.push('- no concrete candidates found')
+  if (finalReport) {
+    lines.push('llm_ranked_code_map:', finalReport)
+  } else {
+    lines.push('llm_ranked_code_map:', '- missing; use fallback_candidates below')
   }
 
-  ranked.forEach((candidate, idx) => {
-    lines.push(`${idx + 1}. ${candidate.path} [${candidate.confidence}, score ${Math.round(candidate.score)}] roles=${candidate.kinds.join(',')}`)
+  lines.push('', 'fallback_candidates:')
+
+  if (fallbackRanked.length === 0) {
+    lines.push('- no concrete fallback candidates found')
+  }
+
+  fallbackRanked.forEach((candidate, idx) => {
+    lines.push(`${idx + 1}. ${candidate.path} [${candidate.confidence}] roles=${candidate.kinds.join(',')}`)
     if (candidate.symbols.length > 0) lines.push(`   symbols: ${candidate.symbols.join(', ')}`)
     if (candidate.reasons.length > 0) lines.push(`   why: ${candidate.reasons.join('; ')}`)
     for (const hit of candidate.hits.slice(0, 2)) {
@@ -212,12 +263,19 @@ function buildEvidencePack(
   return lines.join('\n').replace(/\n{3,}/g, '\n\n')
 }
 
+function trimLlmReport(value?: string): string {
+  const text = (value || '').trim()
+  if (!text) return ''
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+  return normalized.length > 5000 ? `${normalized.slice(0, 4999)}...` : normalized
+}
+
 export async function runFastContextSubagent(params: RunParams): Promise<FastContextScanResult> {
   const onEvent = params.onEvent
   const candidates = new Map<string, FastContextScanHit[]>()
   const allHits: FastContextScanHit[] = []
   const seenHitKeys = new Set<string>()
-  const tokens = objectiveTokens(params.objective)
+  const tokens = __testObjectiveTokens(params.objective)
   const startedAt = Date.now()
 
   const def = {
@@ -318,7 +376,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   })
 
   const ranked = summarizeCandidates(candidates)
-  const evidencePack = buildEvidencePack(params.objective, candidates, result.elapsedMs, result.turns, result.truncated ?? false)
+  const evidencePack = __testBuildEvidencePack(params.objective, candidates, result.elapsedMs, result.turns, result.truncated ?? false, result.finalText)
 
   emit({
     type: 'phase',

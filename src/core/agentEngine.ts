@@ -41,7 +41,7 @@ import {
   formatCodeMap,
 } from './toolDispatcher'
 import { getSubAgentDefinition, runSubAgent, loadDynamicAgents, getAvailableAgentTypes } from './subAgent'
-import type { ToolExecutor } from '../tools/executor'
+import type { ToolExecutor, WebSearchResult } from '../tools/executor'
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
 import type { TreeNode } from '../shared/types'
 import { parseTextToolCalls } from '../shared/toolCallMarkup'
@@ -281,6 +281,7 @@ export class AgentEngine {
   private currentRunSuccessfulReadFiles: Set<string> = new Set()
   private currentRunSearches: Set<string> = new Set()
   private currentRunSuccessfulSearches: Set<string> = new Set()
+  private currentRunExplorePacks: Set<string> = new Set()
   private conclusionGuardAttempts: number = 0
   private disabledToolNames: Set<string> = new Set()
   private thinkingMode: ThinkingMode = 'auto'
@@ -672,6 +673,7 @@ export class AgentEngine {
     this.currentRunSuccessfulReadFiles.clear()
     this.currentRunSearches.clear()
     this.currentRunSuccessfulSearches.clear()
+    this.currentRunExplorePacks.clear()
     this.conclusionGuardAttempts = 0
     this.compressionPreparedTurnCount = 0
     this.codemapSummary = null
@@ -1164,6 +1166,7 @@ export class AgentEngine {
     this.currentRunSuccessfulReadFiles.clear()
     this.currentRunSearches.clear()
     this.currentRunSuccessfulSearches.clear()
+    this.currentRunExplorePacks.clear()
     this.conclusionGuardAttempts = 0
     this.contextLimitRetryInProgress = false
     this.preservedFiles = []
@@ -3219,10 +3222,11 @@ Before retrying:
 
   private buildEvidenceGuardHint(): string | null {
     // If the model already performed any read operations (read_file,
-    // list_directory, search_*, get_codemap), it has gathered evidence.
+    // list_directory, search_*, get_codemap, explore_code), it has gathered evidence.
     // Don't force a retry — trust the model's judgment on when to conclude.
     if (this.currentRunReadFiles.size > 0) return null
     if (this.currentRunSuccessfulSearches.size > 0) return null
+    if (this.currentRunExplorePacks.size > 0) return null
     if (this.currentRunToolNames.some(n => n === 'list_directory' || n === 'get_codemap')) return null
     return this.buildEvidencePolicyContext(this.currentTurnStrategy, 'retry')
   }
@@ -3256,6 +3260,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       const query = (args.query || args.pattern || '') as string
       this.currentRunSearches.add(`${name}:${query}`)
     }
+    if (name === 'explore_code') {
+      const objective = (args.objective || '') as string
+      this.currentRunSearches.add(`${name}:${objective}`)
+    }
   }
 
   private recordSuccessfulToolUsage(name: string, args: Record<string, unknown>, output: string): void {
@@ -3279,6 +3287,12 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       if (/^(No matches found|No matching files found|No codemap found)$/i.test(output.trim())) return
       const query = (args.query || args.pattern || '') as string
       this.currentRunSuccessfulSearches.add(`${name}:${query}`)
+    }
+    if (name === 'explore_code') {
+      if (/no concrete candidates found|did not return high-signal files/i.test(output)) return
+      const objective = (args.objective || '') as string
+      this.currentRunExplorePacks.add(objective || 'explore_code')
+      this.currentRunSuccessfulSearches.add(`${name}:${objective}`)
     }
   }
 
@@ -3525,7 +3539,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private isReadAfterWriteSensitiveToolCall(toolCall: ToolCall): boolean {
-    return ['read_file', 'read_file_full', 'list_directory', 'search_files', 'search_content', 'search_symbols', 'get_codemap'].includes(toolCall.name)
+    return ['read_file', 'read_file_full', 'list_directory', 'search_files', 'search_content', 'search_symbols', 'get_codemap', 'explore_code', 'web_search'].includes(toolCall.name)
   }
 
   private partitionToolCalls(toolCalls: ToolCall[]): Array<{ isConcurrencySafe: boolean; toolCalls: ToolCall[] }> {
@@ -4062,6 +4076,79 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const nodes = Array.isArray(map) ? map : [map]
         const related = response.data?.relatedPaths?.length ? `\n\nRelated paths:\n${response.data.relatedPaths.map((p: string) => `- ${p}`).join('\n')}` : ''
         return `${nodes.map(node => this.formatCodeMap(node)).join('\n')}${related}`
+      }
+
+      case 'web_search': {
+        if (typeof this.toolExecutor.webSearch !== 'function') {
+          return 'Error: web_search is not available in this runtime'
+        }
+        const query = String(args.query || '').trim()
+        if (!query) return 'Error: query is required'
+        const response = await this.toolExecutor.webSearch({
+          query,
+          limit: args.limit,
+          region: args.region,
+          freshness: args.freshness,
+          domains: args.domains,
+        })
+        if (!response.success) return `Error: ${response.error || 'web search failed'}`
+        const data = response.data
+        if (!data?.results?.length) return `No web results found for "${query}"`
+        return this.formatWebSearchResults(data.query, data.provider, data.results)
+      }
+
+      case 'explore_code': {
+        if (!basePath) return `Error: no workspace selected`
+        const objective = String(args.objective || '').trim()
+        if (!objective) return `Error: objective is required`
+        const thoroughness = args.thoroughness === 'quick'
+          ? 'quick'
+          : args.thoroughness === 'very_thorough'
+            ? 'very_thorough'
+            : 'medium'
+        const context = typeof args.context === 'string' && args.context.trim()
+          ? `\n\nParent context:\n${args.context.trim()}`
+          : ''
+        const maxTurns = thoroughness === 'quick' ? 2 : thoroughness === 'very_thorough' ? 5 : 3
+        const maxParallel = thoroughness === 'quick' ? 4 : 6
+        const onEvent = (event: FastContextScanEvent) => this.emit({ type: 'fast_context:event', event })
+        const skeleton = await this.maybeBuildWorkspaceSkeleton(basePath)
+
+        this.emit({
+          type: 'fast_context:event',
+          event: {
+            type: 'phase',
+            phase: 'mapping',
+            wave: 1,
+            maxWaves: maxTurns,
+            insight: `Explore(${objective.slice(0, 90)})`,
+          },
+        })
+
+        const result = await runFastContextSubagent({
+          workspacePath: basePath,
+          objective: `${objective}\n\nThoroughness: ${thoroughness}${context}`,
+          toolExecutor: this.toolExecutor,
+          apiKey: this.stateProvider.getActiveConfig()?.apiKey || '',
+          baseUrl: this.stateProvider.getActiveConfig()?.baseUrl || 'https://api.deepseek.com',
+          codemap: skeleton,
+          maxTurns,
+          maxParallel,
+          abortSignal: this.abortController?.signal,
+          onEvent,
+        })
+
+        this.emit({ type: 'fast_context:complete', result })
+        if (result.hits.length === 0 || result.filesScanned === 0) {
+          return `Explore did not return high-signal files for: ${objective}\nUse targeted search_content/search_files/search_symbols with alternative names.`
+        }
+        return [
+          `<explore_code_result thoroughness="${thoroughness}" files="${result.filesScanned}" hits="${result.hits.length}" elapsed_ms="${result.elapsedMs}">`,
+          result.evidencePack,
+          '',
+          'next_step: read_file the most relevant candidate ranges before detailed claims or edits.',
+          '</explore_code_result>',
+        ].join('\n')
       }
 
       case 'list_memories': {
@@ -4694,6 +4781,33 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
   private formatCodeMap(node: CodeMapNode, depth = 0): string {
     return formatCodeMap(node, depth)
+  }
+
+  private formatWebSearchResults(query: string, provider: string, results: WebSearchResult[]): string {
+    const attr = (value: string): string => String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 240)
+    const clean = (value: string | undefined): string => String(value || '').replace(/\s+/g, ' ').trim()
+
+    const lines = [
+      `<web_search_results query="${attr(query)}" provider="${attr(provider)}" count="${results.length}">`,
+    ]
+    results.forEach((result, index) => {
+      const title = clean(result.title) || '(untitled)'
+      const snippet = clean(result.snippet)
+      lines.push(`${index + 1}. ${title}`)
+      lines.push(`   url: ${result.url}`)
+      if (snippet) lines.push(`   snippet: ${snippet}`)
+      if (result.source) lines.push(`   source: ${clean(result.source)}`)
+      if (result.publishedDate) lines.push(`   published: ${clean(result.publishedDate)}`)
+    })
+    lines.push('</web_search_results>')
+    return lines.join('\n')
   }
 
   private resolvePath(basePath: string, relativePath: string): string {

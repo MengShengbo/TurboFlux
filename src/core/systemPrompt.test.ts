@@ -10,4 +10,19 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('<turboflux_profile>profile rules</turboflux_profile>')
     expect(prompt).toContain('<identity>')
   })
+
+  it('guides broad code location through explore_code without fixed triggers', () => {
+    const prompt = buildSystemPrompt('vibe')
+
+    expect(prompt).toContain('explore_code')
+    expect(prompt).toContain('Do not rely on fixed trigger words')
+    expect(prompt).toContain('for simple directed searches, use search_content/search_files/search_symbols directly')
+  })
+
+  it('guides current and external facts through web_search', () => {
+    const prompt = buildSystemPrompt('vibe')
+
+    expect(prompt).toContain('web_search')
+    expect(prompt).toContain('current or external facts')
+  })
 })

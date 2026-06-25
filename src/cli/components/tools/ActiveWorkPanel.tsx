@@ -43,6 +43,8 @@ const EXPLORE_TOOLS = new Set([
   'search_symbols',
   'search_semantic',
   'get_codemap',
+  'explore_code',
+  'web_search',
 ])
 const RUN_TOOLS = new Set(['run_command'])
 
@@ -202,7 +204,7 @@ function formatRunningLabel(tool: ToolStatus): string {
   const label = formatToolLabel(tool.name, tool.args)
   const prefix = getRunningPrefix(tool.name)
   if (prefix) {
-    const subject = label.replace(/^(Read full|Read|List|Write|Replace|Edit|Delete|Search|Find|Symbol|Semantic|CodeMap|Run)\s*/, '')
+    const subject = label.replace(/^(Read full|Read|List|Write|Replace|Edit|Delete|Search|Find|Symbol|Semantic|CodeMap|Explore|Web|Run)\s*/, '')
     return subject ? `${prefix} ${subject}` : prefix
   }
   if (FILE_TOOLS.has(tool.name)) return label.replace(/^(Write|Replace|Edit|Delete)/, match => getRunningVerb(match))
@@ -221,6 +223,8 @@ function getRunningPrefix(name: string): string {
     case 'search_symbols': return 'Indexing symbols'
     case 'search_semantic': return 'Searching semantically'
     case 'get_codemap': return 'Mapping code'
+    case 'explore_code': return 'Exploring'
+    case 'web_search': return 'Searching web'
     case 'write_file': return 'Writing'
     case 'replace_file': return 'Replacing'
     case 'edit_file': return 'Editing'
@@ -265,6 +269,8 @@ function formatToolLabel(name: string, argsJson?: string): string {
     case 'search_symbols': return `Symbol ${str('query')}`
     case 'search_semantic': return `Semantic ${str('query')}`
     case 'get_codemap': return `CodeMap${str('path') ? ` ${str('path')}` : ''}`
+    case 'explore_code': return `Explore "${(str('objective') || str('query')).slice(0, 56)}"`
+    case 'web_search': return `Web "${str('query').slice(0, 56)}"`
     case 'run_command': return `Run ${str('command').slice(0, 80)}`
     case 'create_checkpoint': return 'Checkpoint'
     case 'create_task': return `Task: ${str('title')}`
@@ -291,6 +297,8 @@ function formatToolName(name: string): string {
     case 'search_files': return 'find files'
     case 'search_symbols': return 'symbols'
     case 'get_codemap': return 'codemap'
+    case 'explore_code': return 'explore'
+    case 'web_search': return 'web search'
     case 'run_command': return 'run'
     default: return name
   }

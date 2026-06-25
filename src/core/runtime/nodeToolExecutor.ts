@@ -5,7 +5,7 @@ import { homedir } from 'os'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
-import type { ToolExecutor, Result, SearchContentHit, CommandOutput, CheckpointResult } from '../../tools/executor'
+import type { ToolExecutor, Result, SearchContentHit, CommandOutput, CheckpointResult, WebSearchResult } from '../../tools/executor'
 import type { TreeNode } from '../../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../../shared/memoryTypes'
@@ -30,6 +30,8 @@ interface BackgroundTerminalSession {
 
 const MAX_TERMINAL_CHUNKS = 500
 const TERMINAL_KILL_TIMEOUT_MS = 5000
+const WEB_SEARCH_TIMEOUT_MS = 8000
+const WEB_SEARCH_USER_AGENT = 'TurboFlux/0.1 (+https://github.com/MengShengbo/TurboFluxCli)'
 const DEFAULT_TERMINAL_SHELL = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
 const DEFAULT_TERMINAL_SHELL_ARGS = process.platform === 'win32'
   ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass']
@@ -148,6 +150,54 @@ export class NodeToolExecutor implements ToolExecutor {
         return { success: true, data: [] }
       }
     }
+  }
+
+  async webSearch(query: { query: string; limit?: number; region?: string; freshness?: string; domains?: string[] }): Promise<Result<{ results: WebSearchResult[]; provider: string; query: string }>> {
+    const searchQuery = String(query.query || '').trim()
+    if (!searchQuery) return { success: false, error: 'Search query is required' }
+    const limit = Math.max(1, Math.min(10, Number(query.limit) || 5))
+    const region = String(query.region || 'wt-wt')
+    const freshness = typeof query.freshness === 'string' ? query.freshness : undefined
+    const domains = Array.isArray(query.domains)
+      ? query.domains.map(domain => this.normalizeDomainFilter(domain)).filter(Boolean)
+      : []
+    const effectiveQuery = domains.length > 0
+      ? `${searchQuery} ${domains.map(domain => `site:${domain}`).join(' OR ')}`
+      : searchQuery
+
+    const errors: string[] = []
+    if (!freshness) {
+      try {
+        const results = await this.searchDuckDuckGoInstant(effectiveQuery, limit, region)
+        if (results.length > 0) {
+          return { success: true, data: { results, provider: 'duckduckgo_instant', query: effectiveQuery } }
+        }
+      } catch (e) {
+        errors.push(`duckduckgo_instant: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+
+    try {
+      const htmlResults = await this.searchDuckDuckGoHtml(effectiveQuery, limit, region, freshness)
+      if (htmlResults.length > 0) {
+        return { success: true, data: { results: htmlResults, provider: 'duckduckgo_html', query: effectiveQuery } }
+      }
+    } catch (e) {
+      errors.push(`duckduckgo_html: ${e instanceof Error ? e.message : String(e)}`)
+    }
+
+    try {
+      const bingResults = await this.searchBingHtml(effectiveQuery, limit, freshness)
+      if (bingResults.length > 0) {
+        return { success: true, data: { results: bingResults, provider: 'bing_html', query: effectiveQuery } }
+      }
+    } catch (e) {
+      errors.push(`bing_html: ${e instanceof Error ? e.message : String(e)}`)
+    }
+
+    return errors.length > 0
+      ? { success: false, error: `No web search provider returned results. ${errors.join('; ')}` }
+      : { success: true, data: { results: [], provider: 'none', query: effectiveQuery } }
   }
 
   async searchCodeSymbols(query: { query: string; workspacePath: string; kind?: string; limit?: number }): Promise<Result<CodeSearchHit[]>> {
@@ -762,6 +812,238 @@ export class NodeToolExecutor implements ToolExecutor {
       }
     }
     return { success: false, error: 'Stream request failed' }
+  }
+
+  private async searchDuckDuckGoInstant(query: string, limit: number, region: string): Promise<WebSearchResult[]> {
+    const url = new URL('https://api.duckduckgo.com/')
+    url.searchParams.set('q', query)
+    url.searchParams.set('format', 'json')
+    url.searchParams.set('no_html', '1')
+    url.searchParams.set('skip_disambig', '1')
+    url.searchParams.set('kl', region)
+
+    const json = await this.fetchJsonWithTimeout(url.toString())
+    const results: WebSearchResult[] = []
+
+    if (typeof json.AbstractURL === 'string' && json.AbstractURL && typeof json.AbstractText === 'string' && json.AbstractText) {
+      results.push({
+        title: this.cleanText(json.Heading || query),
+        url: json.AbstractURL,
+        snippet: this.cleanText(json.AbstractText),
+        source: json.AbstractSource || 'DuckDuckGo',
+      })
+    }
+
+    const collectTopic = (topic: any): void => {
+      if (!topic || typeof topic !== 'object') return
+      if (typeof topic.FirstURL === 'string' && typeof topic.Text === 'string') {
+        results.push({
+          title: this.cleanText(topic.Text.split(' - ')[0] || topic.Text).slice(0, 120),
+          url: topic.FirstURL,
+          snippet: this.cleanText(topic.Text),
+          source: 'DuckDuckGo',
+        })
+      }
+      if (Array.isArray(topic.Topics)) {
+        for (const child of topic.Topics) collectTopic(child)
+      }
+    }
+    for (const topic of Array.isArray(json.RelatedTopics) ? json.RelatedTopics : []) collectTopic(topic)
+
+    return this.dedupeWebResults(results).slice(0, limit)
+  }
+
+  private async searchDuckDuckGoHtml(query: string, limit: number, region: string, freshness?: string): Promise<WebSearchResult[]> {
+    const url = new URL('https://duckduckgo.com/html/')
+    url.searchParams.set('q', query)
+    url.searchParams.set('kl', region)
+    const df = this.freshnessToDuckDuckGoDf(freshness)
+    if (df) url.searchParams.set('df', df)
+
+    const html = await this.fetchTextWithTimeout(url.toString(), {
+      'User-Agent': WEB_SEARCH_USER_AGENT,
+      'Accept': 'text/html,application/xhtml+xml',
+    })
+    const results: WebSearchResult[] = []
+    const blockRe = /<div[^>]+class="result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi
+    let match: RegExpExecArray | null
+    while ((match = blockRe.exec(html)) && results.length < limit * 2) {
+      const block = match[1]
+      const link = block.match(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+      if (!link) continue
+      const rawUrl = this.decodeHtml(link[1])
+      const title = this.cleanText(this.stripHtml(link[2]))
+      const snippetMatch = block.match(/<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i)
+        || block.match(/<div[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/div>/i)
+      const snippet = snippetMatch ? this.cleanText(this.stripHtml(snippetMatch[1])) : ''
+      const normalizedUrl = this.normalizeDuckDuckGoUrl(rawUrl)
+      if (!title || !normalizedUrl) continue
+      results.push({ title, url: normalizedUrl, snippet, source: 'DuckDuckGo' })
+    }
+    return this.dedupeWebResults(results).slice(0, limit)
+  }
+
+  private async searchBingHtml(query: string, limit: number, freshness?: string): Promise<WebSearchResult[]> {
+    const url = new URL('https://www.bing.com/search')
+    url.searchParams.set('q', query)
+    url.searchParams.set('count', String(Math.max(limit, 5)))
+    const freshnessFilter = this.freshnessToBingFilter(freshness)
+    if (freshnessFilter) url.searchParams.set('qft', freshnessFilter)
+
+    const html = await this.fetchTextWithTimeout(url.toString(), {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) TurboFlux/0.1',
+      'Accept': 'text/html,application/xhtml+xml',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
+    })
+    const results: WebSearchResult[] = []
+    const blockRe = /<li[^>]+class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi
+    let match: RegExpExecArray | null
+    while ((match = blockRe.exec(html)) && results.length < limit * 2) {
+      const block = match[1]
+      const link = block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/i)
+        || block.match(/<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+      if (!link) continue
+      const title = this.cleanText(this.stripHtml(link[2]))
+      const normalizedUrl = this.normalizeBingUrl(this.decodeHtml(link[1]))
+      const snippetMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i)
+        || block.match(/<div[^>]+class="b_caption"[^>]*>([\s\S]*?)<\/div>/i)
+      const snippet = snippetMatch ? this.cleanText(this.stripHtml(snippetMatch[1])) : ''
+      if (!title || !normalizedUrl || normalizedUrl.startsWith('javascript:')) continue
+      results.push({ title, url: normalizedUrl, snippet, source: 'Bing' })
+    }
+    return this.dedupeWebResults(results).slice(0, limit)
+  }
+
+  private async fetchJsonWithTimeout(url: string): Promise<any> {
+    const text = await this.fetchTextWithTimeout(url, {
+      'User-Agent': WEB_SEARCH_USER_AGENT,
+      'Accept': 'application/json',
+    })
+    return JSON.parse(text)
+  }
+
+  private async fetchTextWithTimeout(url: string, headers: Record<string, string>): Promise<string> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), WEB_SEARCH_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, { headers, signal: controller.signal })
+      const text = await response.text()
+      if (!response.ok) throw new Error(this.formatHttpError(url, response.status, text))
+      return text
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  private dedupeWebResults(results: WebSearchResult[]): WebSearchResult[] {
+    const seen = new Set<string>()
+    const deduped: WebSearchResult[] = []
+    for (const result of results) {
+      const url = result.url.trim()
+      if (!url || seen.has(url)) continue
+      seen.add(url)
+      deduped.push({
+        title: this.cleanText(result.title).slice(0, 160),
+        url,
+        snippet: this.cleanText(result.snippet).slice(0, 500),
+        source: result.source,
+        publishedDate: result.publishedDate,
+      })
+    }
+    return deduped
+  }
+
+  private normalizeDuckDuckGoUrl(value: string): string {
+    try {
+      const decoded = this.decodeHtml(value)
+      const url = new URL(decoded, 'https://duckduckgo.com')
+      const uddg = url.searchParams.get('uddg')
+      return uddg ? decodeURIComponent(uddg) : url.toString()
+    } catch {
+      return value
+    }
+  }
+
+  private normalizeBingUrl(value: string): string {
+    try {
+      const decoded = this.decodeHtml(value)
+      const url = new URL(decoded, 'https://www.bing.com')
+      const rawU = url.searchParams.get('u')
+      if (url.hostname.endsWith('bing.com') && rawU) {
+        const target = this.decodeBingEncodedUrl(rawU)
+        if (target) return target
+      }
+      return url.toString()
+    } catch {
+      return value
+    }
+  }
+
+  private decodeBingEncodedUrl(value: string): string {
+    try {
+      const raw = value.startsWith('a1') ? value.slice(2) : value
+      const padded = raw.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(raw.length / 4) * 4, '=')
+      const decoded = Buffer.from(padded, 'base64').toString('utf-8')
+      return /^https?:\/\//i.test(decoded) ? decoded : ''
+    } catch {
+      return ''
+    }
+  }
+
+  private normalizeDomainFilter(value: string): string {
+    const raw = String(value || '').trim()
+    if (!raw) return ''
+    try {
+      const withProtocol = /^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`
+      return new URL(withProtocol).hostname.replace(/^www\./i, '')
+    } catch {
+      return raw.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split(/[/?#]/)[0]
+    }
+  }
+
+  private freshnessToDuckDuckGoDf(freshness?: string): string {
+    switch (freshness) {
+      case 'day': return 'd'
+      case 'week': return 'w'
+      case 'month': return 'm'
+      case 'year': return 'y'
+      default: return ''
+    }
+  }
+
+  private freshnessToBingFilter(freshness?: string): string {
+    switch (freshness) {
+      case 'day': return '+filterui:age-lt1440'
+      case 'week': return '+filterui:age-lt10080'
+      case 'month': return '+filterui:age-lt43200'
+      case 'year': return '+filterui:age-lt525600'
+      default: return ''
+    }
+  }
+
+  private stripHtml(value: string): string {
+    return value.replace(/<[^>]+>/g, ' ')
+  }
+
+  private decodeHtml(value: string): string {
+    return value
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&nbsp;|&ensp;|&emsp;/g, ' ')
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/g, "'")
+      .replace(/&#(\d+);/g, (_match, code) => {
+        try { return String.fromCodePoint(Number(code)) } catch { return _match }
+      })
+      .replace(/&#x([0-9a-f]+);/gi, (_match, code) => {
+        try { return String.fromCodePoint(parseInt(code, 16)) } catch { return _match }
+      })
+  }
+
+  private cleanText(value: string): string {
+    return this.decodeHtml(String(value || '').replace(/\s+/g, ' ').trim())
   }
 
   // Helper methods

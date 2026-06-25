@@ -87,6 +87,7 @@ describe('TurnStrategyPlanner', () => {
     expect(names).toContain('list_directory')
     expect(names).toContain('search_content')
     expect(names).toContain('get_codemap')
+    expect(names).toContain('explore_code')
   })
 
   it('exposes write tools in both vibe and plan modes', () => {

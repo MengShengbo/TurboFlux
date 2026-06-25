@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
 
 function makeTempDir(prefix: string): string {
@@ -18,6 +18,10 @@ async function withWorkspace<T>(fn: (paths: { workspace: string; outside: string
     rmSync(outside, { recursive: true, force: true })
   }
 }
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe('NodeToolExecutor sandbox policies', () => {
   it('keeps workspace policy reads and writes inside the workspace', async () => withWorkspace(async ({ workspace, outside }) => {
@@ -200,3 +204,111 @@ it('runs and inspects an agent background terminal session', async () => withWor
   const afterKill = await executor.ptyList?.()
   expect(afterKill?.sessions?.find((session: any) => session.id === sessionId)?.status).toBe('exited')
 }))
+
+describe('NodeToolExecutor webSearch', () => {
+  it('returns DuckDuckGo instant answer results', async () => withWorkspace(async ({ workspace }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        Heading: 'TurboFlux',
+        AbstractURL: 'https://example.com/turboflux',
+        AbstractText: 'TurboFlux is a local AI workbench.',
+        AbstractSource: 'Example',
+        RelatedTopics: [
+          {
+            FirstURL: 'https://example.com/docs',
+            Text: 'TurboFlux docs - Reference manual',
+          },
+        ],
+      }),
+    } as Response)
+
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const result = await executor.webSearch({ query: 'TurboFlux docs', limit: 3 })
+
+    expect(result.success).toBe(true)
+    expect(result.data?.provider).toBe('duckduckgo_instant')
+    expect(result.data?.results[0]).toMatchObject({
+      title: 'TurboFlux',
+      url: 'https://example.com/turboflux',
+      snippet: 'TurboFlux is a local AI workbench.',
+      source: 'Example',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  }))
+
+  it('falls back to DuckDuckGo HTML results and normalizes redirect URLs', async () => withWorkspace(async ({ workspace }) => {
+    const html = `
+      <div class="result results_links">
+        <div class="links_main">
+          <a class="result__a" href="/l/?uddg=https%3A%2F%2Fnodejs.org%2Fen%2Flearn">Node.js Learn</a>
+          <a class="result__snippet">Official Node.js learning documentation.</a>
+        </div>
+      </div>
+    `
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => html,
+    } as Response)
+
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const result = await executor.webSearch({
+      query: 'Node.js fetch AbortController',
+      limit: 2,
+      freshness: 'month',
+      domains: ['https://nodejs.org/docs'],
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.data?.provider).toBe('duckduckgo_html')
+    expect(result.data?.query).toContain('site:nodejs.org')
+    expect(result.data?.results).toEqual([
+      {
+        title: 'Node.js Learn',
+        url: 'https://nodejs.org/en/learn',
+        snippet: 'Official Node.js learning documentation.',
+        source: 'DuckDuckGo',
+      },
+    ])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const calledUrl = String(fetchMock.mock.calls[0][0])
+    expect(calledUrl).toContain('df=m')
+    expect(calledUrl).toContain('site%3Anodejs.org')
+  }))
+
+  it('falls back to Bing HTML when DuckDuckGo providers are unavailable', async () => withWorkspace(async ({ workspace }) => {
+    const html = `
+      <ol id="b_results">
+        <li class="b_algo">
+          <h2><a href="https://nodejs.org/en/learn">Node.js Learn</a></h2>
+          <p>Node.js&#174; official learning documentation.</p>
+        </li>
+      </ol>
+    `
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new Error('duck instant blocked'))
+      .mockRejectedValueOnce(new Error('duck html blocked'))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => html,
+      } as Response)
+
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const result = await executor.webSearch({ query: 'Node.js learn', limit: 2 })
+
+    expect(result.success).toBe(true)
+    expect(result.data?.provider).toBe('bing_html')
+    expect(result.data?.results).toEqual([
+      {
+        title: 'Node.js Learn',
+        url: 'https://nodejs.org/en/learn',
+        snippet: 'Node.js® official learning documentation.',
+        source: 'Bing',
+      },
+    ])
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  }))
+})

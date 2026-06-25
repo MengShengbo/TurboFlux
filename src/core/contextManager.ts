@@ -211,6 +211,7 @@ function mapToolToOperation(toolName: string): 'read' | 'write' | 'edit' | 'dele
     case 'search_content': return 'read'
     case 'search_symbols': return 'read'
     case 'get_codemap': return 'read'
+    case 'web_search': return 'read'
     case 'write_file':
     case 'replace_file':
       return 'write'
