@@ -4,7 +4,7 @@
 
 <h1 align="center">TurboFlux CLI</h1>
 
-<p align="center">开源的终端 AI Coding Agent。</p>
+<p align="center">TurboFlux CLI 是一个开源的终端 AI Coding Agent。</p>
 
 <p align="center">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-20242a?logo=node.js" />
