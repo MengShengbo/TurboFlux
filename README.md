@@ -191,7 +191,7 @@ npm run build
 
 ```text
 src/cli/          Ink 终端界面
-src/core/         Agent Runtime、上下文、模型与子代理
+src/core/         Agent 循环、上下文、模型与子代理
 src/tools/        工具、本地历史与记忆
 src/shared/       共享类型
 ```
