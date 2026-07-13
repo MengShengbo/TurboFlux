@@ -4,33 +4,34 @@
 
 <h1 align="center">TurboFlux CLI</h1>
 
-<p align="center">
-  一个在真实工作区里读代码、改文件、跑命令的终端 AI Agent。
-</p>
+<p align="center">开源的终端 AI Coding Agent。</p>
 
 <p align="center">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-20242a?logo=node.js" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-20242a?logo=typescript" />
-  <img alt="Ink" src="https://img.shields.io/badge/UI-Ink-20242a" />
   <img alt="License" src="https://img.shields.io/badge/License-MIT-20242a" />
 </p>
 
-TurboFlux 是我给自己做的终端 AI 编程 Agent。目标不是把聊天框搬进 CLI，而是让模型能在一个真实项目里连续完成检索、阅读、修改、命令执行和验证，并把会话、上下文与恢复信息留在本机。
-
-当前版本是 **0.1.5**。项目可以日常使用，但仍在快速开发，配置格式、交互细节和扩展接口都可能变化。
-
 <p align="center">
-  <img src="docs/assets/turboflux-cli.png" width="1000" alt="TurboFlux CLI 正在检索和修改项目" />
+  <img src="docs/assets/turboflux-cli.png" width="1000" alt="TurboFlux Terminal UI" />
 </p>
 
-## 快速开始
+## 安装
 
-需要 Node.js 20 或更高版本。Git 不是启动必需项；如果工作区本身是 Git 仓库，TurboFlux 会在会话开始时默认启用 Git 集成。
+需要 Node.js 20 或更高版本。
 
 ```bash
+# npm
 npm install -g github:MengShengbo/TurboFluxCli
-turboflux setup
-turboflux /path/to/project
+
+# macOS / Linux / Git Bash
+curl -fsSL https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.sh | bash
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.ps1 | iex
 ```
 
 从源码安装：
@@ -42,147 +43,127 @@ npm install
 npm install -g .
 ```
 
-在当前目录启动，或者执行一次性任务：
+## 配置
+
+首次使用先运行：
 
 ```bash
+turboflux setup
+```
+
+TurboFlux 支持 OpenAI、Anthropic、OpenRouter、DeepSeek 和自定义 OpenAI-compatible API。配置保存在本机 `~/.turboflux/`。
+
+```bash
+turboflux setup api          # API 与模型
+turboflux setup fastcontext  # FastContext 单独使用的模型
+turboflux setup language     # 界面与输出语言
+turboflux setup persona      # 输出风格
+turboflux setup show         # 查看当前配置
+```
+
+## 使用
+
+```bash
+# 在当前目录启动
 turboflux
-turboflux . --command "找出登录流程的入口，并说明调用链"
+
+# 打开指定项目
+turboflux /path/to/project
+
+# 执行一次任务后退出
+turboflux /path/to/project --command "检查登录流程并修复问题"
 ```
 
-`turboflux setup` 会配置 API、模型、界面与输出语言、人设和全局指令。TurboFlux 不附带免费模型或 API Key。
+TurboFlux 可以搜索和阅读代码、编辑文件、运行命令、启动后台终端、查看 diff、管理任务，并在完成后继续验证结果。
 
-## 现在能做什么
+会话会自动保存。使用 `/resume` 恢复历史会话，或在输入框中连续按两次 `Esc` 回到之前的某条消息。
 
-| 能力 | 当前实现 |
-| --- | --- |
-| 读写代码 | 分段或整文件读取、精确编辑、原子多处编辑、创建与删除文件，并在终端里展示变更状态和 diff |
-| 搜索项目 | 文件名搜索、正则内容搜索、轻量符号扫描、项目 codemap，以及 FastContext 多轮检索 |
-| 执行命令 | 前台命令、后台终端、增量读取输出、列出与停止后台进程 |
-| 处理长任务 | 任务树、依赖关系、进度状态、子代理，以及连续工具调用 |
-| 保存工作现场 | 本地会话自动保存、历史会话恢复、双击 `Esc` 回到某条用户消息之前 |
-| 管理上下文 | 使用供应商返回的 token 用量，在长会话中做 recap、自动压缩和手动压缩 |
-| 接收图片 | Windows 终端中直接粘贴剪贴板图片，也可以粘贴本地图片路径 |
-| 扩展能力 | 项目/用户 Skills、项目自定义 Agents、stdio MCP 工具 |
+## Agents
 
-这些能力不是 README 里的规划项，入口都在 `src/cli`、`src/core` 和 `src/tools` 中。尚未完成的部分单独写在后面的“当前边界”里。
+TurboFlux 有两种工作模式：
 
-## FastContext
+- **vibe**：默认模式，直接完成检索、修改和验证。
+- **plan**：先分析并给出计划，确认后执行。
 
-FastContext 是 TurboFlux 的代码定位子代理，不是 `/fastcontext` 斜杠命令。
+在会话中使用 `/vibe` 和 `/plan` 切换，也可以用 `/thinking` 调整模型的推理强度。
 
-当主 Agent 判断一次普通搜索不够时，可以调用 `explore_code`，或者通过 `spawn_agent` 启动 `fast_context`。它在独立上下文中使用一组只读工具：
+内置子代理：
 
-```text
-search_content
-search_files
-search_symbols
-read_file
-get_codemap
-```
+- **fast_context**：在独立上下文中搜索项目，返回相关文件和行号。
+- **explorer**：追踪功能实现、调用链和跨文件关系。
+- **reviewer**：检查代码质量、安全问题和潜在缺陷。
+- **git_inspector**：分析提交记录和代码变更。
 
-一次扫描默认最多 3 轮，每轮最多并发 6 个工具调用。结果不是整段搜索过程，而是一份压缩后的候选文件、行号、证据类型和置信度列表。主 Agent 再按这份地图读取真正相关的源码，避免把大量检索噪声塞进主会话。
+FastContext 由主 Agent 按需调用，不提供单独的 `/fastcontext` 命令。它默认跟随主模型，也可以通过 `turboflux setup fastcontext` 分配独立配置。
 
-FastContext 默认跟随主模型，也可以单独分配一个更快或更便宜的 API 配置：
-
-```bash
-turboflux setup fastcontext
-```
+项目还可以从 `.turboflux/agents/*.md` 加载自定义子代理。
 
 ## 图片输入
 
-在 Windows 交互终端里，复制截图后按 `Ctrl+V`，输入框会插入 `[Image #1]`，图片作为附件随下一条消息发送。连续粘贴可以附加多张图片。
+Windows 终端支持直接粘贴剪贴板图片：
 
-也可以直接粘贴图片路径或 Markdown 图片引用。这种方式不依赖 Windows 剪贴板：
+1. 复制截图或图片。
+2. 在 TurboFlux 输入框按 `Ctrl+V`。
+3. 输入框出现 `[Image #1]` 后正常发送。
+
+也可以粘贴本地图片路径：
 
 ```text
-帮我看一下这个报错截图：C:\Users\me\Desktop\error.png
+帮我看看 C:\Users\me\Desktop\error.png
 对比 ./before.png 和 ./after.png
 ```
 
-当前单张图片上限为 5 MB。PNG、JPEG、WebP 和 GIF 可以直接进入视觉模型请求；最终能否识图仍取决于所选模型和 API 是否支持视觉输入。
+支持 PNG、JPEG、WebP 和 GIF，单张图片最大 5 MB。所选模型需要支持视觉输入。
 
-## 会话与上下文
+## 上下文与记忆
 
-会话保存在 `~/.turboflux/conversations/`。`/resume` 会打开历史选择器，`Ctrl+H` 也能进入同一界面。输入框为空时连续按两次 `Esc`，可以选择一条旧的用户消息，把会话退回到它之前并重新编辑。
+TurboFlux 会根据模型返回的 token 用量管理长会话：
 
-上下文管理分两层：
+- 自动生成阶段性 recap。
+- 接近上下文上限时压缩较早的对话。
+- 保留最近消息、工具结果、任务和文件信息。
+- 使用 `/context` 查看用量，使用 `/compact` 手动压缩。
 
-1. 达到较早阈值时生成 cache-safe recap，保留当前任务、文件、错误、验证结果和下一步。
-2. 接近模型输入上限时压缩旧轮次，保留最近对话和工具证据；模型摘要失败时会退回结构化本地摘要。
+项目规则支持 `TURBOFLUX.md`，也会读取 `CLAUDE.md`、`AGENTS.md`、`.cursorrules` 和 `.cursor/rules/` 等常见格式。
 
-`/context` 显示最近一次供应商返回的输入/输出 token，`/compact` 手动触发压缩。TurboFlux 不用字符估算冒充供应商 token 用量，因此模型没有返回 usage 时会明确显示 unknown。
-
-项目规则和长期记忆会按当前问题筛选后注入。除了 `TURBOFLUX.md`，还兼容读取 `CLAUDE.md`、`AGENTS.md`、`.cursorrules`、`.cursor/rules/`、`.windsurfrules` 等常见规则文件。
+长期记忆保存在项目的 `.turboflux/memory/` 中，可以由 Agent 使用 `remember`、`list_memories` 和 `forget` 管理。
 
 ## 常用命令
 
-在会话中输入 `/help` 可以看到当前版本实际注册的全部命令。
-
-| 命令 | 作用 |
+| 命令 | 说明 |
 | --- | --- |
-| `/model` | 打开模型选择器或切换模型 |
-| `/plan` | 先检索和规划，得到确认后再执行 |
-| `/vibe` | 进入自主执行模式 |
-| `/thinking auto\|off\|standard\|max` | 调整推理模式 |
-| `/context` | 查看供应商上报的上下文用量 |
-| `/compact` | 压缩较早的对话 |
-| `/resume` | 恢复已保存的会话 |
-| `/list` | 列出会话 |
+| `/help` | 查看全部命令 |
+| `/model` | 选择或切换模型 |
+| `/plan` | 切换到计划模式 |
+| `/vibe` | 切换到自主执行模式 |
+| `/thinking` | 设置推理模式 |
+| `/context` | 查看上下文用量 |
+| `/compact` | 压缩当前会话 |
+| `/resume` | 恢复历史会话 |
 | `/new` | 开始新会话 |
-| `/clear` | 保存当前会话后清空界面并开始新会话 |
-| `/mcp status\|tools` | 查看 MCP 连接和工具 |
-| `/skills` | 查看已加载的 Skill |
-| `/git on\|off` | 开关当前会话的 Git 状态注入和 Git checkpoint |
+| `/mcp` | 查看 MCP 服务与工具 |
+| `/skills` | 查看已加载的 Skills |
 
-注意：Git 仓库默认会启用这项集成。Agent 调用显式 `create_checkpoint` 时会执行 `git add -A` 和 `git commit`，其中 `git add -A` 会暂存工作区的全部改动，而不只包含 Agent 刚修改的文件；它不会自动 push。工作区里有不想提交的改动时，应在当前会话先执行 `/git off`。
+> [!NOTE]
+> Git 仓库会默认启用 Git 集成。显式 checkpoint 会执行 `git add -A` 和 `git commit`，但不会 push；使用 `/git off` 可以关闭当前会话的 Git 集成。
 
-## 模型与 API
+## Skills 与 MCP
 
-TurboFlux 对 Anthropic 使用 Messages API；OpenAI、OpenRouter、DeepSeek 和自定义服务走 OpenAI-compatible Chat Completions。可以保存多份 API 配置，并给主 Agent 与 FastContext 分配不同配置。
-
-```bash
-turboflux setup api
-turboflux setup show
-```
-
-内置模型表只提供模型名、上下文窗口、输出上限和推理参数等元数据。它不代表你的账号一定拥有对应模型权限，实际可用性由 API 供应商决定。自定义 OpenAI-compatible 服务可以直接填写 Base URL 和模型名。
-
-主要本机配置：
-
-```text
-~/.turboflux/config.json          API、模型和 FastContext 配置
-~/.turboflux/profile.json         语言、人设和全局自定义指令
-~/.turboflux/conversations/       会话记录
-~/.turboflux/checkpoints/         本地文件 checkpoint 数据
-```
-
-API Key 当前以明文 JSON 保存在本机配置中，没有接入系统钥匙串。
-
-## Skills、Agents 与 MCP
-
-Skill 使用一个带 frontmatter 的 `SKILL.md`：
+Skill 放在以下目录：
 
 ```text
 <workspace>/.turboflux/skills/<name>/SKILL.md
 ~/.turboflux/skills/<name>/SKILL.md
 ```
 
-同名时项目 Skill 优先。加载后会注册成斜杠命令，并把 Skill 指令附加到 Agent。
-
-自定义子代理从下面的位置加载：
-
-```text
-<workspace>/.turboflux/agents/*.md
-```
-
-MCP 配置支持项目级和全局级文件，项目配置优先：
+MCP 配置支持项目级和全局级文件：
 
 ```text
 <workspace>/.turboflux/settings.json
 ~/.turboflux/settings.json
 ```
 
-当前 MCP 只实现了 stdio transport。最小配置如下：
+当前支持 stdio MCP：
 
 ```json
 {
@@ -196,27 +177,6 @@ MCP 配置支持项目级和全局级文件，项目配置优先：
 }
 ```
 
-## 安全与当前边界
-
-- 文件工具会拒绝工作区之外的路径，但这不是容器或操作系统级隔离。`run_command` 仍然是在本机 Shell 中执行。
-- 权限管线会拒绝磁盘级破坏命令，并对 `git reset --hard`、`git clean -f`、递归删除、强推等高风险命令请求确认。规则匹配不可能覆盖所有危险命令，确认框仍需要人看。
-- 文件修改后会自动写入本地 checkpoint，但当前 CLI 还没有完整的 checkpoint 浏览和恢复界面。它不能替代 Git、远程仓库或正式备份。
-- 剪贴板位图捕获目前只支持 Windows；粘贴本地图片路径可跨平台使用。
-- MCP 目前只有 stdio transport，自定义 Agent 的格式和模型路由仍在调整。
-- `src/server/` 是实验性的本地兼容 API 与管理页，不是 CLI 默认启动路径，也暂不作为稳定功能发布。
-
-## 源码结构
-
-```text
-bin/                    turboflux 启动入口
-src/cli/                Ink 界面、输入、命令、会话与图片附件
-src/core/               Agent 循环、模型调用、上下文、权限、子代理与 MCP
-src/core/runtime/       CLI 使用的状态和本地工具执行器
-src/tools/              工具接口、本地历史和工作区记忆
-src/shared/             跨模块类型与协议
-src/server/             实验性本地 API 代理和管理页
-```
-
 ## 开发
 
 ```bash
@@ -227,7 +187,14 @@ npm run type-check
 npm run build
 ```
 
-测试使用 Vitest，TypeScript 编译目标为 ES2022。
+主要目录：
+
+```text
+src/cli/          Ink 终端界面
+src/core/         Agent Runtime、上下文、模型与子代理
+src/tools/        工具、本地历史与记忆
+src/shared/       共享类型
+```
 
 ## License
 
