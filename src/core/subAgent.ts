@@ -150,7 +150,7 @@ const DEFINITIONS: Record<string, SubAgentDefinition> = {
     id: 'fast_context',
     label: 'Fast Context',
     description: 'Fast issue-localization code map for large repositories. Use when you need ranked candidate files, roles, and evidence before deciding what to read.',
-    driver: 'deepseek-flash',
+    driver: 'main-model',
     systemPrompt: FAST_CONTEXT_SYSTEM_PROMPT(),
     maxTurns: 3,
     maxParallel: 6,
@@ -248,6 +248,7 @@ export interface SubAgentResult {
   turns: number
   elapsedMs: number
   finalText?: string
+  evidence?: SubAgentEvidence[]
   error?: string
   truncated?: boolean
 }
@@ -340,7 +341,12 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     },
   ]
 
-  const modelId = model || 'deepseek-v4-flash'
+  const modelId = model?.trim() || definition.driver?.trim()
+  if (!modelId) {
+    const message = `Subagent ${definition.label} requires an active model from the main agent.`
+    emit({ type: 'error', message })
+    return { ok: false, finalText: '', evidence: [], turns: 0, elapsedMs: Date.now() - startedAt, truncated: false, error: message }
+  }
   let turn = 0
 
   while (turn < definition.maxTurns) {

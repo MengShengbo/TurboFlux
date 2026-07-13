@@ -49,6 +49,11 @@ type StaticTranscriptItem =
   | { kind: 'header'; id: string }
   | { kind: 'message'; id: string; message: Message }
 
+type QueuedPrompt = {
+  prompt: string
+  attachments?: AgentAttachment[]
+}
+
 const THINKING_MODE_ORDER: ThinkingMode[] = ['auto', 'off', 'standard', 'max']
 
 export function getNextThinkingMode(mode: ThinkingMode): ThinkingMode {
@@ -335,6 +340,12 @@ export function getEngineUserOrdinalForUiMessage(messages: Message[], turns: Age
   return engineUserOrdinal
 }
 
+function estimateOutputTokensForDisplay(text: string): number {
+  const trimmed = text.trim()
+  if (!trimmed) return 0
+  return Math.max(1, Math.ceil(trimmed.length / 4))
+}
+
 function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker }: AppProps) {
   const { exit } = useApp()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -347,6 +358,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [draftAttachments, setDraftAttachments] = useState<AgentAttachment[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const [streamText, setStreamText] = useState('')
+  const [currentTurnOutputTokens, setCurrentTurnOutputTokens] = useState(0)
   const [currentTools, setCurrentTools] = useState<ToolStatus[]>([])
   const [streamingToolDraft, setStreamingToolDraft] = useState<StreamingToolDraft | null>(null)
   const [mood, setMood] = useState<MascotMood>('idle')
@@ -363,6 +375,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
   const [changeSummaries, setChangeSummaries] = useState<ChangeSummary[]>([])
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([])
+  const [interruptHint, setInterruptHint] = useState<string | null>(null)
+  const [exitHint, setExitHint] = useState<string | null>(null)
   const [pendingAsk, setPendingAsk] = useState<{
     question: string
     options?: string[]
@@ -380,6 +395,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const inputRef = useRef('')
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
+  const isRunningRef = useRef(false)
+  const queuedPromptsRef = useRef<QueuedPrompt[]>([])
+  const activePromptRef = useRef<{ prompt: string; messageId: string; responseStarted: boolean; attachments?: AgentAttachment[]; priorTurns: AgentTurn[] } | null>(null)
+  const abortingRef = useRef(false)
+  const abortRestoredPromptRef = useRef(false)
+  const runPromptRef = useRef<((prompt: string, attachments?: AgentAttachment[]) => Promise<void>) | null>(null)
+  const exitPressRef = useRef(0)
+  const lastCtrlCEventAtRef = useRef(0)
+  const handleInterruptRef = useRef<() => void>(() => {})
   const lastClipboardImageRef = useRef<{ fingerprint: string; at: number } | null>(null)
   const genMsgId = useCallback(() => {
     messageIdRef.current += 1
@@ -402,6 +426,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
   const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath))
+
+  useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
+  useEffect(() => { queuedPromptsRef.current = queuedPrompts }, [queuedPrompts])
 
   useEffect(() => {
     setThinkingMode(engine.getThinkingMode())
@@ -453,6 +480,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setCurrentTools([])
     setStreamingToolDraft(null)
     setChangeSummaries([])
+    setCurrentTurnOutputTokens(0)
     streamBufferRef.current = ''
     clearStreamFlushTimer()
     setStreamText('')
@@ -462,6 +490,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setTerminalSessions([])
     setPendingAsk(null)
     setAskInput('')
+    queuedPromptsRef.current = []
+    setQueuedPrompts([])
+    activePromptRef.current = null
+    abortingRef.current = false
+    setInterruptHint(null)
+    setExitHint(null)
     setCursorMode(false)
     clear()
     setIsRunning(false)
@@ -507,12 +541,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       switch (event.type) {
         case 'stream:start':
           setIsRunning(true)
+          setCurrentTurnOutputTokens(0)
           setStreamingToolDraft(null)
           streamBufferRef.current = ''
           clearStreamFlushTimer()
           break
         case 'stream:delta':
+          if (activePromptRef.current) activePromptRef.current.responseStarted = true
           streamBufferRef.current += event.text
+          setCurrentTurnOutputTokens(previous => Math.max(previous, estimateOutputTokensForDisplay(streamBufferRef.current)))
           if (!streamFlushTimerRef.current) {
             streamFlushTimerRef.current = setTimeout(() => {
               streamFlushTimerRef.current = null
@@ -520,6 +557,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             }, 80)
           }
           setLastActivity(Date.now())
+          break
+        case 'stream:usage':
+          setTokenUsage(event.usage)
+          if (typeof event.usage.output === 'number') {
+            setCurrentTurnOutputTokens(previous => Math.max(previous, event.usage.output ?? 0))
+          }
           break
         case 'stream:end': {
           clearStreamFlushTimer()
@@ -532,6 +575,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             appendMessages([{ id: genMsgId(), role: 'assistant', content: visibleText, tools: [...toolsSnapshot], changes: [...changesSnapshot] }])
           }
           setStreamText('')
+          setCurrentTurnOutputTokens(0)
           setCurrentTools([])
           setChangeSummaries([])
           setIsRunning(false)
@@ -545,6 +589,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           convManager.scheduleSave()
           break
         case 'tool:call':
+          if (activePromptRef.current) activePromptRef.current.responseStarted = true
           setIsRunning(true)
           setStreamingToolDraft(prev => prev?.id === event.toolCall.id ? null : prev)
           setCurrentTools(prev => [...prev, {
@@ -557,6 +602,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           setLastActivity(Date.now())
           break
         case 'stream:tool_call_delta':
+          if (activePromptRef.current) activePromptRef.current.responseStarted = true
           setIsRunning(true)
           setStreamingToolDraft(prev => ({
             id: event.toolCallId,
@@ -704,14 +750,37 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     transcriptEnd,
   ])
 
+  const runNextQueuedPrompt = useCallback(() => {
+    const next = queuedPromptsRef.current[0]
+    if (!next || isRunningRef.current || runPromptRef.current === null) return
+    const rest = queuedPromptsRef.current.slice(1)
+    queuedPromptsRef.current = rest
+    setQueuedPrompts(rest)
+    void runPromptRef.current(next.prompt, next.attachments)
+  }, [])
+
   const runPrompt = useCallback(async (prompt: string, attachments?: AgentAttachment[]) => {
-    appendMessages([{ id: genMsgId(), role: 'user', content: prompt }])
+    if (isRunningRef.current) {
+      const nextQueue = [...queuedPromptsRef.current, { prompt, attachments }]
+      queuedPromptsRef.current = nextQueue
+      setQueuedPrompts(nextQueue)
+      appendMessages([{ id: genMsgId(), role: 'system', content: `Queued message #${nextQueue.length}: ${prompt.slice(0, 80)}` }], { forceLatest: true })
+      return
+    }
+
+    const userMessageId = genMsgId()
+    activePromptRef.current = { prompt, attachments, messageId: userMessageId, responseStarted: false, priorTurns: [...engine.getSession().turns] }
+    abortingRef.current = false
+    abortRestoredPromptRef.current = false
+    appendMessages([{ id: userMessageId, role: 'user', content: prompt }])
     if (!config.apiKey) {
+      activePromptRef.current = null
       appendMessages([{ id: genMsgId(), role: 'system', content: 'No model provider is configured yet. Exit and run `turboflux setup`, or set `/config apiKey <key>` manually.' }])
       if (singleShot) exit()
       return
     }
     setIsRunning(true)
+    isRunningRef.current = true
     setMood('thinking')
     streamBufferRef.current = ''
     clearStreamFlushTimer()
@@ -724,6 +793,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setChangeSummaries([])
     setPendingAsk(null)
     setAskInput('')
+    setInterruptHint(null)
+    setExitHint(null)
     setLastActivity(Date.now())
     try {
       const turns = await engine.run(prompt, { attachments })
@@ -741,13 +812,30 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       clearStreamFlushTimer()
       setStreamText('')
       setStreamingToolDraft(null)
-      appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${e.message}` }])
+      if (abortRestoredPromptRef.current) {
+        // The prompt is already back in the editor; avoid adding a synthetic transcript row.
+      } else if (abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))) {
+        appendMessages([{ id: genMsgId(), role: 'system', content: 'Interrupted.' }])
+      } else {
+        appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${e.message}` }])
+      }
       setIsRunning(false)
-      setMood('error')
-      setTimeout(() => setMood('idle'), 4000)
+      setMood(abortingRef.current ? 'idle' : 'error')
+      if (!abortingRef.current) setTimeout(() => setMood('idle'), 4000)
+    } finally {
+      activePromptRef.current = null
+      abortingRef.current = false
+      abortRestoredPromptRef.current = false
+      isRunningRef.current = false
+      setIsRunning(false)
+      setTimeout(runNextQueuedPrompt, 0)
     }
     if (singleShot) exit()
-  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit])
+  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId])
+
+  useEffect(() => {
+    runPromptRef.current = runPrompt
+  }, [runPrompt])
 
   const submitAskResponse = useCallback((response: string) => {
     const trimmed = response.trim()
@@ -820,6 +908,60 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     return { value: resolved.prompt, cursorOffset: resolved.prompt.length }
   }, [appendMessages, genMsgId, workspacePath])
 
+  const handleInterrupt = useCallback(() => {
+    const pressedAt = Date.now()
+    if (pressedAt - lastCtrlCEventAtRef.current < 120) return
+    lastCtrlCEventAtRef.current = pressedAt
+
+    if (isRunningRef.current || engine.isRunning() || engine.isFastContextRunning()) {
+      const activePrompt = activePromptRef.current
+      abortingRef.current = true
+      engine.abort()
+      queuedPromptsRef.current = []
+      setQueuedPrompts([])
+      setInterruptHint('Interrupted current agent run.')
+      setTimeout(() => setInterruptHint(null), 2500)
+
+      if (activePrompt && !activePrompt.responseStarted) {
+        inputRef.current = activePrompt.prompt
+        setInput(activePrompt.prompt)
+        draftAttachmentsRef.current = activePrompt.attachments ?? []
+        setDraftAttachments(activePrompt.attachments ?? [])
+        engine.restoreFromTurns(activePrompt.priorTurns)
+        replaceMessages(prev => prev.filter(message => message.id !== activePrompt.messageId))
+        abortRestoredPromptRef.current = true
+      }
+      return
+    }
+
+    if (pressedAt - exitPressRef.current < 1800) {
+      exit()
+      return
+    }
+    exitPressRef.current = pressedAt
+    setExitHint('Press Ctrl+C again to exit.')
+    setTimeout(() => {
+      if (Date.now() - exitPressRef.current >= 1800) setExitHint(null)
+    }, 1800)
+  }, [engine, exit, replaceMessages])
+
+  useEffect(() => {
+    handleInterruptRef.current = handleInterrupt
+  }, [handleInterrupt])
+
+  useEffect(() => {
+    if (!isInteractive || singleShot) return
+
+    const onSigint = () => {
+      handleInterruptRef.current()
+    }
+
+    process.on('SIGINT', onSigint)
+    return () => {
+      process.off('SIGINT', onSigint)
+    }
+  }, [isInteractive, singleShot])
+
   const handleSubmit = useCallback((value: string) => {
     const trimmed = value.trim()
     if (!trimmed) return
@@ -828,6 +970,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setInput('')
     draftAttachmentsRef.current = []
     setDraftAttachments([])
+
+    if (commandRegistry.isCommand(trimmed) && isRunningRef.current) {
+      runPrompt(trimmed, pendingDraftAttachments)
+      return
+    }
 
     if (commandRegistry.isCommand(trimmed)) {
       if (trimmed === '/model') {
@@ -879,7 +1026,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, thinkingMode, workspacePath])
 
   useInput((ch, key) => {
-    if (key.ctrl && ch === 'c') exit()
+    if (key.ctrl && ch === 'c') {
+      handleInterrupt()
+      return
+    }
     if (activeOverlay !== null) return // overlays handle their own keys
 
     if ((key.meta && ch.toLowerCase() === 't') || (key.shift && key.tab)) {
@@ -932,6 +1082,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         tools={currentTools}
         draft={streamingToolDraft}
         streamText={streamTextForDisplay}
+        outputTokens={currentTurnOutputTokens}
         lastActivity={lastActivity}
         verbose={verbose}
         idleLabel={!visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
@@ -1021,7 +1172,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ) : null
 
   const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay
-  const showPrompt = !isRunning && !singleShot && activeOverlay === null && !cursorMode && !pendingAsk
+  const showPrompt = !singleShot && activeOverlay === null && !cursorMode && !pendingAsk
   const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
     <Box marginTop={1}>
@@ -1045,17 +1196,26 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     </Box>
   ) : null
   const promptNode = showPrompt ? (
-    <PromptInput
-      value={input}
-      onChange={setComposedInput}
-      onSubmit={handleSubmit}
-      onDoubleEsc={() => {
-        if (messages.length > 0) push('rewind')
-      }}
-      onPasteImage={handlePasteImage}
-      onPasteText={handlePasteText}
-      mode={currentMode}
-    />
+    <Box flexDirection="column">
+      {(queuedPrompts.length > 0 || interruptHint || exitHint) && (
+        <Box paddingLeft={1}>
+          <Text dimColor>
+            {interruptHint || exitHint || `${queuedPrompts.length} queued - will run after current agent turn`}
+          </Text>
+        </Box>
+      )}
+      <PromptInput
+        value={input}
+        onChange={setComposedInput}
+        onSubmit={handleSubmit}
+        onDoubleEsc={() => {
+          if (messages.length > 0) push('rewind')
+        }}
+        onPasteImage={handlePasteImage}
+        onPasteText={handlePasteText}
+        mode={currentMode}
+      />
+    </Box>
   ) : null
   const transcriptHint = noFlickerActive && activeOverlay === null && (hiddenBefore > 0 || hiddenAfter > 0) ? (
     <Box flexShrink={0}>
@@ -1198,6 +1358,7 @@ export function startInkApp(options: {
       incrementalRendering: noFlicker,
       interactive,
       alternateScreen: noFlicker,
+      exitOnCtrlC: false,
     }
   )
 }

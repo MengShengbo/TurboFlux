@@ -15,7 +15,7 @@ const FAST_CONTEXT_DEFINITION = {
   description: 'Fast issue-localization code map for large repositories',
   maxTurns: 3,
   maxParallel: 6,
-  driver: 'deepseek-flash',
+  driver: 'main-model',
 }
 
 const STOP_WORDS = new Set([

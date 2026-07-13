@@ -6,7 +6,9 @@ function contextWithUsage(usage: { input?: number; output?: number; source?: 'pr
   return {
     engine: {
       getContextUsage: () => usage,
-      runFastContextObjective: () => Promise.resolve(null),
+      isRunning: () => false,
+      isFastContextRunning: () => false,
+      runStandaloneFastContextObjective: () => Promise.resolve(null),
     } as CommandContext['engine'],
     config: {
       provider: 'custom',
@@ -29,7 +31,9 @@ function fullContext(overrides: Partial<CommandContext> = {}): CommandContext {
     ...contextWithUsage({ source: 'unknown' }),
     engine: {
       getContextUsage: () => ({ source: 'unknown' }),
-      runFastContextObjective: () => Promise.resolve(null),
+      isRunning: () => false,
+      isFastContextRunning: () => false,
+      runStandaloneFastContextObjective: () => Promise.resolve(null),
       resetSession: () => {},
     } as CommandContext['engine'],
     ...overrides,
@@ -56,29 +60,11 @@ describe('/context', () => {
 })
 
 describe('/fastcontext', () => {
-  it('requires an objective', () => {
+  it('is no longer exposed as a manual command', () => {
     const result = commandRegistry.execute('/fastcontext', contextWithUsage({ source: 'unknown' }))
 
     expect(result.type).toBe('text')
-    expect(result.text).toContain('Usage: /fastcontext <what to find>')
-  })
-
-  it('starts the FastContext subagent explicitly', () => {
-    let objective = ''
-    const ctx = contextWithUsage({ source: 'unknown' })
-    ctx.engine = {
-      ...ctx.engine,
-      runFastContextObjective: (value: string) => {
-        objective = value
-        return Promise.resolve(null)
-      },
-    } as CommandContext['engine']
-
-    const result = commandRegistry.execute('/fastcontext find auth flow', ctx)
-
-    expect(result.type).toBe('text')
-    expect(result.text).toContain('FastContext subagent started: find auth flow')
-    expect(objective).toBe('find auth flow')
+    expect(result.text).toContain('Unknown command: /fastcontext')
   })
 })
 

@@ -180,21 +180,6 @@ commandRegistry.register({
   },
 })
 
-// /fastcontext
-commandRegistry.register({
-  name: 'fastcontext',
-  description: 'Run the FastContext subagent for quick broad code discovery',
-  argumentHint: '<objective>',
-  aliases: ['fc'],
-  type: 'local',
-  execute: (args, ctx) => {
-    const objective = args.trim()
-    if (!objective) return 'Usage: /fastcontext <what to find>'
-    ctx.engine.runFastContextObjective(objective).catch(() => {})
-    return `FastContext subagent started: ${objective}`
-  },
-})
-
 // /context
 commandRegistry.register({
   name: 'context',

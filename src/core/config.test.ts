@@ -3,8 +3,15 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   configFromProviderPreset,
+  createApiConfigProfile,
+  createEmptyConfig,
+  deleteApiConfigProfile,
+  getFastContextApiConfig,
   getProviderPreset,
+  saveApiConfigProfile,
   setConfigValue,
+  setFastContextModelConfig,
+  switchActiveApiConfig,
   type TurboFluxConfig,
 } from './config'
 
@@ -69,5 +76,84 @@ describe('provider presets', () => {
     expect(config.provider).toBe('custom')
     expect(config.baseUrl).toBe('https://api.example.com/v1')
     expect(config.model).toBe('custom-model')
+  })
+})
+
+describe('API config profiles', () => {
+  it('can save and switch between multiple API profiles', () => {
+    let config = createEmptyConfig()
+    const openai = createApiConfigProfile({
+      name: 'OpenAI main',
+      provider: 'openai',
+      apiKey: 'sk-openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.5',
+    })
+    const local = createApiConfigProfile({
+      name: 'Local model',
+      provider: 'custom',
+      apiKey: 'local-key',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      model: 'qwen-local',
+    })
+
+    config = saveApiConfigProfile(config, openai, true)
+    config = saveApiConfigProfile(config, local, false)
+    const switched = switchActiveApiConfig(config, local.id)
+
+    expect(switched.activeApiConfigId).toBe(local.id)
+    expect(switched.provider).toBe('custom')
+    expect(switched.model).toBe('qwen-local')
+    expect(switched.apiConfigs).toHaveLength(2)
+  })
+
+  it('uses a selected API profile for FastContext', () => {
+    let config = createEmptyConfig()
+    const main = createApiConfigProfile({
+      name: 'Main',
+      provider: 'openai',
+      apiKey: 'sk-main',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.5',
+    })
+    const fast = createApiConfigProfile({
+      name: 'FastContext',
+      provider: 'custom',
+      apiKey: 'sk-fast',
+      baseUrl: 'https://fast.example/v1',
+      model: 'fast-context-model',
+    })
+
+    config = saveApiConfigProfile(config, main, true)
+    config = saveApiConfigProfile(config, fast, false)
+    config = setFastContextModelConfig(config, { mode: 'api-config', apiConfigId: fast.id })
+
+    expect(getFastContextApiConfig(config)?.model).toBe('fast-context-model')
+  })
+
+  it('falls back to follow-main when deleting the FastContext profile', () => {
+    let config = createEmptyConfig()
+    const main = createApiConfigProfile({
+      name: 'Main',
+      provider: 'openai',
+      apiKey: 'sk-main',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.5',
+    })
+    const fast = createApiConfigProfile({
+      name: 'FastContext',
+      provider: 'custom',
+      apiKey: 'sk-fast',
+      baseUrl: 'https://fast.example/v1',
+      model: 'fast-context-model',
+    })
+
+    config = saveApiConfigProfile(config, main, true)
+    config = saveApiConfigProfile(config, fast, false)
+    config = setFastContextModelConfig(config, { mode: 'api-config', apiConfigId: fast.id })
+    const next = deleteApiConfigProfile(config, fast.id)
+
+    expect(next.fastContextModel?.mode).toBe('follow-main')
+    expect(getFastContextApiConfig(next)).toBeUndefined()
   })
 })

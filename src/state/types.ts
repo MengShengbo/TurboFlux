@@ -52,6 +52,8 @@ export interface ContextReservoirEntry {
 export interface AgentStateProvider {
   getActiveConfig(): APIConfig | null
   getActiveModel(): APIModel | null
+  getFastContextConfig?(): APIConfig | null
+  getFastContextModel?(): APIModel | null
   getWorkspace(): WorkspaceInfo | null
   getConversationId(): string | null
   getContextSegments(): ContextSegment[]

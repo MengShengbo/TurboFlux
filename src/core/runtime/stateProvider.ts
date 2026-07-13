@@ -1,4 +1,5 @@
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
+import type { FastContextModelConfig, TurboFluxApiConfigProfile } from '../config'
 
 export interface AgentRuntimeConfig {
   provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
@@ -7,6 +8,9 @@ export interface AgentRuntimeConfig {
   model: string
   contextWindow: number
   maxTokens: number
+  apiConfigs?: TurboFluxApiConfigProfile[]
+  activeApiConfigId?: string
+  fastContextModel?: FastContextModelConfig
 }
 
 export interface RuntimeTokenUsageEvent {
@@ -41,14 +45,55 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
   }
 
   getActiveConfig(): APIConfig | null {
-    if (!this.config.apiKey || !this.config.baseUrl || !this.config.model) return null
+    return this.apiConfigFromRuntimeConfig(this.config)
+  }
+
+  getFastContextConfig(): APIConfig | null {
+    const selected = this.getFastContextProfile()
+    if (!selected) return this.getActiveConfig()
+    return this.apiConfigFromProfile(selected)
+  }
+
+  getFastContextModel(): APIModel | null {
+    const selected = this.getFastContextProfile()
+    if (!selected) return this.getActiveModel()
     return {
-      provider: this.config.provider,
-      apiKey: this.config.apiKey,
-      baseUrl: this.config.baseUrl,
-      defaultModel: this.config.model,
-      contextWindow: this.config.contextWindow,
-      maxTokens: this.config.maxTokens,
+      id: selected.model,
+      name: selected.model,
+      provider: selected.provider,
+      contextWindow: selected.contextWindow,
+      maxTokens: selected.maxTokens,
+    }
+  }
+
+  private getFastContextProfile(): TurboFluxApiConfigProfile | undefined {
+    if (this.config.fastContextModel?.mode !== 'api-config') return undefined
+    const id = this.config.fastContextModel.apiConfigId
+    if (!id) return undefined
+    return this.config.apiConfigs?.find(profile => profile.id === id)
+  }
+
+  private apiConfigFromRuntimeConfig(config: AgentRuntimeConfig): APIConfig | null {
+    if (!config.apiKey || !config.baseUrl || !config.model) return null
+    return {
+      provider: config.provider,
+      apiKey: config.apiKey,
+      baseUrl: config.baseUrl,
+      defaultModel: config.model,
+      contextWindow: config.contextWindow,
+      maxTokens: config.maxTokens,
+    }
+  }
+
+  private apiConfigFromProfile(profile: TurboFluxApiConfigProfile): APIConfig | null {
+    if (!profile.apiKey || !profile.baseUrl || !profile.model) return null
+    return {
+      provider: profile.provider,
+      apiKey: profile.apiKey,
+      baseUrl: profile.baseUrl,
+      defaultModel: profile.model,
+      contextWindow: profile.contextWindow,
+      maxTokens: profile.maxTokens,
     }
   }
 

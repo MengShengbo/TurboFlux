@@ -12,12 +12,15 @@ describe('AgentActivityLine', () => {
     expect(line).toHaveLength(48)
   })
 
-  it('moves the diagonal shimmer between frames', () => {
-    const first = flattenFrame(32, 1)
-    const second = flattenFrame(32, 5)
+  it('keeps the activity line visually quiet while the highlight moves', () => {
+    const first = buildAgentActivityLineFrame(32, 1)
+    const second = buildAgentActivityLineFrame(32, 5)
+    const firstLine = first.map(segment => segment.text).join('')
+    const secondLine = second.map(segment => segment.text).join('')
 
-    expect(first).not.toBe(second)
-    expect(second).toContain('/')
+    expect(firstLine).toBe('-'.repeat(32))
+    expect(secondLine).toBe('-'.repeat(32))
+    expect(first.map(segment => segment.color).join('|')).not.toBe(second.map(segment => segment.color).join('|'))
   })
 
   it('returns no segments for zero width terminals', () => {

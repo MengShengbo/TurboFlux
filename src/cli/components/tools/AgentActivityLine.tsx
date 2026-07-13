@@ -9,10 +9,13 @@ interface AgentActivityLineProps {
 
 interface AgentActivitySegment {
   text: string
-  glow: boolean
+  color: string
+  bold: boolean
 }
 
 const SHIMMER_STEP = 2
+const BASE_COLOR = '#075985'
+const SWEEP_COLORS = ['#0e7490', '#0891b2', '#22d3ee', '#67e8f9', '#22d3ee', '#0891b2', '#0e7490']
 
 export function AgentActivityLine({ active }: AgentActivityLineProps) {
   const { columns } = useTerminalSize()
@@ -36,7 +39,7 @@ export function AgentActivityLine({ active }: AgentActivityLineProps) {
   return (
     <Box flexShrink={0} height={1}>
       {segments.map((segment, index) => (
-        <Text key={`${index}-${segment.glow ? 'glow' : 'base'}`} color={segment.glow ? '#38bdf8' : '#075985'} bold={segment.glow}>
+        <Text key={`${index}-${segment.color}-${segment.bold ? 'bold' : 'base'}`} color={segment.color} bold={segment.bold}>
           {segment.text}
         </Text>
       ))}
@@ -48,18 +51,28 @@ export function buildAgentActivityLineFrame(width: number, frame: number): Agent
   const safeWidth = Math.max(0, Math.floor(width))
   if (safeWidth === 0) return []
 
-  const shimmerWidth = Math.max(6, Math.min(18, Math.floor(safeWidth * 0.18)))
+  const shimmerWidth = Math.max(10, Math.min(26, Math.floor(safeWidth * 0.2)))
   const travelWidth = safeWidth + shimmerWidth
   const head = positiveModulo(frame * SHIMMER_STEP, travelWidth)
   const chars: AgentActivitySegment[] = []
 
   for (let index = 0; index < safeWidth; index += 1) {
     const distance = head - index
-    const glow = distance >= 0 && distance < shimmerWidth
-    chars.push({
-      text: glow ? '/' : '-',
-      glow,
-    })
+    const sweepIndex = distance >= 0 && distance < shimmerWidth
+      ? Math.min(SWEEP_COLORS.length - 1, Math.floor((distance / shimmerWidth) * SWEEP_COLORS.length))
+      : -1
+    const isCore = sweepIndex === 3
+    chars.push(sweepIndex >= 0
+      ? {
+          text: '-',
+          color: SWEEP_COLORS[sweepIndex]!,
+          bold: isCore,
+        }
+      : {
+          text: '-',
+          color: BASE_COLOR,
+          bold: false,
+        })
   }
 
   return mergeSegments(chars)
@@ -70,7 +83,7 @@ function mergeSegments(chars: AgentActivitySegment[]): AgentActivitySegment[] {
 
   for (const char of chars) {
     const previous = segments[segments.length - 1]
-    if (previous && previous.glow === char.glow) {
+    if (previous && previous.color === char.color && previous.bold === char.bold) {
       previous.text += char.text
     } else {
       segments.push({ ...char })

@@ -22,6 +22,7 @@ interface ActiveWorkPanelProps {
   tools: ToolStatus[]
   draft: StreamingToolDraft | null
   streamText: string
+  outputTokens?: number
   lastActivity: number
   verbose: boolean
   idleLabel?: string | null
@@ -52,6 +53,7 @@ export function ActiveWorkPanel({
   tools,
   draft,
   streamText,
+  outputTokens = 0,
   lastActivity,
   verbose,
   idleLabel = 'Thinking...',
@@ -79,11 +81,13 @@ export function ActiveWorkPanel({
         <Box>
           <Text color={theme.inactive}>Work </Text>
           <SpinnerGlyph lastActivity={getPrimaryActivity(activeTools, draft, lastActivity)} label={cliTruncate(primary, labelWidth, { position: 'middle' })} />
+          <TurnTokenCounter tokens={outputTokens} />
         </Box>
       ) : idleLabel && !streamText ? (
         <Box>
           <Text color={theme.inactive}>Work </Text>
           <SpinnerGlyph lastActivity={lastActivity} label={idleLabel} />
+          <TurnTokenCounter tokens={outputTokens} />
         </Box>
       ) : null}
 
@@ -98,6 +102,21 @@ export function ActiveWorkPanel({
       )}
     </Box>
   )
+}
+
+function TurnTokenCounter({ tokens }: { tokens: number }) {
+  const theme = useTheme()
+  if (!Number.isFinite(tokens) || tokens <= 0) return null
+  return (
+    <Text color={theme.success}>
+      {` +token${formatTokenCount(tokens)}`}
+    </Text>
+  )
+}
+
+function formatTokenCount(value: number): string {
+  const rounded = Math.max(0, Math.floor(value))
+  return rounded.toLocaleString()
 }
 
 function WorkGroupLine({ group, columns }: { group: WorkGroup; columns: number }) {

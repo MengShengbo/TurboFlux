@@ -16,7 +16,7 @@
  * driver-agnostic. When DeepSeek ships a new tier (e.g. v5-flash) we
  * extend the union and the proxy's mapping table — nothing else.
  */
-export type SubAgentDriver = 'deepseek-flash' | 'deepseek-reasoner'
+export type SubAgentDriver = 'main-model' | 'deepseek-flash' | 'deepseek-reasoner'
 
 /**
  * Thinking effort. Maps onto DeepSeek V4's three-tier reasoning control:
