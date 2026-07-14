@@ -12,10 +12,6 @@
   <img alt="License" src="https://img.shields.io/badge/License-MIT-20242a" />
 </p>
 
-<p align="center">
-  <img src="docs/assets/turboflux-cli.png" width="1000" alt="TurboFlux Terminal UI" />
-</p>
-
 ## 安装
 
 需要 Node.js 20 或更高版本。
