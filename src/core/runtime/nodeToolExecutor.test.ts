@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
+import { hashText } from '../fileIO.js'
 
 function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))
@@ -56,6 +57,38 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(write.success).toBe(true)
     expect(read).toMatchObject({ success: true, data: 'hello' })
     expect(readFileSync(join(workspace, 'nested', 'file.txt'), 'utf-8')).toBe('hello')
+  }))
+
+  it('uses optimistic version checks and preserves concurrent edits', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'inside.txt')
+    writeFileSync(filePath, 'first', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+    const expectedHash = hashText('first')
+
+    writeFileSync(filePath, 'editor change', 'utf-8')
+    const conflict = await executor.writeFile(filePath, 'agent change', { expectedHash })
+    const createConflict = await executor.writeFile(filePath, 'overwrite', { expectNotExists: true })
+
+    expect(conflict.success).toBe(false)
+    expect(conflict.error).toContain('changed since it was read')
+    expect(createConflict.success).toBe(false)
+    expect(readFileSync(filePath, 'utf-8')).toBe('editor change')
+  }))
+
+  it('blocks workspace paths that escape through a symlink or junction', async () => withWorkspace(async ({ workspace, outside }) => {
+    writeFileSync(join(outside, 'secret.txt'), 'outside', 'utf-8')
+    const linkPath = join(workspace, 'linked')
+    try {
+      symlinkSync(outside, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      return
+    }
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.readFile(join(linkPath, 'secret.txt'))
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('Path outside workspace')
   }))
 
   it('blocks writes and command execution in readonly policy', async () => withWorkspace(async ({ workspace }) => {
@@ -118,6 +151,20 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.data?.exitCode).toBe(7)
   }))
 
+  it('does not leak parent-process secrets into child commands', async () => withWorkspace(async ({ workspace }) => {
+    process.env.TURBOFLUX_TEST_SECRET = 'do-not-inherit'
+    try {
+      const executor = new NodeToolExecutor(workspace)
+      const hidden = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.TURBOFLUX_TEST_SECRET || "missing")'], workspace)
+      const explicit = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.EXPLICIT_VALUE || "missing")'], workspace, { EXPLICIT_VALUE: 'allowed' })
+
+      expect(hidden.data?.stdout).toBe('missing')
+      expect(explicit.data?.stdout).toBe('allowed')
+    } finally {
+      delete process.env.TURBOFLUX_TEST_SECRET
+    }
+  }))
+
   it('blocks code map target paths that escape the workspace', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
 
@@ -177,6 +224,37 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result?.success).toBe(true)
     expect(result?.checkpointId).toMatch(/^cp_/)
     expect(result?.label).toBe('test checkpoint')
+  }))
+
+  it('lists and restores local history checkpoints', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'inside.txt')
+    writeFileSync(filePath, 'checkpoint version', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+    const created = await executor.checkpointCreate(workspace, 'restorable', [filePath], 'explicit', { [filePath]: 'before' })
+    writeFileSync(filePath, 'later edit', 'utf-8')
+
+    const listed = await executor.checkpointList(workspace, 10)
+    const restored = await executor.checkpointRestore(workspace, created.checkpointId)
+
+    expect(listed.data).toEqual(expect.arrayContaining([expect.objectContaining({ id: created.checkpointId })]))
+    expect(restored.success).toBe(true)
+    expect(restored.data?.safetyCheckpointId).toBeTruthy()
+    expect(readFileSync(filePath, 'utf-8')).toBe('checkpoint version')
+  }))
+
+  it('discovers useful dot-directories but skips secret env files', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, '.github', 'workflows'), { recursive: true })
+    writeFileSync(join(workspace, '.github', 'workflows', 'ci.yml'), 'name: ci', 'utf-8')
+    writeFileSync(join(workspace, '.env'), 'SECRET=value', 'utf-8')
+    writeFileSync(join(workspace, '.env.example'), 'SECRET=', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const yaml = await executor.searchFiles('**/*.yml', workspace)
+    const envFiles = await executor.searchFiles('.env*', workspace)
+
+    expect(yaml.data?.matches.some(path => path.endsWith('ci.yml'))).toBe(true)
+    expect(envFiles.data?.matches.some(path => path.endsWith('.env.example'))).toBe(true)
+    expect(envFiles.data?.matches.some(path => path.endsWith('.env'))).toBe(false)
   }))
 
   it('blocks local history checkpoints in readonly policy', async () => withWorkspace(async ({ workspace }) => {

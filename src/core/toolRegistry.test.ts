@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getToolsForMode } from './toolRegistry'
+import { getToolsForMode, toolsToAnthropicFormat, toolsToOpenAIFormat, validateToolArgs } from './toolRegistry'
 
 describe('tool mode boundaries', () => {
   it('exposes only read-only tools in plan mode', () => {
@@ -9,5 +9,25 @@ describe('tool mode boundaries', () => {
     expect(tools.every(tool => tool.isReadOnly)).toBe(true)
     expect(tools.some(tool => tool.name === 'run_command')).toBe(false)
     expect(tools.some(tool => tool.name === 'write_file')).toBe(false)
+  })
+
+  it('emits closed schemas and strict nullable optionals for OpenAI', () => {
+    const tools = toolsToOpenAIFormat('vibe', { strict: true }) as any[]
+    const readFile = tools.find(tool => tool.function.name === 'read_file')
+    const multiEdit = tools.find(tool => tool.function.name === 'multi_edit')
+
+    expect(readFile.function.strict).toBe(true)
+    expect(readFile.function.parameters.additionalProperties).toBe(false)
+    expect(readFile.function.parameters.required).toContain('offset')
+    expect(readFile.function.parameters.properties.offset.anyOf).toContainEqual({ type: 'null' })
+    expect(multiEdit.function.parameters.properties.edits.items.additionalProperties).toBe(false)
+  })
+
+  it('includes array item schemas for Anthropic and rejects extra arguments', () => {
+    const tools = toolsToAnthropicFormat('vibe') as any[]
+    const webSearch = tools.find(tool => tool.name === 'web_search')
+
+    expect(webSearch.input_schema.properties.domains.items).toEqual({ type: 'string' })
+    expect(validateToolArgs('read_file', { path: 'a.ts', surprise: true })).toEqual({ valid: false, error: 'Unexpected parameter: surprise' })
   })
 })

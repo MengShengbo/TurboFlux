@@ -84,6 +84,9 @@ export interface ToolExecutor {
 
   // Checkpoint operations
   checkpointCreate?(workspacePath: string, message: string, filePaths: string[], type: 'auto' | 'explicit', preimages?: any): Promise<Result<CheckpointResult>>
+  checkpointList?(workspacePath: string, limit?: number): Promise<Result<any[]>>
+  checkpointRestore?(workspacePath: string, checkpointId: string): Promise<Result<{ restoredFiles: string[]; conflictedFiles?: string[]; safetyCheckpointId?: string }>>
+  checkpointPrune?(workspacePath: string, keepCount?: number): Promise<Result<void>>
 
   // Stream operations (API calls)
   sendMessage(url: string, headers: Record<string, string>, body: string, options?: RequestOptions): Promise<Result<string>>

@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { getSupportedModelSpec, SUPPORTED_MODEL_SPECS } from './modelRegistry'
+import { loadCredentialSnapshot, saveCredentialSnapshot } from './credentialStore'
+import { writeFileAtomicSync } from './fileIO'
 
 export interface TurboFluxConfig {
   provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
@@ -58,10 +60,43 @@ export interface ProviderPreset {
   description: string
 }
 
-const CONFIG_DIR = join(homedir(), '.turboflux')
+const CONFIG_DIR = process.env.TURBOFLUX_CONFIG_DIR || join(homedir(), '.turboflux')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const CONVERSATIONS_DIR = join(CONFIG_DIR, 'conversations')
 const CHECKPOINTS_DIR = join(CONFIG_DIR, 'checkpoints')
+
+function hydrateCredentials(raw: Partial<TurboFluxConfig>): Partial<TurboFluxConfig> {
+  const stored = loadCredentialSnapshot()
+  const envApiKey = process.env.TURBOFLUX_API_KEY?.trim()
+  const activeId = typeof raw.activeApiConfigId === 'string'
+    ? raw.activeApiConfigId
+    : Array.isArray(raw.apiConfigs) ? raw.apiConfigs[0]?.id : undefined
+  const profiles = Array.isArray(raw.apiConfigs)
+    ? raw.apiConfigs.map(profile => ({
+        ...profile,
+        apiKey: envApiKey && profile.id === activeId
+          ? envApiKey
+          : stored.apiConfigs?.[profile.id] || profile.apiKey || '',
+      }))
+    : raw.apiConfigs
+  return {
+    ...raw,
+    apiKey: envApiKey || stored.apiKey || raw.apiKey || '',
+    apiConfigs: profiles,
+  }
+}
+
+function stripCredentials(config: TurboFluxConfig): TurboFluxConfig {
+  return {
+    ...config,
+    apiKey: '',
+    apiConfigs: config.apiConfigs?.map(profile => ({ ...profile, apiKey: '' })),
+  }
+}
+
+function writeConfigDocument(config: TurboFluxConfig): void {
+  writeFileAtomicSync(CONFIG_FILE, JSON.stringify(stripCredentials(config), null, 2), 0o600)
+}
 
 export const DEFAULT_FREE_MODEL = ''
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
@@ -431,23 +466,23 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
   ensureDirectories()
 
   if (!existsSync(CONFIG_FILE)) {
-    const initial = applyKnownModelMetadata({ ...DEFAULT_CONFIG }, MODEL_PRESETS)
-    writeFileSync(CONFIG_FILE, JSON.stringify(initial, null, 2), 'utf-8')
+    const initial = applyKnownModelMetadata(normalizeConfig(hydrateCredentials(DEFAULT_CONFIG)), MODEL_PRESETS)
+    writeConfigDocument(initial)
     return initial
   }
 
   try {
     const raw = readFileSync(CONFIG_FILE, 'utf-8').replace(/^\uFEFF/, '')
     const userConfig = JSON.parse(raw)
-    const merged = normalizeConfig({ ...DEFAULT_CONFIG, ...userConfig })
+    const merged = normalizeConfig(hydrateCredentials({ ...DEFAULT_CONFIG, ...userConfig }))
   if (looksLikeLegacyLocalProxyDefault(userConfig)) {
       const reset = emptyConfigWithProfiles()
-      writeFileSync(CONFIG_FILE, JSON.stringify(reset, null, 2), 'utf-8')
+      writeConfigDocument(reset)
       return reset
     }
     if (looksLikeLegacyBundledDefault(userConfig)) {
       const migrated = emptyConfigWithProfiles()
-      writeFileSync(CONFIG_FILE, JSON.stringify(migrated, null, 2), 'utf-8')
+      writeConfigDocument(migrated)
       return migrated
     }
     const withBackendMetadata = applyKnownModelMetadata(merged, MODEL_PRESETS)
@@ -456,7 +491,9 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
       withBackendMetadata.maxTokens !== merged.maxTokens ||
       withBackendMetadata.model !== merged.model
     ) {
-      writeFileSync(CONFIG_FILE, JSON.stringify(withBackendMetadata, null, 2), 'utf-8')
+      saveConfig(withBackendMetadata)
+    } else if (userConfig.apiKey || userConfig.apiConfigs?.some((profile: TurboFluxApiConfigProfile) => profile.apiKey)) {
+      saveConfig(withBackendMetadata)
     }
     return syncActiveProfile(withBackendMetadata)
   } catch {
@@ -466,11 +503,24 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
 
 export function saveConfig(config: TurboFluxConfig): void {
   ensureDirectories()
-  writeFileSync(CONFIG_FILE, JSON.stringify(syncActiveProfile(normalizeConfig(config)), null, 2), 'utf-8')
+  const normalized = syncActiveProfile(normalizeConfig(config))
+  saveCredentialSnapshot({
+    apiKey: normalized.apiKey || undefined,
+    apiConfigs: Object.fromEntries((normalized.apiConfigs || []).filter(profile => profile.apiKey).map(profile => [profile.id, profile.apiKey])),
+  })
+  writeConfigDocument(normalized)
 }
 
 export function getConfigDir(): string {
   return CONFIG_DIR
+}
+
+export function redactConfig(config: TurboFluxConfig): TurboFluxConfig {
+  return {
+    ...config,
+    apiKey: config.apiKey ? '***' : '',
+    apiConfigs: config.apiConfigs?.map(profile => ({ ...profile, apiKey: profile.apiKey ? '***' : '' })),
+  }
 }
 
 export function getConversationsDir(): string {

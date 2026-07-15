@@ -77,7 +77,7 @@ const tools: EnhancedToolDef[] = [
     category: 'write',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
-      { name: 'edits', type: 'array', description: 'Array of edit steps. Each item is {old_string: string, new_string: string, replace_all?: boolean}. Applied in order.', required: true },
+      { name: 'edits', type: 'array', description: 'Array of edit steps. Each item is {old_string: string, new_string: string, replace_all?: boolean}. Applied in order.', required: true, schema: { type: 'array', items: { type: 'object', properties: { old_string: { type: 'string' }, new_string: { type: 'string' }, replace_all: { type: ['boolean', 'null'] } }, required: ['old_string', 'new_string', 'replace_all'], additionalProperties: false } } },
     ],
     isReadOnly: false,
     isDestructive: false,
@@ -181,7 +181,7 @@ const tools: EnhancedToolDef[] = [
       { name: 'limit', type: 'number', description: 'Maximum number of results to return (default 5, max 10).', required: false, default: 5 },
       { name: 'region', type: 'string', description: 'DuckDuckGo region code such as wt-wt, us-en, cn-zh. Defaults to wt-wt.', required: false, default: 'wt-wt' },
       { name: 'freshness', type: 'string', description: 'Optional freshness hint for future providers. Supported values: day, week, month, year.', required: false, enum: ['day', 'week', 'month', 'year'] },
-      { name: 'domains', type: 'array', description: 'Optional domain filters such as ["docs.github.com", "nodejs.org"]. Use for official/source-only searches.', required: false },
+      { name: 'domains', type: 'array', description: 'Optional domain filters such as ["docs.github.com", "nodejs.org"]. Use for official/source-only searches.', required: false, schema: { type: 'array', items: { type: 'string' } } },
     ],
     isReadOnly: true,
     isDestructive: false,
@@ -208,7 +208,7 @@ const tools: EnhancedToolDef[] = [
     parameters: [
       { name: 'text', type: 'string', description: 'The memory content to store (≤ 500 chars). Should be atomic, actionable, and generalizable.', required: true },
       { name: 'kind', type: 'string', description: 'Memory type. Use "fact" for project knowledge, "strategy" for learned approaches, "pitfall" for things to avoid, "workflow" for procedural steps, "preference" for user style preferences.', required: false, default: 'fact', enum: ['fact', 'strategy', 'pitfall', 'workflow', 'preference', 'episode'] },
-      { name: 'tags', type: 'array', description: 'Tags for retrieval (e.g. ["api", "auth", "debugging"]). Max 8 tags.', required: false },
+      { name: 'tags', type: 'array', description: 'Tags for retrieval (e.g. ["api", "auth", "debugging"]). Max 8 tags.', required: false, schema: { type: 'array', items: { type: 'string' } } },
       { name: 'confidence', type: 'string', description: 'How confident this memory is. "asserted" = user stated directly, "observed" = inferred from behavior, "inferred" = deduced from context.', required: false, default: 'observed', enum: ['asserted', 'observed', 'inferred'] },
     ],
     isReadOnly: false,
@@ -235,7 +235,7 @@ const tools: EnhancedToolDef[] = [
       { name: 'command', type: 'string', description: 'Shell command to execute', required: true },
       { name: 'cwd', type: 'string', description: 'Working directory', required: false },
       { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (foreground only). Default 30000.', required: false, default: 30000 },
-      { name: 'env', type: 'object', description: 'Additional environment variables', required: false },
+      { name: 'env', type: 'object', description: 'Additional environment variables', required: false, schema: { type: 'object', additionalProperties: { type: 'string' } } },
       { name: 'approved', type: 'boolean', description: 'Legacy field; permission gates are enforced by the runtime.', required: false, default: false },
       { name: 'run_in_background', type: 'boolean', description: 'When true, spawn the command in a dedicated agent terminal session and return immediately with a session_id. Use for dev servers, watch processes, test-watch. Default false.', required: false, default: false },
     ],
@@ -296,9 +296,9 @@ const tools: EnhancedToolDef[] = [
       { name: 'description', type: 'string', description: 'Task description', required: true },
       { name: 'priority', type: 'string', description: 'Task priority level', required: true, enum: ['major', 'medium', 'minor'] },
       { name: 'parent_id', type: 'string', description: 'Parent task ID', required: false },
-      { name: 'dependencies', type: 'array', description: 'Task IDs this task depends on (must be completed first)', required: false },
+      { name: 'dependencies', type: 'array', description: 'Task IDs this task depends on (must be completed first)', required: false, schema: { type: 'array', items: { type: 'string' } } },
       { name: 'order', type: 'number', description: 'Execution order within siblings (lower = earlier)', required: false },
-      { name: 'metadata', type: 'object', description: 'Optional metadata: estimatedDuration, relatedFiles, relatedIssue', required: false },
+      { name: 'metadata', type: 'object', description: 'Optional metadata: estimatedDuration, relatedFiles, relatedIssue', required: false, schema: { type: 'object', properties: { estimatedDuration: { type: ['number', 'null'] }, relatedFiles: { anyOf: [{ type: 'array', items: { type: 'string' } }, { type: 'null' }] }, relatedIssue: { type: ['string', 'null'] } }, required: ['estimatedDuration', 'relatedFiles', 'relatedIssue'], additionalProperties: false } },
     ],
     isReadOnly: false,
     isDestructive: false,
@@ -315,6 +315,7 @@ const tools: EnhancedToolDef[] = [
         type: 'array',
         description: 'Array of task definitions. Each item: { title, description, priority ("major"|"medium"|"minor"), ref? (local label to reference within this call), parent_id? (real task id or a `ref` from earlier in this same array), dependencies? (array of ids or local refs), order?, metadata? }.',
         required: true,
+        schema: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, description: { type: 'string' }, priority: { type: 'string', enum: ['major', 'medium', 'minor'] }, ref: { type: ['string', 'null'] }, parent_id: { type: ['string', 'null'] }, dependencies: { anyOf: [{ type: 'array', items: { type: 'string' } }, { type: 'null' }] }, order: { type: ['number', 'null'] }, metadata: { type: ['object', 'null'] } }, required: ['title', 'description', 'priority', 'ref', 'parent_id', 'dependencies', 'order', 'metadata'], additionalProperties: false } },
       },
     ],
     isReadOnly: false,
@@ -381,7 +382,7 @@ const tools: EnhancedToolDef[] = [
     category: 'communicate',
     parameters: [
       { name: 'question', type: 'string', description: 'Question to ask the user', required: true },
-      { name: 'options', type: 'array', description: 'Optional list of choices', required: false },
+      { name: 'options', type: 'array', description: 'Optional list of choices', required: false, schema: { type: 'array', items: { type: 'string' } } },
       { name: 'reason', type: 'string', description: 'Reason for asking (e.g. approval gate)', required: false },
       { name: 'command', type: 'string', description: 'When asking to approve a shell command, include the exact command text here so the UI can render an approval card.', required: false },
     ],
@@ -402,6 +403,41 @@ const tools: EnhancedToolDef[] = [
     isConcurrencySafe: true,
   },
   {
+    name: 'list_checkpoints',
+    description: 'List local history checkpoints for the current workspace.',
+    category: 'read',
+    parameters: [
+      { name: 'limit', type: 'number', description: 'Maximum checkpoints to return (1-100)', required: false, default: 20 },
+    ],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+  },
+  {
+    name: 'restore_checkpoint',
+    description: 'Restore AI-touched files from a local history checkpoint. A safety checkpoint is created before files are overwritten.',
+    category: 'write',
+    parameters: [
+      { name: 'checkpoint_id', type: 'string', description: 'Checkpoint id returned by list_checkpoints', required: true },
+    ],
+    isReadOnly: false,
+    isDestructive: true,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
+    name: 'prune_checkpoints',
+    description: 'Prune old local history checkpoints while keeping the newest entries.',
+    category: 'manage',
+    parameters: [
+      { name: 'keep_count', type: 'number', description: 'Number of newest checkpoints to keep (1-200)', required: false, default: 50 },
+    ],
+    isReadOnly: false,
+    isDestructive: true,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
     name: 'create_checkpoint',
     description: 'Create a local history checkpoint.',
     category: 'manage',
@@ -411,7 +447,7 @@ const tools: EnhancedToolDef[] = [
     isReadOnly: false,
     isDestructive: false,
     isConcurrencySafe: false,
-    requiredMode: ['vibe', 'plan'],
+    requiredMode: ['vibe'],
   },
   {
     name: 'spawn_agent',
@@ -446,7 +482,7 @@ Each invocation is stateless. Provide a highly specific objective.`,
     description: 'Generate a summary card for completed work: changes, findings, key files, and unresolved gaps.',
     category: 'communicate',
     parameters: [
-      { name: 'files_changed', type: 'array', description: 'List of changed files', required: true },
+      { name: 'files_changed', type: 'array', description: 'List of changed files', required: true, schema: { type: 'array', items: { type: 'string' } } },
       { name: 'summary', type: 'string', description: 'Change summary', required: true },
       { name: 'reason', type: 'string', description: 'Reason for the change', required: false },
       { name: 'risks', type: 'string', description: 'Potential risks', required: false },
@@ -480,7 +516,7 @@ export function getToolsByCategory(category: ToolCategory): EnhancedToolDef[] {
   return tools.filter(t => t.category === category)
 }
 
-type ToolFormatOptions = { disabledTools?: string[] }
+type ToolFormatOptions = { disabledTools?: string[]; strict?: boolean }
 
 function selectTools(mode: AgentMode, options?: ToolFormatOptions): EnhancedToolDef[] {
   return getToolsForMode(mode, options)
@@ -493,20 +529,17 @@ export function toolsToOpenAIFormat(mode: AgentMode, options?: ToolFormatOptions
     function: {
       name: tool.name,
       description: tool.description,
+      ...(options?.strict ? { strict: true } : {}),
       parameters: {
         type: 'object',
         properties: Object.fromEntries(
           tool.parameters.map(p => [
             p.name,
-            {
-              type: p.type,
-              description: p.description,
-              ...(p.enum ? { enum: p.enum } : {}),
-              ...(p.default !== undefined ? { default: p.default } : {}),
-            },
+            parameterSchema(p, options?.strict === true),
           ])
         ),
-        required: tool.parameters.filter(p => p.required).map(p => p.name),
+        required: (options?.strict ? tool.parameters : tool.parameters.filter(p => p.required)).map(p => p.name),
+        additionalProperties: false,
       },
     },
   }))
@@ -522,17 +555,25 @@ export function toolsToAnthropicFormat(mode: AgentMode, options?: ToolFormatOpti
       properties: Object.fromEntries(
         tool.parameters.map(p => [
           p.name,
-          {
-            type: p.type,
-            description: p.description,
-            ...(p.enum ? { enum: p.enum } : {}),
-            ...(p.default !== undefined ? { default: p.default } : {}),
-          },
+          parameterSchema(p, false),
         ])
       ),
       required: tool.parameters.filter(p => p.required).map(p => p.name),
+      additionalProperties: false,
     },
   }))
+}
+
+function parameterSchema(parameter: ToolParameter, strict: boolean): Record<string, unknown> {
+  const base: Record<string, unknown> = parameter.schema
+    ? { ...parameter.schema }
+    : { type: parameter.type }
+  if (parameter.enum) base.enum = parameter.enum
+  if (parameter.default !== undefined) base.default = parameter.default
+  if (strict && !parameter.required) {
+    return { anyOf: [base, { type: 'null' }], description: parameter.description }
+  }
+  return { ...base, description: parameter.description }
 }
 
 function paramTypeMatches(declared: ToolParameter['type'], value: unknown): boolean {
@@ -551,6 +592,10 @@ export function validateToolArgs(toolName: string, args: Record<string, unknown>
   if (!tool) {
     return { valid: false, error: `Unknown tool: ${toolName}` }
   }
+
+  const knownParameters = new Set(tool.parameters.map(parameter => parameter.name))
+  const unexpected = Object.keys(args).find(name => !knownParameters.has(name))
+  if (unexpected) return { valid: false, error: `Unexpected parameter: ${unexpected}` }
 
   for (const param of tool.parameters) {
     const value = args[param.name]

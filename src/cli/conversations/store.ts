@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, readdirSync, unlinkSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
 import type { ConversationMeta, PersistedConversation, ConversationIndex } from './types'
+import { writeFileAtomicSync } from '../../core/fileIO'
 
 const CONVERSATIONS_DIR = join(homedir(), '.turboflux', 'conversations')
 
@@ -14,7 +15,7 @@ function ensureDir(): void {
 export function saveConversation(conv: PersistedConversation): void {
   ensureDir()
   const filePath = join(CONVERSATIONS_DIR, `${conv.id}.json`)
-  writeFileSync(filePath, JSON.stringify(conv, null, 2), 'utf-8')
+  writeFileAtomicSync(filePath, JSON.stringify(conv, null, 2), 0o600)
 }
 
 export function loadConversation(id: string): PersistedConversation | null {

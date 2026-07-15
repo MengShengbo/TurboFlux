@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { ensureDirectories, getConfigDir } from './config'
+import { writeFileAtomicSync } from './fileIO'
 
 export type TurboFluxInterfaceLanguage = 'zh-CN' | 'en'
 export type TurboFluxAiOutputLanguage = 'follow-user' | 'zh-CN' | 'en' | 'ja' | 'ko' | 'custom'
@@ -321,7 +322,7 @@ export function loadProfile(): TurboFluxProfile {
   const file = getProfileFile()
   if (!existsSync(file)) {
     const initial = normalizeProfile({ ...DEFAULT_PROFILE, updatedAt: new Date().toISOString() })
-    writeFileSync(file, JSON.stringify(initial, null, 2), 'utf-8')
+    writeFileAtomicSync(file, JSON.stringify(initial, null, 2), 0o600)
     return initial
   }
 
@@ -340,7 +341,7 @@ export function saveProfile(profile: Partial<TurboFluxProfile>): TurboFluxProfil
     ...profile,
     updatedAt: new Date().toISOString(),
   })
-  writeFileSync(getProfileFile(), JSON.stringify(next, null, 2), 'utf-8')
+  writeFileAtomicSync(getProfileFile(), JSON.stringify(next, null, 2), 0o600)
   return next
 }
 

@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, extname, isAbsolute, join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import type { AgentAttachment } from '../shared/agentTypes'
@@ -202,8 +202,9 @@ function attachImageFile(filePath: string, index: number, warnings: string[]): A
   const targetDir = attachmentDir()
   mkdirSync(targetDir, { recursive: true })
   const ext = extname(filePath).toLowerCase() || '.png'
-  const target = join(targetDir, `image-${Date.now()}-${index}${ext}`)
-  copyFileSync(filePath, target)
+  const digest = createHash('sha256').update(readFileSync(filePath)).digest('hex')
+  const target = join(targetDir, `${digest}${ext}`)
+  if (!existsSync(target)) copyFileSync(filePath, target)
   const targetStat = statSync(target)
   return {
     id: `image${index}`,
@@ -321,7 +322,7 @@ function readClipboardImageRefs(): string[] {
 }
 
 function attachmentDir(): string {
-  return join(tmpdir(), 'turboflux-attachments')
+  return join(homedir(), '.turboflux', 'attachments')
 }
 
 function resolveInputPath(value: string, workspacePath: string): string {

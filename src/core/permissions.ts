@@ -141,6 +141,8 @@ export class PermissionPipeline {
       'add_task_dependency',
       'remove_task_dependency',
       'create_checkpoint',
+      'restore_checkpoint',
+      'prune_checkpoints',
     ].includes(toolName)
   }
 

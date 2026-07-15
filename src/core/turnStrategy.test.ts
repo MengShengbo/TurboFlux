@@ -90,11 +90,11 @@ describe('TurnStrategyPlanner', () => {
     expect(names).toContain('explore_code')
   })
 
-  it('exposes write tools in both vibe and plan modes', () => {
+  it('keeps plan mode read-only while vibe mode can write', () => {
     expect(openAiToolNames('vibe')).toContain('edit_file')
-    expect(openAiToolNames('plan')).toContain('edit_file')
+    expect(openAiToolNames('plan')).not.toContain('edit_file')
     expect(openAiToolNames('vibe')).toContain('replace_file')
-    expect(openAiToolNames('plan')).toContain('replace_file')
+    expect(openAiToolNames('plan')).not.toContain('replace_file')
     expect(openAiToolNames('vibe')).toContain('read_file')
     expect(openAiToolNames('plan')).toContain('read_file')
   })

@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from 'fs'
-import { join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
+import { readFileSync, existsSync, mkdirSync, rmSync, readdirSync, realpathSync, statSync } from 'fs'
+import { basename, join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { homedir } from 'os'
 import { promisify } from 'util'
@@ -13,6 +13,7 @@ import type { SandboxPolicy } from '../../shared/agentTypes'
 import type { TerminalOutputChunk, TerminalSessionInfo } from '../../shared/terminalTypes'
 import { MemoryService } from '../../tools/memory/service'
 import { LocalHistoryService } from '../../tools/localHistory/service'
+import { hashText, writeFileAtomicSync } from '../fileIO'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
@@ -26,9 +27,11 @@ interface BackgroundTerminalSession {
   proc: ChildProcessWithoutNullStreams
   chunks: TerminalOutputChunk[]
   nextSeq: number
+  bufferChars: number
 }
 
 const MAX_TERMINAL_CHUNKS = 500
+const MAX_TERMINAL_BUFFER_CHARS = 1_000_000
 const MAX_COMMAND_OUTPUT_CHARS = 2_000_000
 const TERMINAL_KILL_TIMEOUT_MS = 5000
 const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
@@ -40,11 +43,13 @@ const DEFAULT_TERMINAL_SHELL_ARGS = process.platform === 'win32'
   : []
 const DEFAULT_TERMINAL_SHELL_ID = process.platform === 'win32' ? 'powershell' : 'bash'
 const DEFAULT_TERMINAL_SHELL_LABEL = process.platform === 'win32' ? 'PowerShell' : 'Bash'
+const SENSITIVE_ENV_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)/i
 
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
   private localHistoryService: LocalHistoryService
   private workspaceRoot: string
+  private workspaceRealRoot: string
   private sandboxPolicy: SandboxPolicy
   private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
   private activeStreams: Map<number, AbortController> = new Map()
@@ -53,6 +58,7 @@ export class NodeToolExecutor implements ToolExecutor {
     this.memoryService = new MemoryService()
     this.localHistoryService = new LocalHistoryService(join(homedir(), '.turboflux', 'checkpoints'))
     this.workspaceRoot = resolveNativePath(workspacePath)
+    this.workspaceRealRoot = existsSync(this.workspaceRoot) ? realpathSync.native(this.workspaceRoot) : this.workspaceRoot
     this.sandboxPolicy = options.sandboxPolicy || 'workspace'
   }
 
@@ -67,24 +73,41 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async writeFile(path: string, content: string, _metadata?: Record<string, unknown>): Promise<Result<void>> {
+  async writeFile(path: string, content: string, metadata?: Record<string, unknown>): Promise<Result<void>> {
     try {
       this.ensureWritable()
       const safePath = this.ensureAllowedPath(path)
       const dir = dirname(safePath)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      writeFileSync(safePath, content, 'utf-8')
+      if (metadata?.expectNotExists === true && existsSync(safePath)) {
+        return { success: false, error: `Write conflict: file already exists: ${path}` }
+      }
+      if (typeof metadata?.expectedHash === 'string') {
+        if (!existsSync(safePath)) return { success: false, error: `Write conflict: file was deleted: ${path}` }
+        const actualHash = hashText(readFileSync(safePath, 'utf-8'))
+        if (actualHash !== metadata.expectedHash) {
+          return { success: false, error: `Write conflict: file changed since it was read: ${path}` }
+        }
+      }
+      writeFileAtomicSync(safePath, content)
       return { success: true }
     } catch (e) {
       return { success: false, error: String(e) }
     }
   }
 
-  async deleteFile(path: string, options?: { recursive?: boolean }): Promise<Result<void>> {
+  async deleteFile(path: string, options?: { recursive?: boolean; expectedHash?: string }): Promise<Result<void>> {
     try {
       this.ensureWritable()
       const safePath = this.ensureAllowedPath(path)
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
+      const expectedHash = options?.expectedHash
+      if (typeof expectedHash === 'string') {
+        const actualHash = hashText(readFileSync(safePath, 'utf-8'))
+        if (actualHash !== expectedHash) {
+          return { success: false, error: `Delete conflict: file changed since it was read: ${path}` }
+        }
+      }
       rmSync(safePath, { recursive: options?.recursive, force: true })
       return { success: true }
     } catch (e) {
@@ -119,7 +142,17 @@ export class NodeToolExecutor implements ToolExecutor {
     }
 
     try {
-      const args = ['--line-number', '--no-heading', '--max-count=50']
+      const args = [
+        '--line-number',
+        '--no-heading',
+        '--hidden',
+        '--max-count=50',
+        '--glob=!.git/**',
+        '--glob=!node_modules/**',
+        '--glob=!.env',
+        '--glob=!.env.local',
+        '--glob=!.env.*.local',
+      ]
       if (caseInsensitive) args.push('--ignore-case')
       if (filePattern) {
         args.push(`--glob=${filePattern}`)
@@ -203,6 +236,7 @@ export class NodeToolExecutor implements ToolExecutor {
         const args = [
           '--line-number',
           '--no-heading',
+          '--hidden',
           '--max-count=20',
           '--glob=*.{ts,tsx,js,jsx,py,rs,go,java}',
           '--glob=!node_modules/**',
@@ -336,7 +370,7 @@ export class NodeToolExecutor implements ToolExecutor {
     const children: CodeMapNode[] = []
     try {
       const entries = readdirSync(absPath, { withFileTypes: true })
-        .filter(e => !e.name.startsWith('.'))
+        .filter(e => !this.shouldSkipEntry(e.name))
         .sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1))
 
       for (const entry of entries.slice(0, Math.max(1, maxChildrenPerPath))) {
@@ -372,7 +406,7 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async memoryQuery(query: { query: string; workspacePath: string; kind?: MemoryKind; scope?: MemoryScope; limit?: number }): Promise<Result<{ items: Array<{ id: string; content: string; kind: string; score: number }> }>> {
+  async memoryQuery(query: { query?: string; workspacePath: string; kind?: MemoryKind; scope?: MemoryScope; limit?: number }): Promise<Result<{ items: Array<{ id: string; text: string; content: string; kind: string; confidence: string; source: string; tags: string[]; score: number }> }>> {
     try {
       const safeWorkspacePath = this.ensureAllowedPath(query.workspacePath)
       const memories = await this.memoryService.query({
@@ -384,8 +418,12 @@ export class NodeToolExecutor implements ToolExecutor {
       })
       const items = memories.map(m => ({
         id: m.id,
+        text: m.text,
         content: m.text,
         kind: m.kind,
+        confidence: m.confidence,
+        source: m.source,
+        tags: m.tags,
         score: 1,
       }))
       return { success: true, data: { items } }
@@ -464,7 +502,7 @@ export class NodeToolExecutor implements ToolExecutor {
     const shellArgs = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
     const proc = spawn(shell, shellArgs, {
       cwd: safeCwd,
-      env: { ...process.env, ...env },
+      env: this.buildChildEnvironment(env),
       detached: process.platform !== 'win32',
       windowsHide: true,
     })
@@ -476,7 +514,7 @@ export class NodeToolExecutor implements ToolExecutor {
       const safeCwd = this.ensureAllowedPath(cwd)
       const proc = spawn(command, args, {
         cwd: safeCwd,
-        env: { ...process.env, ...env },
+        env: this.buildChildEnvironment(env),
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
@@ -573,7 +611,7 @@ export class NodeToolExecutor implements ToolExecutor {
       const sessionId = `term_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
       const proc = spawn(shell, shellArgs, {
         cwd: safeCwd,
-        env: { ...process.env, ...options?.env },
+        env: this.buildChildEnvironment(options?.env),
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
@@ -595,6 +633,7 @@ export class NodeToolExecutor implements ToolExecutor {
         proc,
         chunks: [],
         nextSeq: 1,
+        bufferChars: 0,
       }
       this.backgroundTerminals.set(sessionId, session)
 
@@ -606,8 +645,14 @@ export class NodeToolExecutor implements ToolExecutor {
           data: text,
           timestamp: Date.now(),
         })
+        session.bufferChars += text.length
         if (session.chunks.length > MAX_TERMINAL_CHUNKS) {
-          session.chunks.splice(0, session.chunks.length - MAX_TERMINAL_CHUNKS)
+          const removed = session.chunks.splice(0, session.chunks.length - MAX_TERMINAL_CHUNKS)
+          session.bufferChars -= removed.reduce((sum, chunk) => sum + chunk.data.length, 0)
+        }
+        while (session.bufferChars > MAX_TERMINAL_BUFFER_CHARS && session.chunks.length > 1) {
+          const removed = session.chunks.shift()
+          if (removed) session.bufferChars -= removed.data.length
         }
         session.info.updatedAt = Date.now()
       }
@@ -667,9 +712,13 @@ export class NodeToolExecutor implements ToolExecutor {
 
     try {
       if (process.platform === 'win32') {
-        session.proc.kill('SIGINT')
+        await this.killTerminalProcessTree(session)
       } else {
-        session.proc.stdin.write('\x03')
+        try {
+          process.kill(-session.info.pid, 'SIGINT')
+        } catch {
+          session.proc.kill('SIGINT')
+        }
       }
       session.info.updatedAt = Date.now()
       return { success: true }
@@ -783,6 +832,7 @@ export class NodeToolExecutor implements ToolExecutor {
       if (!result.success || !result.checkpointId) {
         return { success: false, error: result.error || 'Checkpoint was not created' }
       }
+      await this.localHistoryService.pruneOldCheckpoints(safeWorkspacePath, 50)
       return {
         success: true,
         data: {
@@ -797,6 +847,42 @@ export class NodeToolExecutor implements ToolExecutor {
       }
     } catch (e) {
       return { success: false, error: String(e) }
+    }
+  }
+
+  async checkpointList(workspacePath: string, limit = 20): Promise<Result<any[]>> {
+    try {
+      const safeWorkspacePath = this.ensureAllowedPath(workspacePath)
+      const result = await this.localHistoryService.listCheckpoints(safeWorkspacePath, Math.max(1, Math.min(100, limit)))
+      return result.success
+        ? { success: true, data: result.checkpoints || [] }
+        : { success: false, error: result.error || 'Unable to list checkpoints' }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async checkpointRestore(workspacePath: string, checkpointId: string): Promise<Result<{ restoredFiles: string[]; conflictedFiles?: string[]; safetyCheckpointId?: string }>> {
+    try {
+      this.ensureWritable()
+      if (!/^[a-z0-9_-]{6,128}$/i.test(checkpointId)) return { success: false, error: 'Invalid checkpoint id' }
+      const safeWorkspacePath = this.ensureAllowedPath(workspacePath)
+      const result = await this.localHistoryService.restoreCheckpoint(safeWorkspacePath, checkpointId, 'code_only')
+      if (!result.success) return { success: false, error: result.error || 'Checkpoint restore failed', data: { restoredFiles: result.restoredFiles || [], conflictedFiles: result.conflictedFiles, safetyCheckpointId: result.safetyCheckpointId } }
+      return { success: true, data: { restoredFiles: result.restoredFiles || [], conflictedFiles: result.conflictedFiles, safetyCheckpointId: result.safetyCheckpointId } }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async checkpointPrune(workspacePath: string, keepCount = 50): Promise<Result<void>> {
+    try {
+      this.ensureWritable()
+      const safeWorkspacePath = this.ensureAllowedPath(workspacePath)
+      await this.localHistoryService.pruneOldCheckpoints(safeWorkspacePath, Math.max(1, Math.min(200, keepCount)))
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
 
@@ -1186,11 +1272,26 @@ export class NodeToolExecutor implements ToolExecutor {
 
   private ensureWithinWorkspace(path: string): string {
     const resolvedPath = this.resolveAgainstWorkspace(path)
-    const relativePath = relative(this.workspaceRoot, resolvedPath)
+    const canonicalPath = this.resolveRealPath(resolvedPath)
+    const relativePath = relative(this.workspaceRealRoot, canonicalPath)
     if (relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))) {
       return resolvedPath
     }
     throw new Error(`Path outside workspace: ${path}`)
+  }
+
+  private resolveRealPath(path: string): string {
+    if (existsSync(path)) return realpathSync.native(path)
+    const missingParts: string[] = []
+    let current = path
+    while (!existsSync(current)) {
+      const parent = dirname(current)
+      if (parent === current) break
+      missingParts.unshift(basename(current))
+      current = parent
+    }
+    const existingParent = existsSync(current) ? realpathSync.native(current) : current
+    return resolveNativePath(existingParent, ...missingParts)
   }
 
   private resolveAgainstWorkspace(path: string): string {
@@ -1275,7 +1376,7 @@ export class NodeToolExecutor implements ToolExecutor {
     try {
       const entries = readdirSync(dirPath, { withFileTypes: true })
       for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        if (this.shouldSkipEntry(entry.name)) continue
         const fullPath = join(dirPath, entry.name)
         if (entry.isDirectory()) {
           node.children!.push(this.buildTree(fullPath, maxDepth, depth + 1))
@@ -1354,7 +1455,7 @@ export class NodeToolExecutor implements ToolExecutor {
     try {
       const entries = readdirSync(dir, { withFileTypes: true })
       for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        if (this.shouldSkipEntry(entry.name)) continue
         const fullPath = join(dir, entry.name)
         if (entry.isDirectory()) {
           this.walkDir(fullPath, callback, depth + 1)
@@ -1373,6 +1474,19 @@ export class NodeToolExecutor implements ToolExecutor {
       .replace(/\?/g, '[^/]')
       .replace(/\{\{GLOBSTAR\}\}/g, '.*')
     return new RegExp(`^${escaped}$`, 'i')
+  }
+
+  private shouldSkipEntry(name: string): boolean {
+    if (['.git', 'node_modules', 'dist', 'build', 'coverage', '.next'].includes(name)) return true
+    return name === '.env' || name === '.env.local' || /^\.env\..+\.local$/i.test(name)
+  }
+
+  private buildChildEnvironment(overrides?: Record<string, string>): NodeJS.ProcessEnv {
+    const environment: NodeJS.ProcessEnv = {}
+    for (const [name, value] of Object.entries(process.env)) {
+      if (!SENSITIVE_ENV_NAME.test(name)) environment[name] = value
+    }
+    return { ...environment, ...overrides }
   }
 
   private delay(ms: number): Promise<void> {

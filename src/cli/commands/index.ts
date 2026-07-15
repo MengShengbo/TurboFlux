@@ -1,6 +1,6 @@
 import type { Command, CommandContext } from './types'
 import { commandRegistry } from './registry'
-import { type TurboFluxConfig, getPresetByIdOrModelFrom, applyPreset, setConfigValue } from '../../core/config'
+import { type TurboFluxConfig, getPresetByIdOrModelFrom, applyPreset, redactConfig, setConfigValue } from '../../core/config'
 import { existsSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 
@@ -51,7 +51,7 @@ commandRegistry.register({
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
-      const safe = { ...ctx.config, apiKey: ctx.config.apiKey ? '***' : '(not set)' }
+      const safe = redactConfig(ctx.config)
       return 'Current config:\n' + Object.entries(safe).map(([k, v]) => `  ${k}: ${v}`).join('\n')
     }
     const parts = args.split(/\s+/)

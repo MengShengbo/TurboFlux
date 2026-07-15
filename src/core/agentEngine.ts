@@ -47,6 +47,7 @@ import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, Co
 import type { TreeNode } from '../shared/types'
 import { parseTextToolCalls } from '../shared/toolCallMarkup'
 import { detectGitRepo, fetchGitInfo, formatGitStatusForPrompt, gitCommitCheckpoint, gitResetToCommit } from './gitService'
+import { hashText } from './fileIO'
 
 type TaskSystemCreationEvent = {
   status: 'planning' | 'creating' | 'completed' | 'error'
@@ -239,7 +240,6 @@ export class AgentEngine {
   private fastContextRunPromise: Promise<FastContextScanResult | null> | null = null
   private standaloneFastContextRunPromise: Promise<FastContextScanResult | null> | null = null
   private standaloneFastContextAbortController: AbortController | null = null
-  private readCache: Map<string, { content: string; timestamp: number }> = new Map()
   // Registry of background PTY sessions the agent has spawned via
   // run_command(run_in_background=true). Tracks the command + start time so
   // list_terminals / read_terminal can label them. Foreground commands use
@@ -313,8 +313,6 @@ export class AgentEngine {
   private currentRunPromise: Promise<AgentTurn[]> | null = null
   private forceContextCompactionBeforeNextCall = false
   private contextLimitRetryInProgress = false
-  private readonly READ_CACHE_MAX_SIZE = 64
-  private readonly READ_CACHE_TTL_MS = 5 * 60 * 1000
 
   private toolExecutor: ToolExecutor
   private stateProvider: AgentStateProvider
@@ -734,7 +732,6 @@ export class AgentEngine {
     this.session.turns = this.session.turns.filter(t => t.role === 'system')
     this.taskManager.clear()
     this.toolCallTaskMap.clear()
-    this.readCache.clear()
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
     this.currentRunSuccessfulReadFiles.clear()
@@ -1231,7 +1228,6 @@ export class AgentEngine {
     await this.detectAndEnableGit()
     this.abortController = new AbortController()
     this.runtimeAppendSystemPrompt = null
-    this.readCache.clear()
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
     this.currentRunSuccessfulReadFiles.clear()
@@ -1434,7 +1430,6 @@ export class AgentEngine {
       throw error
     }
 
-    this.readCache.clear()
 
     return newTurns
     })()
@@ -1836,12 +1831,6 @@ Before retrying:
 4. If the error is environmental (missing dependency, permission), report it to the user instead of retrying
 5. After fixing the approach, re-attempt with corrected parameters
 </tool_retry_hint>`
-  }
-
-  private invalidateReadCache(filePath: string): void {
-    for (const key of this.readCache.keys()) {
-      if (key.startsWith(filePath)) this.readCache.delete(key)
-    }
   }
 
   private async capturePreimage(filePath: string): Promise<void> {
@@ -2401,6 +2390,7 @@ Before retrying:
     // turning an agentic request into a no-tool chat response.
     const openaiTools = toolsToOpenAIFormat(this.config.mode, {
       disabledTools: [],
+      strict: config.provider === 'openai',
     })
 
     if (this.mcpClient) {
@@ -4001,11 +3991,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? args.with_line_numbers === true
           : args.with_line_numbers !== false
 
-        const cacheKey = `${filePath}:${isFullRead ? 'full' : offset ?? 0}:${isFullRead ? 'full' : limit ?? 0}:${withLineNumbers ? 'n' : 'r'}`
-        const cached = this.readCache.get(cacheKey)
-        if (cached && (Date.now() - cached.timestamp) < this.READ_CACHE_TTL_MS) {
-          return cached.content
-        }
         const result = await this.toolExecutor.readFile(filePath)
         if (!result.success) {
           const relPath = this.toWorkspaceRelative(basePath, filePath)
@@ -4028,14 +4013,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? slice.map(formatLine).join('\n')
           : slice.join('\n')
 
-        if (this.readCache.has(cacheKey)) {
-          this.readCache.delete(cacheKey)
-        } else if (this.readCache.size >= this.READ_CACHE_MAX_SIZE) {
-          const oldestKey = this.readCache.keys().next().value
-          if (oldestKey) this.readCache.delete(oldestKey)
-        }
-        this.readCache.set(cacheKey, { content, timestamp: Date.now() })
-
         // If there is more content, hint continuation. Default read_file is
         // intentionally sliced so the model does not pull a huge file into
         // context when it only needs a local region.
@@ -4056,10 +4033,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.writeFile(filePath, args.content as string, {
           source: 'ai',
           label: 'AI write_file',
+          expectNotExists: true,
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File written: ${args.path}` : `Error: ${result.error}`
@@ -4075,10 +4052,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.writeFile(filePath, args.content as string, {
           source: 'ai',
           label: 'AI replace_file',
+          expectedHash: hashText(existing.data || ''),
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File replaced: ${args.path}` : `Error: ${result.error}`
@@ -4102,10 +4079,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const writeResult = await this.toolExecutor.writeFile(filePath, content, {
           source: 'ai',
           label: 'AI edit_file',
+          expectedHash: hashText(readResult.data || ''),
         })
         if (writeResult.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return writeResult.success
@@ -4147,10 +4124,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const writeResult = await this.toolExecutor.writeFile(filePath, content, {
           source: 'ai',
           label: 'AI multi_edit',
+          expectedHash: hashText(readResult.data || ''),
         })
         if (writeResult.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return writeResult.success
@@ -4497,14 +4474,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
       case 'delete_file': {
         const filePath = this.resolvePath(basePath, args.path as string)
+        const existing = await this.toolExecutor.readFile(filePath)
+        if (!existing.success) return `Error: unable to read file before deletion - ${existing.error}`
         await this.capturePreimage(filePath)
         const result = await this.toolExecutor.deleteFile(filePath, {
           source: 'ai',
           label: 'AI delete_file',
+          expectedHash: hashText(existing.data || ''),
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File deleted: ${args.path}` : `Error: ${result.error}`
@@ -4764,6 +4743,35 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         this.touchedFilePaths.clear()
         this.filePreimages.clear()
         return `Checkpoint created: ${cpResult.shortId} - ${checkpointMessage}`
+      }
+
+      case 'list_checkpoints': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await this.toolExecutor.checkpointList?.(basePath, args.limit as number | undefined)
+        if (!result?.success) return `Error: ${result?.error || 'unable to list checkpoints'}`
+        const checkpoints = result.data || []
+        if (checkpoints.length === 0) return 'No local history checkpoints.'
+        return checkpoints.map((checkpoint: any) =>
+          `- ${checkpoint.id} • ${checkpoint.label} • ${checkpoint.fileCount} file(s) • ${new Date(checkpoint.timestamp).toISOString()}`
+        ).join('\n')
+      }
+
+      case 'restore_checkpoint': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await this.toolExecutor.checkpointRestore?.(basePath, args.checkpoint_id as string)
+        if (!result?.success) return `Error: ${result?.error || 'checkpoint restore failed'}`
+        this.codemapSummary = null
+        this.codemapCacheKey = null
+        const restored = result.data?.restoredFiles || []
+        const safety = result.data?.safetyCheckpointId ? `\nSafety checkpoint: ${result.data.safetyCheckpointId}` : ''
+        return `Restored ${restored.length} file(s) from checkpoint.${safety}`
+      }
+
+      case 'prune_checkpoints': {
+        if (!basePath) return 'Error: no workspace selected'
+        const keepCount = typeof args.keep_count === 'number' ? args.keep_count : 50
+        const result = await this.toolExecutor.checkpointPrune?.(basePath, keepCount)
+        return result?.success ? `Kept the newest ${keepCount} checkpoint(s).` : `Error: ${result?.error || 'checkpoint prune failed'}`
       }
 
       case 'generate_change_summary': {

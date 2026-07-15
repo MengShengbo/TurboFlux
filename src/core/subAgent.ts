@@ -263,6 +263,20 @@ interface ToolCallRequest {
 
 type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
 
+async function fetchWithTimeout(url: string, init: RequestInit, parentSignal?: AbortSignal, timeoutMs = 120_000): Promise<Response> {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (parentSignal?.aborted) controller.abort()
+  else parentSignal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(abort, timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+    parentSignal?.removeEventListener('abort', abort)
+  }
+}
+
 function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, unknown>> {
   return messages.filter(message => message.role !== 'system').map(message => {
     if (message.role === 'assistant' && message.tool_calls?.length) {
@@ -416,12 +430,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       const headers = isAnthropic
         ? { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', ...customHeaders }
         : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, ...customHeaders }
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
-        signal: abortSignal,
-      })
+      }, abortSignal)
 
       if (!res.ok) {
         const errText = await res.text()

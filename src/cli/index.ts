@@ -2,7 +2,7 @@
 import { resolve } from 'path'
 import { Command } from 'commander'
 import { startRepl } from './repl'
-import { loadConfig, saveConfig, setConfigValue } from '../core/config'
+import { loadConfig, redactConfig, saveConfig, setConfigValue } from '../core/config'
 import { runSetup } from './setup'
 import type { ApprovalPolicy } from '../shared/agentTypes'
 
@@ -57,7 +57,7 @@ program
   .action(async (action: string, key?: string, value?: string) => {
     const config = await loadConfig()
     if (action === 'show') {
-      const display = { ...config, apiKey: config.apiKey ? '***' + config.apiKey.slice(-4) : '(not set)' }
+      const display = redactConfig(config)
       console.log(JSON.stringify(display, null, 2))
     } else if (action === 'set' && key && value) {
       try {

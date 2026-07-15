@@ -35,6 +35,7 @@ export interface ToolParameter {
   required: boolean
   enum?: string[]
   default?: unknown
+  schema?: Record<string, unknown>
 }
 
 export interface TaskNode {

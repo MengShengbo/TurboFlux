@@ -247,7 +247,7 @@ function attachmentManifestText(attachments: AgentAttachment[]): string {
     '<attachments>',
     'Image attachments are saved locally and are also attached to this message when the provider supports vision input.',
     ...attachments.map((attachment, index) =>
-      `<image name="[Image #${index + 1}]" path="${attachment.path}" mime="${attachment.mime}" filename="${attachment.filename}" size="${attachment.size}" />`
+      `<image name="[Image #${index + 1}]" mime="${attachment.mime}" filename="${attachment.filename}" size="${attachment.size}" local_path_redacted="true" />`
     ),
     '</attachments>',
   ].join('\n')
