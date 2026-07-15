@@ -4886,6 +4886,11 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
               type: 'fast_context:event',
               event: { type: 'insight', text: `${def.label} model pending (${Math.floor(event.elapsedMs / 1000)}s)`, tone: 'info' },
             })
+          } else if (event.type === 'model_retry') {
+            this.emit({
+              type: 'fast_context:event',
+              event: { type: 'insight', text: `${def.label} retrying model request: ${event.reason}`, tone: 'warning' },
+            })
           } else if (event.type === 'tool_call') {
             const argSummary = (() => { try { return JSON.stringify(event.args).slice(0, 120) } catch { return '' } })()
             this.emit({

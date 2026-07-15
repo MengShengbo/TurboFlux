@@ -175,6 +175,115 @@ describe('runSubAgent', () => {
     }
   })
 
+  it('retries a transient network failure and exposes the underlying cause', async () => {
+    const originalFetch = globalThis.fetch
+    const events: SubAgentEvent[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        const cause = Object.assign(new Error('socket closed'), {
+          code: 'ECONNRESET',
+          address: '127.0.0.1',
+          port: 443,
+        })
+        throw new TypeError('fetch failed', { cause })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'finished' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find the entry point',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'finished' })
+      expect(requestCount).toBe(2)
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'model_retry',
+        attempt: 2,
+        reason: expect.stringContaining('ECONNRESET'),
+      }))
+      expect(events.find(event => event.type === 'model_retry' && event.reason.includes('127.0.0.1:443'))).toBeTruthy()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it.each([429, 503])('retries transient HTTP status %s once', async status => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response('temporary failure', { status, headers: { 'retry-after': '0' } })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'finished' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find the entry point',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'finished' })
+      expect(requestCount).toBe(2)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('reports search infrastructure failures instead of pretending there were no matches', async () => {
     const originalFetch = globalThis.fetch
     const events: SubAgentEvent[] = []

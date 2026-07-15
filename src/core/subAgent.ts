@@ -264,6 +264,22 @@ interface ToolCallRequest {
 
 type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
 
+const TRANSIENT_HTTP_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504])
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENETDOWN',
+  'ENETRESET',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+])
+
 async function fetchWithTimeout(url: string, init: RequestInit, parentSignal?: AbortSignal, timeoutMs = 120_000): Promise<Response> {
   const controller = new AbortController()
   let timedOut = false
@@ -285,6 +301,96 @@ async function fetchWithTimeout(url: string, init: RequestInit, parentSignal?: A
     clearTimeout(timer)
     parentSignal?.removeEventListener('abort', abort)
   }
+}
+
+function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      const error = new Error('Aborted')
+      error.name = 'AbortError'
+      reject(error)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delayMs)
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function errorCode(error: unknown): string | undefined {
+  let current: unknown = error
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (typeof current === 'object') {
+      const code = (current as { code?: unknown }).code
+      if (typeof code === 'string') return code
+      current = (current as { cause?: unknown }).cause
+      continue
+    }
+    break
+  }
+  return undefined
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+  const code = errorCode(error)
+  if (code && TRANSIENT_NETWORK_CODES.has(code)) return true
+  return error instanceof TypeError && /fetch failed|network|socket/i.test(error.message)
+}
+
+function retryAfterMs(response: Response): number {
+  const value = response.headers.get('retry-after')?.trim()
+  if (!value) return 200
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.max(0, Math.min(2_000, seconds * 1_000))
+  const at = Date.parse(value)
+  return Number.isFinite(at) ? Math.max(0, Math.min(2_000, at - Date.now())) : 200
+}
+
+async function fetchWithTransientRetry(
+  url: string,
+  init: RequestInit,
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+  onRetry: (attempt: number, delayMs: number, reason: string) => void,
+): Promise<Response> {
+  const startedAt = Date.now()
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const remainingMs = timeoutMs - (Date.now() - startedAt)
+    if (remainingMs < 1) {
+      throw lastError || new Error(`Model request timed out after ${timeoutMs}ms`)
+    }
+
+    try {
+      const response = await fetchWithTimeout(url, init, parentSignal, remainingMs)
+      if (attempt === 1 && TRANSIENT_HTTP_STATUSES.has(response.status)) {
+        const delayMs = Math.min(retryAfterMs(response), Math.max(0, remainingMs - 1))
+        onRetry(2, delayMs, `API ${response.status}`)
+        await response.body?.cancel().catch(() => undefined)
+        await abortableDelay(delayMs, parentSignal)
+        continue
+      }
+      return response
+    } catch (error) {
+      lastError = error
+      const isAbort = parentSignal?.aborted || (error instanceof Error && error.name === 'AbortError')
+      const isTimeout = error instanceof Error && /timed out after \d+ms/i.test(error.message)
+      if (attempt === 2 || isAbort || isTimeout || !isTransientNetworkError(error)) throw error
+
+      const elapsedMs = Date.now() - startedAt
+      const delayMs = Math.min(200, Math.max(0, timeoutMs - elapsedMs - 1))
+      if (delayMs <= 0) throw error
+      onRetry(2, delayMs, formatSubAgentError(error))
+      await abortableDelay(delayMs, parentSignal)
+    }
+  }
+
+  throw lastError || new Error('Model request failed')
 }
 
 function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, unknown>> {
@@ -446,11 +552,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       const headers = isAnthropic
         ? { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', ...customHeaders }
         : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, ...customHeaders }
-      const res = await fetchWithTimeout(url, {
+      const res = await fetchWithTransientRetry(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
-      }, abortSignal, requestTimeoutMs)
+      }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
+        emit({ type: 'model_retry', turn, attempt, delayMs, reason })
+      })
 
       if (!res.ok) {
         const errText = await res.text()
@@ -476,8 +584,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       }
     } catch (e: any) {
       if (e.name === 'AbortError') return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'Aborted' }
-      emit({ type: 'error', message: e.message })
-      return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: e.message }
+      const message = formatSubAgentError(e)
+      emit({ type: 'error', message })
+      return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
     } finally {
       clearInterval(waitTimer)
     }
@@ -704,13 +813,19 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
 
 function formatSubAgentError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
-  const cause = error.cause
-  if (!cause) return error.message
-  if (cause instanceof Error) return `${error.message} (${cause.message})`
-  if (typeof cause === 'object') {
-    const details = cause as { code?: unknown; message?: unknown; address?: unknown; port?: unknown }
-    const parts = [details.code, details.message, details.address, details.port].filter(value => value !== undefined)
-    if (parts.length > 0) return `${error.message} (${parts.join(' ')})`
-  }
-  return `${error.message} (${String(cause)})`
+
+  const metadata = error as Error & { code?: unknown; address?: unknown; port?: unknown }
+  const endpoint = metadata.address !== undefined
+    ? `${String(metadata.address)}${metadata.port !== undefined ? `:${String(metadata.port)}` : ''}`
+    : metadata.port !== undefined ? `port ${String(metadata.port)}` : ''
+  const details = [metadata.code, endpoint].filter(value => value !== undefined && value !== '')
+  const suffix = details.length > 0 ? ` [${details.join(' ')}]` : ''
+  if (!error.cause) return `${error.message}${suffix}`
+
+  const cause = error.cause instanceof Error
+    ? formatSubAgentError(error.cause)
+    : typeof error.cause === 'object' && error.cause !== null
+      ? formatSubAgentError(Object.assign(new Error(String((error.cause as { message?: unknown }).message || 'request cause')), error.cause))
+      : String(error.cause)
+  return `${error.message}${suffix} (${cause})`
 }

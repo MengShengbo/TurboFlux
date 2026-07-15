@@ -324,6 +324,12 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
           : 'FastContext model request started',
         tone: 'info',
       })
+    } else if (event.type === 'model_retry') {
+      emit({
+        type: 'insight',
+        text: `retrying model request: ${trimText(event.reason, 120)}`,
+        tone: 'warning',
+      })
     } else if (event.type === 'tool_call') {
       const argSummary = (() => {
         const obj = (event.args && typeof event.args === 'object') ? (event.args as Record<string, unknown>) : {}
