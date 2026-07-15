@@ -23,6 +23,17 @@ export function centerTextBlock(lines: readonly string[], width: number): string
   return lines.map(line => `${prefix}${line}`)
 }
 
+export function revealTextBlock(lines: readonly string[], progress: number): string[] {
+  const blockWidth = lines.reduce((maximum, line) => Math.max(maximum, stringWidth(line)), 0)
+  const normalizedProgress = Math.max(0, Math.min(1, progress))
+  const visibleWidth = Math.round(blockWidth * normalizedProgress)
+
+  return lines.map(line => {
+    const visible = line.slice(0, visibleWidth)
+    return visible.padEnd(line.length, ' ')
+  })
+}
+
 export function shouldUseCompactWordmark(columns: number, rows: number): boolean {
   return columns < 88 || rows < 26
 }

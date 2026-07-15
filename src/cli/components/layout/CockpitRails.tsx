@@ -1,13 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
-import type { FastContextScanEvent, FastContextScanPhase } from '../../../core/fastContextTypes'
+import type { FastContextScanPhase } from '../../../core/fastContextTypes'
 import type { ActiveTaskContext } from '../../../core/taskManager'
 import type { TerminalSessionInfo } from '../../../shared/terminalTypes'
 import type { ToolStatus } from '../tools/ToolCallTree'
 import { formatToolLabelForHistory } from '../tools/ToolCallTree'
 import type { StreamingToolDraft } from '../tools/ActiveWorkPanel'
+import type { FastContextUiSummary } from './fastContextUi'
 
 export interface CockpitLayout {
   showWorkRail: boolean
@@ -27,10 +28,11 @@ interface WorkRailProps {
   isRunning: boolean
   tools: ToolStatus[]
   draft: StreamingToolDraft | null
-  fastContextEvents: FastContextScanEvent[]
+  fastContextSummary: FastContextUiSummary
   fastContextActive: boolean
   terminals: TerminalSessionInfo[]
   mcpCount: number
+  visible?: boolean
 }
 
 export function WorkRail({
@@ -38,13 +40,14 @@ export function WorkRail({
   isRunning,
   tools,
   draft,
-  fastContextEvents,
+  fastContextSummary,
   fastContextActive,
   terminals,
   mcpCount,
+  visible = true,
 }: WorkRailProps) {
   const theme = useTheme()
-  const fastContext = useMemo(() => summarizeFastContext(fastContextEvents), [fastContextEvents])
+  const fastContext = fastContextSummary
   const activeTerminals = terminals.filter(session => session.status === 'running' || session.status === 'starting').length
   const visibleTools = tools.slice(-3).reverse()
   const fastStatus = fastContextActive
@@ -52,6 +55,8 @@ export function WorkRail({
     : fastContext.events > 0
       ? fastContext.phase === 'error' ? 'ERROR' : 'COMPLETE'
       : 'READY'
+
+  if (!visible) return <HiddenRail width={width} side="left" />
 
   return (
     <Box
@@ -153,28 +158,33 @@ interface TaskRailProps {
   width: number
   task: ActiveTaskContext | null
   objective?: string | null
+  objectiveStartedAt?: number
   isRunning: boolean
+  visible?: boolean
 }
 
-export function TaskRail({ width, task, objective, isRunning }: TaskRailProps) {
+export function TaskRail({ width, task, objective, objectiveStartedAt, isRunning, visible = true }: TaskRailProps) {
   const theme = useTheme()
   const [, setTick] = useState(0)
   const activeTask = isRunning ? task : null
   const goal = getTaskRailGoal(activeTask, isRunning ? objective : null)
 
   useEffect(() => {
-    if (!activeTask || !isRunning) return
+    if ((!activeTask && !objectiveStartedAt) || !isRunning) return
     const timer = setInterval(() => setTick(value => value + 1), 1000)
     return () => clearInterval(timer)
-  }, [activeTask?.taskId, isRunning])
+  }, [activeTask?.taskId, objectiveStartedAt, isRunning])
 
   const completedCalls = activeTask?.toolCalls.filter(call => call.status !== 'running').length ?? 0
   const errors = activeTask?.toolCalls.filter(call => call.status === 'error').length ?? 0
   const latest = activeTask
     ? [...activeTask.toolCalls].reverse().find(call => call.status === 'running') ?? activeTask.toolCalls[activeTask.toolCalls.length - 1]
     : undefined
-  const elapsed = activeTask ? formatElapsed(Date.now() - activeTask.startedAt) : ''
+  const elapsedStartedAt = activeTask?.startedAt ?? objectiveStartedAt
+  const elapsed = elapsedStartedAt ? formatElapsed(Date.now() - elapsedStartedAt) : ''
   const progress = activeTask ? Math.max(0, Math.min(100, Math.round(activeTask.progress))) : 0
+
+  if (!visible) return <HiddenRail width={width} side="right" />
 
   return (
     <Box
@@ -231,13 +241,30 @@ export function TaskRail({ width, task, objective, isRunning }: TaskRailProps) {
             )}
           </Box>
         ) : isRunning && goal ? (
-          <Box marginTop={1}>
-            <Text color={theme.subtle}>PHASE </Text>
-            <Text color={theme.warning}>Building execution plan</Text>
+          <Box flexDirection="column" marginTop={1}>
+            <InfoRow label="Phase" value="PLANNING" color={theme.warning} />
+            {elapsed && <InfoRow label="Elapsed" value={elapsed} color={theme.info} />}
           </Box>
         ) : null}
       </Box>
     </Box>
+  )
+}
+
+function HiddenRail({ width, side }: { width: number; side: 'left' | 'right' }) {
+  const theme = useTheme()
+  return (
+    <Box
+      width={width}
+      flexShrink={0}
+      borderStyle="single"
+      borderTop={false}
+      borderBottom={false}
+      borderLeft={side === 'right'}
+      borderRight={side === 'left'}
+      borderColor={theme.divider}
+      backgroundColor={theme.panelBackground}
+    />
   )
 }
 
@@ -253,29 +280,6 @@ function formatObjective(objective: string, width: number): string {
 function formatDraft(draft: StreamingToolDraft, width: number): string {
   const path = draft.partialJson.match(/"path"\s*:\s*"([^"]+)/)?.[1]
   return cliTruncate(path ? `${draft.name} ${path}` : draft.name, Math.max(8, width - 4), { position: 'middle' })
-}
-
-function summarizeFastContext(events: FastContextScanEvent[]): {
-  events: number
-  phase: FastContextScanPhase
-  files: number
-  hits: number
-  latest: string
-} {
-  let phase: FastContextScanPhase = 'scanning'
-  let files = 0
-  let hits = 0
-  let latest = ''
-  for (const event of events) {
-    if (event.type === 'phase') phase = event.phase
-    if (event.type === 'file' && event.status === 'discovered') {
-      files++
-      latest = event.path
-    }
-    if (event.type === 'hit') hits++
-    if (event.type === 'worker' && event.currentPath) latest = event.currentPath
-  }
-  return { events: events.length, phase, files, hits, latest }
 }
 
 function phaseLabel(phase: FastContextScanPhase): string {

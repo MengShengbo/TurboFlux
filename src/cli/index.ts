@@ -19,6 +19,7 @@ program
   .option('-v, --verbose', 'show tool call details')
   .option('--no-flicker', 'use a fixed alternate-screen viewport to reduce redraw flicker')
   .option('--scrollback', 'use classic terminal scrollback instead of the fixed cockpit')
+  .option('--no-animation', 'skip the startup reveal animation')
   .option('--no-color', 'disable color output')
   .option('--approval-policy <policy>', 'tool approval policy: request, auto, or full', 'request')
   .option('--mcp <servers>', 'explicitly start configured MCP servers (comma-separated names or all)')
@@ -45,6 +46,7 @@ program
       noFlicker: opts.scrollback !== true,
       approvalPolicy,
       mcpServers,
+      startupAnimation: opts.animation !== false,
     })
   })
 

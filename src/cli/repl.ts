@@ -12,10 +12,11 @@ export interface ReplOptions {
   noFlicker?: boolean
   approvalPolicy?: ApprovalPolicy
   mcpServers?: string[]
+  startupAnimation?: boolean
 }
 
 export async function startRepl(options: ReplOptions): Promise<void> {
-  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers } = options
+  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation } = options
 
   if (!config.apiKey) {
     console.log(chalk.hex('#7cffea')('\n  No API key configured. Run "turboflux setup" to connect a model provider.\n'))
@@ -32,5 +33,5 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers })
+  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation })
 }

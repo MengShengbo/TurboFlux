@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
 import type { FastContextScanEvent, FastContextScanPhase } from '../../../core/fastContextTypes'
 import { SPINNER_CHARS, SPINNER_INTERVAL_MS } from '../spinner/constants'
+import type { FastContextUiSummary } from '../layout/fastContextUi'
 
 const SPIN = SPINNER_CHARS
 const TICK_MS = SPINNER_INTERVAL_MS
@@ -29,37 +30,29 @@ interface ScanState {
 
 interface FastContextBannerProps {
   events: FastContextScanEvent[]
+  summary: FastContextUiSummary
   isActive: boolean
 }
 
-export function FastContextBanner({ events, isActive }: FastContextBannerProps) {
+export function FastContextBanner({ events, summary, isActive }: FastContextBannerProps) {
   const theme = useTheme()
   const [tick, setTick] = useState(0)
-  const [state, setState] = useState<ScanState>({
-    phase: 'scanning',
-    wave: 1,
-    maxWaves: 4,
-    insight: '',
-    filesDiscovered: 0,
-    filesAbsorbed: 0,
-    hitCount: 0,
-    workers: new Map(),
-    recentFiles: [],
-  })
+  const state = useMemo(() => {
+    const recent = events.reduce(processEvent, createScanState())
+    return {
+      ...recent,
+      phase: summary.phase,
+      filesDiscovered: summary.files,
+      filesAbsorbed: summary.absorbed,
+      hitCount: summary.hits,
+    }
+  }, [events, summary])
 
   useEffect(() => {
     if (!isActive) return
     const id = setInterval(() => setTick(t => t + 1), TICK_MS)
     return () => clearInterval(id)
   }, [isActive])
-
-  useEffect(() => {
-    setState(prev => {
-      let next = prev
-      for (const event of events) next = processEvent(next, event)
-      return next
-    })
-  }, [events.length])
 
   if (!isActive && state.phase !== 'completed') return null
 
@@ -138,6 +131,20 @@ export function FastContextBanner({ events, isActive }: FastContextBannerProps) 
       )}
     </Box>
   )
+}
+
+function createScanState(): ScanState {
+  return {
+    phase: 'scanning',
+    wave: 1,
+    maxWaves: 4,
+    insight: '',
+    filesDiscovered: 0,
+    filesAbsorbed: 0,
+    hitCount: 0,
+    workers: new Map(),
+    recentFiles: [],
+  }
 }
 
 function shortenPath(p: string): string {

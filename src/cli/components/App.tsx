@@ -31,11 +31,13 @@ import type { MascotMood } from './header/Mascot'
 import { stripTextToolCallMarkup } from '../../shared/toolCallMarkup'
 import { useTerminalSize } from '../hooks/useTerminalSize'
 import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
-import { getSafeViewportWidth } from '../terminalLayout'
+import { getSafeFrameWidth, getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
 import { ThinkingModeRail } from './tools/ThinkingModeRail'
 import { resolveCockpitLayout, TaskRail, WorkRail } from './layout/CockpitRails'
+import { getStartupAnimationFrame, shouldAnimateStartup, STARTUP_ANIMATION_MS } from './layout/StartupAnimation'
+import { appendFastContextUiEvents, createFastContextUiSummary, reduceFastContextUiSummary } from './layout/fastContextUi'
 import { shouldUseCompactWordmark } from '../brand'
 import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
 
@@ -48,6 +50,7 @@ interface AppProps {
   noFlicker: boolean
   approvalPolicy?: ApprovalPolicy
   mcpServers?: string[]
+  startupAnimation?: boolean
 }
 
 type StaticTranscriptItem =
@@ -367,13 +370,13 @@ function CockpitRoot({ width, height, children }: { width: number; height: numbe
   )
 }
 
-function SessionPane({ running, children }: { running: boolean; children: React.ReactNode }) {
+function SessionPane({ running, visible, children }: { running: boolean; visible: boolean; children: React.ReactNode }) {
   const theme = useTheme()
   return (
     <Box flexDirection="column" flexGrow={1} flexShrink={1} backgroundColor={theme.background} overflow="hidden">
       <Box flexShrink={0} paddingX={1} backgroundColor={theme.panelRaised} justifyContent="space-between">
-        <Text color={theme.brand} bold>SESSION</Text>
-        <Text color={running ? theme.brandShimmer : theme.success} bold>{running ? '● RUNNING' : '● READY'}</Text>
+        <Text color={theme.brand} bold>{visible ? 'SESSION' : ' '}</Text>
+        <Text color={running ? theme.brandShimmer : theme.success} bold>{visible ? running ? '● RUNNING' : '● READY' : ' '}</Text>
       </Box>
       <Box flexDirection="column" flexGrow={1} flexShrink={1} paddingX={1} overflow="hidden">
         {children}
@@ -382,11 +385,33 @@ function SessionPane({ running, children }: { running: boolean; children: React.
   )
 }
 
-function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers }: AppProps) {
+function PromptPlaceholder() {
+  const theme = useTheme()
+  const { columns } = useTerminalSize()
+  return (
+    <Box
+      height={3}
+      width={getSafeFrameWidth(columns, 3)}
+      backgroundColor={theme.promptBackground}
+    />
+  )
+}
+
+function StatusPlaceholder() {
+  const theme = useTheme()
+  const { columns } = useTerminalSize()
+  return <Box height={1} width={getSafeFrameWidth(columns, 3)} backgroundColor={theme.panelRaised} />
+}
+
+function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation = true }: AppProps) {
   const { exit } = useApp()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const terminal = useTerminalSize()
   const noFlickerActive = noFlicker && isInteractive && !singleShot
+  const startupAnimationEnabled = shouldAnimateStartup(isInteractive, singleShot, startupAnimation && noFlickerActive)
+  const startupStartedAtRef = useRef(Date.now())
+  const [startupElapsed, setStartupElapsed] = useState(startupAnimationEnabled ? 0 : STARTUP_ANIMATION_MS)
+  const startupFrame = getStartupAnimationFrame(startupElapsed)
   const [config, setConfig] = useState(initialConfig)
   const [messages, setMessages] = useState<Message[]>([])
   const [staticTranscriptRevision, setStaticTranscriptRevision] = useState(0)
@@ -407,8 +432,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [lastActivity, setLastActivity] = useState<number>(Date.now())
   const [convListRevision, setConvListRevision] = useState(0)
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
+  const [fcSummary, setFcSummary] = useState(createFastContextUiSummary)
   const [fcActive, setFcActive] = useState(false)
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
+  const [activeObjective, setActiveObjective] = useState<{ prompt: string; startedAt: number } | null>(null)
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
   const [changeSummaries, setChangeSummaries] = useState<ChangeSummary[]>([])
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([])
@@ -429,6 +456,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const messageIdRef = useRef(0)
   const streamBufferRef = useRef('')
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fcEventBufferRef = useRef<FastContextScanEvent[]>([])
+  const fcFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fcActiveRef = useRef(false)
   const inputRef = useRef('')
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
   const isRunningRef = useRef(false)
@@ -466,6 +496,27 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
   const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath))
 
+  useEffect(() => {
+    if (!startupAnimationEnabled) {
+      setStartupElapsed(STARTUP_ANIMATION_MS)
+      return
+    }
+
+    startupStartedAtRef.current = Date.now()
+    setStartupElapsed(0)
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - startupStartedAtRef.current
+      setStartupElapsed(Math.min(STARTUP_ANIMATION_MS, elapsed))
+      if (elapsed >= STARTUP_ANIMATION_MS) clearInterval(timer)
+    }, 40)
+
+    return () => clearInterval(timer)
+  }, [startupAnimationEnabled])
+
+  const skipStartupAnimation = useCallback(() => {
+    setStartupElapsed(STARTUP_ANIMATION_MS)
+  }, [])
+
   useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
   useEffect(() => { queuedPromptsRef.current = queuedPrompts }, [queuedPrompts])
 
@@ -486,6 +537,42 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       streamFlushTimerRef.current = null
     }
   }, [])
+
+  const flushFastContextUi = useCallback(() => {
+    if (fcFlushTimerRef.current) {
+      clearTimeout(fcFlushTimerRef.current)
+      fcFlushTimerRef.current = null
+    }
+    const events = fcEventBufferRef.current
+    if (events.length === 0) return
+    fcEventBufferRef.current = []
+    setFcEvents(current => appendFastContextUiEvents(current, events))
+    setFcSummary(current => reduceFastContextUiSummary(current, events))
+    setLastActivity(Date.now())
+  }, [])
+
+  const queueFastContextUiEvent = useCallback((event: FastContextScanEvent) => {
+    fcEventBufferRef.current.push(event)
+    if (!fcFlushTimerRef.current) {
+      fcFlushTimerRef.current = setTimeout(flushFastContextUi, 80)
+    }
+  }, [flushFastContextUi])
+
+  const discardFastContextUiBuffer = useCallback(() => {
+    if (fcFlushTimerRef.current) {
+      clearTimeout(fcFlushTimerRef.current)
+      fcFlushTimerRef.current = null
+    }
+    fcEventBufferRef.current = []
+  }, [])
+
+  const resetFastContextUi = useCallback(() => {
+    discardFastContextUiBuffer()
+    fcActiveRef.current = false
+    setFcEvents([])
+    setFcSummary(createFastContextUiSummary())
+    setFcActive(false)
+  }, [discardFastContextUiBuffer])
 
   const appendMessages = useCallback((nextMessages: Message[], options?: { forceLatest?: boolean }) => {
     if (nextMessages.length === 0) return
@@ -530,9 +617,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     streamBufferRef.current = ''
     clearStreamFlushTimer()
     setStreamText('')
-    setFcEvents([])
+    resetFastContextUi()
     setFcActive(false)
     setActiveTask(null)
+    setActiveObjective(null)
     setTerminalSessions([])
     setPendingAsk(null)
     setAskInput('')
@@ -546,7 +634,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     clear()
     setIsRunning(false)
     setMood('idle')
-  }, [engine, stateProvider, clearStreamFlushTimer, clear, replaceMessages])
+  }, [engine, stateProvider, clearStreamFlushTimer, clear, replaceMessages, resetFastContextUi])
 
   const getRewindContextSegments = useCallback((turns: AgentTurn[]) => {
     const boundaryTime = turns.reduce((max, turn) => Math.max(max, turn.timestamp), 0)
@@ -677,11 +765,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           setLastActivity(Date.now())
           break
         case 'fast_context:event':
-          setFcEvents(prev => [...prev, event.event])
-          setFcActive(true)
-          setLastActivity(Date.now())
+          queueFastContextUiEvent(event.event)
+          if (!fcActiveRef.current) {
+            fcActiveRef.current = true
+            setFcActive(true)
+          }
           break
         case 'fast_context:complete':
+          flushFastContextUi()
+          fcActiveRef.current = false
           setFcActive(false)
           break
         case 'active:task':
@@ -722,11 +814,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     })
     return () => {
       clearStreamFlushTimer()
+      discardFastContextUiBuffer()
       unsub()
       convManager.destroy()
       runtime.destroy().catch(() => {})
     }
-  }, [engine, runtime, clearStreamFlushTimer, appendMessages])
+  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer])
 
   const getConversationEntries = useCallback((): ConversationEntry[] => {
     const convs = convManager.list()
@@ -815,12 +908,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
 
     const userMessageId = genMsgId()
+    setActiveObjective({ prompt, startedAt: Date.now() })
     activePromptRef.current = { prompt, attachments, messageId: userMessageId, responseStarted: false, priorTurns: [...engine.getSession().turns] }
     abortingRef.current = false
     abortRestoredPromptRef.current = false
     appendMessages([{ id: userMessageId, role: 'user', content: prompt }])
     if (!config.apiKey) {
       activePromptRef.current = null
+      setActiveObjective(null)
       appendMessages([{ id: genMsgId(), role: 'system', content: 'No model provider is configured yet. Exit and run `turboflux setup`, or set `/config apiKey <key>` manually.' }])
       if (singleShot) exit()
       return
@@ -833,7 +928,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setStreamText('')
     setCurrentTools([])
     setStreamingToolDraft(null)
-    setFcEvents([])
+    resetFastContextUi()
     setFcActive(false)
     setActiveTask(null)
     setChangeSummaries([])
@@ -870,6 +965,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       if (!abortingRef.current) setTimeout(() => setMood('idle'), 4000)
     } finally {
       activePromptRef.current = null
+      setActiveObjective(null)
       abortingRef.current = false
       abortRestoredPromptRef.current = false
       isRunningRef.current = false
@@ -877,7 +973,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       setTimeout(runNextQueuedPrompt, 0)
     }
     if (singleShot) exit()
-  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId])
+  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, resetFastContextUi])
 
   useEffect(() => {
     runPromptRef.current = runPrompt
@@ -1072,6 +1168,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, thinkingMode, workspacePath])
 
   useInput((ch, key) => {
+    if (!startupFrame.complete) {
+      skipStartupAnimation()
+      return
+    }
     if (key.ctrl && ch === 'c') {
       handleInterrupt()
       return
@@ -1122,7 +1222,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const runningNode = isRunning ? (
     <Box flexDirection="column" marginBottom={1}>
-      {!noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} isActive={fcActive} />}
+      {!noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} summary={fcSummary} isActive={fcActive} />}
       {!noFlickerActive && activeTask && <TaskProgressLine task={activeTask} />}
       <ActiveWorkPanel
         tools={noFlickerActive ? [] : currentTools}
@@ -1309,6 +1409,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               workspacePath={workspacePath}
               mood={mood}
               hasApiKey={!!config.apiKey}
+              logoReveal={startupFrame.logoReveal}
+              showVersion={startupFrame.showVersion}
+              showWorkspace={startupFrame.showWorkspace}
             />
           </Box>
 
@@ -1320,35 +1423,45 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   isRunning={isRunning}
                   tools={currentTools}
                   draft={streamingToolDraft}
-                  fastContextEvents={fcEvents}
+                  fastContextSummary={fcSummary}
                   fastContextActive={fcActive}
                   terminals={terminalSessions}
                   mcpCount={mcpCount}
+                  visible={startupFrame.showRails}
                 />
               )}
-              <SessionPane running={isRunning}>
+              <SessionPane running={isRunning} visible={startupFrame.showSession}>
                 {overlayNode ?? transcriptNode}
               </SessionPane>
               {cockpit.showTaskRail && (
-                <TaskRail width={cockpit.taskWidth} task={activeTask} isRunning={isRunning} />
+                <TaskRail
+                  width={cockpit.taskWidth}
+                  task={activeTask}
+                  objective={activeObjective?.prompt}
+                  objectiveStartedAt={activeObjective?.startedAt}
+                  isRunning={isRunning}
+                  visible={startupFrame.showRails}
+                />
               )}
             </Box>
             <Box flexDirection="column" flexShrink={0}>
               {pendingAskNode}
               {cursorHint}
-              {promptNode}
+              <AgentActivityLine active={isRunning || startupFrame.shimmerActive} persistent />
+              {startupFrame.showPrompt ? promptNode : showPrompt ? <PromptPlaceholder /> : null}
               <ThinkingModeRail notice={thinkingModeNotice} onDone={() => setThinkingModeNotice(null)} />
-              <AgentActivityLine active={isRunning} persistent />
-              <StatusLine
-                config={config}
-                tokenUsage={tokenUsage}
-                mode={currentMode}
-                thinkingMode={thinkingMode}
-                viewingHistory={isViewingHistory}
-                gitEnabled={gitEnabled}
-                mcpCount={mcpCount}
-                terminalCount={activeTerminalCount}
-              />
+              {startupFrame.showStatus ? (
+                <StatusLine
+                  config={config}
+                  tokenUsage={tokenUsage}
+                  mode={currentMode}
+                  thinkingMode={thinkingMode}
+                  viewingHistory={isViewingHistory}
+                  gitEnabled={gitEnabled}
+                  mcpCount={mcpCount}
+                  terminalCount={activeTerminalCount}
+                />
+              ) : <StatusPlaceholder />}
             </Box>
           </Box>
         </CockpitRoot>
@@ -1420,6 +1533,7 @@ export function startInkApp(options: {
   noFlicker?: boolean
   approvalPolicy?: ApprovalPolicy
   mcpServers?: string[]
+  startupAnimation?: boolean
 }) {
   const workspaceName = options.workspacePath.split(/[\\/]/).pop() || 'workspace'
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -1434,6 +1548,7 @@ export function startInkApp(options: {
       noFlicker={noFlicker}
       approvalPolicy={options.approvalPolicy}
       mcpServers={options.mcpServers}
+      startupAnimation={options.startupAnimation}
     />,
     {
       maxFps: noFlicker ? 24 : 18,

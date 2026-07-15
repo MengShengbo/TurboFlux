@@ -252,7 +252,7 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
 
   const placeholder = mode === 'plan' ? 'Describe what to plan...'
     : 'What are we building today?'
-  const frameWidth = getSafeFrameWidth(columns)
+  const frameWidth = getSafeFrameWidth(columns, 3)
   const cursorChar = value[cursorOffset] ?? ' '
   const beforeCursor = value.slice(0, cursorOffset)
   const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
@@ -271,11 +271,6 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
         </Box>
       )}
       <Box
-        borderStyle="single"
-        borderColor={theme.promptBorder}
-        borderTop={false}
-        borderBottom={false}
-        borderRight={false}
         width={frameWidth}
         flexDirection="row"
         paddingLeft={1}

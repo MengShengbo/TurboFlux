@@ -55,7 +55,7 @@ export function StatusLine({
   const barColor = ratio < 0.5 ? theme.success : ratio < 0.8 ? theme.warning : theme.error
 
   const isWide = columns > 80
-  const frameWidth = getSafeFrameWidth(columns)
+  const frameWidth = getSafeFrameWidth(columns, 3)
 
   const parts: string[] = []
   if (config.model) parts.push(config.model)
