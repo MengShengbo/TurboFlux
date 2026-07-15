@@ -37,6 +37,7 @@ export interface ContextSegment {
   originalCharCount: number
   isValid: boolean
   createdAt?: number
+  coveredTurnIds?: string[]
 }
 
 export interface ContextReservoirEntry {

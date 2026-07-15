@@ -59,6 +59,17 @@ type TaskSystemCreationEvent = {
   error?: string
 }
 
+export function splitTurnsForCompaction(turns: AgentTurn[], keepRecent: number): { oldTurns: AgentTurn[]; recentTurns: AgentTurn[] } {
+  let splitIndex = Math.max(0, turns.length - Math.max(1, keepRecent))
+  while (splitIndex > 0 && turns[splitIndex]?.role === 'tool_result') {
+    splitIndex -= 1
+  }
+  return {
+    oldTurns: turns.slice(0, splitIndex),
+    recentTurns: turns.slice(splitIndex),
+  }
+}
+
 type PromptModuleSnapshot = {
   id: string
   label: string
@@ -495,8 +506,7 @@ export class AgentEngine {
     const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
     if (nonSystemTurns.length <= keepRecent) return
 
-    const recentTurns = nonSystemTurns.slice(-keepRecent)
-    const oldTurns = nonSystemTurns.slice(0, -keepRecent)
+    const { oldTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
     if (oldTurns.length === 0) return
 
     const firstVisibleOldTurn = oldTurns.find(turn => turn.role === 'user' || turn.role === 'assistant')
@@ -533,6 +543,7 @@ export class AgentEngine {
         originalCharCount,
         isValid: true,
         createdAt: Date.now(),
+        coveredTurnIds: oldTurns.map(turn => turn.id),
       }
       this.stateProvider.addContextSegment(segment)
       this.emit({ type: 'context:segment_created', segment })
@@ -576,6 +587,23 @@ export class AgentEngine {
 
   setContextReservoir(entries: ContextReservoirEntry[]): void {
     this.stateProvider.setContextReservoir(entries)
+  }
+
+  getFullConversationTurns(): AgentTurn[] {
+    const systemTurns = this.session.turns.filter(turn => turn.role === 'system')
+    const liveTurns = this.session.turns.filter(turn => turn.role !== 'system')
+    const orderedIds: string[] = []
+    const turnsById = new Map<string, AgentTurn>()
+    const addTurn = (turn: AgentTurn) => {
+      if (!turnsById.has(turn.id)) orderedIds.push(turn.id)
+      turnsById.set(turn.id, turn)
+    }
+    this.stateProvider.getContextReservoir()
+      .slice()
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+      .forEach(entry => entry.turns.forEach(addTurn))
+    liveTurns.forEach(addTurn)
+    return [...systemTurns, ...orderedIds.map(id => turnsById.get(id)!).filter(Boolean)]
   }
 
   resetSession(): void {
@@ -1141,8 +1169,7 @@ export class AgentEngine {
     const keepRecent = resolveContextPolicyProfile(this.config.contextPolicy).recapKeepRecentTurns
     if (nonSystemTurns.length <= keepRecent + 4) return
 
-    const recapTurns = nonSystemTurns.slice(0, -keepRecent)
-    const recentTurns = nonSystemTurns.slice(-keepRecent)
+    const { oldTurns: recapTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
     const firstVisibleTurn = recapTurns.find(turn => turn.role === 'user' || turn.role === 'assistant')
     const lastVisibleTurn = [...recapTurns].reverse().find(turn => turn.role === 'user' || turn.role === 'assistant')
     if (!firstVisibleTurn || !lastVisibleTurn) return
@@ -1176,6 +1203,7 @@ export class AgentEngine {
       originalCharCount: recapTurns.reduce((sum, turn) => sum + this.countTurnChars(turn), 0),
       isValid: true,
       createdAt: Date.now(),
+      coveredTurnIds: recapTurns.map(turn => turn.id),
     }
     this.stateProvider.addContextSegment(segment)
     this.emit({ type: 'context:segment_created', segment })
@@ -1446,8 +1474,7 @@ export class AgentEngine {
     // from arxiv:2508.21433 — empirically optimal for SWE-bench agents).
     const keepRecent = 10
     const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
-    const recentTurns = nonSystemTurns.slice(-keepRecent)
-    const oldTurns = nonSystemTurns.slice(0, -keepRecent)
+    const { oldTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
 
     if (oldTurns.length === 0) return
 
@@ -1500,6 +1527,7 @@ export class AgentEngine {
       originalCharCount,
       isValid: true,
       createdAt: Date.now(),
+      coveredTurnIds: oldTurns.map(turn => turn.id),
     }
     this.stateProvider.addContextSegment(segment)
     this.emit({ type: 'context:segment_created', segment })

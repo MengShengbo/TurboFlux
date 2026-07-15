@@ -1,7 +1,7 @@
 import type { AgentEngine } from '../../core/agentEngine'
 import type { TurboFluxConfig } from '../../core/config'
 import type { PersistedConversation, ConversationMeta } from './types'
-import { saveConversation, loadConversation, listConversations, deleteConversation } from './store'
+import { saveConversation, loadConversation, listConversations, deleteConversation, sameWorkspacePath } from './store'
 
 export class ConversationManager {
   private currentId: string
@@ -30,9 +30,10 @@ export class ConversationManager {
 
   persist(): void {
     const session = this.engine.getSession()
-    if (session.turns.length === 0) return
+    const fullTurns = this.engine.getFullConversationTurns()
+    if (fullTurns.length === 0) return
 
-    const firstUserMsg = session.turns.find(t => t.role === 'user')
+    const firstUserMsg = fullTurns.find(t => t.role === 'user')
     const title = firstUserMsg
       ? firstUserMsg.content.slice(0, 60).replace(/\n/g, ' ')
       : 'Untitled'
@@ -46,9 +47,11 @@ export class ConversationManager {
       mode: session.mode,
       model: this.config.model,
       provider: this.config.provider,
-      turnCount: session.turns.length,
-      turns: session.turns,
+      turnCount: fullTurns.length,
+      turns: fullTurns,
+      activeTurns: session.turns,
       contextSegments: this.engine.getContextSegments(),
+      contextReservoir: this.engine.getContextReservoir(),
     }
     saveConversation(conv)
   }
@@ -60,23 +63,26 @@ export class ConversationManager {
   }
 
   list(): ConversationMeta[] {
-    return listConversations()
+    return listConversations(this.workspacePath)
   }
 
   switchTo(id: string): PersistedConversation | null {
     this.persist()
     const conv = loadConversation(id)
     if (!conv) return null
+    if (!sameWorkspacePath(conv.workspacePath, this.workspacePath)) return null
     this.currentId = id
     return conv
   }
 
   delete(id: string): boolean {
+    const conv = loadConversation(id)
+    if (!conv || !sameWorkspacePath(conv.workspacePath, this.workspacePath)) return false
     return deleteConversation(id)
   }
 
   resumeLast(): PersistedConversation | null {
-    const all = listConversations()
+    const all = listConversations(this.workspacePath)
     if (all.length === 0) return null
     return this.switchTo(all[0].id)
   }

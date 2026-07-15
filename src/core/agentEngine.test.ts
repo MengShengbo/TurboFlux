@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ToolCall, ToolResult } from '../shared/agentTypes'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, splitTurnsForCompaction } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -81,5 +81,21 @@ describe('AgentEngine MCP dispatch', () => {
     expect(result).toMatchObject({ isError: false, output: 'mcp result' })
     expect(callTool).toHaveBeenCalledWith('files', 'replace', { path: 'a.ts' })
     engine.destroy()
+  })
+})
+
+describe('context compaction boundaries', () => {
+  it('keeps assistant tool calls together with their tool results', () => {
+    const turns = [
+      { id: 'u1', role: 'user' as const, content: 'start', timestamp: 1 },
+      { id: 'a1', role: 'assistant' as const, content: '', timestamp: 2, toolCalls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.ts' } }] },
+      { id: 'tr1', role: 'tool_result' as const, content: 'result', timestamp: 3, toolResults: [{ toolCallId: 'tc1', name: 'read_file', output: 'result', isError: false }] },
+      { id: 'a2', role: 'assistant' as const, content: 'done', timestamp: 4 },
+    ]
+
+    const split = splitTurnsForCompaction(turns, 2)
+
+    expect(split.oldTurns.map(turn => turn.id)).toEqual(['u1'])
+    expect(split.recentTurns.map(turn => turn.id)).toEqual(['a1', 'tr1', 'a2'])
   })
 })

@@ -24,6 +24,26 @@ export interface RuntimeTokenUsageEvent {
   cacheHitRate?: number
 }
 
+function normalizeContextSegments(segments: ContextSegment[]): ContextSegment[] {
+  const normalized: ContextSegment[] = []
+  const sorted = segments.slice().sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+  for (const segment of sorted) {
+    const covered = new Set(segment.coveredTurnIds || [])
+    for (let index = normalized.length - 1; index >= 0; index -= 1) {
+      const existing = normalized[index]
+      const sameBoundary = existing.startMessageId === segment.startMessageId && existing.endMessageId === segment.endMessageId
+      const overlaps = covered.size > 0 && (existing.coveredTurnIds || []).some(id => covered.has(id))
+      if (sameBoundary || overlaps) normalized.splice(index, 1)
+    }
+    normalized.push({
+      ...segment,
+      coveredTurnIds: segment.coveredTurnIds ? [...segment.coveredTurnIds] : undefined,
+      createdAt: segment.createdAt ?? Date.now(),
+    })
+  }
+  return normalized
+}
+
 export class DefaultAgentStateProvider implements AgentStateProvider {
   private contextSegments: ContextSegment[] = []
   private contextReservoir: ContextReservoirEntry[] = []
@@ -123,28 +143,11 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
   }
 
   addContextSegment(segment: ContextSegment): void {
-    const createdAt = segment.createdAt ?? Date.now()
-    const nextSegment = { ...segment, createdAt }
-    const existingIndex = this.contextSegments.findIndex(existing =>
-      existing.startMessageId === nextSegment.startMessageId
-      && existing.endMessageId === nextSegment.endMessageId
-    )
-
-    if (existingIndex >= 0) {
-      this.contextSegments = this.contextSegments.map((existing, index) =>
-        index === existingIndex ? nextSegment : existing
-      )
-      return
-    }
-
-    this.contextSegments = [...this.contextSegments, nextSegment]
+    this.contextSegments = normalizeContextSegments([...this.contextSegments, segment])
   }
 
   setContextSegments(segments: ContextSegment[]): void {
-    this.contextSegments = segments.map(segment => ({
-      ...segment,
-      createdAt: segment.createdAt ?? Date.now(),
-    }))
+    this.contextSegments = normalizeContextSegments(segments)
   }
 
   getContextReservoir(): ContextReservoirEntry[] {

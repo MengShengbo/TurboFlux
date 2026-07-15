@@ -16,6 +16,7 @@ import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
 import type { AgentAttachment, AgentTurn, ApprovalPolicy, ChangeSummary, ThinkingMode, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
+import type { ContextReservoirEntry, ContextSegment } from '../../state/types'
 import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
 import { formatMarkdown } from './markdown/index'
@@ -469,10 +470,17 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setMessages(nextMessages)
   }, [])
 
-  const restoreCliStateFromTurns = useCallback((turns: AgentTurn[], nextInput = '', contextSegments = stateProvider.getContextSegments()) => {
-    engine.restoreFromTurns(turns)
+  const restoreCliStateFromTurns = useCallback((
+    activeTurns: AgentTurn[],
+    nextInput = '',
+    contextSegments: ContextSegment[] = [],
+    contextReservoir: ContextReservoirEntry[] = [],
+    transcriptTurns: AgentTurn[] = activeTurns,
+  ) => {
+    engine.restoreFromTurns(activeTurns)
     engine.setContextSegments(contextSegments)
-    replaceMessages(turnsToMessages(turns))
+    engine.setContextReservoir(contextReservoir)
+    replaceMessages(turnsToMessages(transcriptTurns))
     inputRef.current = nextInput
     setInput(nextInput)
     draftAttachmentsRef.current = []
@@ -1126,12 +1134,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     const targetMessage = messages[messageIndex]
     if (!targetMessage || targetMessage.role !== 'user') return
 
-    const currentTurns = engine.getSession().turns
+    const currentTurns = engine.getFullConversationTurns()
     const engineUserOrdinal = getEngineUserOrdinalForUiMessage(messages, currentTurns, messageIndex)
     const truncatedTurns = sliceTurnsBeforeNthUserTurn(currentTurns, engineUserOrdinal)
 
     pop()
-    restoreCliStateFromTurns(truncatedTurns, targetMessage.content, getRewindContextSegments(truncatedTurns))
+    restoreCliStateFromTurns(truncatedTurns, targetMessage.content, getRewindContextSegments(truncatedTurns), [], truncatedTurns)
     convManager.scheduleSave()
   }, [messages, engine, pop, restoreCliStateFromTurns, getRewindContextSegments, convManager])
 
@@ -1143,7 +1151,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         pop()
         const conv = convManager.switchTo(id)
         if (conv) {
-          restoreCliStateFromTurns(conv.turns, '', conv.contextSegments ?? [])
+          restoreCliStateFromTurns(
+            conv.activeTurns ?? conv.turns,
+            '',
+            conv.contextSegments ?? [],
+            conv.contextReservoir ?? [],
+            conv.turns,
+          )
         }
       }}
       onDelete={(id) => {

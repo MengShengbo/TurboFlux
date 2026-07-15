@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { homedir } from 'os'
 import type { ConversationMeta, PersistedConversation, ConversationIndex } from './types'
 
@@ -34,7 +34,15 @@ export function deleteConversation(id: string): boolean {
   return true
 }
 
-export function listConversations(): ConversationMeta[] {
+export function sameWorkspacePath(left: string, right: string): boolean {
+  const normalize = (value: string) => {
+    const resolved = resolve(value).replace(/\\/g, '/')
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  }
+  return normalize(left) === normalize(right)
+}
+
+export function listConversations(workspacePath?: string): ConversationMeta[] {
   ensureDir()
   const files = readdirSync(CONVERSATIONS_DIR).filter(f => f.endsWith('.json'))
   const metas: ConversationMeta[] = []
@@ -43,6 +51,7 @@ export function listConversations(): ConversationMeta[] {
     try {
       const raw = readFileSync(join(CONVERSATIONS_DIR, file), 'utf-8')
       const conv: PersistedConversation = JSON.parse(raw)
+      if (workspacePath && !sameWorkspacePath(conv.workspacePath, workspacePath)) continue
       metas.push({
         id: conv.id,
         title: conv.title,
@@ -52,7 +61,7 @@ export function listConversations(): ConversationMeta[] {
         mode: conv.mode,
         model: conv.model,
         provider: conv.provider,
-        turnCount: conv.turns.length,
+        turnCount: conv.turnCount || conv.turns.length,
       })
     } catch {
       // skip corrupted files

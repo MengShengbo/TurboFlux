@@ -63,4 +63,31 @@ describe('CliStateProvider context segments', () => {
 
     vi.restoreAllMocks()
   })
+
+  it('keeps only the newest overlapping context segment', () => {
+    const provider = new CliStateProvider(baseConfig, 'C:/workspace')
+    provider.addContextSegment({
+      startMessageId: 'u1',
+      endMessageId: 'a1',
+      coveredTurnIds: ['u1', 'a1'],
+      summary: 'older',
+      isModelGenerated: true,
+      originalCharCount: 10,
+      isValid: true,
+      createdAt: 1,
+    })
+    provider.addContextSegment({
+      startMessageId: 'u1',
+      endMessageId: 'a2',
+      coveredTurnIds: ['u1', 'a1', 'u2', 'a2'],
+      summary: 'newer',
+      isModelGenerated: true,
+      originalCharCount: 20,
+      isValid: true,
+      createdAt: 2,
+    })
+
+    expect(provider.getContextSegments()).toHaveLength(1)
+    expect(provider.getContextSegments()[0]?.summary).toBe('newer')
+  })
 })

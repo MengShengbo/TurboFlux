@@ -1,5 +1,6 @@
 import type { AgentMode, AgentTurn } from '../../shared/agentTypes'
 import type { ContextSegment } from '../../state/types'
+import type { ContextReservoirEntry } from '../../state/types'
 
 export interface ConversationMeta {
   id: string
@@ -15,7 +16,9 @@ export interface ConversationMeta {
 
 export interface PersistedConversation extends ConversationMeta {
   turns: AgentTurn[]
+  activeTurns?: AgentTurn[]
   contextSegments?: ContextSegment[]
+  contextReservoir?: ContextReservoirEntry[]
 }
 
 export interface ConversationIndex {
