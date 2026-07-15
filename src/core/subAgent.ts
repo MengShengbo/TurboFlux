@@ -244,6 +244,8 @@ export interface RunSubAgentOptions {
   codemap?: string | null
   abortSignal?: AbortSignal
   requestTimeoutMs?: number
+  retrievalContext?: string
+  initialEvidence?: SubAgentEvidence[]
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -434,7 +436,15 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     messages.push({ role: 'assistant', content: 'READY' })
   }
 
-  messages.push({ role: 'user', content: `Objective: ${objective}\n\nBuild a ranked code map: likely entry points, implementations, callers/config/schema, and suspected root-cause evidence. Be fast and precise.` })
+  const retrievalContext = options.retrievalContext?.trim()
+  messages.push({
+    role: 'user',
+    content: [
+      `Objective: ${objective}`,
+      retrievalContext ? `\nDeterministic prefetch (grounded starting points, not proof):\n${retrievalContext}` : '',
+      '\nBuild a ranked code map: likely entry points, implementations, callers/config/schema, and suspected root-cause evidence. Be fast and precise.',
+    ].filter(Boolean).join('\n'),
+  })
 
   const tools = [
     {
@@ -510,6 +520,19 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     return { ok: false, finalText: '', evidence: [], turns: 0, elapsedMs: Date.now() - startedAt, truncated: false, error: message }
   }
   let turn = 0
+  const collectedEvidence: SubAgentEvidence[] = [...(options.initialEvidence || [])]
+  const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
+  let searchRecoveryUsed = false
+  let readRecoveryUsed = false
+
+  const addEvidence = (evidence: SubAgentEvidence): void => {
+    const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
+    if (evidenceKeys.has(key)) return
+    evidenceKeys.add(key)
+    collectedEvidence.push(evidence)
+  }
+
+  const hasReadEvidence = (): boolean => collectedEvidence.some(evidence => /(?:file read|read confirmation|prefetch read)/i.test(evidence.reason))
 
   while (turn < definition.maxTurns) {
     if (abortSignal?.aborted) break
@@ -592,14 +615,32 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     }
 
     if (responseToolCalls.length === 0) {
+      const isFastContext = definition.id === 'fast_context'
+      if (isFastContext && !hasReadEvidence() && collectedEvidence.length > 0 && !readRecoveryUsed && turn < definition.maxTurns) {
+        messages.push({ role: 'assistant', content: messageText })
+        messages.push({
+          role: 'user',
+          content: 'Quality gate: candidate paths are not enough. Use read_file on the strongest candidates, inspect the relevant line ranges, then return the required RANKED_CODE_MAP with grounded evidence.',
+        })
+        readRecoveryUsed = true
+        continue
+      }
+      if (isFastContext && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
+        messages.push({ role: 'assistant', content: messageText })
+        messages.push({
+          role: 'user',
+          content: 'Recovery search: the first pass produced no concrete evidence. Rewrite the objective into exact identifiers, visible text, and likely file globs; run a different search strategy before concluding.',
+        })
+        searchRecoveryUsed = true
+        continue
+      }
       emit({ type: 'final', text: messageText })
       emit({ type: 'turn_complete', turn, calls: 0 })
-      return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: messageText }
+      return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: messageText, evidence: collectedEvidence }
     }
 
-    messages.push({ role: 'assistant', content: messageText, tool_calls: responseToolCalls })
-
     const toolCalls = responseToolCalls.slice(0, definition.maxParallel)
+    messages.push({ role: 'assistant', content: messageText, tool_calls: toolCalls })
     const entries = toolCalls.map(tc => {
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.function.arguments) } catch {}
@@ -640,6 +681,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       emit({ type: 'tool_result', tool: tc.function.name, ok: result.ok, summary: result.summary, turn })
 
       for (const ev of result.evidence) {
+        addEvidence(ev)
         emit({ type: 'evidence', evidence: ev })
       }
 
@@ -647,9 +689,24 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     }
 
     emit({ type: 'turn_complete', turn, calls: results.length })
+
+    if (
+      definition.id === 'fast_context'
+      && results.length > 0
+      && results.every(({ result }) => result.ok)
+      && results.every(({ result }) => result.evidence.length === 0)
+      && !searchRecoveryUsed
+      && turn < definition.maxTurns
+    ) {
+      messages.push({
+        role: 'user',
+        content: 'The last search wave returned no matches. Rewrite the query once using narrower and broader variants, related filenames, symbols, and visible text; do not conclude until one alternate search has run.',
+      })
+      searchRecoveryUsed = true
+    }
   }
 
-  return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, truncated: turn >= definition.maxTurns }
+  return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: turn >= definition.maxTurns }
 }
 
 interface ToolExecResult {

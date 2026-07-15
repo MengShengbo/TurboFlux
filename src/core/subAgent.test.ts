@@ -284,6 +284,202 @@ describe('runSubAgent', () => {
     }
   })
 
+  it('rewrites an empty search wave once before concluding', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)))
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'search-1',
+                function: { name: 'search_content', arguments: JSON.stringify({ pattern: 'missing' }) },
+              }],
+            },
+          }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'RANKED_CODE_MAP\nUNCERTAINTY: no evidence' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 2,
+      maxParallel: 2,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find missing behavior',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      })
+
+      expect(result.ok).toBe(true)
+      expect(requestBodies).toHaveLength(2)
+      expect(JSON.stringify(requestBodies[1].messages)).toContain('last search wave returned no matches')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('requires read evidence before accepting a FastContext final report', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)))
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'RANKED_CODE_MAP\n1. src/a.ts candidate only' } }],
+        }), { status: 200 })
+      }
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'read-1',
+                function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/a.ts', offset: 1, limit: 20 }) },
+              }],
+            },
+          }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'RANKED_CODE_MAP\n1. src/a.ts L1-L2 role=entry confidence=high' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: 'export const entry = true\nrun()' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 3,
+      maxParallel: 2,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find entry',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        initialEvidence: [{
+          path: 'src/a.ts',
+          startLine: 1,
+          endLine: 1,
+          preview: 'src/a.ts',
+          reason: 'prefetch search: entry',
+        }],
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: expect.stringContaining('L1-L2') })
+      expect(requestBodies).toHaveLength(3)
+      expect(JSON.stringify(requestBodies[1].messages)).toContain('Quality gate: candidate paths are not enough')
+      expect(result.evidence?.some(evidence => evidence.reason === 'file read')).toBe(true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('keeps only executable tool calls in assistant history when parallel calls are capped', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)))
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [
+                { id: 'read-a', function: { name: 'read_file', arguments: JSON.stringify({ path: 'a.ts' }) } },
+                { id: 'read-b', function: { name: 'read_file', arguments: JSON.stringify({ path: 'b.ts' }) } },
+              ],
+            },
+          }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'finished' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async (path: string) => ({ success: true, data: `content for ${path}` }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 2,
+      maxParallel: 1,
+    }
+
+    try {
+      await runSubAgent({
+        definition,
+        objective: 'read candidates',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      })
+
+      const assistantMessage = requestBodies[1].messages.find((message: any) => message.role === 'assistant' && message.tool_calls)
+      expect(assistantMessage.tool_calls).toHaveLength(1)
+      expect(assistantMessage.tool_calls[0].id).toBe('read-a')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('reports search infrastructure failures instead of pretending there were no matches', async () => {
     const originalFetch = globalThis.fetch
     const events: SubAgentEvent[] = []

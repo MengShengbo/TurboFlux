@@ -1,3 +1,4 @@
+import { isAbsolute, join, relative } from 'path'
 import type {
   FastContextConfidence,
   FastContextEvidenceKind,
@@ -27,6 +28,11 @@ const STOP_WORDS = new Set([
   'current', 'now', 'then', 'there', 'here', 'read', 'write', 'edit',
 ])
 
+const PREFETCH_FILE_GLOBS = [
+  '**/{package.json,pyproject.toml,Cargo.toml,go.mod,composer.json,pom.xml,build.gradle,Makefile}',
+  '**/{index,main,app,server,client,router,routes,cli}.{ts,tsx,js,jsx,mjs,cjs,py,rs,go,java,kt}',
+]
+
 interface RunParams {
   workspacePath: string
   objective: string
@@ -55,6 +61,12 @@ interface CandidateSummary {
   kinds: FastContextEvidenceKind[]
   reasons: string[]
   symbols: string[]
+}
+
+interface DeterministicPrefetchResult {
+  evidence: SubAgentEvidence[]
+  context: string
+  errors: string[]
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -98,6 +110,217 @@ export function __testObjectiveTokens(objective: string): string[] {
   }
 
   return Array.from(new Set(tokens)).slice(0, 32)
+}
+
+export function __testSelectPrefetchTokens(objective: string): string[] {
+  return selectPrefetchTokens(__testObjectiveTokens(objective))
+}
+
+function selectPrefetchTokens(tokens: string[]): string[] {
+  const preferred = tokens.filter(token => token.length >= 2 && !STOP_WORDS.has(token))
+  const codeLike = preferred.filter(token => /[a-z0-9_$]/i.test(token) && (/[._/$-]/.test(token) || /[a-z]/i.test(token)))
+  const chinese = preferred.filter(token => /[\u4e00-\u9fff]/u.test(token))
+  return Array.from(new Set([
+    ...codeLike.slice(0, 4),
+    ...chinese.slice(0, 3),
+    ...preferred.slice(0, 4),
+  ])).slice(0, 6)
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function toWorkspaceRelative(workspacePath: string, value: unknown): string {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const absolutePath = isAbsolute(raw) ? raw : join(workspacePath, raw)
+  const relativePath = relative(workspacePath, absolutePath).replace(/\\/g, '/')
+  if (!relativePath || relativePath === '.' || relativePath.startsWith('../')) return ''
+  return relativePath.replace(/^\.\//, '')
+}
+
+function formatPrefetchError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+function dedupeEvidence(evidence: SubAgentEvidence[]): SubAgentEvidence[] {
+  const seen = new Set<string>()
+  return evidence.filter(item => {
+    const key = `${item.path}:${item.startLine}-${item.endLine}:${item.reason}:${item.preview}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function buildPrefetchContext(evidence: SubAgentEvidence[]): string {
+  const confirmed = evidence.filter(item => /prefetch read confirmation/i.test(item.reason)).slice(0, 6)
+  const candidates = evidence
+    .filter(item => !/prefetch read confirmation/i.test(item.reason))
+    .slice(0, 10)
+  const lines: string[] = []
+
+  if (confirmed.length > 0) {
+    lines.push('read-confirmed candidates:')
+    for (const item of confirmed) {
+      lines.push(`- ${item.path}:${item.startLine}-${item.endLine} ${trimText(item.preview.replace(/\s+/g, ' '), 260)}`)
+    }
+  }
+  if (candidates.length > 0) {
+    lines.push('search candidates:')
+    for (const item of candidates) {
+      lines.push(`- ${item.path}:${item.startLine} ${trimText(item.preview.replace(/\s+/g, ' '), 180)}`)
+    }
+  }
+  return lines.join('\n') || 'No deterministic candidates were found; use independent search strategies.'
+}
+
+async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Promise<DeterministicPrefetchResult> {
+  const selectedTokens = selectPrefetchTokens(tokens)
+  const tasks: Array<{
+    label: string
+    kind: 'files' | 'content' | 'symbols'
+    token?: string
+    pattern?: string
+    run: () => Promise<any>
+  }> = []
+
+  for (const pattern of PREFETCH_FILE_GLOBS) {
+    tasks.push({
+      label: `glob ${pattern}`,
+      kind: 'files',
+      pattern,
+      run: () => params.toolExecutor.searchFiles(pattern, params.workspacePath),
+    })
+  }
+  for (const token of selectedTokens.slice(0, 4)) {
+    tasks.push({
+      label: `content ${token}`,
+      kind: 'content',
+      token,
+      run: () => params.toolExecutor.searchContent(escapeRegExp(token), params.workspacePath, undefined, true),
+    })
+  }
+  for (const token of selectedTokens.filter(value => /^[a-z_$][a-z0-9_$.-]{2,}$/i.test(value)).slice(0, 3)) {
+    tasks.push({
+      label: `symbols ${token}`,
+      kind: 'symbols',
+      token,
+      run: () => params.toolExecutor.searchCodeSymbols({ workspacePath: params.workspacePath, query: token, limit: 8 }),
+    })
+  }
+
+  const settled = await Promise.allSettled(tasks.map(task => task.run()))
+  const evidence: SubAgentEvidence[] = []
+  const errors: string[] = []
+
+  settled.forEach((item, index) => {
+    const task = tasks[index]
+    if (item.status === 'rejected') {
+      errors.push(`${task.label}: ${formatPrefetchError(item.reason)}`)
+      return
+    }
+    const result = item.value
+    if (!result?.success) {
+      errors.push(`${task.label}: ${result?.error || 'search failed'}`)
+      return
+    }
+
+    if (task.kind === 'files') {
+      const matches = Array.isArray(result.data?.matches) ? result.data.matches : []
+      for (const match of matches.slice(0, 12)) {
+        const path = toWorkspaceRelative(params.workspacePath, match)
+        if (!path) continue
+        evidence.push({
+          path,
+          startLine: 1,
+          endLine: 1,
+          preview: path,
+          reason: `prefetch glob: ${task.pattern}`,
+        })
+      }
+      return
+    }
+
+    if (task.kind === 'content') {
+      const hits = Array.isArray(result.data) ? result.data : []
+      for (const hit of hits.slice(0, 12)) {
+        const path = toWorkspaceRelative(params.workspacePath, hit?.file)
+        const line = Math.max(1, Number(hit?.line) || 1)
+        if (!path) continue
+        evidence.push({
+          path,
+          startLine: Math.max(1, line - 2),
+          endLine: line + 2,
+          preview: String(hit?.text || ''),
+          reason: `prefetch search: ${task.token}`,
+        })
+      }
+      return
+    }
+
+    const hits = Array.isArray(result.data) ? result.data : []
+    for (const hit of hits.slice(0, 8)) {
+      const path = toWorkspaceRelative(params.workspacePath, hit?.path)
+      const line = Math.max(1, Number(hit?.line || hit?.startLine) || 1)
+      if (!path) continue
+      evidence.push({
+        path,
+        startLine: line,
+        endLine: Math.max(line, Number(hit?.endLine) || line + 5),
+        preview: String(hit?.preview || hit?.subtitle || hit?.title || ''),
+        reason: `prefetch symbol: ${task.token}`,
+        symbol: hit?.symbolName || hit?.title,
+      })
+    }
+  })
+
+  const uniqueEvidence = dedupeEvidence(evidence)
+  const grouped = new Map<string, FastContextScanHit[]>()
+  const candidateEvidence = uniqueEvidence.filter(item => !/prefetch glob/i.test(item.reason))
+  const evidenceForRanking = candidateEvidence.length > 0
+    ? candidateEvidence
+    : uniqueEvidence
+  for (const item of evidenceForRanking) {
+    const hit = decorateHit(item, tokens, 'prefetch')
+    const list = grouped.get(hit.path) || []
+    list.push(hit)
+    grouped.set(hit.path, list)
+  }
+
+  const readTargets = summarizeCandidates(grouped).slice(0, 4)
+  const readResults = await Promise.all(readTargets.map(async candidate => {
+    if (params.abortSignal?.aborted) return null
+    const filePath = join(params.workspacePath, candidate.path)
+    const result = await params.toolExecutor.readFile(filePath)
+    if (!result.success || typeof result.data !== 'string') {
+      errors.push(`read ${candidate.path}: ${result.error || 'read failed'}`)
+      return null
+    }
+    const lines = result.data.split(/\r?\n/)
+    const targetLine = Math.max(1, candidate.hits[0]?.startLine || 1)
+    const start = Math.max(0, Math.min(lines.length, targetLine - 8))
+    const end = Math.min(lines.length, Math.max(start + 1, targetLine + 17))
+    return {
+      path: candidate.path,
+      startLine: start + 1,
+      endLine: end,
+      preview: lines.slice(start, end).join('\n'),
+      reason: 'prefetch read confirmation',
+    } satisfies SubAgentEvidence
+  }))
+
+  const allEvidence = dedupeEvidence([
+    ...uniqueEvidence,
+    ...readResults.filter((item): item is SubAgentEvidence => Boolean(item)),
+  ])
+  return {
+    evidence: allEvidence,
+    context: buildPrefetchContext(allEvidence),
+    errors,
+  }
 }
 
 function countTokenMatches(value: string, tokens: string[]): number {
@@ -227,10 +450,15 @@ export function __testBuildEvidencePack(
 ): string {
   const fallbackRanked = summarizeCandidates(candidates).slice(0, 7)
   const finalReport = trimLlmReport(llmReport)
+  const readConfirmedCount = Array.from(candidates.values())
+    .flat()
+    .filter(hit => /(?:file read|read confirmation|prefetch read)/i.test(hit.reason || ''))
+    .length
   const lines: string[] = [
     '<fast_context_pack role="code_map_locator">',
     `objective: ${objective}`,
     `retrieval: ${turns} turn(s), ${elapsedMs}ms`,
+    `quality: ${readConfirmedCount} read-confirmed evidence range(s)`,
     'authority: llm_subagent_report_first; local evidence ranking is only a fallback/checksum.',
     'isolation: subagent raw tool history is not injected; only this compact report and fallback evidence enter the main context.',
     '',
@@ -272,6 +500,7 @@ function trimLlmReport(value?: string): string {
   const text = (value || '').trim()
   if (!text) return ''
   const normalized = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+  if (!/^RANKED_CODE_MAP\b/m.test(normalized)) return ''
   return normalized.length > 5000 ? `${normalized.slice(0, 4999)}...` : normalized
 }
 
@@ -340,7 +569,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     } else if (event.type === 'tool_result') {
       emit({ type: 'insight', text: event.summary, tone: event.ok ? 'info' : 'warning' })
     } else if (event.type === 'evidence') {
-      const key = `${event.evidence.path}:${event.evidence.startLine}-${event.evidence.endLine}`
+      const key = `${event.evidence.path}:${event.evidence.startLine}-${event.evidence.endLine}:${event.evidence.reason}`
       if (seenHitKeys.has(key)) return
       seenHitKeys.add(key)
       const workerId = currentTurn > 0 ? `map-pass-${currentTurn}` : undefined
@@ -370,6 +599,25 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     }
   }
 
+  emit({ type: 'insight', text: 'running deterministic workspace prefetch', tone: 'info' })
+  const prefetch = await runDeterministicPrefetch(params, tokens)
+  for (const evidence of prefetch.evidence) {
+    onSubEvent({ type: 'evidence', evidence })
+  }
+  if (prefetch.errors.length > 0) {
+    emit({
+      type: 'insight',
+      text: `prefetch completed with ${prefetch.errors.length} recoverable error(s): ${trimText(prefetch.errors[0], 140)}`,
+      tone: 'warning',
+    })
+  } else {
+    emit({
+      type: 'insight',
+      text: `prefetch found ${prefetch.evidence.length} evidence range(s) across ${candidates.size} file(s)`,
+      tone: prefetch.evidence.length > 0 ? 'success' : 'warning',
+    })
+  }
+
   const result = await runSubAgent({
     definition: def as any,
     objective: params.objective,
@@ -383,11 +631,20 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     codemap: params.codemap,
     abortSignal: params.abortSignal,
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
+    retrievalContext: prefetch.context,
+    initialEvidence: prefetch.evidence,
     onEvent: onSubEvent,
   })
 
-  if (!result.ok) {
+  if (!result.ok && prefetch.evidence.length === 0) {
     throw new Error(result.error || 'FastContext locator failed')
+  }
+  if (!result.ok) {
+    emit({
+      type: 'insight',
+      text: `model ranking unavailable; using deterministic evidence (${trimText(result.error || 'request failed', 120)})`,
+      tone: 'warning',
+    })
   }
 
   emit({
@@ -399,7 +656,15 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   })
 
   const ranked = summarizeCandidates(candidates)
-  const evidencePack = __testBuildEvidencePack(params.objective, candidates, result.elapsedMs, result.turns, result.truncated ?? false, result.finalText)
+  const truncated = (result.truncated ?? false) || !result.ok
+  const evidencePack = __testBuildEvidencePack(
+    params.objective,
+    candidates,
+    result.elapsedMs,
+    result.turns,
+    truncated,
+    result.ok ? result.finalText : undefined,
+  )
 
   emit({
     type: 'phase',
@@ -422,6 +687,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     filesScanned: candidates.size,
     hits: allHits,
     elapsedMs: Date.now() - startedAt,
-    truncated: result.truncated ?? false,
+    truncated,
   }
 }

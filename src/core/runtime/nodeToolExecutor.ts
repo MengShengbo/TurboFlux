@@ -199,6 +199,15 @@ export class NodeToolExecutor implements ToolExecutor {
         '--max-count=50',
         '--glob=!.git/**',
         '--glob=!node_modules/**',
+        '--glob=!dist/**',
+        '--glob=!build/**',
+        '--glob=!coverage/**',
+        '--glob=!.next/**',
+        '--glob=!.turbo/**',
+        '--glob=!.cache/**',
+        '--glob=!.turboflux/**',
+        '--glob=!target/**',
+        '--glob=!vendor/**',
         '--glob=!.env',
         '--glob=!.env.local',
         '--glob=!.env.*.local',
@@ -282,6 +291,7 @@ export class NodeToolExecutor implements ToolExecutor {
         `(export\\s+default\\s+)?(function|class)\\s+\\w*${this.escapeRegex(query.query)}\\w*`,
       ]
       const results: CodeSearchHit[] = []
+      let ripgrepUnavailable = false
       for (const pattern of patterns) {
         const args = [
           '--line-number',
@@ -323,18 +333,26 @@ export class NodeToolExecutor implements ToolExecutor {
           }
         } catch (e: any) {
           if (e.code === 1 || e.exitCode === 1) continue
+          if (e.code === 'ENOENT') {
+            ripgrepUnavailable = true
+            break
+          }
+          return { success: false, error: e instanceof Error ? e.message : String(e), data: [] }
         }
         if (results.length >= (query.limit || 10)) break
       }
       const limit = query.limit || 10
+      const fallback = results.length === 0 || ripgrepUnavailable
+        ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit)
+        : []
       return {
         success: true,
         data: results.length > 0
           ? results.slice(0, limit)
-          : this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit),
+          : fallback,
       }
     } catch (e) {
-      return { success: true, data: [] }
+      return { success: false, error: e instanceof Error ? e.message : String(e), data: [] }
     }
   }
 
