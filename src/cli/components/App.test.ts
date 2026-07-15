@@ -7,6 +7,7 @@ import {
   formatTaskToolSummary,
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
+  turnsToMessages,
 } from './App'
 import type { Message } from './messages/Messages'
 import type { AgentTurn } from '../../shared/agentTypes'
@@ -124,5 +125,23 @@ describe('rewind helpers', () => {
     ]
 
     expect(sliceTurnsBeforeNthUserTurn(turns, 1).map(turn => turn.id)).toEqual(['turn-u1', 'turn-a1'])
+  })
+})
+
+describe('interrupted assistant messages', () => {
+  it('preserves the interrupted marker when restoring engine turns', () => {
+    const messages = turnsToMessages([{
+      id: 'partial-assistant',
+      role: 'assistant',
+      content: 'partial response',
+      timestamp: 1,
+      metadata: { interrupted: true },
+    }])
+
+    expect(messages).toEqual([expect.objectContaining({
+      id: 'partial-assistant',
+      content: 'partial response',
+      interrupted: true,
+    })])
   })
 })

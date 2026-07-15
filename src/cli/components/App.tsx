@@ -170,7 +170,7 @@ function serializeToolArgsForUi(args: Record<string, unknown> | undefined): stri
   return JSON.stringify(clone)
 }
 
-function turnsToMessages(turns: AgentTurn[]): Message[] {
+export function turnsToMessages(turns: AgentTurn[]): Message[] {
   const resultByToolCallId = new Map<string, NonNullable<AgentTurn['toolResults']>[number]>()
   for (const turn of turns) {
     if (turn.role !== 'tool_result' || !turn.toolResults) continue
@@ -201,6 +201,7 @@ function turnsToMessages(turns: AgentTurn[]): Message[] {
       content: turn.content,
       tools: tools && tools.length > 0 ? tools : undefined,
       changes: changes && changes.length > 0 ? changes : undefined,
+      interrupted: turn.metadata?.interrupted === true,
     }]
   })
 }
@@ -678,17 +679,25 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           const changesSnapshot = changeSummariesRef.current
           const visibleText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
           if (visibleText || toolsSnapshot.length > 0 || changesSnapshot.length > 0) {
-            appendMessages([{ id: genMsgId(), role: 'assistant', content: visibleText, tools: [...toolsSnapshot], changes: [...changesSnapshot] }])
+            appendMessages([{
+              id: genMsgId(),
+              role: 'assistant',
+              content: visibleText,
+              tools: [...toolsSnapshot],
+              changes: [...changesSnapshot],
+              interrupted: event.interrupted === true,
+            }])
           }
           setStreamText('')
           setCurrentTurnOutputTokens(0)
           setCurrentTools([])
           setChangeSummaries([])
+          setStreamingToolDraft(null)
           setIsRunning(false)
-          setMood('happy')
+          setMood(event.interrupted ? 'idle' : 'happy')
           setTokenUsage(engine.getContextUsage())
           convManager.scheduleSave()
-          setTimeout(() => setMood('idle'), 3000)
+          if (!event.interrupted) setTimeout(() => setMood('idle'), 3000)
           break
         }
         case 'session:complete':
@@ -928,17 +937,33 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         }
       }
     } catch (e: any) {
+      const bufferedStreamText = streamBufferRef.current
+      const visibleInterruptedText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
+      const toolsSnapshot = currentToolsRef.current
+      const changesSnapshot = changeSummariesRef.current
+      const interrupted = abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))
       streamBufferRef.current = ''
       clearStreamFlushTimer()
       setStreamText('')
       setStreamingToolDraft(null)
       if (abortRestoredPromptRef.current) {
         // The prompt is already back in the editor; avoid adding a synthetic transcript row.
-      } else if (abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))) {
+      } else if (interrupted && (visibleInterruptedText || toolsSnapshot.length > 0 || changesSnapshot.length > 0)) {
+        appendMessages([{
+          id: genMsgId(),
+          role: 'assistant',
+          content: visibleInterruptedText,
+          tools: [...toolsSnapshot],
+          changes: [...changesSnapshot],
+          interrupted: true,
+        }])
+      } else if (interrupted) {
         appendMessages([{ id: genMsgId(), role: 'system', content: 'Interrupted.' }])
       } else {
         appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${e.message}` }])
       }
+      setCurrentTools([])
+      setChangeSummaries([])
       setIsRunning(false)
       setMood(abortingRef.current ? 'idle' : 'error')
       if (!abortingRef.current) setTimeout(() => setMood('idle'), 4000)

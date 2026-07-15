@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolCall, ToolResult } from '../shared/agentTypes'
+import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, splitTurnsForCompaction } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -138,6 +138,180 @@ describe('AgentEngine FastContext scheduling', () => {
     } finally {
       engine.destroy()
       globalThis.fetch = originalFetch
+    }
+  })
+})
+
+describe('AgentEngine interrupted streams', () => {
+  function createHarness(provider: 'custom' | 'anthropic', streamLine?: string) {
+    const workspace = process.cwd()
+    const runtimeConfig = {
+      provider,
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }
+    const stateProvider = new DefaultAgentStateProvider(runtimeConfig, workspace)
+    let engine!: AgentEngine
+    const streamAbort = vi.fn(async () => {})
+    const executor = {
+      streamMessage: vi.fn(async (_url: string, _headers: Record<string, string>, _body: string, onLine: (line: string) => void) => {
+        if (streamLine) onLine(streamLine)
+        engine.abort()
+        return { success: false, error: 'Request aborted' }
+      }),
+      streamAbort,
+    } as unknown as ToolExecutor
+    engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      maxTurns: 2,
+      workspacePath: workspace,
+    }, executor, stateProvider)
+    ;(engine as unknown as { abortController: AbortController }).abortController = new AbortController()
+    const events: AgentEventType[] = []
+    engine.subscribe(event => events.push(event))
+    return { engine, stateProvider, events, streamAbort }
+  }
+
+  it('keeps partial OpenAI-compatible text and strips incomplete tool markup', async () => {
+    const line = `data: ${JSON.stringify({
+      choices: [{ delta: { content: 'Keep this answer.\n<tool_calls><invoke name="read_file">' }, finish_reason: null }],
+    })}`
+    const { engine, stateProvider, events, streamAbort } = createHarness('custom', line)
+    const internal = engine as unknown as {
+      callOpenAICompatibleAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callOpenAICompatibleAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        [{ role: 'system', content: 'system' }, { role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn.content).toBe('Keep this answer.')
+      expect(turn.metadata?.interrupted).toBe(true)
+      expect(turn.toolCalls).toBeUndefined()
+      expect(events).toContainEqual({ type: 'stream:end', interrupted: true })
+      expect(streamAbort).toHaveBeenCalledOnce()
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('keeps partial Anthropic text as an interrupted assistant turn', async () => {
+    const line = `data: ${JSON.stringify({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: 'Anthropic partial response' },
+    })}`
+    const { engine, stateProvider, events } = createHarness('anthropic', line)
+    const internal = engine as unknown as {
+      callAnthropicAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        systemPrompt: string,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callAnthropicAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        'system',
+        [{ role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn.content).toBe('Anthropic partial response')
+      expect(turn.metadata?.interrupted).toBe(true)
+      expect(events).toContainEqual({ type: 'stream:end', interrupted: true })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('does not create an empty assistant turn when interrupted before output', async () => {
+    const { engine, stateProvider, events } = createHarness('custom')
+    const internal = engine as unknown as {
+      callOpenAICompatibleAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      await expect(internal.callOpenAICompatibleAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        [{ role: 'system', content: 'system' }, { role: 'user', content: 'hello' }],
+        Date.now(),
+      )).rejects.toMatchObject({ message: 'aborted', aborted: true })
+      expect(events).toContainEqual({ type: 'stream:end', interrupted: true })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('persists a partial assistant turn through the full run loop', async () => {
+    const workspace = process.cwd()
+    const runtimeConfig = {
+      provider: 'custom' as const,
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }
+    const stateProvider = new DefaultAgentStateProvider(runtimeConfig, workspace)
+    const executor = new NodeToolExecutor(workspace)
+    let engine!: AgentEngine
+    const streamAbort = vi.spyOn(executor, 'streamAbort').mockResolvedValue()
+    vi.spyOn(executor, 'streamMessage').mockImplementation(async (_url, _headers, _body, onLine) => {
+      onLine(`data: ${JSON.stringify({
+        choices: [{ delta: { content: 'Persist this partial reply.' }, finish_reason: null }],
+      })}`)
+      engine.abort()
+      return { success: false, error: 'Request aborted' }
+    })
+    engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      maxTurns: 2,
+      workspacePath: workspace,
+    }, executor, stateProvider)
+
+    try {
+      const turns = await engine.run('start a partial response')
+      const assistantTurn = turns.find(turn => turn.role === 'assistant')
+
+      expect(assistantTurn?.content).toBe('Persist this partial reply.')
+      expect(assistantTurn?.metadata?.interrupted).toBe(true)
+      expect(engine.getSession().turns.at(-1)).toMatchObject({
+        role: 'assistant',
+        content: 'Persist this partial reply.',
+        metadata: expect.objectContaining({ interrupted: true }),
+      })
+      expect(streamAbort).toHaveBeenCalledOnce()
+    } finally {
+      engine.destroy()
     }
   })
 })

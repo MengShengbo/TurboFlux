@@ -45,7 +45,7 @@ import { getSubAgentDefinition, runSubAgent, loadDynamicAgents, getAvailableAgen
 import type { ToolExecutor, WebSearchResult } from '../tools/executor'
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
 import type { TreeNode } from '../shared/types'
-import { parseTextToolCalls } from '../shared/toolCallMarkup'
+import { parseTextToolCalls, stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import { detectGitRepo, fetchGitInfo, formatGitStatusForPrompt, gitCommitCheckpoint, gitResetToCommit } from './gitService'
 import { hashText } from './fileIO'
 
@@ -93,7 +93,7 @@ export type AgentEventType =
   | { type: 'stream:thinking_delta'; text: string }
   | { type: 'stream:tool_call_delta'; toolCallId: string; toolName: string; partialJson: string }
   | { type: 'stream:start' }
-  | { type: 'stream:end' }
+  | { type: 'stream:end'; interrupted?: boolean }
   | { type: 'stream:usage'; usage: TokenUsage }
   | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string }
   | { type: 'active:task'; context: import('./taskManager').ActiveTaskContext | null }
@@ -2087,9 +2087,7 @@ Before retrying:
       const errAborted = (error as { aborted?: boolean })?.aborted === true
         || this.abortController?.signal.aborted === true
       if (errAborted) {
-        // Surface as an empty assistant turn; outer loop will break on the
-        // next abort check without polluting the conversation with an error.
-        return this.createAssistantTurn('', undefined, { mode: this.config.mode })
+        throw error
       }
       const errorMsg = error instanceof Error ? error.message : 'API call failed'
       if (this.isContextLimitError(errorMsg) && !this.contextLimitRetryInProgress) {
@@ -2366,8 +2364,8 @@ Before retrying:
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
-        // User-initiated stop. Don't propagate as a model error; let the outer
-        // run-loop notice abortController.signal.aborted and break cleanly.
+        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
         const err = new Error('aborted') as Error & { aborted?: boolean }
         err.aborted = true
         throw err
@@ -2709,6 +2707,8 @@ Before retrying:
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
+        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
         const err = new Error('aborted') as Error & { aborted?: boolean }
         err.aborted = true
         throw err
@@ -5131,6 +5131,20 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       toolCalls,
       metadata: finalMetadata,
     }
+  }
+
+  private finishInterruptedStream(textContent: string, model: APIModel | null, startTime: number): AgentTurn | null {
+    const visibleText = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+    this.emit({ type: 'stream:end', interrupted: true })
+    if (!visibleText) return null
+    return this.createAssistantTurn(visibleText, undefined, {
+      model: model?.name,
+      duration: Date.now() - startTime,
+      mode: this.config.mode,
+      thinkingMode: this.thinkingMode,
+      resolvedThinkingMode: this.resolvedThinkingMode,
+      interrupted: true,
+    })
   }
 
   private createToolResultTurn(results: ToolResult[]): AgentTurn {

@@ -163,7 +163,7 @@ export function MessageList({
                 />
               </Box>
             ))}
-            <AssistantMessage content={msg.content} />
+            <AssistantMessage content={msg.content} interrupted={msg.interrupted} />
           </Box>
         )
       })}

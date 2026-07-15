@@ -11,6 +11,7 @@ export interface Message {
   content: string
   tools?: ToolStatus[]
   changes?: ChangeSummary[]
+  interrupted?: boolean
 }
 
 export function UserMessage({ content }: { content: string; key?: any }) {
@@ -23,11 +24,13 @@ export function UserMessage({ content }: { content: string; key?: any }) {
   )
 }
 
-export function AssistantMessage({ content }: { content: string; key?: any }) {
+export function AssistantMessage({ content, interrupted = false }: { content: string; interrupted?: boolean; key?: any }) {
+  const theme = useTheme()
   if (!content) return null
   return (
-    <Box>
+    <Box flexDirection="column">
       <Text>{formatMarkdown(content)}</Text>
+      {interrupted && <Text dimColor color={theme.inactive}>Interrupted</Text>}
     </Box>
   )
 }

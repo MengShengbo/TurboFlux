@@ -81,6 +81,7 @@ export interface AgentTurn {
     resolvedThinkingMode?: ResolvedThinkingMode
     thinking?: ThinkingTrace
     rawReasoningPayload?: RawReasoningPayload
+    interrupted?: boolean
     checkpointId?: string
     checkpointLabel?: string
     attachments?: AgentAttachment[]
