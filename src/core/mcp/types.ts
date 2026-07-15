@@ -16,4 +16,10 @@ export interface McpToolInfo {
   description: string
   inputSchema: Record<string, unknown>
   serverName: string
+  annotations?: {
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+    idempotentHint?: boolean
+    openWorldHint?: boolean
+  }
 }

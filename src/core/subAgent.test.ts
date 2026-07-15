@@ -55,6 +55,7 @@ describe('runSubAgent', () => {
       toolExecutor: executor,
       apiKey: 'test',
       baseUrl: 'http://example.test',
+      model: 'test-model',
     })
 
     globalThis.fetch = originalFetch
@@ -62,5 +63,61 @@ describe('runSubAgent', () => {
     expect(result.ok).toBe(true)
     expect(calls.map(call => call.path.replace(/\\/g, '/'))).toEqual(['C:/repo/a.ts', 'C:/repo/b.ts'])
     expect(Math.abs(calls[1].at - calls[0].at)).toBeLessThan(40)
+  })
+
+  it('uses Anthropic messages, headers, and tool-result blocks', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(input), init })
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          content: [{ type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.ts' } }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: 'finished' }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: 'export const value = 1' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'inspect code',
+      maxTurns: 2,
+      maxParallel: 2,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'inspect a.ts',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'anthropic-key',
+        baseUrl: 'https://api.anthropic.test/v1',
+        provider: 'anthropic',
+        model: 'claude-test',
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'finished' })
+      expect(requests).toHaveLength(2)
+      expect(requests[0].url).toBe('https://api.anthropic.test/v1/messages')
+      expect(new Headers(requests[0].init?.headers).get('x-api-key')).toBe('anthropic-key')
+      const secondBody = JSON.parse(String(requests[1].init?.body))
+      expect(JSON.stringify(secondBody.messages)).toContain('tool_result')
+      expect(secondBody.model).toBe('claude-test')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })

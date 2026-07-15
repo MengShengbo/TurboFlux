@@ -53,6 +53,10 @@ export class PermissionPipeline {
       return { verdict: 'allow', reason: 'Previously approved this session' }
     }
 
+    if (toolName.includes('__') && this.approvalPolicy !== 'full') {
+      return { verdict: 'ask', reason: 'MCP tools require explicit approval before sharing data or taking action' }
+    }
+
     if (toolName === 'run_command') {
       const askResult = this.checkAskCommandPatterns(args)
       if (askResult) return askResult
@@ -120,6 +124,7 @@ export class PermissionPipeline {
   }
 
   private requiresApproval(toolName: string): boolean {
+    if (toolName.includes('__')) return true
     return [
       'write_file',
       'replace_file',

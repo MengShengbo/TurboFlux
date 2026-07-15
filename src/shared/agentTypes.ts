@@ -25,6 +25,7 @@ export interface AgentTool {
   isDestructive: boolean
   isConcurrencySafe: boolean
   requiredMode?: AgentMode[]
+  inputSchema?: Record<string, unknown>
 }
 
 export interface ToolParameter {

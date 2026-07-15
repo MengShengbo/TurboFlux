@@ -5,6 +5,7 @@ import type { ToolExecutor } from '../tools/executor'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
 import type { SkillRuntime } from './skills/runtime'
 import type { LoadedSkill } from './skills/loader'
+import { normalizeBaseUrl } from './normalizeBaseUrl'
 
 export { type SubAgentDefinition }
 
@@ -237,6 +238,8 @@ export interface RunSubAgentOptions {
   toolExecutor: ToolExecutor
   apiKey: string
   baseUrl: string
+  provider?: string
+  customHeaders?: Record<string, string>
   model?: string
   codemap?: string | null
   abortSignal?: AbortSignal
@@ -258,12 +261,40 @@ interface ToolCallRequest {
   function: { name: string; arguments: string }
 }
 
+type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
+
+function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, unknown>> {
+  return messages.filter(message => message.role !== 'system').map(message => {
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      return {
+        role: 'assistant',
+        content: [
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+          ...message.tool_calls.map(toolCall => ({
+            type: 'tool_use',
+            id: toolCall.id,
+            name: toolCall.function.name,
+            input: JSON.parse(toolCall.function.arguments || '{}'),
+          })),
+        ],
+      }
+    }
+    if (message.role === 'tool') {
+      return {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: message.tool_call_id, content: message.content }],
+      }
+    }
+    return { role: message.role, content: message.content }
+  })
+}
+
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
-  const { definition, objective, workspacePath, toolExecutor, apiKey, baseUrl, model, codemap, abortSignal, onEvent } = options
+  const { definition, objective, workspacePath, toolExecutor, apiKey, baseUrl, provider, customHeaders, model, codemap, abortSignal, onEvent } = options
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
 
-  const messages: Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string }> = []
+  const messages: SubAgentMessage[] = []
 
   messages.push({ role: 'system', content: definition.systemPrompt })
 
@@ -341,7 +372,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     },
   ]
 
-  const modelId = model?.trim() || definition.driver?.trim()
+  const modelId = model?.trim()
   if (!modelId) {
     const message = `Subagent ${definition.label} requires an active model from the main agent.`
     emit({ type: 'error', message })
@@ -354,21 +385,41 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     turn++
     emit({ type: 'turn_start', turn, maxTurns: definition.maxTurns })
 
-    let response: any
+    let messageText = ''
+    let responseToolCalls: ToolCallRequest[] = []
     try {
-      const body = JSON.stringify({
-        model: modelId,
-        messages,
-        tools,
-        temperature: definition.temperature ?? 0,
-        max_tokens: definition.maxOutputTokens || 4096,
-        stream: false,
-      })
-
-      const res = await fetch(`${baseUrl}/chat/completions`, {
+      const isAnthropic = provider === 'anthropic'
+      const requestBody = isAnthropic
+        ? {
+            model: modelId,
+            system: definition.systemPrompt,
+            messages: toAnthropicMessages(messages),
+            tools: tools.map(tool => ({
+              name: tool.function.name,
+              description: tool.function.description,
+              input_schema: tool.function.parameters,
+            })),
+            temperature: definition.temperature ?? 0,
+            max_tokens: definition.maxOutputTokens || 4096,
+          }
+        : {
+            model: modelId,
+            messages,
+            tools,
+            temperature: definition.temperature ?? 0,
+            max_tokens: definition.maxOutputTokens || 4096,
+            stream: false,
+          }
+      const url = isAnthropic
+        ? `${baseUrl.replace(/\/+$/, '')}/messages`
+        : `${normalizeBaseUrl(baseUrl)}/chat/completions`
+      const headers = isAnthropic
+        ? { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', ...customHeaders }
+        : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, ...customHeaders }
+      const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body,
+        headers,
+        body: JSON.stringify(requestBody),
         signal: abortSignal,
       })
 
@@ -378,28 +429,37 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: `API error: ${res.status}` }
       }
 
-      response = await res.json()
+      const response: any = await res.json()
+      if (isAnthropic) {
+        const blocks = Array.isArray(response.content) ? response.content : []
+        messageText = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text || '').join('')
+        responseToolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any) => ({
+          id: block.id,
+          function: { name: block.name, arguments: JSON.stringify(block.input || {}) },
+        }))
+      } else {
+        const choice = response.choices?.[0]
+        if (!choice) {
+          return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'No response choice' }
+        }
+        messageText = choice.message?.content || ''
+        responseToolCalls = choice.message?.tool_calls || []
+      }
     } catch (e: any) {
       if (e.name === 'AbortError') return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'Aborted' }
       emit({ type: 'error', message: e.message })
       return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: e.message }
     }
 
-    const choice = response.choices?.[0]
-    if (!choice) {
-      return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'No response choice' }
-    }
-
-    const msg = choice.message
-    if (!msg.tool_calls || msg.tool_calls.length === 0) {
-      emit({ type: 'final', text: msg.content || '' })
+    if (responseToolCalls.length === 0) {
+      emit({ type: 'final', text: messageText })
       emit({ type: 'turn_complete', turn, calls: 0 })
-      return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: msg.content }
+      return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: messageText }
     }
 
-    messages.push({ role: 'assistant', content: msg.content || '', tool_calls: msg.tool_calls })
+    messages.push({ role: 'assistant', content: messageText, tool_calls: responseToolCalls })
 
-    const toolCalls = (msg.tool_calls as ToolCallRequest[]).slice(0, definition.maxParallel)
+    const toolCalls = responseToolCalls.slice(0, definition.maxParallel)
     const entries = toolCalls.map(tc => {
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.function.arguments) } catch {}

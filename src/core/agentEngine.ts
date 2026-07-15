@@ -1,5 +1,6 @@
 ﻿import type {
   AgentMode,
+  AgentTool,
   AgentSession,
   AgentTurn,
   AgentConfig,
@@ -31,7 +32,7 @@ import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import type { FastContextScanEvent, FastContextScanResult } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
 import { runFastContextSubagent } from './fastContextSubagent'
-import { isMcpTool, parseMcpToolName, executeMcpTool, getMcpAgentTools } from './mcp/toolBridge'
+import { isMcpTool, parseMcpToolName, executeMcpTool, getMcpAgentTools, validateMcpToolArgs } from './mcp/toolBridge'
 import type { McpClient } from './mcp/client'
 import type { SubAgentEvent, SubAgentEvidence } from '../shared/subAgentTypes'
 import type { CodeMapNode, CodeSearchHit, CodeSymbolKind } from '../shared/codeIndexTypes'
@@ -1884,6 +1885,8 @@ Before retrying:
         toolExecutor: this.toolExecutor,
         apiKey: fastContextConfig?.apiKey || '',
         baseUrl: fastContextConfig?.baseUrl || 'https://api.deepseek.com',
+        provider: fastContextConfig?.provider,
+        customHeaders: fastContextConfig?.customHeaders,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
         codemap: skeleton,
         abortSignal: options.signal,
@@ -2050,14 +2053,13 @@ Before retrying:
     if (this.mcpClient) {
       const mcpTools = getMcpAgentTools(this.mcpClient)
       for (const tool of mcpTools.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (this.config.mode === 'plan' && !tool.isReadOnly) continue
         anthropicTools.push({
           name: tool.name,
           description: tool.description,
-          input_schema: {
+          input_schema: tool.inputSchema || {
             type: 'object',
-            properties: Object.fromEntries(
-              tool.parameters.map(p => [p.name, { type: p.type, description: p.description }])
-            ),
+            properties: Object.fromEntries(tool.parameters.map(p => [p.name, { type: p.type, description: p.description }])),
             required: tool.parameters.filter(p => p.required).map(p => p.name),
           },
         })
@@ -2376,12 +2378,13 @@ Before retrying:
     if (this.mcpClient) {
       const mcpTools = getMcpAgentTools(this.mcpClient)
       for (const tool of mcpTools.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (this.config.mode === 'plan' && !tool.isReadOnly) continue
         openaiTools.push({
           type: 'function',
           function: {
             name: tool.name,
             description: tool.description,
-            parameters: {
+            parameters: tool.inputSchema || {
               type: 'object',
               properties: Object.fromEntries(tool.parameters.map(p => [p.name, { type: p.type, description: p.description }])),
               required: tool.parameters.filter(p => p.required).map(p => p.name),
@@ -3640,7 +3643,11 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private isWriteToolCall(toolCall: ToolCall): boolean {
-    return ['write_file', 'replace_file', 'edit_file', 'multi_edit', 'delete_file', 'create_checkpoint', 'run_command'].includes(toolCall.name)
+    return this.resolveToolDefinition(toolCall.name)?.isReadOnly === false
+  }
+
+  private resolveToolDefinition(name: string): AgentTool | undefined {
+    return getToolByName(name) || (this.mcpClient ? getMcpAgentTools(this.mcpClient).find(tool => tool.name === name) : undefined)
   }
 
   private isReadAfterWriteSensitiveToolCall(toolCall: ToolCall): boolean {
@@ -3652,7 +3659,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     let hasSeenWrite = false
 
     for (const tc of toolCalls) {
-      const tool = getToolByName(tc.name)
+      const tool = this.resolveToolDefinition(tc.name)
       const isReadAfterWrite = hasSeenWrite && this.isReadAfterWriteSensitiveToolCall(tc)
       const isSafe = (tool?.isConcurrencySafe ?? false) && !isReadAfterWrite
 
@@ -3671,7 +3678,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private async executeSingleTool(toolCall: ToolCall): Promise<ToolResult> {
-    const tool = getToolByName(toolCall.name)
+    const tool = this.resolveToolDefinition(toolCall.name)
 
     if (!tool) {
       return {
@@ -3711,7 +3718,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     }
 
     // Validate tool arguments
-    const validation = validateToolArgs(toolCall.name, toolCall.arguments)
+    const validation = isMcpTool(toolCall.name) && tool.inputSchema
+      ? validateMcpToolArgs(tool.inputSchema, toolCall.arguments)
+      : validateToolArgs(toolCall.name, toolCall.arguments)
     if (!validation.valid) {
       return {
         toolCallId: toolCall.id,
@@ -4829,14 +4838,19 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         }
         const enrichedObjective = extraContext ? `${objective}\n\nAdditional context from parent agent:\n${extraContext}` : objective
         const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
+        const activeConfig = this.stateProvider.getActiveConfig()
+        const activeModel = this.stateProvider.getActiveModel()
         try {
           const result = await runSubAgent({
             definition: def,
             objective: enrichedObjective,
             workspacePath: this.config.workspacePath,
             toolExecutor: this.toolExecutor,
-            apiKey: this.stateProvider.getActiveConfig()?.apiKey || '',
-            baseUrl: this.stateProvider.getActiveConfig()?.baseUrl || 'https://api.deepseek.com',
+            apiKey: activeConfig?.apiKey || '',
+            baseUrl: activeConfig?.baseUrl || 'https://api.deepseek.com',
+            provider: activeConfig?.provider,
+            customHeaders: activeConfig?.customHeaders,
+            model: activeModel?.id || activeConfig?.defaultModel,
             codemap: skeleton,
             abortSignal: this.abortController?.signal,
             onEvent: onSubEvent,

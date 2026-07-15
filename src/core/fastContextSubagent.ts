@@ -31,6 +31,8 @@ interface RunParams {
   toolExecutor: ToolExecutor
   apiKey: string
   baseUrl: string
+  provider?: string
+  customHeaders?: Record<string, string>
   maxTurns?: number
   maxParallel?: number
   model?: string
@@ -357,6 +359,8 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     toolExecutor: params.toolExecutor,
     apiKey: params.apiKey,
     baseUrl: params.baseUrl,
+    provider: params.provider,
+    customHeaders: params.customHeaders,
     model: params.model,
     codemap: params.codemap,
     abortSignal: params.abortSignal,

@@ -141,6 +141,11 @@ describe('PermissionPipeline', () => {
   })
 
   describe('approval policies', () => {
+    it('asks before MCP tools even under auto policy', () => {
+      const pipeline = new PermissionPipeline('auto')
+      expect(pipeline.check('files__read', { path: 'secret.txt' })).toMatchObject({ verdict: 'ask' })
+    })
+
     it('request policy asks before write tools', () => {
       const pipeline = new PermissionPipeline('request')
       const result = pipeline.check('write_file', { path: 'notes.md', content: 'hello' })

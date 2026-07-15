@@ -4,15 +4,33 @@ import type { McpToolInfo } from './types'
 
 export function mcpToolToAgentTool(tool: McpToolInfo): AgentTool {
   const params = extractParameters(tool.inputSchema)
+  const isReadOnly = tool.annotations?.readOnlyHint === true
+  const isDestructive = isReadOnly ? false : tool.annotations?.destructiveHint !== false
   return {
     name: tool.name,
     description: `[MCP:${tool.serverName}] ${tool.description}`,
-    category: 'read',
+    category: isReadOnly ? 'read' : 'execute',
     parameters: params,
-    isReadOnly: true,
-    isDestructive: false,
-    isConcurrencySafe: true,
+    isReadOnly,
+    isDestructive,
+    isConcurrencySafe: isReadOnly && tool.annotations?.openWorldHint !== true,
+    inputSchema: tool.inputSchema,
   }
+}
+
+export function validateMcpToolArgs(schema: Record<string, unknown>, args: Record<string, unknown>): { valid: boolean; error?: string } {
+  const required = Array.isArray(schema.required) ? schema.required.filter((name): name is string => typeof name === 'string') : []
+  for (const name of required) {
+    if (args[name] === undefined || args[name] === null) {
+      return { valid: false, error: `Missing required parameter: ${name}` }
+    }
+  }
+  if (schema.additionalProperties === false && schema.properties && typeof schema.properties === 'object') {
+    const allowed = new Set(Object.keys(schema.properties as Record<string, unknown>))
+    const unexpected = Object.keys(args).find(name => !allowed.has(name))
+    if (unexpected) return { valid: false, error: `Unexpected parameter: ${unexpected}` }
+  }
+  return { valid: true }
 }
 
 function extractParameters(schema: Record<string, unknown>): ToolParameter[] {

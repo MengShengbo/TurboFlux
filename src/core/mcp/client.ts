@@ -71,6 +71,7 @@ export class McpClient {
         description: tool.description || '',
         inputSchema: (tool.inputSchema as Record<string, unknown>) || {},
         serverName,
+        annotations: tool.annotations,
       }))
     } catch {
       return []
