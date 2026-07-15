@@ -4,6 +4,7 @@ import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
 import { getSafeFrameWidth } from '../../terminalLayout'
+import { isTerminalMouseInput } from '../../terminalMouse'
 
 interface PasteTextResult {
   value: string
@@ -137,6 +138,8 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
   }, { isActive: isInteractive })
 
   useInput((ch, key) => {
+    if (isTerminalMouseInput(ch)) return
+
     if (isImagePasteShortcut(ch, key)) {
       onPasteImage?.()
       return
@@ -152,6 +155,8 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
       }
       return
     }
+
+    if ((key.ctrl || key.shift) && (key.upArrow || key.downArrow)) return
 
     if (key.upArrow) {
       if (showCompletions) {

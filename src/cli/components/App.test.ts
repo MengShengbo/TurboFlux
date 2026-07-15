@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  buildTranscriptSlice,
   clipTextToRows,
-  getNextTranscriptOffsetAfterAppend,
   getEngineUserOrdinalForUiMessage,
   getNextThinkingMode,
   formatTaskProgressLabel,
@@ -12,76 +10,6 @@ import {
 } from './App'
 import type { Message } from './messages/Messages'
 import type { AgentTurn } from '../../shared/agentTypes'
-
-function message(id: string, content: string): Message {
-  return { id, role: 'assistant', content }
-}
-
-function diffMessage(id: string): Message {
-  return {
-    id,
-    role: 'assistant',
-    content: '',
-    changes: [{
-      path: 'src/example.ts',
-      operation: 'edit',
-      before: 'const value = 1\n',
-      after: 'const value = 2\n',
-    }],
-  }
-}
-
-describe('no-flicker transcript slicing', () => {
-  it('keeps the newest messages inside the row budget', () => {
-    const messages = [
-      message('1', 'one'),
-      message('2', 'two'),
-      message('3', 'three'),
-      message('4', 'four'),
-    ]
-
-    const slice = buildTranscriptSlice(messages, 6, 80, 0)
-
-    expect(slice.start).toBe(2)
-    expect(slice.end).toBe(4)
-    expect(slice.messages.map(m => m.id)).toEqual(['3', '4'])
-  })
-
-  it('can page upward from the latest transcript tail', () => {
-    const messages = [
-      message('1', 'one'),
-      message('2', 'two'),
-      message('3', 'three'),
-      message('4', 'four'),
-    ]
-
-    const slice = buildTranscriptSlice(messages, 6, 80, 2)
-
-    expect(slice.start).toBe(0)
-    expect(slice.end).toBe(2)
-    expect(slice.messages.map(m => m.id)).toEqual(['1', '2'])
-  })
-
-  it('clips an oversized single message instead of overflowing the viewport', () => {
-    const longText = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n')
-
-    const slice = buildTranscriptSlice([message('1', longText)], 5, 80, 0)
-
-    expect(slice.start).toBe(0)
-    expect(slice.end).toBe(1)
-    expect(slice.messages[0]?.content).toContain('[... clipped for screen ...]')
-    expect(slice.messages[0]?.content).toContain('line 20')
-  })
-
-  it('budgets diff cards as rendered rows when slicing history', () => {
-    const slice = buildTranscriptSlice([
-      diffMessage('diff'),
-      message('plain', 'tail'),
-    ], 8, 80, 0, 0)
-
-    expect(slice.messages.map(m => m.id)).toEqual(['diff', 'plain'])
-  })
-})
 
 describe('no-flicker mode selection', () => {
   it('uses the fixed cockpit by default for interactive sessions', () => {
@@ -142,16 +70,6 @@ describe('clipTextToRows', () => {
 
     expect(clipped).toContain('[... clipped for screen ...]')
     expect(clipped.endsWith('x'.repeat(64))).toBe(true)
-  })
-})
-
-describe('transcript offset behavior', () => {
-  it('stays pinned to latest when the viewport is already at the bottom', () => {
-    expect(getNextTranscriptOffsetAfterAppend(0, 2, true)).toBe(0)
-  })
-
-  it('preserves the current history view when new messages append', () => {
-    expect(getNextTranscriptOffsetAfterAppend(3, 2, false)).toBe(5)
   })
 })
 

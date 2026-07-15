@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { render, Box, Static, Text, useInput, useApp } from 'ink'
+import { render, Box, Static, Text, useInput, useApp, useBoxMetrics, type DOMElement } from 'ink'
 import { ThemeProvider, useTheme } from '../theme/index'
 import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
@@ -39,7 +39,16 @@ import { resolveCockpitLayout, TaskRail, WorkRail } from './layout/CockpitRails'
 import { getStartupAnimationFrame, shouldAnimateStartup, STARTUP_ANIMATION_MS } from './layout/StartupAnimation'
 import { appendFastContextUiEvents, createFastContextUiSummary, reduceFastContextUiSummary } from './layout/fastContextUi'
 import { shouldUseCompactWordmark } from '../brand'
+import { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, parseTerminalMouseWheel, shouldEnableMouseTracking } from '../terminalMouse'
 import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
+import {
+  DEFAULT_MOUSE_WHEEL_ROWS,
+  TranscriptViewport,
+  clampTranscriptScroll,
+  getTranscriptPageRows,
+  revealTranscriptRange,
+  type TranscriptViewportMetrics,
+} from './TranscriptViewport'
 
 interface AppProps {
   workspacePath: string
@@ -222,24 +231,6 @@ export function shouldUseNoFlicker(
   return requested
 }
 
-function estimateWrappedRows(text: string, columns: number): number {
-  const width = Math.max(20, columns - 8)
-  const lines = text.split(/\r?\n/)
-  return lines.reduce((rows, line) => rows + Math.max(1, Math.ceil(Math.max(1, line.length) / width)), 0)
-}
-
-function estimateMessageRows(message: Message, columns: number, diffMaxRows: number): number {
-  let rows = 2 + estimateWrappedRows(message.content || ' ', columns)
-  if (message.tools?.length) rows += Math.min(8, message.tools.length * 2)
-  if (message.changes?.length) {
-    rows += message.changes.reduce((sum, change) => {
-      const hasSnapshots = change.before !== undefined && change.after !== undefined
-      return sum + 1 + (hasSnapshots ? Math.max(1, diffMaxRows) : 1)
-    }, 0)
-  }
-  return rows
-}
-
 export function clipTextToRows(text: string, maxRows: number, columns: number): string {
   const width = Math.max(20, columns - 8)
   const lines = text.split(/\r?\n/)
@@ -267,53 +258,6 @@ export function clipTextToRows(text: string, maxRows: number, columns: number): 
 
   if (!clipped && kept.length === lines.length) return text
   return `[... clipped for screen ...]\n${kept.join('\n')}`
-}
-
-export function buildTranscriptSlice(
-  messages: Message[],
-  rowBudget: number,
-  columns: number,
-  offsetFromBottom: number,
-  diffMaxRows = MAX_INLINE_DIFF_RENDER_ROWS,
-): { messages: Message[]; start: number; end: number } {
-  if (messages.length === 0) return { messages: [], start: 0, end: 0 }
-
-  const end = Math.max(1, messages.length - offsetFromBottom)
-  const output: Message[] = []
-  let rows = 0
-  let start = end
-
-  for (let i = end - 1; i >= 0; i--) {
-    const message = messages[i]!
-    const cost = estimateMessageRows(message, columns, diffMaxRows)
-    if (output.length > 0 && rows + cost > rowBudget) break
-
-    if (rows + cost > rowBudget) {
-      output.unshift({
-        ...message,
-        tools: undefined,
-        changes: undefined,
-        content: clipTextToRows(message.content, Math.max(1, rowBudget - 2), columns),
-      })
-      start = i
-      break
-    }
-
-    output.unshift(message)
-    rows += cost
-    start = i
-  }
-
-  return { messages: output, start, end }
-}
-
-export function getNextTranscriptOffsetAfterAppend(
-  currentOffset: number,
-  appendedCount: number,
-  stickToLatest: boolean,
-): number {
-  if (stickToLatest) return 0
-  return Math.max(0, currentOffset + appendedCount)
 }
 
 export function sliceTurnsBeforeNthUserTurn(turns: AgentTurn[], userTurnOrdinal: number): AgentTurn[] {
@@ -373,12 +317,29 @@ function CockpitRoot({ width, height, children }: { width: number; height: numbe
 function SessionPane({ running, visible, children }: { running: boolean; visible: boolean; children: React.ReactNode }) {
   const theme = useTheme()
   return (
-    <Box flexDirection="column" flexGrow={1} flexShrink={1} backgroundColor={theme.background} overflow="hidden">
+    <Box
+      flexDirection="column"
+      flexBasis={0}
+      flexGrow={1}
+      flexShrink={1}
+      minHeight={0}
+      minWidth={0}
+      backgroundColor={theme.background}
+      overflow="hidden"
+    >
       <Box flexShrink={0} paddingX={1} backgroundColor={theme.panelRaised} justifyContent="space-between">
         <Text color={theme.brand} bold>{visible ? 'SESSION' : ' '}</Text>
         <Text color={running ? theme.brandShimmer : theme.success} bold>{visible ? running ? '● RUNNING' : '● READY' : ' '}</Text>
       </Box>
-      <Box flexDirection="column" flexGrow={1} flexShrink={1} paddingX={1} overflow="hidden">
+      <Box
+        flexDirection="column"
+        flexBasis={0}
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={0}
+        paddingX={1}
+        overflow="hidden"
+      >
         {children}
       </Box>
     </Box>
@@ -451,8 +412,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const { active: activeOverlay, push, pop } = useOverlayStack()
   const { cursor, enter, navigatePrev, navigateNext, clear } = useMessageCursor(messages)
   const [cursorMode, setCursorMode] = useState(false)
-  const [transcriptOffset, setTranscriptOffset] = useState(0)
-  const transcriptOffsetRef = useRef(0)
+  const [scrollRowsFromBottom, setScrollRowsFromBottom] = useState(0)
+  const [transcriptMetrics, setTranscriptMetrics] = useState<TranscriptViewportMetrics>({
+    contentRows: 0,
+    viewportRows: 1,
+    maxScrollRows: 0,
+  })
+  const transcriptMetricsRef = useRef(transcriptMetrics)
+  const selectedMessageRef = useRef<DOMElement>(null)
+  const selectedMessageMetrics = useBoxMetrics(selectedMessageRef)
   const messageIdRef = useRef(0)
   const streamBufferRef = useRef('')
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -517,6 +485,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setStartupElapsed(STARTUP_ANIMATION_MS)
   }, [])
 
+  useEffect(() => {
+    if (!shouldEnableMouseTracking(isInteractive, noFlickerActive)) return
+    process.stdout.write(ENABLE_MOUSE_TRACKING)
+    return () => {
+      process.stdout.write(DISABLE_MOUSE_TRACKING)
+    }
+  }, [isInteractive, noFlickerActive])
+
   useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
   useEffect(() => { queuedPromptsRef.current = queuedPrompts }, [queuedPrompts])
 
@@ -578,11 +554,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (nextMessages.length === 0) return
 
     setMessages(msgs => [...msgs, ...nextMessages])
-
-    if (!noFlickerActive) return
-
-    const stickToLatest = options?.forceLatest === true || transcriptOffsetRef.current === 0
-    setTranscriptOffset(offset => getNextTranscriptOffsetAfterAppend(offset, nextMessages.length, stickToLatest))
+    if (noFlickerActive && options?.forceLatest === true) setScrollRowsFromBottom(0)
   }, [noFlickerActive])
 
   const replaceMessages = useCallback((nextMessages: React.SetStateAction<Message[]>) => {
@@ -605,7 +577,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setInput(nextInput)
     draftAttachmentsRef.current = []
     setDraftAttachments([])
-    setTranscriptOffset(0)
+    setScrollRowsFromBottom(0)
     setTokenUsage(engine.getContextUsage())
     setGitEnabled(engine.isGitEnabled())
     setThinkingMode(engine.getThinkingMode())
@@ -843,50 +815,57 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     const bottomRows = pendingAsk ? 9 : 5
     return Math.max(4, terminal.rows - headerRows - bottomRows)
   }, [noFlickerActive, terminal.rows, terminal.columns, pendingAsk, config.apiKey])
-  const maxTranscriptOffset = Math.max(0, messages.length - 1)
-  const normalizedTranscriptOffset = noFlickerActive
-    ? Math.min(transcriptOffset, maxTranscriptOffset)
+  const normalizedScrollRows = noFlickerActive
+    ? clampTranscriptScroll(scrollRowsFromBottom, transcriptMetrics.maxScrollRows)
     : 0
-  transcriptOffsetRef.current = normalizedTranscriptOffset
-  const transcriptSlice = useMemo(() => {
-    if (!noFlickerActive) return { messages, start: 0, end: messages.length }
-    return buildTranscriptSlice(messages, transcriptRowBudget, terminal.columns, normalizedTranscriptOffset, 0)
-  }, [noFlickerActive, messages, transcriptRowBudget, terminal.columns, normalizedTranscriptOffset])
-  const transcriptEnd = transcriptSlice.end
-  const transcriptStart = transcriptSlice.start
-  const visibleMessages = transcriptSlice.messages
-  const selectedMessageIndex = cursorMode ? cursor?.index : undefined
-  const visibleSelectedIndex = selectedMessageIndex !== undefined &&
-    selectedMessageIndex >= transcriptStart &&
-    selectedMessageIndex < transcriptEnd
-      ? selectedMessageIndex - transcriptStart
-      : undefined
-  const hiddenBefore = transcriptStart
-  const hiddenAfter = messages.length - transcriptEnd
-  const pageStep = Math.max(1, Math.floor(Math.max(visibleMessages.length, 4) / 2))
-  const isViewingHistory = normalizedTranscriptOffset > 0
+  const pageStep = getTranscriptPageRows(
+    transcriptMetrics.viewportRows > 1 ? transcriptMetrics.viewportRows : transcriptRowBudget,
+  )
+  const isViewingHistory = normalizedScrollRows > 0
+  const selectedMessageId = cursorMode && cursor ? messages[cursor.index]?.id : undefined
+  const cockpit = resolveCockpitLayout(terminal.columns)
+
+  const handleTranscriptMetrics = useCallback((metrics: TranscriptViewportMetrics) => {
+    transcriptMetricsRef.current = metrics
+    setTranscriptMetrics(previous => {
+      if (previous.contentRows === metrics.contentRows &&
+        previous.viewportRows === metrics.viewportRows &&
+        previous.maxScrollRows === metrics.maxScrollRows) {
+        return previous
+      }
+      return metrics
+    })
+  }, [])
+
+  const scrollTranscriptBy = useCallback((delta: number) => {
+    setScrollRowsFromBottom(rows => clampTranscriptScroll(
+      rows + delta,
+      transcriptMetricsRef.current.maxScrollRows,
+    ))
+  }, [])
 
   useEffect(() => {
-    setTranscriptOffset(offset => Math.min(offset, maxTranscriptOffset))
-  }, [maxTranscriptOffset])
+    setScrollRowsFromBottom(rows => clampTranscriptScroll(rows, transcriptMetrics.maxScrollRows))
+  }, [transcriptMetrics.maxScrollRows])
 
   useEffect(() => {
-    if (!noFlickerActive || !cursorMode || !cursor) return
-    if (cursor.index < transcriptStart) {
-      setTranscriptOffset(Math.max(0, messages.length - cursor.index - 1))
-      return
-    }
-
-    if (cursor.index >= transcriptEnd) {
-      setTranscriptOffset(Math.max(0, messages.length - cursor.index - 1))
-    }
+    if (!noFlickerActive || !cursorMode || !cursor || !selectedMessageMetrics.hasMeasured) return
+    setScrollRowsFromBottom(rows => revealTranscriptRange(
+      rows,
+      transcriptMetrics.maxScrollRows,
+      transcriptMetrics.viewportRows,
+      selectedMessageMetrics.top,
+      selectedMessageMetrics.height,
+    ))
   }, [
     noFlickerActive,
     cursorMode,
     cursor?.index,
-    messages.length,
-    transcriptStart,
-    transcriptEnd,
+    selectedMessageMetrics.hasMeasured,
+    selectedMessageMetrics.top,
+    selectedMessageMetrics.height,
+    transcriptMetrics.maxScrollRows,
+    transcriptMetrics.viewportRows,
   ])
 
   const runNextQueuedPrompt = useCallback(() => {
@@ -1178,6 +1157,27 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
     if (activeOverlay !== null) return // overlays handle their own keys
 
+    if (noFlickerActive && !cursorMode && !pendingAsk) {
+      const mouseEvents = parseTerminalMouseWheel(ch)
+      if (mouseEvents.length > 0) {
+        const compactHeader = shouldUseCompactWordmark(terminal.columns, terminal.rows)
+        const transcriptTop = compactHeader ? 5 : 9
+        const transcriptBottom = terminal.rows - 5
+        const transcriptLeft = cockpit.showWorkRail ? cockpit.workWidth + 1 : 1
+        const transcriptRight = terminal.columns - (cockpit.showTaskRail ? cockpit.taskWidth : 0) - 1
+        const delta = mouseEvents.reduce((total, event) => {
+          const insideTranscript = event.x >= transcriptLeft
+            && event.x <= transcriptRight
+            && event.y >= transcriptTop
+            && event.y <= transcriptBottom
+          if (!insideTranscript) return total
+          return total + (event.direction === 'up' ? DEFAULT_MOUSE_WHEEL_ROWS : -DEFAULT_MOUSE_WHEEL_ROWS)
+        }, 0)
+        if (delta !== 0) scrollTranscriptBy(delta)
+        return
+      }
+    }
+
     if ((key.meta && ch.toLowerCase() === 't') || (key.shift && key.tab)) {
       cycleThinkingMode()
       return
@@ -1185,11 +1185,27 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
     if (noFlickerActive && !cursorMode) {
       if (key.pageUp || (key.ctrl && key.upArrow)) {
-        setTranscriptOffset(offset => Math.min(maxTranscriptOffset, offset + pageStep))
+        scrollTranscriptBy(pageStep)
         return
       }
       if (key.pageDown || (key.ctrl && key.downArrow)) {
-        setTranscriptOffset(offset => Math.max(0, offset - pageStep))
+        scrollTranscriptBy(-pageStep)
+        return
+      }
+      if (key.shift && key.upArrow) {
+        scrollTranscriptBy(1)
+        return
+      }
+      if (key.shift && key.downArrow) {
+        scrollTranscriptBy(-1)
+        return
+      }
+      if (key.ctrl && ch.toLowerCase() === 'u') {
+        scrollTranscriptBy(pageStep)
+        return
+      }
+      if (key.ctrl && ch.toLowerCase() === 'd') {
+        scrollTranscriptBy(-pageStep)
         return
       }
     }
@@ -1369,34 +1385,43 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       />
     </Box>
   ) : null
-  const transcriptHint = noFlickerActive && activeOverlay === null && (hiddenBefore > 0 || hiddenAfter > 0) ? (
+  const transcriptHint = noFlickerActive && activeOverlay === null && isViewingHistory ? (
     <Box flexShrink={0}>
       <Text dimColor>
-        {hiddenAfter > 0
-          ? `History view - ${hiddenBefore} earlier, ${hiddenAfter} newer - PgDn for latest`
-          : `${hiddenBefore} earlier messages hidden - PgUp/PgDn or Ctrl+Up/Down to scroll`}
+        {`HISTORY  ${normalizedScrollRows} rows below  PgDn: latest`}
       </Text>
     </Box>
   ) : null
-  const dynamicMessages = visibleMessages
-  const hasTranscriptContent = dynamicMessages.length > 0 || Boolean(runningNode) || Boolean(transcriptHint) // kept for potential diagnostics
   const transcriptNode = (
-    <>
+    <Box
+      flexDirection="column"
+      flexBasis={0}
+      flexGrow={1}
+      flexShrink={1}
+      minHeight={0}
+      overflow="hidden"
+    >
       {transcriptHint}
-      <MessageList
-        messages={dynamicMessages}
-        verbose={verbose}
-        diffMaxRows={noFlickerActive ? 0 : MAX_INLINE_DIFF_RENDER_ROWS}
-        selectedIndex={visibleSelectedIndex}
-      />
-      {runningNode}
-    </>
+      <TranscriptViewport
+        scrollRowsFromBottom={normalizedScrollRows}
+        onScrollRowsChange={setScrollRowsFromBottom}
+        onMetricsChange={handleTranscriptMetrics}
+      >
+        <MessageList
+          messages={messages}
+          verbose={verbose}
+          diffMaxRows={0}
+          selectedMessageId={selectedMessageId}
+          selectedMessageRef={cursorMode ? selectedMessageRef : undefined}
+        />
+        {runningNode}
+      </TranscriptViewport>
+    </Box>
   )
   const staticTranscriptItems = useMemo<StaticTranscriptItem[]>(() => [
     { kind: 'header', id: 'startup-header' },
     ...messages.map(message => ({ kind: 'message' as const, id: message.id, message })),
   ], [messages])
-  const cockpit = resolveCockpitLayout(terminal.columns)
   const mcpCount = mcpClient.getAllConnections().filter(connection => connection.status === 'connected').length
   const activeTerminalCount = terminalSessions.filter(session => session.status === 'running' || session.status === 'starting').length
 
@@ -1415,8 +1440,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             />
           </Box>
 
-          <Box flexDirection="column" flexGrow={1} overflow="hidden">
-            <Box flexDirection="row" flexShrink={1} flexGrow={1} overflow="hidden">
+          <Box flexDirection="column" flexBasis={0} flexGrow={1} minHeight={0} overflow="hidden">
+            <Box flexDirection="row" flexBasis={0} flexShrink={1} flexGrow={1} minHeight={0} overflow="hidden">
               {cockpit.showWorkRail && (
                 <WorkRail
                   width={cockpit.workWidth}

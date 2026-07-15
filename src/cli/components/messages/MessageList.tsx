@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react'
-import { Box, Text } from 'ink'
+import React, { useMemo, type Ref } from 'react'
+import { Box, Text, type DOMElement } from 'ink'
 import { useTheme } from '../../theme/index'
 import { UserMessage, AssistantMessage, SystemMessage, type Message } from './Messages'
 import { ToolCallTree } from '../tools/ToolCallTree'
@@ -12,6 +12,8 @@ interface Props {
   diffMaxRows?: number
   /** If set, renders a border around the selected message */
   selectedIndex?: number
+  selectedMessageId?: string
+  selectedMessageRef?: Ref<DOMElement>
 }
 
 /** Group consecutive system messages into a single rendered block. */
@@ -45,10 +47,17 @@ function useGroupedMessages(messages: Message[]) {
   }, [messages])
 }
 
-export function MessageList({ messages, verbose, diffMaxRows, selectedIndex }: Props) {
+export function MessageList({
+  messages,
+  verbose,
+  diffMaxRows,
+  selectedIndex,
+  selectedMessageId,
+  selectedMessageRef,
+}: Props) {
   const theme = useTheme()
   const grouped = useGroupedMessages(messages)
-  let msgIdx = 0
+  const selectedId = selectedMessageId ?? (selectedIndex === undefined ? undefined : messages[selectedIndex]?.id)
 
   return (
     <Box flexDirection="column" marginTop={0}>
@@ -56,15 +65,32 @@ export function MessageList({ messages, verbose, diffMaxRows, selectedIndex }: P
         if (group.type === 'systemGroup') {
           const key = group.msgs.map(m => m.id).join('-')
           const msgs = group.msgs
+          const isSelected = selectedId !== undefined && msgs.some(message => message.id === selectedId)
           if (msgs.length === 1) {
             return (
-              <Box key={key} flexDirection="column" marginBottom={1}>
+              <Box
+                key={key}
+                ref={isSelected ? selectedMessageRef : undefined}
+                flexDirection="column"
+                marginBottom={1}
+                borderStyle={isSelected ? 'round' : undefined}
+                borderColor={isSelected ? theme.brand : undefined}
+                paddingX={isSelected ? 1 : 0}
+              >
                 <SystemMessage content={msgs[0]!.content} />
               </Box>
             )
           }
           return (
-            <Box key={key} flexDirection="column" marginBottom={1}>
+            <Box
+              key={key}
+              ref={isSelected ? selectedMessageRef : undefined}
+              flexDirection="column"
+              marginBottom={1}
+              borderStyle={isSelected ? 'round' : undefined}
+              borderColor={isSelected ? theme.brand : undefined}
+              paddingX={isSelected ? 1 : 0}
+            >
               <Text dimColor color={theme.inactive}>
                 {'>'} {msgs.length} system messages
               </Text>
@@ -78,13 +104,13 @@ export function MessageList({ messages, verbose, diffMaxRows, selectedIndex }: P
         }
 
         const msg = group.msg
-        const isSelected = selectedIndex === msgIdx
-        msgIdx++
+        const isSelected = selectedId === msg.id
 
         if (msg.role === 'user') {
           return (
             <Box
               key={msg.id}
+              ref={isSelected ? selectedMessageRef : undefined}
               flexDirection="column"
               marginBottom={1}
               borderStyle={isSelected ? 'round' : undefined}
@@ -98,7 +124,15 @@ export function MessageList({ messages, verbose, diffMaxRows, selectedIndex }: P
 
         if (msg.role === 'system') {
           return (
-            <Box key={msg.id} flexDirection="column" marginBottom={1}>
+            <Box
+              key={msg.id}
+              ref={isSelected ? selectedMessageRef : undefined}
+              flexDirection="column"
+              marginBottom={1}
+              borderStyle={isSelected ? 'round' : undefined}
+              borderColor={isSelected ? theme.brand : undefined}
+              paddingX={isSelected ? 1 : 0}
+            >
               <SystemMessage content={msg.content} />
             </Box>
           )
@@ -107,6 +141,7 @@ export function MessageList({ messages, verbose, diffMaxRows, selectedIndex }: P
         return (
           <Box
             key={msg.id}
+            ref={isSelected ? selectedMessageRef : undefined}
             flexDirection="column"
             marginBottom={1}
             borderStyle={isSelected ? 'round' : undefined}
