@@ -107,10 +107,12 @@ export function WorkRail({
           )}
           <InfoRow label="Terminals" value={activeTerminals > 0 ? `${activeTerminals} active` : 'NONE'} color={activeTerminals > 0 ? theme.info : theme.inactive} />
           <InfoRow label="MCP servers" value={mcpCount > 0 ? `${mcpCount} ONLINE` : 'OFF'} color={mcpCount > 0 ? theme.success : theme.inactive} />
-          {fastContext.latest && fastContextActive && (
+          {(fastContext.insight || fastContext.latest) && fastContextActive && (
             <Box flexDirection="column" marginTop={1}>
-              <Text color={theme.subtle}>SCANNING</Text>
-              <Text color={theme.inactive}>{cliTruncate(fastContext.latest, Math.max(8, width - 4), { position: 'middle' })}</Text>
+              <Text color={theme.subtle}>BACKGROUND</Text>
+              <Text color={theme.inactive}>
+                {cliTruncate(fastContext.insight || fastContext.latest, Math.max(8, width - 4), { position: 'middle' })}
+              </Text>
             </Box>
           )}
         </Box>

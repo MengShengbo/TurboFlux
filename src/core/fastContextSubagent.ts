@@ -18,6 +18,8 @@ const FAST_CONTEXT_DEFINITION = {
   driver: 'main-model',
 }
 
+export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 30_000
+
 const STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'this', 'that', 'when', 'where', 'what',
   'why', 'how', 'into', 'your', 'ours', 'their', 'file', 'code', 'task', 'fix',
@@ -41,6 +43,7 @@ interface RunParams {
    * prompt cache for the primer. */
   codemap?: string
   abortSignal?: AbortSignal
+  requestTimeoutMs?: number
   onEvent?: (event: FastContextScanEvent) => void
 }
 
@@ -312,6 +315,15 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         maxWaves: event.maxTurns,
         insight: event.turn === 1 ? 'mapping likely entry points' : 'ranking candidate evidence',
       })
+    } else if (event.type === 'model_wait') {
+      const elapsedSeconds = Math.floor(event.elapsedMs / 1000)
+      emit({
+        type: 'insight',
+        text: elapsedSeconds > 0
+          ? `FastContext model response pending (${elapsedSeconds}s)`
+          : 'FastContext model request started',
+        tone: 'info',
+      })
     } else if (event.type === 'tool_call') {
       const argSummary = (() => {
         const obj = (event.args && typeof event.args === 'object') ? (event.args as Record<string, unknown>) : {}
@@ -364,6 +376,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     model: params.model,
     codemap: params.codemap,
     abortSignal: params.abortSignal,
+    requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     onEvent: onSubEvent,
   })
 

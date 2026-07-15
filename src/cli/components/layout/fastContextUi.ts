@@ -9,6 +9,7 @@ export interface FastContextUiSummary {
   absorbed: number
   hits: number
   latest: string
+  insight: string
 }
 
 export function createFastContextUiSummary(): FastContextUiSummary {
@@ -19,6 +20,7 @@ export function createFastContextUiSummary(): FastContextUiSummary {
     absorbed: 0,
     hits: 0,
     latest: '',
+    insight: '',
   }
 }
 
@@ -41,6 +43,7 @@ export function reduceFastContextUiSummary(
     }
     if (event.type === 'hit') next.hits += 1
     if (event.type === 'worker' && event.currentPath) next.latest = event.currentPath
+    if (event.type === 'insight') next.insight = event.text
   }
 
   return next

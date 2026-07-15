@@ -243,6 +243,7 @@ export interface RunSubAgentOptions {
   model?: string
   codemap?: string | null
   abortSignal?: AbortSignal
+  requestTimeoutMs?: number
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -265,12 +266,21 @@ type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallReq
 
 async function fetchWithTimeout(url: string, init: RequestInit, parentSignal?: AbortSignal, timeoutMs = 120_000): Promise<Response> {
   const controller = new AbortController()
+  let timedOut = false
   const abort = () => controller.abort()
   if (parentSignal?.aborted) controller.abort()
   else parentSignal?.addEventListener('abort', abort, { once: true })
-  const timer = setTimeout(abort, timeoutMs)
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
   try {
     return await fetch(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (timedOut && !parentSignal?.aborted) {
+      throw new Error(`Model request timed out after ${timeoutMs}ms`)
+    }
+    throw error
   } finally {
     clearTimeout(timer)
     parentSignal?.removeEventListener('abort', abort)
@@ -305,6 +315,7 @@ function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, 
 
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
   const { definition, objective, workspacePath, toolExecutor, apiKey, baseUrl, provider, customHeaders, model, codemap, abortSignal, onEvent } = options
+  const requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? 120_000)
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
 
@@ -401,6 +412,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
 
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
+    const waitStartedAt = Date.now()
+    emit({ type: 'model_wait', turn, elapsedMs: 0, timeoutMs: requestTimeoutMs })
+    const waitTimer = setInterval(() => {
+      emit({ type: 'model_wait', turn, elapsedMs: Date.now() - waitStartedAt, timeoutMs: requestTimeoutMs })
+    }, 5_000)
     try {
       const isAnthropic = provider === 'anthropic'
       const requestBody = isAnthropic
@@ -434,7 +450,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
-      }, abortSignal)
+      }, abortSignal, requestTimeoutMs)
 
       if (!res.ok) {
         const errText = await res.text()
@@ -462,6 +478,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       if (e.name === 'AbortError') return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'Aborted' }
       emit({ type: 'error', message: e.message })
       return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: e.message }
+    } finally {
+      clearInterval(waitTimer)
     }
 
     if (responseToolCalls.length === 0) {

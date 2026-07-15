@@ -33,6 +33,7 @@ describe('FastContext UI event buffering', () => {
       absorbed: 1,
       hits: 1,
       latest: 'src/b.ts',
+      insight: '',
     })
   })
 

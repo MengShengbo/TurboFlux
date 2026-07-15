@@ -2,12 +2,66 @@ import { describe, expect, it, vi } from 'vitest'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import { runSubAgent } from './subAgent'
+import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 describe('runSubAgent', () => {
+  it('reports model wait progress and enforces a caller-specific timeout', async () => {
+    const originalFetch = globalThis.fetch
+    const events: SubAgentEvent[] = []
+    vi.useFakeTimers()
+    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const error = new Error('aborted')
+        error.name = 'AbortError'
+        reject(error)
+      }, { once: true })
+    })) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const resultPromise = runSubAgent({
+        definition,
+        objective: 'find the entry point',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        requestTimeoutMs: 6_000,
+        onEvent: event => events.push(event),
+      })
+
+      await vi.advanceTimersByTimeAsync(6_000)
+      const result = await resultPromise
+
+      expect(result).toMatchObject({ ok: false, error: 'Model request timed out after 6000ms' })
+      expect(events.filter(event => event.type === 'model_wait')).toHaveLength(2)
+    } finally {
+      globalThis.fetch = originalFetch
+      vi.useRealTimers()
+    }
+  })
+
   it('executes independent tool calls in parallel and returns results in request order', async () => {
     const originalFetch = globalThis.fetch
     const calls: Array<{ at: number; path: string }> = []

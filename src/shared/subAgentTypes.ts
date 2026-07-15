@@ -76,6 +76,7 @@ export interface SubAgentEvidence {
 
 export type SubAgentEvent =
   | { type: 'turn_start'; turn: number; maxTurns: number }
+  | { type: 'model_wait'; turn: number; elapsedMs: number; timeoutMs: number }
   | { type: 'turn_complete'; turn: number; calls: number }
   | { type: 'tool_call'; tool: string; args: unknown; turn: number }
   | { type: 'tool_result'; tool: string; ok: boolean; summary: string; turn: number }

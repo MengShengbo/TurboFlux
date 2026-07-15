@@ -161,7 +161,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'explore_code',
-    description: `Claude Code-style read-only code exploration. Use when the user asks where a feature/page/component/style/text/entry point lives, when a bug or behavior may span multiple files, when naming is uncertain, or when one directed search is not enough. The tool runs an isolated FastContext locator that searches file names and file contents, reads only high-signal slices, and returns ranked file:line evidence. For a single exact symbol/string/path, prefer search_symbols/search_content/search_files followed by read_file.`,
+    description: `Start a Claude Code-style FastContext locator in the background. Use when the user asks where a feature/page/component/style/text/entry point lives, when a bug or behavior may span multiple files, when naming is uncertain, or when one directed search is not enough. This returns immediately: continue with targeted search/read tools while the isolated locator works, and its ranked file:line evidence will be injected automatically on a later model turn. Do not wait or call explore_code repeatedly. For a single exact symbol/string/path, prefer search_symbols/search_content/search_files followed by read_file.`,
     category: 'read',
     parameters: [
       { name: 'objective', type: 'string', description: 'Concrete thing to locate or understand. Include visible UI text, behavior, suspected feature area, symbol names, and what answer should prove.', required: true },
