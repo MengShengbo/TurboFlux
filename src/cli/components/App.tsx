@@ -404,10 +404,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [interruptHint, setInterruptHint] = useState<string | null>(null)
   const [exitHint, setExitHint] = useState<string | null>(null)
   const [pendingAsk, setPendingAsk] = useState<{
+    id: string
     question: string
     options?: string[]
     reason?: string
     command?: string
+    toolName?: string
+    path?: string
   } | null>(null)
   const [askInput, setAskInput] = useState('')
   const { active: activeOverlay, push, pop } = useOverlayStack()
@@ -765,10 +768,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'ask:user':
           setPendingAsk({
+            id: event.requestId || `ask-${Date.now()}`,
             question: event.question,
             options: event.options,
             reason: event.reason,
             command: event.command,
+            toolName: event.toolName,
+            path: event.path,
           })
           setAskInput('')
           setMood('thinking')
@@ -821,9 +827,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const transcriptRowBudget = useMemo(() => {
     if (!noFlickerActive) return Number.MAX_SAFE_INTEGER
     const headerRows = (shouldUseCompactWordmark(terminal.columns, terminal.rows) ? 5 : 9) + (config.apiKey ? 0 : 1)
-    const bottomRows = pendingAsk ? 9 : 5
+    const bottomRows = 5
     return Math.max(4, terminal.rows - headerRows - bottomRows)
-  }, [noFlickerActive, terminal.rows, terminal.columns, pendingAsk, config.apiKey])
+  }, [noFlickerActive, terminal.rows, terminal.columns, config.apiKey])
   const normalizedScrollRows = noFlickerActive
     ? clampTranscriptScroll(scrollRowsFromBottom, transcriptMetrics.maxScrollRows)
     : 0
@@ -995,6 +1001,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setLastActivity(Date.now())
   }, [appendMessages, engine, genMsgId])
 
+  const submitPermissionDecision = useCallback((requestId: string, decision: PermissionDecision) => {
+    engine.submitAskUserResponse(decision)
+    setPendingAsk(current => current?.id === requestId ? null : current)
+    setAskInput('')
+    setIsRunning(true)
+    setMood('thinking')
+    setLastActivity(Date.now())
+  }, [engine])
+
   const isPermissionAsk = pendingAsk?.options?.includes('allow-once') ?? false
 
   const switchThinkingMode = useCallback((mode: ThinkingMode, showNotice = true) => {
@@ -1063,6 +1078,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const activePrompt = activePromptRef.current
       abortingRef.current = true
       engine.abort()
+      setPendingAsk(null)
+      setAskInput('')
       queuedPromptsRef.current = []
       setQueuedPrompts([])
       setInterruptHint('Interrupted current agent run.')
@@ -1281,10 +1298,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <Box flexDirection="column" marginBottom={1}>
       {isPermissionAsk ? (
         <PermissionDialog
-          toolName={pendingAsk.command ? 'run_command' : 'tool'}
+          key={pendingAsk.id}
+          toolName={pendingAsk.toolName || (pendingAsk.command ? 'run_command' : 'tool')}
           description={pendingAsk.reason || pendingAsk.question}
           command={pendingAsk.command}
-          onDecision={(decision: PermissionDecision) => submitAskResponse(decision)}
+          path={pendingAsk.path}
+          onDecision={(decision: PermissionDecision) => submitPermissionDecision(pendingAsk.id, decision)}
         />
       ) : (
         <Box flexDirection="column" borderStyle="round" paddingX={1} marginY={1}>
@@ -1481,7 +1500,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 />
               )}
               <SessionPane running={isRunning} visible={startupFrame.showSession}>
-                {overlayNode ?? transcriptNode}
+                {overlayNode ?? (pendingAsk ? (
+                  <Box flexDirection="column" flexGrow={1} justifyContent="center">
+                    {pendingAskNode}
+                  </Box>
+                ) : transcriptNode)}
               </SessionPane>
               {cockpit.showTaskRail && (
                 <TaskRail
@@ -1495,7 +1518,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               )}
             </Box>
             <Box flexDirection="column" flexShrink={0}>
-              {pendingAskNode}
               {cursorHint}
               <AgentActivityLine active={isRunning || startupFrame.shimmerActive} persistent />
               {startupFrame.showPrompt ? promptNode : showPrompt ? <PromptPlaceholder /> : null}

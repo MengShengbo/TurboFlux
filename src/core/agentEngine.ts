@@ -95,7 +95,7 @@ export type AgentEventType =
   | { type: 'stream:start' }
   | { type: 'stream:end'; interrupted?: boolean }
   | { type: 'stream:usage'; usage: TokenUsage }
-  | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string }
+  | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string; requestId?: string; toolName?: string; path?: string }
   | { type: 'active:task'; context: import('./taskManager').ActiveTaskContext | null }
   | { type: 'terminal:sessions'; sessions: TerminalSessionInfo[] }
   | {
@@ -215,6 +215,19 @@ export function appendRuntimeContextToLatestUserMessage(
   }
 
   return false
+}
+
+function hasCompleteToolPayloads(calls: Array<{ name: string; argumentsJson: string }>): boolean {
+  if (calls.length === 0) return false
+  return calls.every(call => {
+    if (!call.name.trim()) return false
+    try {
+      JSON.parse(call.argumentsJson || '{}')
+      return true
+    } catch {
+      return false
+    }
+  })
 }
 
 type FastContextBackgroundStatus = 'started' | 'running' | 'busy' | 'unavailable'
@@ -2373,7 +2386,18 @@ Before retrying:
       throw new Error(result.error || 'Anthropic request failed')
     }
     if (!sawMessageStop) {
-      throw new Error('Anthropic stream ended before message_stop')
+      const parsedTextTools = parseTextToolCalls(textContent)
+      const hasVisibleText = Boolean(stripTextToolCallMarkup(textContent, { stripIncomplete: true }))
+      const completeToolPayloads = hasCompleteToolPayloads(
+        [...toolCallMap.values()].map(block => ({ name: block.name, argumentsJson: block.inputJson })),
+      )
+      if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
+        throw new Error('Anthropic stream ended before message_stop')
+      }
+      if (!completeToolPayloads) toolCallMap.clear()
+      if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
+        textContent = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+      }
     }
 
     // Assemble final tool calls from accumulated data
@@ -2716,7 +2740,18 @@ Before retrying:
       throw new Error(result.error || 'Model request failed')
     }
     if (!sawTerminalEvent) {
-      throw new Error('Model stream ended before a terminal event')
+      const parsedTextTools = parseTextToolCalls(textContent)
+      const hasVisibleText = Boolean(stripTextToolCallMarkup(textContent, { stripIncomplete: true }))
+      const completeToolPayloads = hasCompleteToolPayloads(
+        [...toolCallMap.values()].map(entry => ({ name: entry.name, argumentsJson: entry.argumentsJson })),
+      )
+      if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
+        throw new Error('Model stream ended before a terminal event')
+      }
+      if (!completeToolPayloads) toolCallMap.clear()
+      if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
+        textContent = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+      }
     }
 
     // Assemble final tool calls
@@ -4001,6 +4036,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       : undefined
     this.emit({
       type: 'ask:user',
+      requestId: toolCall.id,
+      toolName: toolCall.name,
+      path: this.extractToolCallPath(toolCall),
       question: command
         ? `允许执行这个命令吗？`
         : `允许执行 ${toolCall.name} 吗？`,

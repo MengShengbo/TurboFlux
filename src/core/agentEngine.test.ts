@@ -142,8 +142,61 @@ describe('AgentEngine FastContext scheduling', () => {
   })
 })
 
+describe('AgentEngine permission requests', () => {
+  it('includes the concrete tool and target path without requiring a chat turn', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'request',
+      workspacePath: workspace,
+    }, {} as ToolExecutor, stateProvider)
+    const askEvents: AgentEventType[] = []
+    engine.subscribe(event => {
+      if (event.type !== 'ask:user') return
+      askEvents.push(event)
+      engine.submitAskUserResponse('allow-session')
+    })
+    const checkToolPermission = (engine as unknown as {
+      checkToolPermission: (toolCall: ToolCall) => Promise<ToolResult | null>
+    }).checkToolPermission.bind(engine)
+    const toolCall: ToolCall = {
+      id: 'write-approval-1',
+      name: 'write_file',
+      arguments: { path: 'src/example.ts', content: 'export const value = 1' },
+    }
+
+    try {
+      await expect(checkToolPermission(toolCall)).resolves.toBeNull()
+      await expect(checkToolPermission({
+        ...toolCall,
+        id: 'edit-approval-2',
+        name: 'edit_file',
+        arguments: { path: 'src/other.ts', old_string: 'before', new_string: 'after' },
+      })).resolves.toBeNull()
+      expect(askEvents).toEqual([expect.objectContaining({
+        type: 'ask:user',
+        requestId: 'write-approval-1',
+        toolName: 'write_file',
+        path: 'src/example.ts',
+        options: ['allow-once', 'allow-session', 'deny'],
+      })])
+      expect(engine.getSession().turns).toHaveLength(0)
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
 describe('AgentEngine interrupted streams', () => {
-  function createHarness(provider: 'custom' | 'anthropic', streamLine?: string) {
+  function createHarness(provider: 'custom' | 'anthropic', streamLine?: string, abortStream = true) {
     const workspace = process.cwd()
     const runtimeConfig = {
       provider,
@@ -159,8 +212,11 @@ describe('AgentEngine interrupted streams', () => {
     const executor = {
       streamMessage: vi.fn(async (_url: string, _headers: Record<string, string>, _body: string, onLine: (line: string) => void) => {
         if (streamLine) onLine(streamLine)
-        engine.abort()
-        return { success: false, error: 'Request aborted' }
+        if (abortStream) {
+          engine.abort()
+          return { success: false, error: 'Request aborted' }
+        }
+        return { success: true, data: '' }
       }),
       streamAbort,
     } as unknown as ToolExecutor
@@ -263,6 +319,104 @@ describe('AgentEngine interrupted streams', () => {
         Date.now(),
       )).rejects.toMatchObject({ message: 'aborted', aborted: true })
       expect(events).toContainEqual({ type: 'stream:end', interrupted: true })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('accepts OpenAI-compatible text when the provider omits the terminal marker', async () => {
+    const line = `data: ${JSON.stringify({
+      choices: [{ delta: { content: 'Provider response without DONE.' }, finish_reason: null }],
+    })}`
+    const { engine, stateProvider, events } = createHarness('custom', line, false)
+    const internal = engine as unknown as {
+      callOpenAICompatibleAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callOpenAICompatibleAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        [{ role: 'system', content: 'system' }, { role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn.content).toBe('Provider response without DONE.')
+      expect(turn.metadata?.interrupted).not.toBe(true)
+      expect(events).toContainEqual({ type: 'stream:end' })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('accepts Anthropic text when message_stop is omitted', async () => {
+    const line = `data: ${JSON.stringify({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: 'Anthropic response without message_stop.' },
+    })}`
+    const { engine, stateProvider, events } = createHarness('anthropic', line, false)
+    const internal = engine as unknown as {
+      callAnthropicAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        systemPrompt: string,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callAnthropicAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        'system',
+        [{ role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn.content).toBe('Anthropic response without message_stop.')
+      expect(events).toContainEqual({ type: 'stream:end' })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('rejects an unterminated stream that only contains an incomplete tool call', async () => {
+    const line = `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: 'partial-tool',
+            function: { name: 'write_file', arguments: '{"path":' },
+          }],
+        },
+        finish_reason: null,
+      }],
+    })}`
+    const { engine, stateProvider } = createHarness('custom', line, false)
+    const internal = engine as unknown as {
+      callOpenAICompatibleAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      await expect(internal.callOpenAICompatibleAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        [{ role: 'system', content: 'system' }, { role: 'user', content: 'hello' }],
+        Date.now(),
+      )).rejects.toThrow('Model stream ended before a terminal event')
     } finally {
       engine.destroy()
     }

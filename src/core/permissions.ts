@@ -31,6 +31,13 @@ const ASK_COMMAND_PATTERNS: CommandPattern[] = [
   { pattern: /\bRemove-Item\s+.*-Recurse/i, verdict: 'ask', reason: 'High-risk: recursive deletion (PowerShell)' },
 ]
 
+const SESSION_GRANT_GROUPS = new Map<string, string>([
+  ['write_file', 'file-write'],
+  ['replace_file', 'file-write'],
+  ['edit_file', 'file-write'],
+  ['multi_edit', 'file-write'],
+])
+
 // ─── Permission Pipeline ────────────────────────────────────────────────────
 
 export class PermissionPipeline {
@@ -77,6 +84,11 @@ export class PermissionPipeline {
   }
 
   grantSession(toolName: string, argsFingerprint: string): void {
+    const group = SESSION_GRANT_GROUPS.get(toolName)
+    if (group) {
+      this.sessionGrants.set(`group:${group}`, Date.now())
+      return
+    }
     this.sessionGrants.set(`${toolName}:${argsFingerprint}`, Date.now())
   }
 
@@ -135,18 +147,14 @@ export class PermissionPipeline {
       'forget',
       'run_command',
       'kill_terminal',
-      'create_task',
-      'create_tasks',
-      'update_task',
-      'add_task_dependency',
-      'remove_task_dependency',
-      'create_checkpoint',
       'restore_checkpoint',
       'prune_checkpoints',
     ].includes(toolName)
   }
 
   private hasSessionGrant(toolName: string, args: Record<string, unknown>): boolean {
+    const group = SESSION_GRANT_GROUPS.get(toolName)
+    if (group && this.sessionGrants.has(`group:${group}`)) return true
     const fingerprint = this.computeFingerprint(toolName, args)
     return this.sessionGrants.has(`${toolName}:${fingerprint}`)
   }

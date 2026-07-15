@@ -8,10 +8,11 @@ interface PermissionDialogProps {
   toolName: string
   description: string
   command?: string
+  path?: string
   onDecision: (decision: PermissionDecision) => void
 }
 
-export function PermissionDialog({ toolName, description, command, onDecision }: PermissionDialogProps) {
+export function PermissionDialog({ toolName, description, command, path, onDecision }: PermissionDialogProps) {
   const theme = useTheme()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [decided, setDecided] = useState(false)
@@ -33,16 +34,17 @@ export function PermissionDialog({ toolName, description, command, onDecision }:
   if (decided) return null
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={theme.brand} paddingX={1} marginY={1}>
-      <Text bold color={theme.brand}>Permission Required</Text>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.brand} paddingX={2} marginY={1}>
+      <Text bold color={theme.brand}>Approval required</Text>
       <Box marginTop={1} flexDirection="column">
         <Text>Tool: <Text bold>{toolName}</Text></Text>
+        {path && <Text>Target: <Text color={theme.brand}>{path}</Text></Text>}
         <Text dimColor>{description}</Text>
         {command && <Text>Command: <Text color={theme.brand}>{command}</Text></Text>}
       </Box>
       <Box marginTop={1}>
         <Text color="green">[y]</Text><Text> allow once  </Text>
-        <Text color="cyan">[a]</Text><Text> allow session  </Text>
+        <Text color="cyan">[a]</Text><Text> allow for session  </Text>
         <Text color="red">[n]</Text><Text> deny</Text>
       </Box>
     </Box>

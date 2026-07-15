@@ -138,6 +138,14 @@ describe('PermissionPipeline', () => {
       const result = pipeline.check('run_command', { command: 'rm -rf /' })
       expect(result.verdict).toBe('deny')
     })
+
+    it('shares a session grant across file write and edit tools', () => {
+      const pipeline = new PermissionPipeline('request')
+      pipeline.grantSession('write_file', JSON.stringify({ path: 'a.ts', content: 'a' }))
+
+      expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('allow')
+      expect(pipeline.check('edit_file', { path: 'c.ts', old_string: 'a', new_string: 'b' }).verdict).toBe('allow')
+    })
   })
 
   describe('approval policies', () => {
@@ -162,6 +170,14 @@ describe('PermissionPipeline', () => {
       const pipeline = new PermissionPipeline('request')
       const result = pipeline.check('run_command', { command: 'npm test' })
       expect(result.verdict).toBe('ask')
+    })
+
+    it('does not interrupt internal task workflow bookkeeping', () => {
+      const pipeline = new PermissionPipeline('request')
+
+      expect(pipeline.check('create_task', { title: 'Implement UI' }).verdict).toBe('allow')
+      expect(pipeline.check('update_task', { task_id: 'task-1', status: 'completed' }).verdict).toBe('allow')
+      expect(pipeline.check('create_checkpoint', { label: 'safe point' }).verdict).toBe('allow')
     })
 
     it('full policy allows ask-level high-risk commands', () => {
