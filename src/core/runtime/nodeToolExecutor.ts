@@ -5,7 +5,7 @@ import { homedir } from 'os'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
-import type { ToolExecutor, Result, SearchContentHit, CommandOutput, CheckpointResult, WebSearchResult } from '../../tools/executor'
+import type { ToolExecutor, Result, SearchContentHit, CommandOutput, CheckpointResult, RequestOptions, WebSearchResult } from '../../tools/executor'
 import type { TreeNode } from '../../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../../shared/memoryTypes'
@@ -29,7 +29,9 @@ interface BackgroundTerminalSession {
 }
 
 const MAX_TERMINAL_CHUNKS = 500
+const MAX_COMMAND_OUTPUT_CHARS = 2_000_000
 const TERMINAL_KILL_TIMEOUT_MS = 5000
+const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 const WEB_SEARCH_TIMEOUT_MS = 8000
 const WEB_SEARCH_USER_AGENT = 'TurboFlux/0.1 (+https://github.com/MengShengbo/TurboFluxCli)'
 const DEFAULT_TERMINAL_SHELL = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
@@ -45,6 +47,7 @@ export class NodeToolExecutor implements ToolExecutor {
   private workspaceRoot: string
   private sandboxPolicy: SandboxPolicy
   private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
+  private activeStreams: Map<number, AbortController> = new Map()
 
   constructor(private workspacePath: string, options: NodeToolExecutorOptions = {}) {
     this.memoryService = new MemoryService()
@@ -437,45 +440,104 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, _approved?: boolean): Promise<Result<CommandOutput>> {
-    return new Promise((resolve) => {
-      let safeCwd: string
-      try {
-        const validation = this.validateCommandSync(command, cwd)
-        if (!validation.success) {
-          resolve({ success: false, error: validation.error, data: { stdout: '', stderr: validation.error || '', exitCode: 1 } })
-          return
-        }
-        safeCwd = validation.cwd
-      } catch (error) {
-        resolve({ success: false, error: error instanceof Error ? error.message : String(error) })
-        return
+  async runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, approved?: boolean): Promise<Result<CommandOutput>> {
+    let safeCwd: string
+    try {
+      const validation = this.validateCommandSync(command, cwd)
+      if (!validation.success) {
+        return { success: false, error: validation.error, data: { stdout: '', stderr: validation.error || '', exitCode: 1 } }
       }
-      const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
-      const shellArgs = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
-      const proc = spawn(shell, shellArgs, {
+      if (this.sandboxPolicy === 'workspace' && approved !== true) {
+        const error = 'Workspace command execution requires an explicit permission decision'
+        return { success: false, error, data: { stdout: '', stderr: error, exitCode: 1 } }
+      }
+      safeCwd = validation.cwd
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
+    const shellArgs = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
+    const proc = spawn(shell, shellArgs, {
+      cwd: safeCwd,
+      env: { ...process.env, ...env },
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    })
+    return this.collectProcess(proc, timeout || 30000)
+  }
+
+  async runProcess(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number): Promise<Result<CommandOutput>> {
+    try {
+      const safeCwd = this.ensureAllowedPath(cwd)
+      const proc = spawn(command, args, {
         cwd: safeCwd,
         env: { ...process.env, ...env },
-        timeout: timeout || 30000,
+        detached: process.platform !== 'win32',
+        windowsHide: true,
       })
+      return await this.collectProcess(proc, timeout || 30000)
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
 
+  private collectProcess(proc: ChildProcessWithoutNullStreams, timeout: number): Promise<Result<CommandOutput>> {
+    return new Promise(resolve => {
       let stdout = ''
       let stderr = ''
+      let truncated = false
+      let timedOut = false
+      let settled = false
 
-      proc.stdout.on('data', (data) => { stdout += data.toString() })
-      proc.stderr.on('data', (data) => { stderr += data.toString() })
+      const append = (current: string, value: Buffer | string): string => {
+        if (current.length >= MAX_COMMAND_OUTPUT_CHARS) {
+          truncated = true
+          return current
+        }
+        const text = value.toString()
+        const remaining = MAX_COMMAND_OUTPUT_CHARS - current.length
+        if (text.length > remaining) truncated = true
+        return current + text.slice(0, remaining)
+      }
+      const finish = (result: Result<CommandOutput>) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(result)
+      }
+      const timer = setTimeout(() => {
+        timedOut = true
+        this.terminateProcessTree(proc)
+      }, Math.max(1, timeout))
 
-      proc.on('close', (code) => {
-        resolve({
-          success: true,
-          data: { stdout, stderr, exitCode: code ?? 1 },
-        })
+      proc.stdout.on('data', data => { stdout = append(stdout, data) })
+      proc.stderr.on('data', data => { stderr = append(stderr, data) })
+      proc.on('error', error => {
+        finish({ success: false, error: error.message, data: { stdout, stderr, exitCode: 1, timedOut, truncated } })
       })
-
-      proc.on('error', (err) => {
-        resolve({ success: false, error: err.message })
+      proc.on('close', code => {
+        const exitCode = code ?? 1
+        const success = exitCode === 0 && !timedOut
+        const error = timedOut
+          ? `Command timed out after ${timeout}ms`
+          : success ? undefined : `Command exited with code ${exitCode}`
+        finish({ success, error, data: { stdout, stderr, exitCode, timedOut, truncated } })
       })
     })
+  }
+
+  private terminateProcessTree(proc: ChildProcessWithoutNullStreams): void {
+    if (!proc.pid) return
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      killer.unref()
+      return
+    }
+    try {
+      process.kill(-proc.pid, 'SIGTERM')
+    } catch {
+      proc.kill('SIGTERM')
+    }
   }
 
   async validateCommand(command: string, cwd: string): Promise<Result<void>> {
@@ -733,85 +795,143 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async sendMessage(url: string, headers: Record<string, string>, body: string): Promise<Result<string>> {
-    for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
-      try {
-        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body })
-        const text = await response.text()
-        if (!response.ok) {
-          const error = this.formatHttpError(url, response.status, text)
-          if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
+  async sendMessage(url: string, headers: Record<string, string>, body: string, options: RequestOptions = {}): Promise<Result<string>> {
+    const request = this.createRequestController(options)
+    try {
+      for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body,
+            signal: request.controller.signal,
+          })
+          const text = await response.text()
+          if (!response.ok) {
+            const error = this.formatHttpError(url, response.status, text)
+            if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
+              await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+              continue
+            }
+            return { success: false, error, status: response.status }
+          }
+          return { success: true, data: text }
+        } catch (error) {
+          if (request.controller.signal.aborted || this.isAbortError(error)) {
+            return { success: false, error: 'Request aborted' }
+          }
+          if (attempt < STREAM_RETRY_DELAYS_MS.length) {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
             continue
           }
-          return { success: false, error }
+          return { success: false, error: this.formatNetworkError(url, error) }
         }
-        return { success: true, data: text }
-      } catch (e) {
-        if (attempt < STREAM_RETRY_DELAYS_MS.length) {
-          await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
-          continue
-        }
-        return { success: false, error: this.formatNetworkError(url, e) }
       }
+      return { success: false, error: 'Request failed' }
+    } finally {
+      request.cleanup()
     }
-    return { success: false, error: 'Request failed' }
   }
 
-  async streamMessage(url: string, headers: Record<string, string>, body: string, onLine: (line: string) => void): Promise<Result<string>> {
-    for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
-      let emittedAnyLine = false
-      try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-          body,
-        })
-        if (!response.ok) {
-          const text = await response.text()
-          const error = this.formatHttpError(url, response.status, text)
-          if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
+  async streamMessage(
+    url: string,
+    headers: Record<string, string>,
+    body: string,
+    onLine: (line: string) => void,
+    options: RequestOptions = {},
+  ): Promise<Result<string>> {
+    const request = this.createRequestController(options)
+    if (options.streamId !== undefined) {
+      this.activeStreams.get(options.streamId)?.abort()
+      this.activeStreams.set(options.streamId, request.controller)
+    }
+    try {
+      for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
+        let emittedAnyLine = false
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body,
+            signal: request.controller.signal,
+          })
+          if (!response.ok) {
+            const text = await response.text()
+            const error = this.formatHttpError(url, response.status, text)
+            if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
+              await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+              continue
+            }
+            return { success: false, error, status: response.status }
+          }
+          const reader = response.body?.getReader()
+          if (!reader) return { success: false, error: 'No response body' }
+
+          const decoder = new TextDecoder()
+          let buffer = ''
+          let fullResponse = ''
+
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+            for (const line of lines) {
+              if (line.trim()) {
+                emittedAnyLine = true
+                onLine(line)
+                fullResponse += line + '\n'
+              }
+            }
+          }
+          if (buffer.trim()) {
+            emittedAnyLine = true
+            onLine(buffer)
+            fullResponse += buffer
+          }
+          return { success: true, data: fullResponse }
+        } catch (error) {
+          if (request.controller.signal.aborted || this.isAbortError(error)) {
+            return { success: false, error: 'Request aborted' }
+          }
+          if (!emittedAnyLine && attempt < STREAM_RETRY_DELAYS_MS.length) {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
             continue
           }
-          return { success: false, error, status: response.status }
+          return { success: false, error: this.formatNetworkError(url, error) }
         }
-        const reader = response.body?.getReader()
-        if (!reader) return { success: false, error: 'No response body' }
-
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let fullResponse = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
-          for (const line of lines) {
-            if (line.trim()) {
-              emittedAnyLine = true
-              onLine(line)
-              fullResponse += line + '\n'
-            }
-          }
-        }
-        if (buffer.trim()) {
-          emittedAnyLine = true
-          onLine(buffer)
-          fullResponse += buffer
-        }
-        return { success: true, data: fullResponse }
-      } catch (e) {
-        if (!emittedAnyLine && attempt < STREAM_RETRY_DELAYS_MS.length) {
-          await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
-          continue
-        }
-        return { success: false, error: this.formatNetworkError(url, e) }
       }
+      return { success: false, error: 'Stream request failed' }
+    } finally {
+      if (options.streamId !== undefined && this.activeStreams.get(options.streamId) === request.controller) {
+        this.activeStreams.delete(options.streamId)
+      }
+      request.cleanup()
     }
-    return { success: false, error: 'Stream request failed' }
+  }
+
+  async streamAbort(streamId: number): Promise<void> {
+    this.activeStreams.get(streamId)?.abort()
+  }
+
+  private createRequestController(options: RequestOptions): { controller: AbortController; cleanup: () => void } {
+    const controller = new AbortController()
+    const abortFromParent = () => controller.abort()
+    if (options.signal?.aborted) controller.abort()
+    else options.signal?.addEventListener('abort', abortFromParent, { once: true })
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs || MODEL_REQUEST_TIMEOUT_MS)
+    return {
+      controller,
+      cleanup: () => {
+        clearTimeout(timer)
+        options.signal?.removeEventListener('abort', abortFromParent)
+      },
+    }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError'
   }
 
   private async searchDuckDuckGoInstant(query: string, limit: number, region: string): Promise<WebSearchResult[]> {

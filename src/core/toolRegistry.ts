@@ -466,6 +466,7 @@ export function getToolsForMode(mode: AgentMode, options?: { disabledTools?: str
   const disabledTools = new Set(options?.disabledTools || [])
   return tools.filter(tool => {
     if (disabledTools.has(tool.name)) return false
+    if (mode === 'plan' && !tool.isReadOnly) return false
     if (!tool.requiredMode) return true
     return tool.requiredMode.includes(mode)
   })

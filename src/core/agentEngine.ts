@@ -473,7 +473,7 @@ export class AgentEngine {
     if (!this.config.workspacePath || this.gitDetected) return this.gitEnabled
     this.gitDetected = true
     const isRepo = await detectGitRepo(this.config.workspacePath, this.toolExecutor)
-    if (isRepo && this.config.gitEnabled !== false) {
+    if (isRepo && this.config.gitEnabled === true) {
       this.setGitEnabled(true)
     }
     return this.gitEnabled
@@ -1627,11 +1627,18 @@ ${recentContext}`
       ? `${activeConfig.baseUrl.replace(/\/$/, '')}/messages`
       : `${normalizeBaseUrl(activeConfig.baseUrl)}/chat/completions`
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${activeConfig.apiKey}`,
-      ...activeConfig.customHeaders,
-    }
+    const headers: Record<string, string> = provider === 'anthropic'
+      ? {
+          'Content-Type': 'application/json',
+          'x-api-key': activeConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          ...activeConfig.customHeaders,
+        }
+      : {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${activeConfig.apiKey}`,
+          ...activeConfig.customHeaders,
+        }
 
     if (activeConfig.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://turboflux.dev'
@@ -1652,7 +1659,9 @@ ${recentContext}`
           messages: [{ role: 'system', content: 'You are a context compression assistant. Generate concise, structured continuation summaries.' }, ...messages],
         })
 
-    const result = await this.toolExecutor.sendMessage(url, headers, body)
+    const result = await this.toolExecutor.sendMessage(url, headers, body, {
+      signal: this.abortController?.signal,
+    })
 
     if (!result.success || !result.data) {
       throw new Error(result.error || 'Summary generation failed')
@@ -2140,6 +2149,7 @@ Before retrying:
     // panel so users can see real cache savings, not just billed totals.
     let cacheReadTokens = 0
     let cacheCreationTokens = 0
+    let sawMessageStop = false
     // Mint the streamId BEFORE the request goes out so abort() (which
     // can fire from another tick the moment the user clicks "stop")
     // sees a non-null id that matches the one the main process will use.
@@ -2219,6 +2229,8 @@ Before retrying:
               inputJson: '',
             })
           }
+        } else if (eventType === 'message_stop') {
+          sawMessageStop = true
         } else if (eventType === 'message_delta') {
           if (event.delta?.signature) {
             for (let index = rawReasoningBlocks.length - 1; index >= 0; index -= 1) {
@@ -2254,7 +2266,8 @@ Before retrying:
       } catch {
         // Malformed JSON chunk, skip
       }
-    })
+    }, { streamId, signal: this.abortController?.signal })
+    this.currentStreamId = null
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
@@ -2265,6 +2278,9 @@ Before retrying:
         throw err
       }
       throw new Error(result.error || 'Anthropic request failed')
+    }
+    if (!sawMessageStop) {
+      throw new Error('Anthropic stream ended before message_stop')
     }
 
     // Assemble final tool calls from accumulated data
@@ -2478,6 +2494,7 @@ Before retrying:
     // computes "new tokens" as inputTokens - cacheReadTokens for clarity.
     let cacheReadTokens = 0
     let cacheMissTokens: number | null = null
+    let sawTerminalEvent = false
     // Same pre-allocation pattern as the Anthropic path — the previous
     // `Date.now()` was a no-op for abort because preload re-rolled its
     // own id when sending the request. Now we own the id and forward it
@@ -2488,7 +2505,10 @@ Before retrying:
     const handleStreamLine = (line: string) => {
       if (!line.startsWith('data:')) return
       const jsonStr = line.slice(5).trim()
-      if (jsonStr === '[DONE]') return
+      if (jsonStr === '[DONE]') {
+        sawTerminalEvent = true
+        return
+      }
 
       try {
         const chunk = JSON.parse(jsonStr)
@@ -2518,6 +2538,9 @@ Before retrying:
 
         const choice = chunk.choices?.[0]
         if (!choice) return
+        if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+          sawTerminalEvent = true
+        }
 
         const delta = choice.delta
         if (!delta) return
@@ -2565,7 +2588,10 @@ Before retrying:
     }
 
     let serializedBody = JSON.stringify(body)
-    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine)
+    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+      streamId,
+      signal: this.abortController?.signal,
+    })
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted) break
       if (result.status !== 400) break
@@ -2577,8 +2603,12 @@ Before retrying:
         message: `Provider rejected "${unsupportedParam}"; retrying without that request parameter.`,
       })
       serializedBody = JSON.stringify(body)
-      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine)
+      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+        streamId,
+        signal: this.abortController?.signal,
+      })
     }
+    this.currentStreamId = null
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
@@ -2587,6 +2617,9 @@ Before retrying:
         throw err
       }
       throw new Error(result.error || 'Model request failed')
+    }
+    if (!sawTerminalEvent) {
+      throw new Error('Model stream ended before a terminal event')
     }
 
     // Assemble final tool calls
@@ -3649,6 +3682,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       }
     }
 
+    if (this.config.mode === 'plan' && !tool.isReadOnly) {
+      return {
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        output: `Error: plan mode is read-only; switch to vibe mode before using "${toolCall.name}".`,
+        isError: true,
+        errorKind: 'permission',
+      }
+    }
+
     if (this.disabledToolNames.has(toolCall.name)) {
       return {
         toolCallId: toolCall.id,
@@ -3684,7 +3727,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     this.recordToolUsage(toolCall.name, toolCall.arguments)
 
     try {
-      const output = await this.dispatchTool(toolCall.name, toolCall.arguments)
+      const executionArgs = toolCall.name === 'run_command'
+        ? { ...toolCall.arguments, approved: true }
+        : toolCall.arguments
+      const output = await this.dispatchTool(toolCall.name, executionArgs)
 
       // Layer 0: Large result truncation.
       // When a tool returns a very large output, keep only a short preview
@@ -4654,9 +4700,13 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           return `Error: no workspace selected`
         }
         const checkpointMessage = args.message as string
+        const filePaths = Array.from(this.touchedFilePaths)
+        if (filePaths.length === 0) {
+          return `No AI-touched files to checkpoint`
+        }
 
         if (this.gitEnabled) {
-          const gitResult = await gitCommitCheckpoint(basePath, checkpointMessage, this.toolExecutor)
+          const gitResult = await gitCommitCheckpoint(basePath, checkpointMessage, filePaths, this.toolExecutor)
           if (!gitResult.ok) return `Error: git checkpoint failed — ${gitResult.error}`
           if (gitResult.nothingToCommit) return `Checkpoint skipped — nothing to commit`
           this.pendingCheckpoint = { hash: gitResult.hash || 'HEAD', message: checkpointMessage }
@@ -4666,10 +4716,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           return `Git checkpoint: ${gitResult.hash} — ${checkpointMessage}`
         }
 
-        const filePaths = Array.from(this.touchedFilePaths)
-        if (filePaths.length === 0) {
-          return `No AI-touched files to checkpoint`
-        }
         const preimages = this.filePreimages.size > 0 ? Object.fromEntries(this.filePreimages) : undefined
         const result = await this.toolExecutor.checkpointCreate?.(basePath, checkpointMessage, filePaths, 'explicit', preimages)
         if (!result?.success) {

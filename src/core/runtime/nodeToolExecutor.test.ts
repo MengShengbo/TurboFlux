@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
 
@@ -98,6 +99,25 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.error).toContain('relative path outside the workspace')
   }))
 
+  it('requires an explicit permission decision for workspace shell commands', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const blocked = await executor.runCommand('echo hello', workspace)
+    const approved = await executor.runCommand('echo hello', workspace, {}, 5000, true)
+
+    expect(blocked.success).toBe(false)
+    expect(blocked.error).toContain('explicit permission')
+    expect(approved.success).toBe(true)
+  }))
+
+  it('reports non-zero process exits as failures', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(7)'], workspace)
+
+    expect(result.success).toBe(false)
+    expect(result.data?.exitCode).toBe(7)
+  }))
+
   it('blocks code map target paths that escape the workspace', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
 
@@ -157,10 +177,35 @@ const windowsIt = process.platform === 'win32' ? it : it.skip
 windowsIt('does not mistake Windows command switches for absolute paths', async () => withWorkspace(async ({ workspace }) => {
   const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
 
-  const result = await executor.runCommand('cmd /c echo ok /s', workspace)
+  const result = await executor.runCommand('cmd /c echo ok /s', workspace, {}, 5000, true)
 
   expect(result.success).toBe(true)
   expect(result.data?.stdout).toContain('ok')
+}))
+
+it('aborts only the requested streaming response', async () => withWorkspace(async ({ workspace }) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    response.write('data: {"partial":true}\n\n')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Missing test server address')
+    const executor = new NodeToolExecutor(workspace)
+    const pending = executor.streamMessage(
+      `http://127.0.0.1:${address.port}`,
+      {},
+      '{}',
+      () => {},
+      { streamId: 42, timeoutMs: 5000 },
+    )
+    await new Promise(resolve => setTimeout(resolve, 25))
+    await executor.streamAbort(42)
+    await expect(pending).resolves.toMatchObject({ success: false, error: 'Request aborted' })
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
 }))
 
 it('runs and inspects an agent background terminal session', async () => withWorkspace(async ({ workspace }) => {

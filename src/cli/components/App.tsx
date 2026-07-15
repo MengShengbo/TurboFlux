@@ -14,7 +14,7 @@ import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
-import type { AgentAttachment, AgentTurn, ChangeSummary, ThinkingMode, TokenUsage } from '../../shared/agentTypes'
+import type { AgentAttachment, AgentTurn, ApprovalPolicy, ChangeSummary, ThinkingMode, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
 import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
@@ -43,6 +43,8 @@ interface AppProps {
   singleShot?: string
   verbose: boolean
   noFlicker: boolean
+  approvalPolicy?: ApprovalPolicy
+  mcpServers?: string[]
 }
 
 type StaticTranscriptItem =
@@ -346,7 +348,7 @@ function estimateOutputTokensForDisplay(text: string): number {
   return Math.max(1, Math.ceil(trimmed.length / 4))
 }
 
-function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker }: AppProps) {
+function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers }: AppProps) {
   const { exit } = useApp()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const terminal = useTerminalSize()
@@ -422,6 +424,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     workspaceName,
     config: initialConfig,
     conversationPrefix: 'cli',
+    approvalPolicy,
+    connectMcp: Boolean(mcpServers?.length),
+    mcpServers,
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
@@ -1340,6 +1345,8 @@ export function startInkApp(options: {
   singleShot?: string
   verbose: boolean
   noFlicker?: boolean
+  approvalPolicy?: ApprovalPolicy
+  mcpServers?: string[]
 }) {
   const workspaceName = options.workspacePath.split(/[\\/]/).pop() || 'workspace'
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -1352,6 +1359,8 @@ export function startInkApp(options: {
       singleShot={options.singleShot}
       verbose={options.verbose}
       noFlicker={noFlicker}
+      approvalPolicy={options.approvalPolicy}
+      mcpServers={options.mcpServers}
     />,
     {
       maxFps: noFlicker ? 24 : 18,

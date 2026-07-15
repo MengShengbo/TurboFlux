@@ -69,7 +69,7 @@ export class TurnStrategyPlanner {
     const errors = recentToolErrors(session.turns)
     const hasEvidence = hasRecentEvidence(session.turns)
     const hasTasks = hasOpenWork(session)
-    const canWriteByMode = mode === 'vibe' || mode === 'plan'
+    const canWriteByMode = mode === 'vibe'
     const needsWorkspaceContext = true
     const needsCodeMap = true
     const requiresEvidence = false

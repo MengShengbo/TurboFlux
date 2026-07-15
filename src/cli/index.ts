@@ -4,6 +4,7 @@ import { Command } from 'commander'
 import { startRepl } from './repl'
 import { loadConfig, saveConfig, setConfigValue } from '../core/config'
 import { runSetup } from './setup'
+import type { ApprovalPolicy } from '../shared/agentTypes'
 
 const program = new Command()
 
@@ -18,6 +19,8 @@ program
   .option('-v, --verbose', 'show tool call details')
   .option('--no-flicker', 'use a fixed alternate-screen viewport to reduce redraw flicker')
   .option('--no-color', 'disable color output')
+  .option('--approval-policy <policy>', 'tool approval policy: request, auto, or full', 'request')
+  .option('--mcp <servers>', 'explicitly start configured MCP servers (comma-separated names or all)')
   .action(async (workspace: string, opts) => {
     const workspacePath = resolve(workspace)
     const config = await loadConfig()
@@ -25,12 +28,22 @@ program
     if (opts.modelOverride) config.model = opts.modelOverride
     if (opts.providerOverride) config.provider = opts.providerOverride
 
+    const approvalPolicy = String(opts.approvalPolicy || 'request') as ApprovalPolicy
+    if (!['request', 'auto', 'full'].includes(approvalPolicy)) {
+      throw new Error(`Invalid approval policy: ${approvalPolicy}`)
+    }
+    const mcpServers = typeof opts.mcp === 'string'
+      ? opts.mcp.split(',').map((name: string) => name.trim()).filter(Boolean)
+      : undefined
+
     await startRepl({
       workspacePath,
       config,
       singleShot: opts.command || undefined,
       verbose: opts.verbose || false,
       noFlicker: opts.flicker === false,
+      approvalPolicy,
+      mcpServers,
     })
   })
 

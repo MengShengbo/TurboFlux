@@ -32,6 +32,13 @@ export interface CommandOutput {
   stderr: string
   exitCode: number
   timedOut?: boolean
+  truncated?: boolean
+}
+
+export interface RequestOptions {
+  signal?: AbortSignal
+  streamId?: number
+  timeoutMs?: number
 }
 
 export interface CheckpointResult {
@@ -65,6 +72,7 @@ export interface ToolExecutor {
 
   // Terminal operations
   runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, approved?: boolean): Promise<Result<CommandOutput>>
+  runProcess?(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number): Promise<Result<CommandOutput>>
   validateCommand?(command: string, cwd: string): Promise<Result<void>>
   ptyCreate?(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session?: TerminalSessionInfo }>>
   ptyWrite?(sessionId: string, data: string): Promise<Result<void>>
@@ -78,7 +86,7 @@ export interface ToolExecutor {
   checkpointCreate?(workspacePath: string, message: string, filePaths: string[], type: 'auto' | 'explicit', preimages?: any): Promise<Result<CheckpointResult>>
 
   // Stream operations (API calls)
-  sendMessage(url: string, headers: Record<string, string>, body: string): Promise<Result<string>>
-  streamMessage(url: string, headers: Record<string, string>, body: string, onLine: (line: string) => void): Promise<Result<string>>
+  sendMessage(url: string, headers: Record<string, string>, body: string, options?: RequestOptions): Promise<Result<string>>
+  streamMessage(url: string, headers: Record<string, string>, body: string, onLine: (line: string) => void, options?: RequestOptions): Promise<Result<string>>
   streamAbort?(streamId: number): Promise<void>
 }

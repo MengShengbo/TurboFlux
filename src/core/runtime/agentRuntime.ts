@@ -19,6 +19,7 @@ export interface CreateAgentRuntimeOptions {
   sandboxPolicy?: SandboxPolicy
   shell?: string
   connectMcp?: boolean
+  mcpServers?: string[]
   registerSkills?: (skillRuntime: SkillRuntime) => void
 }
 
@@ -39,7 +40,7 @@ function getDefaultShell(): string {
 function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
   return {
     mode: options.mode || 'vibe',
-    approvalPolicy: options.approvalPolicy || 'auto',
+    approvalPolicy: options.approvalPolicy || 'request',
     sandboxPolicy: options.sandboxPolicy || 'workspace',
     temperature: 0.7,
     maxTurns: 25,
@@ -87,9 +88,12 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
   const mcpClient = new McpClient()
   engine.setMcpClient(mcpClient)
 
-  if (options.connectMcp !== false) {
+  if (options.connectMcp === true) {
     const mcpSettings = loadMcpSettings(options.workspacePath)
-    const servers = Object.entries(mcpSettings.mcpServers).filter(([, config]) => config.enabled)
+    const selected = new Set(options.mcpServers || ['all'])
+    const servers = Object.entries(mcpSettings.mcpServers).filter(([name, config]) =>
+      config.enabled && (selected.has('all') || selected.has(name))
+    )
     for (const [name, config] of servers) {
       mcpClient.connect(name, config).catch(() => {})
     }
