@@ -16,7 +16,8 @@
     "start": "tsx src/cli/index.ts",
     "build": "tsc",
     "type-check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "benchmark:fast-context": "tsx scripts/retrieval-benchmark.ts"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

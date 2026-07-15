@@ -44,6 +44,11 @@ const DEFAULT_TERMINAL_SHELL_ARGS = process.platform === 'win32'
 const DEFAULT_TERMINAL_SHELL_ID = process.platform === 'win32' ? 'powershell' : 'bash'
 const DEFAULT_TERMINAL_SHELL_LABEL = process.platform === 'win32' ? 'PowerShell' : 'Bash'
 const SENSITIVE_ENV_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)/i
+const CODE_SEARCH_SKIPPED_DIRS = new Set([
+  '.git', '.hg', '.svn', '.claude', '.turboflux', '.vscode', '.cache', '.next', '.turbo',
+  'node_modules', 'vendor', 'dist', 'dist-desktop', 'build', 'out', 'coverage', 'target', 'tmp', 'temp',
+])
+const CODE_SEARCH_EXCLUDE_GLOBS = Array.from(CODE_SEARCH_SKIPPED_DIRS, directory => `**/${directory}/**`)
 
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
@@ -140,17 +145,7 @@ export class NodeToolExecutor implements ToolExecutor {
         '--files',
         '--hidden',
         `--glob=${normalizedPattern}`,
-        '--glob=!**/.git/**',
-        '--glob=!**/node_modules/**',
-        '--glob=!**/dist/**',
-        '--glob=!**/build/**',
-        '--glob=!**/coverage/**',
-        '--glob=!**/.next/**',
-        '--glob=!**/.turbo/**',
-        '--glob=!**/.cache/**',
-        '--glob=!**/.turboflux/**',
-        '--glob=!**/target/**',
-        '--glob=!**/vendor/**',
+        ...CODE_SEARCH_EXCLUDE_GLOBS.map(pattern => `--glob=!${pattern}`),
         '--glob=!**/.env',
         '--glob=!**/.env.local',
         '--glob=!**/.env.*.local',
@@ -197,17 +192,7 @@ export class NodeToolExecutor implements ToolExecutor {
         '--no-heading',
         '--hidden',
         '--max-count=50',
-        '--glob=!.git/**',
-        '--glob=!node_modules/**',
-        '--glob=!dist/**',
-        '--glob=!build/**',
-        '--glob=!coverage/**',
-        '--glob=!.next/**',
-        '--glob=!.turbo/**',
-        '--glob=!.cache/**',
-        '--glob=!.turboflux/**',
-        '--glob=!target/**',
-        '--glob=!vendor/**',
+        ...CODE_SEARCH_EXCLUDE_GLOBS.map(pattern => `--glob=!${pattern}`),
         '--glob=!.env',
         '--glob=!.env.local',
         '--glob=!.env.*.local',
@@ -216,14 +201,14 @@ export class NodeToolExecutor implements ToolExecutor {
       if (filePattern) {
         args.push(`--glob=${filePattern}`)
       }
-      args.push('--', pattern, safeBasePath)
-      const { stdout } = await execFileAsync('rg', args, { timeout: 10000, maxBuffer: 1024 * 1024 })
+      args.push('--', pattern, '.')
+      const { stdout } = await execFileAsync('rg', args, { cwd: safeBasePath, timeout: 10000, maxBuffer: 1024 * 1024 })
       const output = stdout.trim()
       if (!output) return { success: true, data: [] }
       const results: SearchContentHit[] = output.split('\n').slice(0, 50).map(line => {
         const match = line.match(/^(.+?):(\d+):(.*)$/)
         if (!match) return { file: '', line: 0, text: line }
-        return { file: match[1], line: parseInt(match[2]), text: match[3] }
+        return { file: resolveNativePath(safeBasePath, match[1]), line: parseInt(match[2]), text: match[3] }
       }).filter(r => r.file)
       return { success: true, data: results }
     } catch (e: any) {
@@ -297,23 +282,22 @@ export class NodeToolExecutor implements ToolExecutor {
           '--line-number',
           '--no-heading',
           '--hidden',
+          '--ignore-case',
           '--max-count=20',
           '--glob=*.{ts,tsx,js,jsx,py,rs,go,java}',
-          '--glob=!node_modules/**',
-          '--glob=!dist/**',
-          '--glob=!.git/**',
+          ...CODE_SEARCH_EXCLUDE_GLOBS.map(exclude => `--glob=!${exclude}`),
           '--',
           pattern,
-          safeWorkspacePath,
+          '.',
         ]
         try {
-          const { stdout } = await execFileAsync('rg', args, { timeout: 8000, maxBuffer: 512 * 1024 })
+          const { stdout } = await execFileAsync('rg', args, { cwd: safeWorkspacePath, timeout: 8000, maxBuffer: 512 * 1024 })
           const output = stdout.trim()
           if (!output) continue
           for (const line of output.split('\n').slice(0, query.limit || 10)) {
             const match = line.match(/^(.+?):(\d+):(.*)$/)
             if (!match) continue
-            const filePath = match[1]
+            const filePath = resolveNativePath(safeWorkspacePath, match[1])
             const lineNum = parseInt(match[2])
             const text = match[3].trim()
             const symbolMatch = text.match(/(?:export\s+)?(?:default\s+)?(?:function|const|let|var|class|interface|type|enum)\s+(\w+)/)
@@ -342,7 +326,7 @@ export class NodeToolExecutor implements ToolExecutor {
         if (results.length >= (query.limit || 10)) break
       }
       const limit = query.limit || 10
-      const fallback = results.length === 0 || ripgrepUnavailable
+      const fallback = ripgrepUnavailable
         ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit)
         : []
       return {
@@ -1574,7 +1558,7 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private shouldSkipEntry(name: string): boolean {
-    if (['.git', 'node_modules', 'dist', 'build', 'coverage', '.next'].includes(name)) return true
+    if (CODE_SEARCH_SKIPPED_DIRS.has(name.toLowerCase())) return true
     return name === '.env' || name === '.env.local' || /^\.env\..+\.local$/i.test(name)
   }
 

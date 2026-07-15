@@ -28,6 +28,18 @@ describe('FastContext objective tokenization', () => {
     expect(tokens.length).toBeLessThanOrEqual(6)
   })
 
+  it('prefers complete identifiers and compound terms over noisy fragments', () => {
+    const fastContextTokens = __testSelectPrefetchTokens('Locate FastContext background scheduling and subagent retrieval')
+    const scrollTokens = __testSelectPrefetchTokens('Locate row-level transcript viewport scrolling and terminal mouse-wheel handling')
+
+    expect(fastContextTokens).toEqual(expect.arrayContaining(['fastcontext', 'background', 'scheduling', 'subagent']))
+    expect(fastContextTokens).not.toContain('fast')
+    expect(fastContextTokens).not.toContain('context')
+    expect(scrollTokens).toEqual(expect.arrayContaining(['row-level', 'transcript', 'viewport', 'mouse-wheel']))
+    expect(scrollTokens).not.toContain('row')
+    expect(scrollTokens).not.toContain('wheel')
+  })
+
   it('treats the LLM final report as the primary ranked code map', () => {
     const candidates = new Map<string, FastContextScanHit[]>()
     candidates.set('src/fallback.ts', [{

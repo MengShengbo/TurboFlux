@@ -195,12 +195,16 @@ describe('NodeToolExecutor sandbox policies', () => {
 
   it('returns line-numbered content and symbol search results', async () => withWorkspace(async ({ workspace }) => {
     mkdirSync(join(workspace, 'src'), { recursive: true })
+    mkdirSync(join(workspace, 'tmp'), { recursive: true })
+    mkdirSync(join(workspace, '.claude'), { recursive: true })
     writeFileSync(join(workspace, 'src', 'FluxRunner.ts'), 'export class FluxRunner {\n  run() { return true }\n}\n', 'utf-8')
     writeFileSync(join(workspace, 'src', 'ignored.txt'), 'export class FluxIgnored {}\n', 'utf-8')
+    writeFileSync(join(workspace, 'tmp', 'FluxHidden.ts'), 'export class FluxHidden {}\n', 'utf-8')
+    writeFileSync(join(workspace, '.claude', 'FluxShadow.ts'), 'export class FluxShadow {}\n', 'utf-8')
     const executor = new NodeToolExecutor(workspace)
 
     const content = await executor.searchContent('FluxRunner', workspace, '*.ts')
-    const symbols = await executor.searchCodeSymbols({ query: 'Flux', workspacePath: workspace })
+    const symbols = await executor.searchCodeSymbols({ query: 'flux', workspacePath: workspace })
 
     expect(content.success).toBe(true)
     expect(content.data).toEqual(expect.arrayContaining([
@@ -210,6 +214,7 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(symbols.data).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: 'src/FluxRunner.ts', title: 'FluxRunner', line: 1 }),
     ]))
+    expect(symbols.data?.some(hit => /FluxHidden|FluxShadow/.test(hit.title))).toBe(false)
   }))
 
   it('creates local history checkpoints for workspace files', async () => withWorkspace(async ({ workspace }) => {

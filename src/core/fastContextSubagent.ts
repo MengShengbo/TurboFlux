@@ -26,12 +26,19 @@ const STOP_WORDS = new Set([
   'why', 'how', 'into', 'your', 'ours', 'their', 'file', 'code', 'task', 'fix',
   'bug', 'issue', 'error', 'failed', 'fails', 'wrong', 'about', 'need', 'needs',
   'current', 'now', 'then', 'there', 'here', 'read', 'write', 'edit',
+  'locate', 'find', 'identify', 'show', 'implementation', 'implement', 'handling',
+  'support', 'codebase', 'source', 'logic', 'feature', 'behavior',
 ])
 
 const PREFETCH_FILE_GLOBS = [
   '**/{package.json,pyproject.toml,Cargo.toml,go.mod,composer.json,pom.xml,build.gradle,Makefile}',
   '**/{index,main,app,server,client,router,routes,cli}.{ts,tsx,js,jsx,mjs,cjs,py,rs,go,java,kt}',
 ]
+const FAILURE_QUERY_TERMS = new Set([
+  'abort', 'aborted', 'crash', 'crashes', 'deadlock', 'freeze', 'freezes', 'hang', 'hangs',
+  'stuck', 'timeout', 'timedout', 'exception', 'panic', 'failure',
+])
+const ENTRY_QUERY_TERMS = new Set(['bootstrap', 'command', 'entry', 'entrypoint', 'launch', 'startup'])
 
 interface RunParams {
   workspacePath: string
@@ -81,7 +88,7 @@ function trimText(value: string, max = 220): string {
 export function __testObjectiveTokens(objective: string): string[] {
   const tokens: string[] = []
   const add = (token: string): void => {
-    const value = token.trim().toLowerCase()
+    const value = token.trim().replace(/^[./-]+|[./-]+$/g, '').toLowerCase()
     if (!value || STOP_WORDS.has(value)) return
     if (/^[a-z0-9_.$/-]+$/i.test(value) && value.length < 2) return
     if (/^[\u4e00-\u9fff]+$/u.test(value) && value.length < 2) return
@@ -117,13 +124,31 @@ export function __testSelectPrefetchTokens(objective: string): string[] {
 }
 
 function selectPrefetchTokens(tokens: string[]): string[] {
-  const preferred = tokens.filter(token => token.length >= 2 && !STOP_WORDS.has(token))
+  const compoundParts = new Set(
+    tokens
+      .filter(token => /[._/$-]/.test(token))
+      .flatMap(token => token.split(/[._/$-]+/).filter(part => part.length >= 2)),
+  )
+  const preferred = tokens.filter(token => (
+    token.length >= 2
+    && !STOP_WORDS.has(token)
+    && (!compoundParts.has(token) || /[._/$-]/.test(token))
+    && !(
+      /^[a-z0-9_$]+$/i.test(token)
+      && tokens.some(other => (
+        other !== token
+        && /^[a-z0-9_$]+$/i.test(other)
+        && other.length >= token.length + 3
+        && other.includes(token)
+      ))
+    )
+  ))
   const codeLike = preferred.filter(token => /[a-z0-9_$]/i.test(token) && (/[._/$-]/.test(token) || /[a-z]/i.test(token)))
   const chinese = preferred.filter(token => /[\u4e00-\u9fff]/u.test(token))
   return Array.from(new Set([
-    ...codeLike.slice(0, 4),
+    ...codeLike.slice(0, 6),
     ...chinese.slice(0, 3),
-    ...preferred.slice(0, 4),
+    ...preferred.slice(0, 6),
   ])).slice(0, 6)
 }
 
@@ -195,7 +220,25 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
       run: () => params.toolExecutor.searchFiles(pattern, params.workspacePath),
     })
   }
-  for (const token of selectedTokens.slice(0, 4)) {
+  const filenameTokens = Array.from(new Set(
+    selectedTokens
+      .flatMap(token => token.split(/[._/$-]+/))
+      .map(token => token.replace(/[^a-z0-9_\u4e00-\u9fff-]/gi, ''))
+      .filter(token => token.length >= 3),
+  )).slice(0, 8)
+  if (filenameTokens.length > 0) {
+    const pattern = filenameTokens.length === 1
+      ? `**/*${filenameTokens[0]}*`
+      : `**/*{${filenameTokens.join(',')}}*`
+    tasks.push({
+      label: `filenames ${filenameTokens.join(',')}`,
+      kind: 'files',
+      token: filenameTokens.join(','),
+      pattern,
+      run: () => params.toolExecutor.searchFiles(pattern, params.workspacePath),
+    })
+  }
+  for (const token of selectedTokens) {
     tasks.push({
       label: `content ${token}`,
       kind: 'content',
@@ -203,7 +246,7 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
       run: () => params.toolExecutor.searchContent(escapeRegExp(token), params.workspacePath, undefined, true),
     })
   }
-  for (const token of selectedTokens.filter(value => /^[a-z_$][a-z0-9_$.-]{2,}$/i.test(value)).slice(0, 3)) {
+  for (const token of selectedTokens.filter(value => /^[a-z_$][a-z0-9_$]{2,}$/i.test(value)).slice(0, 4)) {
     tasks.push({
       label: `symbols ${token}`,
       kind: 'symbols',
@@ -238,7 +281,9 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
           startLine: 1,
           endLine: 1,
           preview: path,
-          reason: `prefetch glob: ${task.pattern}`,
+          reason: task.token
+            ? `prefetch filename: ${task.token}`
+            : `prefetch glob: ${task.pattern}`,
         })
       }
       return
@@ -290,7 +335,25 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
     grouped.set(hit.path, list)
   }
 
-  const readTargets = summarizeCandidates(grouped).slice(0, 4)
+  const rankedCandidates = summarizeCandidates(grouped)
+  const anchorGrouped = new Map<string, FastContextScanHit[]>()
+  for (const item of uniqueEvidence.filter(item => /prefetch glob/i.test(item.reason))) {
+    const hit = decorateHit(item, tokens, 'prefetch')
+    const list = anchorGrouped.get(hit.path) || []
+    list.push(hit)
+    anchorGrouped.set(hit.path, list)
+  }
+  const rankedAnchors = summarizeCandidates(anchorGrouped)
+  const entryOrStartupQuery = tokens.some(token => ENTRY_QUERY_TERMS.has(token))
+  const preferredTargets = entryOrStartupQuery
+    ? [...rankedCandidates.slice(0, 3), ...rankedAnchors.slice(0, 2), ...rankedCandidates.slice(3)]
+    : rankedCandidates
+  const seenReadTargets = new Set<string>()
+  const readTargets = preferredTargets.filter(candidate => {
+    if (seenReadTargets.has(candidate.path)) return false
+    seenReadTargets.add(candidate.path)
+    return true
+  }).slice(0, entryOrStartupQuery ? 5 : 4)
   const readResults = await Promise.all(readTargets.map(async candidate => {
     if (params.abortSignal?.aborted) return null
     const filePath = join(params.workspacePath, candidate.path)
@@ -343,12 +406,13 @@ function inferKind(hit: SubAgentEvidence, tokens: string[]): FastContextEvidence
   const reason = hit.reason.toLowerCase()
   const objectiveMatches = countTokenMatches(`${path}\n${preview}`, tokens)
   const looksLikeFailureSite = /\b(throw|error|exception|failed|failure|invalid|missing|undefined|null|abort|reject)\b/.test(preview)
+  const objectiveLooksLikeFailure = tokens.some(token => FAILURE_QUERY_TERMS.has(token))
 
-  if (looksLikeFailureSite && objectiveMatches >= 2) return 'root_cause'
-  if (/\b(test|spec)\b|__tests__|\.test\.|\.spec\./.test(path)) return 'test'
+  if (/\b(test|spec|benchmark|fixture)\b|__tests__|\.test\.|\.spec\./.test(path)) return 'test'
   if (/\b(schema|types?|interface|contract|protocol|ipc|dto)\b/.test(path)) return 'schema'
   if (/(\.config\.|config|settings|package\.json|tsconfig|vite|webpack|rollup|eslint|env)/.test(path)) return 'config'
-  if (/^(index|main|app|server|client|router|routes|cli)\./.test(base) || /\b(routes?|entry|bootstrap)\b/.test(path)) return 'entry'
+  if (/^bin\/.*\.(?:mjs|cjs|js|ts|py|sh|ps1|cmd|bat)$/.test(path) || /^(index|main|app|server|client|router|routes|cli)\./.test(base) || /\b(routes?|entry|bootstrap)\b/.test(path)) return 'entry'
+  if (objectiveLooksLikeFailure && looksLikeFailureSite && objectiveMatches >= 2) return 'root_cause'
   if ((reason.includes('grep') || reason.includes('symbol')) && /\b(import|from|require|use[A-Z]|\w+\()/.test(hit.preview)) return 'caller'
   if (reason.includes('file read') || /\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|cs|cpp|c|swift|kt)$/.test(path)) return 'implementation'
   return 'supporting'
@@ -426,7 +490,9 @@ function summarizeCandidates(candidates: Map<string, FastContextScanHit[]>): Can
       const symbols = Array.from(new Set(sortedHits.map(hit => hit.symbol || '').filter(Boolean))).slice(0, 4)
       const diversityBonus = Math.min(7, Math.max(0, kinds.length - 1) * 3)
       const densityBonus = Math.min(12, Math.max(0, sortedHits.length - 1) * 3)
-      const score = clamp(topScore + diversityBonus + densityBonus, 20, 100)
+      const readConfirmedBonus = reasons.some(reason => /(?:file read|read confirmation|prefetch read)/i.test(reason)) ? 6 : 0
+      const testPenalty = kinds.length === 1 && kinds[0] === 'test' ? 12 : 0
+      const score = Math.max(20, topScore + diversityBonus + densityBonus + readConfirmedBonus - testPenalty)
       return {
         path,
         hits: sortedHits,
