@@ -2,6 +2,7 @@ import React from 'react'
 import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
+import { getSafeFrameWidth } from '../../terminalLayout'
 import type { TurboFluxConfig } from '../../../core/config'
 import type { AgentMode, ThinkingMode, TokenUsage } from '../../../shared/agentTypes'
 
@@ -12,11 +13,8 @@ interface StatusLineProps {
   thinkingMode?: ThinkingMode
   viewingHistory?: boolean
   gitEnabled?: boolean
-}
-
-const MODE_COLORS: Record<AgentMode, string> = {
-  vibe: 'green',
-  plan: 'blue',
+  mcpCount?: number
+  terminalCount?: number
 }
 
 const MODE_LABELS: Record<AgentMode, string> = {
@@ -31,7 +29,16 @@ const THINKING_LABELS: Record<ThinkingMode, string> = {
   max: 'max',
 }
 
-export function StatusLine({ config, tokenUsage, mode = 'vibe', thinkingMode = 'auto', viewingHistory = false, gitEnabled = false }: StatusLineProps) {
+export function StatusLine({
+  config,
+  tokenUsage,
+  mode = 'vibe',
+  thinkingMode = 'auto',
+  viewingHistory = false,
+  gitEnabled = false,
+  mcpCount = 0,
+  terminalCount = 0,
+}: StatusLineProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const hasProviderUsage = tokenUsage.source === 'provider' && typeof tokenUsage.input === 'number'
@@ -48,22 +55,30 @@ export function StatusLine({ config, tokenUsage, mode = 'vibe', thinkingMode = '
   const barColor = ratio < 0.5 ? theme.success : ratio < 0.8 ? theme.warning : theme.error
 
   const isWide = columns > 80
+  const frameWidth = getSafeFrameWidth(columns)
 
   const parts: string[] = []
   if (config.model) parts.push(config.model)
-  if (config.provider) parts.push(config.provider)
-  parts.push(`think ${THINKING_LABELS[thinkingMode]}`)
-  if (gitEnabled) parts.push('git')
-  if (viewingHistory) parts.push('history view')
+  parts.push(`think:${THINKING_LABELS[thinkingMode]}`)
+  parts.push(`git:${gitEnabled ? 'on' : 'off'}`)
+  parts.push(`mcp:${mcpCount > 0 ? mcpCount : 'off'}`)
+  if (terminalCount > 0) parts.push(`term:${terminalCount}`)
+  if (viewingHistory) parts.push('history')
 
   return (
-    <Box marginTop={0} flexDirection="row" justifyContent="space-between">
+    <Box
+      width={frameWidth}
+      paddingX={1}
+      backgroundColor={theme.panelRaised}
+      flexDirection="row"
+      justifyContent="space-between"
+    >
       <Box flexDirection="row">
-        <Text color={MODE_COLORS[mode]} bold>[{MODE_LABELS[mode]}]</Text>
-        <Text color={theme.statusLine}> </Text>
+        <Text color={mode === 'vibe' ? theme.success : theme.info} bold>{MODE_LABELS[mode]}</Text>
+        <Text color={theme.divider}> | </Text>
         <Text color={theme.statusLine}>
-          {parts.length > 0 ? parts.join(' - ') : 'no model connection'}
-          {isWide && ` - ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : 'unknown'}`}
+          {parts.length > 0 ? parts.join(' | ') : 'no model connection'}
+          {isWide && ` | ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : 'unknown'}`}
           {hasProviderUsage && total > 0 && ' '}
         </Text>
         {hasProviderUsage && total > 0 && <Text color={barColor}>{bar}</Text>}

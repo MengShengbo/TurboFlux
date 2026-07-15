@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { render, Box, Static, Text, useInput, useApp } from 'ink'
-import { ThemeProvider } from '../theme/index'
+import { ThemeProvider, useTheme } from '../theme/index'
 import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
 import type { ToolStatus } from './tools/ToolCallTree'
@@ -35,6 +35,8 @@ import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
 import { ThinkingModeRail } from './tools/ThinkingModeRail'
+import { resolveCockpitLayout, TaskRail, WorkRail } from './layout/CockpitRails'
+import { shouldUseCompactWordmark } from '../brand'
 import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
 
 interface AppProps {
@@ -208,7 +210,7 @@ function isFalsyEnv(value: string | undefined): boolean {
 export function shouldUseNoFlicker(
   interactive: boolean,
   singleShot?: string,
-  requested = false,
+  requested = true,
 ): boolean {
   if (!interactive || singleShot) return false
   const forced = normalizeEnvFlag(process.env.TURBOFLUX_NO_FLICKER)
@@ -347,6 +349,37 @@ function estimateOutputTokensForDisplay(text: string): number {
   const trimmed = text.trim()
   if (!trimmed) return 0
   return Math.max(1, Math.ceil(trimmed.length / 4))
+}
+
+function CockpitRoot({ width, height, children }: { width: number; height: number; children: React.ReactNode }) {
+  const theme = useTheme()
+  return (
+    <Box
+      flexDirection="column"
+      paddingX={1}
+      width={width}
+      height={height}
+      overflow="hidden"
+      backgroundColor={theme.background}
+    >
+      {children}
+    </Box>
+  )
+}
+
+function SessionPane({ running, children }: { running: boolean; children: React.ReactNode }) {
+  const theme = useTheme()
+  return (
+    <Box flexDirection="column" flexGrow={1} flexShrink={1} backgroundColor={theme.background} overflow="hidden">
+      <Box flexShrink={0} paddingX={1} backgroundColor={theme.panelRaised} justifyContent="space-between">
+        <Text color={theme.brand} bold>SESSION</Text>
+        <Text color={running ? theme.brandShimmer : theme.success} bold>{running ? '● RUNNING' : '● READY'}</Text>
+      </Box>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} paddingX={1} overflow="hidden">
+        {children}
+      </Box>
+    </Box>
+  )
 }
 
 function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers }: AppProps) {
@@ -713,10 +746,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const transcriptRowBudget = useMemo(() => {
     if (!noFlickerActive) return Number.MAX_SAFE_INTEGER
-    const headerRows = terminal.columns < 60 ? 17 : 14
-    const bottomRows = pendingAsk ? 8 : 3
+    const headerRows = (shouldUseCompactWordmark(terminal.columns, terminal.rows) ? 5 : 9) + (config.apiKey ? 0 : 1)
+    const bottomRows = pendingAsk ? 9 : 5
     return Math.max(4, terminal.rows - headerRows - bottomRows)
-  }, [noFlickerActive, terminal.rows, terminal.columns, pendingAsk])
+  }, [noFlickerActive, terminal.rows, terminal.columns, pendingAsk, config.apiKey])
   const maxTranscriptOffset = Math.max(0, messages.length - 1)
   const normalizedTranscriptOffset = noFlickerActive
     ? Math.min(transcriptOffset, maxTranscriptOffset)
@@ -1089,16 +1122,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const runningNode = isRunning ? (
     <Box flexDirection="column" marginBottom={1}>
-      {(fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} isActive={fcActive} />}
-      {activeTask && <TaskProgressLine task={activeTask} />}
+      {!noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} isActive={fcActive} />}
+      {!noFlickerActive && activeTask && <TaskProgressLine task={activeTask} />}
       <ActiveWorkPanel
-        tools={currentTools}
-        draft={streamingToolDraft}
+        tools={noFlickerActive ? [] : currentTools}
+        draft={noFlickerActive ? null : streamingToolDraft}
         streamText={streamTextForDisplay}
         outputTokens={currentTurnOutputTokens}
         lastActivity={lastActivity}
         verbose={verbose}
-        idleLabel={!visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
+        idleLabel={!noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
       />
     </Box>
   ) : null
@@ -1263,35 +1296,62 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     { kind: 'header', id: 'startup-header' },
     ...messages.map(message => ({ kind: 'message' as const, id: message.id, message })),
   ], [messages])
+  const cockpit = resolveCockpitLayout(terminal.columns)
+  const mcpCount = mcpClient.getAllConnections().filter(connection => connection.status === 'connected').length
+  const activeTerminalCount = terminalSessions.filter(session => session.status === 'running' || session.status === 'starting').length
 
   if (noFlickerActive) {
     return (
       <ThemeProvider>
-        <Box flexDirection="column" paddingX={1} width={getSafeViewportWidth(terminal.columns)} height={terminal.rows} overflow="hidden">
+        <CockpitRoot width={getSafeViewportWidth(terminal.columns)} height={terminal.rows}>
           <Box flexShrink={0}>
             <Header
-              workspaceName={workspaceName}
-              model={config.model}
+              workspacePath={workspacePath}
               mood={mood}
               hasApiKey={!!config.apiKey}
             />
           </Box>
 
           <Box flexDirection="column" flexGrow={1} overflow="hidden">
-            <Box flexDirection="column" flexShrink={1} overflow="hidden">
-              {overlayNode ?? transcriptNode}
+            <Box flexDirection="row" flexShrink={1} flexGrow={1} overflow="hidden">
+              {cockpit.showWorkRail && (
+                <WorkRail
+                  width={cockpit.workWidth}
+                  isRunning={isRunning}
+                  tools={currentTools}
+                  draft={streamingToolDraft}
+                  fastContextEvents={fcEvents}
+                  fastContextActive={fcActive}
+                  terminals={terminalSessions}
+                  mcpCount={mcpCount}
+                />
+              )}
+              <SessionPane running={isRunning}>
+                {overlayNode ?? transcriptNode}
+              </SessionPane>
+              {cockpit.showTaskRail && (
+                <TaskRail width={cockpit.taskWidth} task={activeTask} isRunning={isRunning} />
+              )}
             </Box>
             <Box flexDirection="column" flexShrink={0}>
               {pendingAskNode}
               {cursorHint}
               {promptNode}
-              <TerminalSessionsFooter sessions={terminalSessions} />
               <ThinkingModeRail notice={thinkingModeNotice} onDone={() => setThinkingModeNotice(null)} />
-              <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} thinkingMode={thinkingMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
-              <AgentActivityLine active={isRunning} />
+              <AgentActivityLine active={isRunning} persistent />
+              <StatusLine
+                config={config}
+                tokenUsage={tokenUsage}
+                mode={currentMode}
+                thinkingMode={thinkingMode}
+                viewingHistory={isViewingHistory}
+                gitEnabled={gitEnabled}
+                mcpCount={mcpCount}
+                terminalCount={activeTerminalCount}
+              />
             </Box>
           </Box>
-        </Box>
+        </CockpitRoot>
       </ThemeProvider>
     )
   }
@@ -1304,8 +1364,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             ? (
               <Box key={item.id} flexDirection="column" paddingX={1}>
                 <Header
-                  workspaceName={workspaceName}
-                  model={config.model}
+                  workspacePath={workspacePath}
                   mood="idle"
                   hasApiKey={!!config.apiKey}
                 />

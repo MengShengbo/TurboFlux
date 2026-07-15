@@ -84,17 +84,21 @@ describe('no-flicker transcript slicing', () => {
 })
 
 describe('no-flicker mode selection', () => {
-  it('uses normal terminal scrollback by default for interactive sessions', () => {
-    expect(shouldUseNoFlicker(true)).toBe(false)
+  it('uses the fixed cockpit by default for interactive sessions', () => {
+    expect(shouldUseNoFlicker(true)).toBe(true)
   })
 
-  it('can use the fixed viewport when explicitly requested', () => {
+  it('keeps the fixed viewport when explicitly requested', () => {
     expect(shouldUseNoFlicker(true, undefined, true)).toBe(true)
   })
 
   it('stays disabled for one-shot and non-interactive output', () => {
     expect(shouldUseNoFlicker(true, 'hello', true)).toBe(false)
     expect(shouldUseNoFlicker(false, undefined, true)).toBe(false)
+  })
+
+  it('can opt back into classic terminal scrollback', () => {
+    expect(shouldUseNoFlicker(true, undefined, false)).toBe(false)
   })
 
   it('can be disabled for terminals that dislike alternate screen', () => {

@@ -21,6 +21,7 @@ import {
   type TurboFluxConfig,
 } from '../core/config'
 import { getSupportedModelSpec } from '../core/modelRegistry'
+import { TURBOFLUX_WORDMARK_LINES } from './brand'
 import {
   DEFAULT_PROFILE,
   PERSONA_DEFINITIONS,
@@ -157,17 +158,10 @@ function printBanner(profile = loadProfile()): void {
     'Model profiles · FastContext subagent · Language · Persona · Behavior',
   )
   const title = zh(profile, '终端工作台初始化', 'Terminal workbench setup')
-  const mark = [
-    '  ______          __        ________          ',
-    ' /_  __/_  ______/ /_  ____/ ____/ /_  ___  __',
-    '  / / / / / / __  / / / / /_  / / / / / / |/_/',
-    ' / / / /_/ / /_/ / /_/ / __/ / /_/ / /_>  <  ',
-    '/_/  \\__,_/\\__,_/\\__,_/_/    \\____/\\__/_/|_|  ',
-  ]
   console.log('')
   console.log(`  ${chalk.dim('─'.repeat(72))}`)
   console.log('')
-  console.log(mark.map(line => `  ${renderSetupLogoLine(line)}`).join('\n'))
+  console.log(TURBOFLUX_WORDMARK_LINES.map(line => `  ${renderSetupLogoLine(line)}`).join('\n'))
   console.log('')
   console.log(`  ${chalk.white.bold('TurboFlux Setup')} ${chalk.dim('v0.1.5')} ${chalk.gray(`- ${title}`)}`)
   console.log(`  ${chalk.gray(subtitle)}`)

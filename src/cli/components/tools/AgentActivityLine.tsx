@@ -2,9 +2,11 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { SPINNER_INTERVAL_MS } from '../spinner/constants'
+import { useTheme } from '../../theme/index'
 
 interface AgentActivityLineProps {
   active: boolean
+  persistent?: boolean
 }
 
 interface AgentActivitySegment {
@@ -17,8 +19,9 @@ const SHIMMER_STEP = 2
 const BASE_COLOR = '#075985'
 const SWEEP_COLORS = ['#0e7490', '#0891b2', '#22d3ee', '#67e8f9', '#22d3ee', '#0891b2', '#0e7490']
 
-export function AgentActivityLine({ active }: AgentActivityLineProps) {
+export function AgentActivityLine({ active, persistent = false }: AgentActivityLineProps) {
   const { columns } = useTerminalSize()
+  const theme = useTheme()
   const [frame, setFrame] = useState(0)
 
   useEffect(() => {
@@ -32,9 +35,12 @@ export function AgentActivityLine({ active }: AgentActivityLineProps) {
     return () => clearInterval(interval)
   }, [active])
 
-  if (!active) return null
+  if (!active && !persistent) return null
 
-  const segments = buildAgentActivityLineFrame(columns, frame)
+  const width = Math.max(0, columns - 3)
+  const segments = active
+    ? buildAgentActivityLineFrame(width, frame)
+    : [{ text: '─'.repeat(width), color: theme.subtle, bold: false }]
 
   return (
     <Box flexShrink={0} height={1}>

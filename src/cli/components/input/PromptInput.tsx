@@ -271,14 +271,17 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
         </Box>
       )}
       <Box
-        borderStyle="round"
+        borderStyle="single"
         borderColor={theme.promptBorder}
-        borderLeft={false}
+        borderTop={false}
+        borderBottom={false}
         borderRight={false}
         width={frameWidth}
         flexDirection="row"
         paddingLeft={1}
         paddingRight={1}
+        paddingY={1}
+        backgroundColor={theme.promptBackground}
       >
         <Text bold color={theme.brand}>{'> '}</Text>
         {value ? (

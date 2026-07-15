@@ -14,9 +14,10 @@ export interface Message {
 }
 
 export function UserMessage({ content }: { content: string; key?: any }) {
+  const theme = useTheme()
   return (
-    <Box backgroundColor="#303030" paddingX={1}>
-      <Text dimColor>{'> '}</Text>
+    <Box backgroundColor={theme.surface} paddingX={1}>
+      <Text color={theme.brand}>{'> '}</Text>
       <Text bold>{content}</Text>
     </Box>
   )
