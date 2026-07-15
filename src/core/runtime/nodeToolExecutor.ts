@@ -125,11 +125,61 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   async searchFiles(pattern: string, basePath: string): Promise<Result<{ matches: string[]; truncated?: boolean }>> {
+    let safeBasePath: string
     try {
-      const matches = this.globSync(pattern, this.ensureAllowedPath(basePath))
-      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
+      safeBasePath = this.ensureAllowedPath(basePath)
     } catch (e) {
       return { success: false, error: String(e) }
+    }
+
+    const normalizedPattern = String(pattern || '').trim().replace(/\\/g, '/')
+    if (!normalizedPattern) return { success: false, error: 'File search pattern is required' }
+
+    try {
+      const args = [
+        '--files',
+        '--hidden',
+        `--glob=${normalizedPattern}`,
+        '--glob=!**/.git/**',
+        '--glob=!**/node_modules/**',
+        '--glob=!**/dist/**',
+        '--glob=!**/build/**',
+        '--glob=!**/coverage/**',
+        '--glob=!**/.next/**',
+        '--glob=!**/.turbo/**',
+        '--glob=!**/.cache/**',
+        '--glob=!**/.turboflux/**',
+        '--glob=!**/target/**',
+        '--glob=!**/vendor/**',
+        '--glob=!**/.env',
+        '--glob=!**/.env.local',
+        '--glob=!**/.env.*.local',
+        '.',
+      ]
+      const { stdout } = await execFileAsync('rg', args, {
+        cwd: safeBasePath,
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024,
+      })
+      const matches = stdout
+        .split(/\r?\n/)
+        .map(path => path.trim())
+        .filter(Boolean)
+        .map(path => resolveNativePath(safeBasePath, path))
+        .sort((left, right) => {
+          const leftRelative = relative(safeBasePath, left).replace(/\\/g, '/')
+          const rightRelative = relative(safeBasePath, right).replace(/\\/g, '/')
+          const depthDelta = leftRelative.split('/').length - rightRelative.split('/').length
+          return depthDelta || leftRelative.localeCompare(rightRelative)
+        })
+      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
+    } catch (e: any) {
+      if (e.code === 1 || e.exitCode === 1) return { success: true, data: { matches: [] } }
+      if (e.code !== 'ENOENT') {
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+      const matches = this.globSync(normalizedPattern, safeBasePath)
+      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
     }
   }
 
@@ -1467,13 +1517,42 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private globToRegex(pattern: string): RegExp {
-    const escaped = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*\*/g, '{{GLOBSTAR}}')
-      .replace(/\*/g, '[^/]*')
-      .replace(/\?/g, '[^/]')
-      .replace(/\{\{GLOBSTAR\}\}/g, '.*')
-    return new RegExp(`^${escaped}$`, 'i')
+    const alternatives = this.expandGlobBraces(pattern.replace(/\\/g, '/'))
+      .map(alternative => {
+        let regex = ''
+        for (let index = 0; index < alternative.length; index += 1) {
+          const character = alternative[index]
+          if (character === '*' && alternative[index + 1] === '*') {
+            if (alternative[index + 2] === '/') {
+              regex += '(?:.*/)?'
+              index += 2
+            } else {
+              regex += '.*'
+              index += 1
+            }
+          } else if (character === '*') {
+            regex += '[^/]*'
+          } else if (character === '?') {
+            regex += '[^/]'
+          } else {
+            regex += character.replace(/[.+^$()|[\]{}\\]/g, '\\$&')
+          }
+        }
+        return regex
+      })
+    return new RegExp(`^(?:${alternatives.join('|')})$`, 'i')
+  }
+
+  private expandGlobBraces(pattern: string): string[] {
+    const open = pattern.indexOf('{')
+    if (open < 0) return [pattern]
+    const close = pattern.indexOf('}', open + 1)
+    if (close < 0) return [pattern]
+    const choices = pattern.slice(open + 1, close).split(',').filter(Boolean)
+    if (choices.length < 2) return [pattern]
+    const prefix = pattern.slice(0, open)
+    const suffix = pattern.slice(close + 1)
+    return choices.flatMap(choice => this.expandGlobBraces(`${prefix}${choice}${suffix}`))
   }
 
   private shouldSkipEntry(name: string): boolean {

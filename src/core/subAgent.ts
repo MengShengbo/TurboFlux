@@ -509,8 +509,21 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           } satisfies ToolExecResult,
         }
       }
-      const result = await executeSubAgentTool(entry.tc.function.name, entry.args, workspacePath, toolExecutor)
-      return { entry, result }
+      try {
+        const result = await executeSubAgentTool(entry.tc.function.name, entry.args, workspacePath, toolExecutor)
+        return { entry, result }
+      } catch (error) {
+        const message = formatSubAgentError(error)
+        return {
+          entry,
+          result: {
+            ok: false,
+            output: `Tool failed: ${message}`,
+            summary: `${entry.tc.function.name} failed: ${message}`,
+            evidence: [],
+          } satisfies ToolExecResult,
+        }
+      }
     }))
 
     for (const { entry, result } of results) {
@@ -542,12 +555,19 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
 
   switch (name) {
     case 'search_content': {
-      const pattern = args.pattern || ''
+      const pattern = String(args.pattern || '').trim()
+      if (!pattern) {
+        return { ok: false, output: 'Search pattern is required.', summary: 'grep failed: missing pattern', evidence }
+      }
       const basePath = args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath
       const filePattern = typeof args.file_pattern === 'string' ? args.file_pattern : undefined
       const caseInsensitive = args.case_sensitive === true ? false : true
       const res = await executor.searchContent(pattern, basePath, filePattern, caseInsensitive)
-      if (!res.success || !res.data || res.data.length === 0) {
+      if (!res.success) {
+        const error = res.error || 'unknown search error'
+        return { ok: false, output: `Search failed: ${error}`, summary: `grep "${pattern}" failed: ${error}`, evidence }
+      }
+      if (!res.data || res.data.length === 0) {
         return { ok: true, output: 'No matches found.', summary: `grep "${pattern}" → 0 hits`, evidence }
       }
       const hits = res.data.slice(0, 15)
@@ -567,30 +587,40 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
     }
 
     case 'read_file': {
-      const filePath = resolveWorkspacePath(workspacePath, args.path)
+      const requestedPath = String(args.path || '').trim()
+      if (!requestedPath) {
+        return { ok: false, output: 'File path is required.', summary: 'read failed: missing path', evidence }
+      }
+      const filePath = resolveWorkspacePath(workspacePath, requestedPath)
+      const relativePath = toWorkspaceRelative(workspacePath, filePath)
       const res = await executor.readFile(filePath)
       if (!res.success || !res.data) {
-        return { ok: false, output: `File not found: ${args.path}`, summary: `read ${args.path} → not found`, evidence }
+        const error = res.error || 'file not found'
+        return { ok: false, output: `Read failed: ${error}`, summary: `read ${relativePath} failed: ${error}`, evidence }
       }
       const allLines = res.data.split('\n')
-      const offset = (args.offset || 1) - 1
-      const limit = args.limit || 60
+      const offset = Math.max(0, Math.floor(Number(args.offset) || 1) - 1)
+      const limit = Math.max(1, Math.min(200, Math.floor(Number(args.limit) || 60)))
       const slice = allLines.slice(offset, offset + limit)
       const preview = slice.slice(0, 10).join('\n')
       evidence.push({
-        path: args.path,
+        path: relativePath,
         startLine: offset + 1,
         endLine: offset + slice.length,
         preview,
         reason: 'file read',
       })
-      return { ok: true, output: slice.map((l, i) => `${offset + i + 1} | ${l}`).join('\n'), summary: `read ${args.path}:${offset + 1}-${offset + slice.length}`, evidence }
+      return { ok: true, output: slice.map((line, index) => `${offset + index + 1} | ${line}`).join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence }
     }
 
     case 'search_files': {
       const pattern = args.pattern || '**/*.ts'
       const res = await executor.searchFiles(pattern, workspacePath)
-      if (!res.success || !res.data?.matches?.length) {
+      if (!res.success) {
+        const error = res.error || 'unknown file search error'
+        return { ok: false, output: `File search failed: ${error}`, summary: `glob "${pattern}" failed: ${error}`, evidence }
+      }
+      if (!res.data?.matches?.length) {
         return { ok: true, output: 'No files found.', summary: `glob "${pattern}" → 0 files`, evidence }
       }
       const matches = res.data.matches.slice(0, 20)
@@ -619,7 +649,11 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         limit: 20,
       })
       const hits = normalizeCodeSearchHits(res.data).slice(0, 15)
-      if (!res.success || hits.length === 0) {
+      if (!res.success) {
+        const error = res.error || 'unknown symbol search error'
+        return { ok: false, output: `Symbol search failed: ${error}`, summary: `symbols "${query}" failed: ${error}`, evidence }
+      }
+      if (hits.length === 0) {
         return { ok: true, output: 'No symbols found.', summary: `symbols "${query}" -> 0 hits`, evidence }
       }
       const lines = hits.map(hit => {
@@ -649,7 +683,11 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       })
       const map = res.data?.map
       const nodes = Array.isArray(map) ? map : map ? [map] : []
-      if (!res.success || nodes.length === 0) {
+      if (!res.success) {
+        const error = res.error || 'unknown codemap error'
+        return { ok: false, output: `Codemap failed: ${error}`, summary: `codemap "${query}" failed: ${error}`, evidence }
+      }
+      if (nodes.length === 0) {
         return { ok: true, output: 'No codemap found.', summary: `codemap "${query}" -> 0 nodes`, evidence }
       }
       const lines: string[] = []
@@ -662,4 +700,17 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
     default:
       return { ok: false, output: `Unknown tool: ${name}`, summary: `unknown tool ${name}`, evidence }
   }
+}
+
+function formatSubAgentError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const cause = error.cause
+  if (!cause) return error.message
+  if (cause instanceof Error) return `${error.message} (${cause.message})`
+  if (typeof cause === 'object') {
+    const details = cause as { code?: unknown; message?: unknown; address?: unknown; port?: unknown }
+    const parts = [details.code, details.message, details.address, details.port].filter(value => value !== undefined)
+    if (parts.length > 0) return `${error.message} (${parts.join(' ')})`
+  }
+  return `${error.message} (${String(cause)})`
 }

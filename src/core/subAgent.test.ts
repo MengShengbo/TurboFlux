@@ -174,4 +174,60 @@ describe('runSubAgent', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('reports search infrastructure failures instead of pretending there were no matches', async () => {
+    const originalFetch = globalThis.fetch
+    const events: SubAgentEvent[] = []
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: '',
+          tool_calls: [{
+            id: 'search-1',
+            function: { name: 'search_files', arguments: JSON.stringify({ pattern: '**/*.ts' }) },
+          }],
+        },
+      }],
+    }), { status: 200 })) as unknown as typeof fetch
+
+    const executor = {
+      searchFiles: async () => ({ success: false, error: 'rg unavailable' }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+      readFile: async () => ({ success: true, data: '' }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find source files',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({ ok: true, truncated: true })
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'tool_result',
+        tool: 'search_files',
+        ok: false,
+        summary: expect.stringContaining('rg unavailable'),
+      }))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })

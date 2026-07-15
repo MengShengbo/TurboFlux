@@ -257,6 +257,23 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(envFiles.data?.matches.some(path => path.endsWith('.env'))).toBe(false)
   }))
 
+  it('supports root files and brace globs used by code-search agents', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'src', 'cli'), { recursive: true })
+    writeFileSync(join(workspace, 'package.json'), '{}', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'cli', 'index.ts'), 'export {}', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'cli', 'main.js'), 'export {}', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const manifests = await executor.searchFiles('**/{package.json,pyproject.toml,Cargo.toml}', workspace)
+    const entries = await executor.searchFiles('**/{index,main}.{ts,js}', workspace)
+
+    expect(manifests.data?.matches).toEqual([join(workspace, 'package.json')])
+    expect(entries.data?.matches).toEqual(expect.arrayContaining([
+      join(workspace, 'src', 'cli', 'index.ts'),
+      join(workspace, 'src', 'cli', 'main.js'),
+    ]))
+  }))
+
   it('blocks local history checkpoints in readonly policy', async () => withWorkspace(async ({ workspace }) => {
     const filePath = join(workspace, 'inside.txt')
     writeFileSync(filePath, 'after', 'utf-8')
