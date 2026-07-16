@@ -4,7 +4,7 @@ import { Command } from 'commander'
 import { startRepl } from './repl'
 import { loadConfig, redactConfig, saveConfig, setConfigValue } from '../core/config'
 import { runSetup } from './setup'
-import type { ApprovalPolicy } from '../shared/agentTypes'
+import { normalizeApprovalPolicy, type ApprovalPolicy } from '../shared/agentTypes'
 
 const program = new Command()
 
@@ -21,7 +21,7 @@ program
   .option('--scrollback', 'use classic terminal scrollback instead of the fixed cockpit')
   .option('--no-animation', 'skip the startup reveal animation')
   .option('--no-color', 'disable color output')
-  .option('--approval-policy <policy>', 'tool approval policy: request, auto, or full', 'request')
+  .option('--approval-policy <policy>', 'tool approval policy: ask, agent, or full')
   .option('--mcp <servers>', 'explicitly start configured MCP servers (comma-separated names or all)')
   .action(async (workspace: string, opts) => {
     const workspacePath = resolve(workspace)
@@ -30,10 +30,13 @@ program
     if (opts.modelOverride) config.model = opts.modelOverride
     if (opts.providerOverride) config.provider = opts.providerOverride
 
-    const approvalPolicy = String(opts.approvalPolicy || 'request') as ApprovalPolicy
-    if (!['request', 'auto', 'full'].includes(approvalPolicy)) {
-      throw new Error(`Invalid approval policy: ${approvalPolicy}`)
+    const rawApprovalPolicy = opts.approvalPolicy ? String(opts.approvalPolicy).toLowerCase() : undefined
+    if (rawApprovalPolicy && !['ask', 'agent', 'full', 'request', 'auto'].includes(rawApprovalPolicy)) {
+      throw new Error(`Invalid approval policy: ${rawApprovalPolicy}`)
     }
+    const approvalPolicy: ApprovalPolicy | undefined = rawApprovalPolicy
+      ? normalizeApprovalPolicy(rawApprovalPolicy)
+      : undefined
     const mcpServers = typeof opts.mcp === 'string'
       ? opts.mcp.split(',').map((name: string) => name.trim()).filter(Boolean)
       : undefined
@@ -80,7 +83,7 @@ program
 program
   .command('setup [action]')
   .description('Configure TurboFlux provider, language, persona, and custom behavior')
-  .option('-p, --provider <provider>', 'provider preset (deepseek, openai, anthropic, openrouter, custom)')
+  .option('-p, --provider <provider>', 'provider preset (openai, anthropic, deepseek, kimi, glm, openrouter, custom)')
   .option('-k, --api-key <key>', 'provider API key')
   .option('-b, --base-url <url>', 'custom base URL')
   .option('-m, --model <model>', 'model name')
@@ -91,6 +94,7 @@ program
   .option('-o, --output-style <styles>', 'comma-separated available personas, "all", or "skip"')
   .option('-d, --default-output-style <style>', 'default persona/output style')
   .option('--custom-instructions <text>', 'global custom instructions injected into TurboFlux')
+  .option('--approval-policy <policy>', 'approval policy (ask, agent, or full)')
   .option('-y, --yes', 'accept defaults for missing options')
   .action(async (action: string | undefined, opts) => {
     try {
@@ -107,6 +111,7 @@ program
         outputStyle: opts.outputStyle,
         defaultOutputStyle: opts.defaultOutputStyle,
         customInstructions: opts.customInstructions,
+        approvalPolicy: opts.approvalPolicy,
         yes: Boolean(opts.yes),
       })
     } catch (error) {

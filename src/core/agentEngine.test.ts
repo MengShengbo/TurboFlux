@@ -155,7 +155,7 @@ describe('AgentEngine permission requests', () => {
     }, workspace)
     const engine = new AgentEngine({
       mode: 'vibe',
-      approvalPolicy: 'request',
+      approvalPolicy: 'ask',
       workspacePath: workspace,
     }, {} as ToolExecutor, stateProvider)
     const askEvents: AgentEventType[] = []

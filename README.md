@@ -43,13 +43,14 @@ npm install -g .
 turboflux setup
 ```
 
-TurboFlux 支持 OpenAI、Anthropic、OpenRouter、DeepSeek 和自定义 OpenAI-compatible API。配置保存在 `~/.turboflux/config.json`，API Key 单独保存在 `~/.turboflux/credentials.json`。
+TurboFlux 支持 OpenAI、Anthropic、DeepSeek、Kimi、GLM、OpenRouter 和自定义 OpenAI-compatible API。配置保存在 `~/.turboflux/config.json`，API Key 单独保存在 `~/.turboflux/credentials.json`。
 
 ```bash
 turboflux setup api          # API 与模型
 turboflux setup fastcontext  # FastContext 单独使用的模型
 turboflux setup language     # 界面与输出语言
 turboflux setup persona      # 输出风格
+turboflux setup approval     # 工具审批策略
 turboflux setup show         # 查看当前配置
 ```
 
@@ -65,8 +66,8 @@ turboflux /path/to/project
 # 执行一次任务后退出
 turboflux /path/to/project --command "检查登录流程并修复问题"
 
-# 调整工具审批策略（默认 request）
-turboflux /path/to/project --approval-policy request
+# 临时调整本次会话的审批策略
+turboflux /path/to/project --approval-policy agent
 ```
 
 TurboFlux 可以搜索和阅读代码、编辑文件、运行命令、启动后台终端、查看 diff、管理任务，并在完成后继续验证结果。
@@ -80,7 +81,9 @@ TurboFlux 有两种工作模式：
 - **vibe**：默认模式，直接完成检索、修改和验证。
 - **plan**：只读分析并制定计划；切换到 `/vibe` 后执行修改。
 
-在会话中使用 `/vibe` 和 `/plan` 切换，也可以用 `/thinking` 调整模型的推理强度。
+在会话中使用 `/vibe` 和 `/plan` 切换。模型推理使用供应商原生配置，可通过 `/reasoning` 查看或调整当前模型支持的开关、effort 或 token budget。
+
+审批策略分为 `ask`（写文件和执行命令前询问）、`agent`（低风险操作自动继续，检测到风险时询问）和 `full`（完全访问；灾难性命令仍会阻止）。
 
 内置子代理：
 
@@ -131,7 +134,8 @@ TurboFlux 会根据模型返回的 token 用量管理长会话：
 | `/model` | 选择或切换模型 |
 | `/plan` | 切换到计划模式 |
 | `/vibe` | 切换到自主执行模式 |
-| `/thinking` | 设置推理模式 |
+| `/reasoning` | 配置当前模型的原生推理能力 |
+| `/approval` | 设置工具审批策略 |
 | `/context` | 查看上下文用量 |
 | `/compact` | 压缩当前会话 |
 | `/resume` | 恢复历史会话 |

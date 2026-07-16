@@ -1,4 +1,4 @@
-import type { AgentMode, ResolvedThinkingMode } from '../shared/agentTypes'
+import type { AgentMode } from '../shared/agentTypes'
 import {
   buildVoiceSection,
   buildVoiceAdapterSection,
@@ -30,7 +30,6 @@ interface SystemPromptOptions {
   codemapSummary?: string
   workspaceMemory?: string
   gitStatus?: string
-  thinkingMode?: ResolvedThinkingMode
   enabledSkills?: Array<{
     id: string
     name: string
@@ -171,12 +170,6 @@ ${workspace}
 </environment>`
 }
 
-function buildThinkingSection(thinkingMode: ResolvedThinkingMode): string {
-  if (thinkingMode === 'off') return ''
-  if (thinkingMode === 'max') return '<thinking_mode>Deep: competing hypotheses, evidence verification, critical review.</thinking_mode>'
-  return '<thinking_mode>Standard: problem modeling, evidence-first retrieval, verify before concluding.</thinking_mode>'
-}
-
 function buildSkillsSection(
   skills: NonNullable<SystemPromptOptions['enabledSkills']>,
 ): string {
@@ -243,10 +236,6 @@ export function buildSystemPrompt(mode: AgentMode, options: SystemPromptOptions 
 
   if (options.profileSystemPrompt) {
     dynamicSections.push(options.profileSystemPrompt)
-  }
-
-  if (options.thinkingMode && options.thinkingMode !== 'off') {
-    dynamicSections.push(buildThinkingSection(options.thinkingMode))
   }
 
   if (options.enabledSkills && options.enabledSkills.length > 0) {

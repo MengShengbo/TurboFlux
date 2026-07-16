@@ -3,6 +3,8 @@ import { commandRegistry } from './registry'
 import { type TurboFluxConfig, getPresetByIdOrModelFrom, applyPreset, redactConfig, setConfigValue } from '../../core/config'
 import { existsSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
+import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
+import { APPROVAL_POLICY_LABELS, normalizeApprovalPolicy, REASONING_EFFORTS } from '../../shared/agentTypes'
 
 // /exit
 commandRegistry.register({
@@ -221,20 +223,68 @@ commandRegistry.register({
   },
 })
 
-// /thinking
+// /reasoning
 commandRegistry.register({
-  name: 'thinking',
-  description: 'Set thinking mode',
-  argumentHint: '[auto|off|standard|max]',
+  name: 'reasoning',
+  description: 'Configure the active model native reasoning controls',
+  argumentHint: '[on|off|effort|budget <tokens>]',
   type: 'local',
   execute: (args, ctx) => {
-    const modes = ['auto', 'off', 'standard', 'max'] as const
-    const mode = args.trim() as typeof modes[number]
-    if (!modes.includes(mode)) {
-      return `Usage: /thinking <${modes.join('|')}>\nCurrent: ${ctx.engine.getThinkingMode()}`
+    const capability = getModelReasoningCapabilities(ctx.config.model, ctx.config.provider)
+    if (!capability) return `${ctx.config.model || 'This model'} has no known native reasoning controls.`
+
+    const input = args.trim().toLowerCase()
+    const current = formatNativeReasoningSetting(ctx.config.model, ctx.config.reasoning, ctx.config.provider)
+    if (!input) {
+      const controls = [
+        capability.supportsToggle ? 'on/off' : null,
+        capability.efforts.length > 0 ? capability.efforts.join('/') : null,
+        capability.control === 'budget' ? 'budget <tokens>' : null,
+      ].filter(Boolean).join(', ')
+      return `Native reasoning: ${current || 'provider default'}\nControls: ${controls || 'fixed by model'}`
     }
-    ctx.engine.setThinkingMode(mode)
-    return
+
+    let next: TurboFluxConfig
+    if (input === 'on' || input === 'off') {
+      if (!capability.supportsToggle) return 'This model keeps reasoning enabled and does not expose a toggle.'
+      next = setConfigValue(ctx.config, 'reasoningEnabled', input)
+    } else if (input.startsWith('budget ')) {
+      if (capability.control !== 'budget') return 'This model does not use a manual reasoning token budget.'
+      next = setConfigValue(ctx.config, 'reasoningBudgetTokens', input.slice('budget '.length).trim())
+    } else if (REASONING_EFFORTS.includes(input as typeof REASONING_EFFORTS[number])) {
+      if (!capability.efforts.includes(input as typeof REASONING_EFFORTS[number])) {
+        return `Supported effort values: ${capability.efforts.join(', ') || 'none'}`
+      }
+      next = setConfigValue(ctx.config, 'reasoningEffort', input)
+    } else {
+      return 'Usage: /reasoning [on|off|effort|budget <tokens>]'
+    }
+    ctx.setConfig(next)
+    return `Native reasoning set to ${formatNativeReasoningSetting(next.model, next.reasoning, next.provider)}.`
+  },
+})
+
+// /approval
+commandRegistry.register({
+  name: 'approval',
+  description: 'Set approval policy',
+  argumentHint: '[ask|agent|full]',
+  type: 'local',
+  execute: (args, ctx) => {
+    const input = args.trim().toLowerCase()
+    if (!input) {
+      return `Approval policy: ${APPROVAL_POLICY_LABELS[ctx.config.approvalPolicy]} (${ctx.config.approvalPolicy})`
+    }
+    if (!['ask', 'agent', 'full', 'request', 'auto'].includes(input)) {
+      return 'Usage: /approval <ask|agent|full>'
+    }
+    const policy = normalizeApprovalPolicy(input, ctx.config.approvalPolicy)
+    const next = setConfigValue(ctx.config, 'approvalPolicy', policy)
+    ctx.setConfig(next)
+    ctx.engine.setApprovalPolicy(policy)
+    return policy === 'full'
+      ? 'Full access selected. Restart TurboFlux to apply the unrestricted filesystem sandbox.'
+      : `Approval policy set to ${APPROVAL_POLICY_LABELS[policy]}.`
   },
 })
 

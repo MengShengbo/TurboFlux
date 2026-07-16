@@ -40,8 +40,8 @@ function getDefaultShell(): string {
 function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
   return {
     mode: options.mode || 'vibe',
-    approvalPolicy: options.approvalPolicy || 'request',
-    sandboxPolicy: options.sandboxPolicy || 'workspace',
+    approvalPolicy: options.approvalPolicy || options.config.approvalPolicy || 'ask',
+    sandboxPolicy: options.sandboxPolicy || ((options.approvalPolicy || options.config.approvalPolicy) === 'full' ? 'full' : 'workspace'),
     temperature: 0.7,
     maxTurns: 25,
     workspacePath: options.workspacePath,
@@ -58,8 +58,9 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
 export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRuntime {
   const conversationId = options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`
   const stateProvider = new DefaultAgentStateProvider(options.config, options.workspacePath, { conversationId })
+  const effectiveApprovalPolicy = options.approvalPolicy || options.config.approvalPolicy || 'ask'
   const toolExecutor = new NodeToolExecutor(options.workspacePath, {
-    sandboxPolicy: options.sandboxPolicy || 'workspace',
+    sandboxPolicy: options.sandboxPolicy || (effectiveApprovalPolicy === 'full' ? 'full' : 'workspace'),
   })
   const engine = new AgentEngine(
     {

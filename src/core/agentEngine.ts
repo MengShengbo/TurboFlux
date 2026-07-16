@@ -10,8 +10,6 @@
   TaskPriority,
   TaskStatus,
   TaskNode,
-  ThinkingMode,
-  ResolvedThinkingMode,
   TokenUsage,
   AnthropicThinkingBlock,
 } from '../shared/agentTypes'
@@ -26,7 +24,7 @@ import { canComputeDiff, computeHunks, summarizeHunks } from './diffCompute'
 import { ContextManager, extractStructuredSummary, formatSummaryAsContext } from './contextManager'
 import { autoCompactThreshold, blockingContextLimit, recapThreshold, resolveContextPolicyProfile } from './contextPolicy'
 import { countMessagesTokens, countTurnishTokens } from './tokenCounter'
-import { resolveReasoningParam } from './modelRegistry'
+import { resolveNativeReasoningRequest } from './modelRegistry'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import type { FastContextScanEvent, FastContextScanResult } from './fastContextTypes'
@@ -115,14 +113,8 @@ export type AgentEventType =
 
 export type AgentEventListener = (event: AgentEventType) => void
 
-function shouldOmitSamplingTemperature(model: string, provider: APIConfig['provider']): boolean {
-  const reasoningParam = resolveProviderReasoningParam(provider, model, 'standard')
-  return reasoningParam?.kind === 'anthropic-adaptive'
-}
-
-function resolveProviderReasoningParam(provider: APIConfig['provider'], model: string, mode: ResolvedThinkingMode) {
-  if (provider === 'custom' || provider === 'openrouter') return null
-  return resolveReasoningParam(model, mode)
+function shouldOmitSamplingTemperature(config: APIConfig): boolean {
+  return resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider)?.omitTemperature === true
 }
 
 function extractUnsupportedRequestParam(error?: string): string | null {
@@ -325,8 +317,6 @@ export class AgentEngine {
   private currentRunExplorePacks: Set<string> = new Set()
   private conclusionGuardAttempts: number = 0
   private disabledToolNames: Set<string> = new Set()
-  private thinkingMode: ThinkingMode = 'auto'
-  private resolvedThinkingMode: ResolvedThinkingMode = 'off'
   private pendingAssistantMessageId: string | null = null
   // Snapshot of the chat message id for the assistant turn that just finished
   // streaming. Used to attach an auto/explicit checkpoint produced AFTER that
@@ -349,7 +339,7 @@ export class AgentEngine {
   constructor(private config: AgentConfig, toolExecutor: ToolExecutor, stateProvider: AgentStateProvider) {
     this.toolExecutor = toolExecutor
     this.stateProvider = stateProvider
-    this.permissions.setApprovalPolicy(config.approvalPolicy || 'auto')
+    this.permissions.setApprovalPolicy(config.approvalPolicy || 'agent')
     const now = Date.now()
     this.session = {
       id: generateSessionId(),
@@ -522,22 +512,18 @@ export class AgentEngine {
     return promise
   }
 
-  setThinkingMode(mode: ThinkingMode): void {
-    this.thinkingMode = mode
-    this.config.thinkingMode = mode
-  }
-
   setContextPolicy(mode: ContextPolicyMode): void {
     this.config.contextPolicy = mode
     this.compressionPreparedTurnCount = 0
   }
 
-  setResolvedThinkingMode(mode: ResolvedThinkingMode): void {
-    this.resolvedThinkingMode = mode
+  setApprovalPolicy(policy: NonNullable<AgentConfig['approvalPolicy']>): void {
+    this.config.approvalPolicy = policy
+    this.permissions.setApprovalPolicy(policy)
   }
 
-  getThinkingMode(): ThinkingMode {
-    return this.thinkingMode
+  getApprovalPolicy(): NonNullable<AgentConfig['approvalPolicy']> {
+    return this.permissions.getApprovalPolicy()
   }
 
   isGitEnabled(): boolean {
@@ -772,8 +758,8 @@ export class AgentEngine {
       checkpointMessage?: string
       checkpointId?: string
       checkpointLabel?: string
-      thinkingMode?: ThinkingMode
-      resolvedThinkingMode?: ResolvedThinkingMode
+      reasoningEnabled?: boolean
+      reasoningEffort?: NonNullable<AgentTurn['metadata']>['reasoningEffort']
       thinking?: NonNullable<AgentTurn['metadata']>['thinking']
       rawReasoningPayload?: NonNullable<AgentTurn['metadata']>['rawReasoningPayload']
       attachments?: NonNullable<AgentTurn['metadata']>['attachments']
@@ -878,8 +864,8 @@ export class AgentEngine {
         if (typeof meta?.tokens === 'number') turnMetadata.tokens = { input: meta.tokens, output: 0 }
         else if (meta?.tokens) turnMetadata.tokens = meta.tokens
         if (meta?.duration) turnMetadata.duration = meta.duration
-        if (meta?.thinkingMode) turnMetadata.thinkingMode = meta.thinkingMode
-        if (meta?.resolvedThinkingMode) turnMetadata.resolvedThinkingMode = meta.resolvedThinkingMode
+        if (typeof meta?.reasoningEnabled === 'boolean') turnMetadata.reasoningEnabled = meta.reasoningEnabled
+        if (meta?.reasoningEffort) turnMetadata.reasoningEffort = meta.reasoningEffort
         if (meta?.thinking) turnMetadata.thinking = { ...meta.thinking, isStreaming: false }
         if (meta?.rawReasoningPayload) {
           turnMetadata.rawReasoningPayload = {
@@ -2074,7 +2060,6 @@ Before retrying:
       workspaceName: this.config.workspaceName,
       systemPromptOverride: this.config.systemPromptOverride,
       profileSystemPrompt: this.config.profileSystemPrompt,
-      thinkingMode: this.resolvedThinkingMode,
       enabledSkills: this.config.enabledSkills,
       provider: activeConfig.provider,
       modelId: activeConfig.defaultModel,
@@ -2196,20 +2181,16 @@ Before retrying:
       messages: requestMessages,
       stream: true,
     }
-    const reasoningParam = resolveReasoningParam(config.defaultModel, this.resolvedThinkingMode)
-    if (reasoningParam?.kind === 'anthropic-adaptive') {
-      if (reasoningParam.thinking === 'disabled') {
-        requestBody.thinking = { type: 'disabled' }
-      } else {
-        requestBody.thinking = { type: 'adaptive' }
-        requestBody.output_config = { effort: reasoningParam.effort ?? 'high' }
-        if (!headers['anthropic-beta']) {
-          headers['anthropic-beta'] = 'effort-2025-11-24'
-        } else if (!headers['anthropic-beta'].includes('effort-2025-11-24')) {
-          headers['anthropic-beta'] = `${headers['anthropic-beta']},effort-2025-11-24`
-        }
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider)
+    if (reasoningRequest?.thinking) {
+      const thinking = { ...reasoningRequest.thinking }
+      if (thinking.budget_tokens && thinking.budget_tokens >= anthropicMaxTokens) {
+        thinking.budget_tokens = Math.max(1_024, anthropicMaxTokens - 1)
       }
+      requestBody.thinking = thinking
     }
+    if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
+    if (reasoningRequest?.omitTemperature) delete requestBody.temperature
     if (cachedTools.length > 0) {
       requestBody.tools = cachedTools
       requestBody.tool_choice = { type: 'auto' }
@@ -2445,8 +2426,8 @@ Before retrying:
       tokens,
       duration: Date.now() - startTime,
       mode: this.config.mode,
-      thinkingMode: this.thinkingMode,
-      resolvedThinkingMode: this.resolvedThinkingMode,
+      reasoningEnabled: reasoningRequest?.enabled,
+      reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
       thinking: { content: reasoningContent, source: 'provider' },
       rawReasoningPayload: rawReasoningBlocks.length > 0
         ? { provider: 'anthropic', blocks: rawReasoningBlocks }
@@ -2520,34 +2501,17 @@ Before retrying:
       messages: requestMessages,
       stream: true,
     }
-    if (!shouldOmitSamplingTemperature(config.defaultModel, config.provider)) {
+    if (!shouldOmitSamplingTemperature(config)) {
       body.temperature = this.config.temperature ?? config.temperature ?? 0.7
     }
     if (maxTokens > 0) {
       body.max_tokens = maxTokens
     }
-    const reasoningParam = resolveProviderReasoningParam(config.provider, config.defaultModel, this.resolvedThinkingMode)
-    if (reasoningParam?.kind === 'openai-chat') {
-      body.reasoning_effort = reasoningParam.effort
-    } else if (reasoningParam?.kind === 'deepseek-chat') {
-      body.thinking = reasoningParam.thinking === 'disabled'
-        ? { type: 'disabled' }
-        : { type: 'enabled', effort: reasoningParam.effort ?? 'high' }
-      if (reasoningParam.effort) {
-        body.reasoning_effort = reasoningParam.effort
-      }
-      if (reasoningParam.thinking === 'enabled') {
-        delete body.temperature
-      }
-    } else if (reasoningParam?.kind === 'anthropic-adaptive') {
-      body.thinking = reasoningParam.thinking === 'disabled'
-        ? { type: 'disabled' }
-        : { type: 'adaptive' }
-      if (reasoningParam.thinking === 'adaptive') {
-        body.output_config = { effort: reasoningParam.effort ?? 'high' }
-        delete body.temperature
-      }
-    }
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider)
+    if (reasoningRequest?.thinking) body.thinking = reasoningRequest.thinking
+    if (reasoningRequest?.reasoningEffort) body.reasoning_effort = reasoningRequest.reasoningEffort
+    if (reasoningRequest?.outputConfig) body.output_config = reasoningRequest.outputConfig
+    if (reasoningRequest?.omitTemperature) delete body.temperature
     // OpenAI streaming spec: usage is NOT sent unless we opt in via
     // stream_options.include_usage. Without this, mimo / Kimi / DeepSeek
     // / OpenRouter / Qwen all return zero token counts, the per-call
@@ -2809,8 +2773,8 @@ Before retrying:
       tokens,
       duration: Date.now() - startTime,
       mode: this.config.mode,
-      thinkingMode: this.thinkingMode,
-      resolvedThinkingMode: this.resolvedThinkingMode,
+      reasoningEnabled: reasoningRequest?.enabled,
+      reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
       thinking: { content: reasoningContent, source: 'provider' },
       // Store reasoning_content so it can be passed back in subsequent turns.
       // OpenAI-compatible providers (e.g. mimo, DeepSeek-R1) require the
@@ -3470,7 +3434,7 @@ Before retrying:
 
   private buildEvidencePolicyContext(strategy?: TurnStrategy | null, phase: 'pre' | 'retry' = 'pre'): string | null {
     if (!strategy?.requiresEvidence) return null
-    const maxAttempts = this.resolvedThinkingMode === 'max' ? 2 : 1
+    const maxAttempts = 1
     if (phase === 'retry' && this.conclusionGuardAttempts >= maxAttempts) return null
 
     const hasSearchEvidence = this.currentRunSuccessfulSearches.size > 0
@@ -5179,8 +5143,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       model: model?.name,
       duration: Date.now() - startTime,
       mode: this.config.mode,
-      thinkingMode: this.thinkingMode,
-      resolvedThinkingMode: this.resolvedThinkingMode,
       interrupted: true,
     })
   }

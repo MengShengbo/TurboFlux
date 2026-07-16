@@ -17,6 +17,7 @@ function contextWithUsage(usage: { input?: number; output?: number; source?: 'pr
       model: 'test-model',
       contextWindow: 1_000_000,
       maxTokens: 16_384,
+      approvalPolicy: 'ask',
     },
     modelPresets: [],
     workspacePath: process.cwd(),
@@ -133,5 +134,38 @@ describe('/config', () => {
     expect(result.type).toBe('text')
     expect(result.text).toContain('contextWindow must be a positive integer')
     expect(called).toBe(false)
+  })
+})
+
+describe('native reasoning and approval commands', () => {
+  it('sets only effort values supported by the active model', () => {
+    let nextConfig: CommandContext['config'] | null = null
+    const ctx = fullContext({
+      config: { ...fullContext().config, provider: 'openai', model: 'gpt-5.6' },
+      setConfig: config => { nextConfig = config },
+    })
+
+    const result = commandRegistry.execute('/reasoning xhigh', ctx)
+
+    expect(result.text).toContain('xhigh')
+    expect(nextConfig?.reasoning?.effort).toBe('xhigh')
+  })
+
+  it('persists the agent-decides approval policy', () => {
+    let nextConfig: CommandContext['config'] | null = null
+    let enginePolicy = ''
+    const ctx = fullContext({
+      engine: {
+        ...fullContext().engine,
+        setApprovalPolicy: policy => { enginePolicy = policy },
+      } as CommandContext['engine'],
+      setConfig: config => { nextConfig = config },
+    })
+
+    const result = commandRegistry.execute('/approval agent', ctx)
+
+    expect(result.text).toContain('Approve low risk')
+    expect(nextConfig?.approvalPolicy).toBe('agent')
+    expect(enginePolicy).toBe('agent')
   })
 })

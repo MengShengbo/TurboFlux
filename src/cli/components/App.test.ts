@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   clipTextToRows,
   getEngineUserOrdinalForUiMessage,
-  getNextThinkingMode,
   formatTaskProgressLabel,
   formatTaskToolSummary,
   shouldUseNoFlicker,
@@ -86,15 +85,6 @@ describe('task progress labels', () => {
     expect(formatTaskToolSummary(0, 0, 0, 0)).toBe('planning')
     expect(formatTaskToolSummary(2, 4, 1, 0)).toBe('tools 2/4, 1 running')
     expect(formatTaskToolSummary(3, 4, 0, 1)).toBe('tools 3/4, 1 failed')
-  })
-})
-
-describe('thinking mode shortcuts', () => {
-  it('cycles through thinking effort modes like a status-bar mode switcher', () => {
-    expect(getNextThinkingMode('auto')).toBe('off')
-    expect(getNextThinkingMode('off')).toBe('standard')
-    expect(getNextThinkingMode('standard')).toBe('max')
-    expect(getNextThinkingMode('max')).toBe('auto')
   })
 })
 

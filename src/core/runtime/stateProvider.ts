@@ -1,13 +1,16 @@
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
-import type { FastContextModelConfig, TurboFluxApiConfigProfile } from '../config'
+import type { FastContextModelConfig, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
+import type { ApprovalPolicy, NativeReasoningConfig } from '../../shared/agentTypes'
 
 export interface AgentRuntimeConfig {
-  provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
+  provider: TurboFluxProvider
   apiKey: string
   baseUrl: string
   model: string
   contextWindow: number
   maxTokens: number
+  approvalPolicy?: ApprovalPolicy
+  reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
   fastContextModel?: FastContextModelConfig
@@ -102,6 +105,7 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       defaultModel: config.model,
       contextWindow: config.contextWindow,
       maxTokens: config.maxTokens,
+      reasoning: config.reasoning,
     }
   }
 
@@ -114,6 +118,7 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       defaultModel: profile.model,
       contextWindow: profile.contextWindow,
       maxTokens: profile.maxTokens,
+      reasoning: profile.reasoning,
     }
   }
 

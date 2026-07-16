@@ -1,17 +1,20 @@
 import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { getSupportedModelSpec, SUPPORTED_MODEL_SPECS } from './modelRegistry'
+import { getSupportedModelSpec, normalizeNativeReasoningConfig, SUPPORTED_MODEL_SPECS } from './modelRegistry'
+import { normalizeApprovalPolicy, type ApprovalPolicy, type NativeReasoningConfig } from '../shared/agentTypes'
 import { loadCredentialSnapshot, saveCredentialSnapshot } from './credentialStore'
 import { writeFileAtomicSync } from './fileIO'
 
 export interface TurboFluxConfig {
-  provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
+  provider: 'openai' | 'anthropic' | 'deepseek' | 'kimi' | 'glm' | 'openrouter' | 'custom'
   apiKey: string
   baseUrl: string
   model: string
   contextWindow: number
   maxTokens: number
+  approvalPolicy: ApprovalPolicy
+  reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
   fastContextModel?: FastContextModelConfig
@@ -25,6 +28,7 @@ export interface ModelPreset {
   baseUrl: string
   contextWindow: number
   maxTokens: number
+  reasoning?: NativeReasoningConfig
   description: string
 }
 
@@ -40,6 +44,7 @@ export interface TurboFluxApiConfigProfile {
   model: string
   contextWindow: number
   maxTokens: number
+  reasoning?: NativeReasoningConfig
   createdAt: number
   updatedAt: number
 }
@@ -101,7 +106,7 @@ function writeConfigDocument(config: TurboFluxConfig): void {
 export const DEFAULT_FREE_MODEL = ''
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 export const DEFAULT_MAX_TOKENS = 16_384
-export const TURBOFLUX_PROVIDERS: TurboFluxProvider[] = ['openai', 'anthropic', 'deepseek', 'openrouter', 'custom']
+export const TURBOFLUX_PROVIDERS: TurboFluxProvider[] = ['openai', 'anthropic', 'deepseek', 'kimi', 'glm', 'openrouter', 'custom']
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
@@ -117,7 +122,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: 'OpenAI',
     provider: 'openai',
     baseUrl: 'https://api.openai.com/v1',
-    defaultModel: 'gpt-5.5',
+    defaultModel: 'gpt-5.6',
     description: 'Official OpenAI-compatible API.',
   },
   {
@@ -125,7 +130,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: 'Anthropic',
     provider: 'anthropic',
     baseUrl: 'https://api.anthropic.com/v1',
-    defaultModel: 'claude-sonnet-4-6',
+    defaultModel: 'claude-opus-4-8',
     description: 'Official Anthropic Messages API.',
   },
   {
@@ -143,6 +148,22 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.deepseek.com',
     defaultModel: 'deepseek-v4-flash',
     description: 'OpenAI-compatible DeepSeek API.',
+  },
+  {
+    id: 'kimi',
+    name: 'Kimi',
+    provider: 'kimi',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    defaultModel: 'kimi-k3',
+    description: 'Moonshot Kimi OpenAI-compatible API.',
+  },
+  {
+    id: 'glm',
+    name: 'GLM',
+    provider: 'glm',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    defaultModel: 'glm-5.2',
+    description: 'Zhipu GLM OpenAI-compatible API.',
   },
 ]
 
@@ -166,6 +187,7 @@ export const MODEL_PRESETS: ModelPreset[] = SUPPORTED_MODEL_SPECS.map(spec => ({
   baseUrl: baseUrlForProvider(providerForModel(spec.id)),
   contextWindow: spec.contextWindow,
   maxTokens: spec.defaultRequestTokens,
+  reasoning: normalizeNativeReasoningConfig(spec.id, undefined, spec.provider),
   description: spec.description,
 }))
 
@@ -176,6 +198,8 @@ const DEFAULT_CONFIG: TurboFluxConfig = {
   model: DEFAULT_FREE_MODEL,
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
+  approvalPolicy: 'ask',
+  reasoning: undefined,
   apiConfigs: [],
   activeApiConfigId: undefined,
   fastContextModel: EMPTY_FAST_CONTEXT_MODEL,
@@ -228,6 +252,7 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : DEFAULT_CONFIG.apiKey
   const contextWindow = positiveInteger(raw.contextWindow, DEFAULT_CONFIG.contextWindow)
   const maxTokens = positiveInteger(raw.maxTokens, DEFAULT_CONFIG.maxTokens)
+  const approvalPolicy = normalizeApprovalPolicy(raw.approvalPolicy, DEFAULT_CONFIG.approvalPolicy)
   const profiles = normalizeApiConfigProfiles((raw as any).apiConfigs)
   let activeApiConfigId = typeof raw.activeApiConfigId === 'string' ? raw.activeApiConfigId : undefined
   const activeProfile = profiles.find(profile => profile.id === activeApiConfigId)
@@ -244,6 +269,7 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
       model,
       contextWindow,
       maxTokens,
+      reasoning: normalizeNativeReasoningConfig(model, raw.reasoning, provider),
       createdAt: now,
       updatedAt: now,
     })
@@ -262,6 +288,8 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
     model: selected?.model ?? model,
     contextWindow: selected?.contextWindow ?? contextWindow,
     maxTokens: selected?.maxTokens ?? maxTokens,
+    approvalPolicy,
+    reasoning: selected?.reasoning ?? normalizeNativeReasoningConfig(model, raw.reasoning, provider),
     apiConfigs: nextProfiles,
     activeApiConfigId,
     fastContextModel,
@@ -276,6 +304,7 @@ function buildApiConfigProfile(raw: Partial<TurboFluxApiConfigProfile> & Partial
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : DEFAULT_CONFIG.apiKey
   const contextWindow = positiveInteger(raw.contextWindow, DEFAULT_CONFIG.contextWindow)
   const maxTokens = positiveInteger(raw.maxTokens, DEFAULT_CONFIG.maxTokens)
+  const reasoning = normalizeNativeReasoningConfig(model, raw.reasoning, provider)
   const id = typeof raw.id === 'string' && raw.id.trim()
     ? raw.id.trim()
     : `api_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
@@ -288,6 +317,7 @@ function buildApiConfigProfile(raw: Partial<TurboFluxApiConfigProfile> & Partial
     model,
     contextWindow,
     maxTokens,
+    reasoning,
     createdAt: positiveInteger(raw.createdAt, now),
     updatedAt: positiveInteger(raw.updatedAt, now),
   }
@@ -357,6 +387,7 @@ function activeFieldsFromProfile(config: TurboFluxConfig, profile?: TurboFluxApi
     model: profile.model,
     contextWindow: profile.contextWindow,
     maxTokens: profile.maxTokens,
+    reasoning: profile.reasoning,
     activeApiConfigId: profile.id,
   }
 }
@@ -373,6 +404,7 @@ function syncActiveProfile(config: TurboFluxConfig): TurboFluxConfig {
       model: '',
       contextWindow: positiveInteger(config.contextWindow, DEFAULT_CONFIG.contextWindow),
       maxTokens: positiveInteger(config.maxTokens, DEFAULT_CONFIG.maxTokens),
+      reasoning: undefined,
       apiConfigs: [],
       activeApiConfigId: undefined,
       fastContextModel: EMPTY_FAST_CONTEXT_MODEL,
@@ -391,6 +423,7 @@ function syncActiveProfile(config: TurboFluxConfig): TurboFluxConfig {
     model: config.model,
     contextWindow: config.contextWindow,
     maxTokens: config.maxTokens,
+    reasoning: config.reasoning,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   })
@@ -424,7 +457,48 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
     }
     case 'model':
       if (!value.trim()) throw new Error('model cannot be empty')
-      return updateActive({ ...config, model: value.trim() })
+      return updateActive({
+        ...config,
+        model: value.trim(),
+        reasoning: normalizeNativeReasoningConfig(value.trim(), config.reasoning, config.provider),
+      })
+    case 'approvalPolicy':
+      if (!['ask', 'agent', 'full', 'request', 'auto'].includes(value.toLowerCase())) {
+        throw new Error('approvalPolicy must be ask, agent, or full')
+      }
+      return { ...config, approvalPolicy: normalizeApprovalPolicy(value.toLowerCase(), config.approvalPolicy) }
+    case 'reasoningEnabled': {
+      const normalized = value.toLowerCase()
+      if (!['true', 'false', 'on', 'off', 'enabled', 'disabled'].includes(normalized)) {
+        throw new Error('reasoningEnabled must be on or off')
+      }
+      return updateActive({
+        ...config,
+        reasoning: normalizeNativeReasoningConfig(config.model, {
+          ...config.reasoning,
+          enabled: ['true', 'on', 'enabled'].includes(normalized),
+        }, config.provider),
+      })
+    }
+    case 'reasoningEffort':
+      return updateActive({
+        ...config,
+        reasoning: normalizeNativeReasoningConfig(config.model, {
+          ...config.reasoning,
+          effort: value.toLowerCase() as NativeReasoningConfig['effort'],
+        }, config.provider),
+      })
+    case 'reasoningBudgetTokens': {
+      const parsed = Number(value)
+      if (!Number.isInteger(parsed) || parsed < 1024) throw new Error('reasoningBudgetTokens must be at least 1024')
+      return updateActive({
+        ...config,
+        reasoning: normalizeNativeReasoningConfig(config.model, {
+          ...config.reasoning,
+          budgetTokens: parsed,
+        }, config.provider),
+      })
+    }
     case 'contextWindow':
     case 'maxTokens': {
       const parsed = Number(value)
@@ -434,7 +508,7 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
       return updateActive({ ...config, [key]: parsed } as TurboFluxConfig)
     }
     default:
-      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens`)
+      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens, approvalPolicy, reasoningEnabled, reasoningEffort, reasoningBudgetTokens`)
   }
 }
 
@@ -447,6 +521,7 @@ function applyKnownModelMetadata(config: TurboFluxConfig, presets: ModelPreset[]
   return spec ? {
     ...config,
     model: spec.id,
+    reasoning: normalizeNativeReasoningConfig(spec.id, config.reasoning, spec.provider),
   } : config
 }
 
@@ -550,6 +625,7 @@ export function applyPreset(config: TurboFluxConfig, preset: ModelPreset): Turbo
     baseUrl: preset.baseUrl,
     contextWindow: preset.contextWindow,
     maxTokens: preset.maxTokens,
+    reasoning: normalizeNativeReasoningConfig(preset.model, preset.reasoning ?? config.reasoning, preset.provider),
   })
 }
 
@@ -564,6 +640,8 @@ export function configFromProviderPreset(preset: ProviderPreset, apiKey: string,
     model: spec?.id ?? selectedModel,
     contextWindow: spec?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: spec?.defaultRequestTokens ?? DEFAULT_MAX_TOKENS,
+    approvalPolicy: 'ask',
+    reasoning: normalizeNativeReasoningConfig(spec?.id ?? selectedModel, undefined, preset.provider),
     apiConfigs: [],
     activeApiConfigId: 'main',
     fastContextModel: { mode: 'follow-main' },

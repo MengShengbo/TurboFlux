@@ -4,13 +4,13 @@ import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { getSafeFrameWidth } from '../../terminalLayout'
 import type { TurboFluxConfig } from '../../../core/config'
-import type { AgentMode, ThinkingMode, TokenUsage } from '../../../shared/agentTypes'
+import { formatNativeReasoningSetting } from '../../../core/modelRegistry'
+import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
 
 interface StatusLineProps {
   config: TurboFluxConfig
   tokenUsage: TokenUsage
   mode?: AgentMode
-  thinkingMode?: ThinkingMode
   viewingHistory?: boolean
   gitEnabled?: boolean
   mcpCount?: number
@@ -22,18 +22,10 @@ const MODE_LABELS: Record<AgentMode, string> = {
   plan: 'PLAN',
 }
 
-const THINKING_LABELS: Record<ThinkingMode, string> = {
-  auto: 'auto',
-  off: 'off',
-  standard: 'standard',
-  max: 'max',
-}
-
 export function StatusLine({
   config,
   tokenUsage,
   mode = 'vibe',
-  thinkingMode = 'auto',
   viewingHistory = false,
   gitEnabled = false,
   mcpCount = 0,
@@ -59,7 +51,9 @@ export function StatusLine({
 
   const parts: string[] = []
   if (config.model) parts.push(config.model)
-  parts.push(`think:${THINKING_LABELS[thinkingMode]}`)
+  const reasoningSetting = formatNativeReasoningSetting(config.model, config.reasoning, config.provider)
+  if (reasoningSetting) parts.push(`reason:${reasoningSetting}`)
+  parts.push(`approval:${config.approvalPolicy}`)
   parts.push(`git:${gitEnabled ? 'on' : 'off'}`)
   parts.push(`mcp:${mcpCount > 0 ? mcpCount : 'off'}`)
   if (terminalCount > 0) parts.push(`term:${terminalCount}`)

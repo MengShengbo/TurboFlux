@@ -140,7 +140,7 @@ describe('PermissionPipeline', () => {
     })
 
     it('shares a session grant across file write and edit tools', () => {
-      const pipeline = new PermissionPipeline('request')
+      const pipeline = new PermissionPipeline('ask')
       pipeline.grantSession('write_file', JSON.stringify({ path: 'a.ts', content: 'a' }))
 
       expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('allow')
@@ -149,31 +149,45 @@ describe('PermissionPipeline', () => {
   })
 
   describe('approval policies', () => {
-    it('asks before MCP tools even under auto policy', () => {
-      const pipeline = new PermissionPipeline('auto')
+    it('asks before MCP tools even when the agent handles low-risk actions', () => {
+      const pipeline = new PermissionPipeline('agent')
       expect(pipeline.check('files__read', { path: 'secret.txt' })).toMatchObject({ verdict: 'ask' })
     })
 
-    it('request policy asks before write tools', () => {
-      const pipeline = new PermissionPipeline('request')
+    it('lets the agent continue low-risk workspace changes', () => {
+      const pipeline = new PermissionPipeline('agent')
+
+      expect(pipeline.check('write_file', { path: 'src/app.ts', content: 'ok' }).verdict).toBe('allow')
+      expect(pipeline.check('run_command', { command: 'npm test' }).verdict).toBe('allow')
+    })
+
+    it('asks before network actions in agent mode', () => {
+      const pipeline = new PermissionPipeline('agent')
+
+      expect(pipeline.check('run_command', { command: 'curl https://example.com' }).verdict).toBe('ask')
+      expect(pipeline.check('run_command', { command: 'git push origin main' }).verdict).toBe('ask')
+    })
+
+    it('ask policy asks before write tools', () => {
+      const pipeline = new PermissionPipeline('ask')
       const result = pipeline.check('write_file', { path: 'notes.md', content: 'hello' })
       expect(result.verdict).toBe('ask')
     })
 
-    it('request policy asks before whole-file replacement', () => {
-      const pipeline = new PermissionPipeline('request')
+    it('ask policy asks before whole-file replacement', () => {
+      const pipeline = new PermissionPipeline('ask')
       const result = pipeline.check('replace_file', { path: 'notes.md', content: 'hello' })
       expect(result.verdict).toBe('ask')
     })
 
-    it('request policy asks before command execution', () => {
-      const pipeline = new PermissionPipeline('request')
+    it('ask policy asks before command execution', () => {
+      const pipeline = new PermissionPipeline('ask')
       const result = pipeline.check('run_command', { command: 'npm test' })
       expect(result.verdict).toBe('ask')
     })
 
     it('does not interrupt internal task workflow bookkeeping', () => {
-      const pipeline = new PermissionPipeline('request')
+      const pipeline = new PermissionPipeline('ask')
 
       expect(pipeline.check('create_task', { title: 'Implement UI' }).verdict).toBe('allow')
       expect(pipeline.check('update_task', { task_id: 'task-1', status: 'completed' }).verdict).toBe('allow')

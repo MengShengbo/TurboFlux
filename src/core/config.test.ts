@@ -22,6 +22,7 @@ const baseConfig: TurboFluxConfig = {
   model: 'gpt-5.5',
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
+  approvalPolicy: 'ask',
 }
 
 describe('setConfigValue', () => {
@@ -48,6 +49,14 @@ describe('setConfigValue', () => {
   it('rejects unknown keys', () => {
     expect(() => setConfigValue(baseConfig, 'debugMode', 'true')).toThrow(/Unknown config key/)
   })
+
+  it('migrates legacy approval names and stores native reasoning effort', () => {
+    const approval = setConfigValue(baseConfig, 'approvalPolicy', 'auto')
+    const reasoning = setConfigValue({ ...baseConfig, provider: 'openai', model: 'gpt-5.6' }, 'reasoningEffort', 'xhigh')
+
+    expect(approval.approvalPolicy).toBe('agent')
+    expect(reasoning.reasoning?.effort).toBe('xhigh')
+  })
 })
 
 describe('provider presets', () => {
@@ -67,6 +76,7 @@ describe('provider presets', () => {
     expect(config.baseUrl).toBe('https://api.openai.com/v1')
     expect(config.model).toBe('gpt-5.5')
     expect(config.contextWindow).toBeGreaterThan(100_000)
+    expect(config.reasoning?.effort).toBe('medium')
   })
 
   it('supports custom OpenAI-compatible endpoints', () => {
@@ -76,6 +86,7 @@ describe('provider presets', () => {
     expect(config.provider).toBe('custom')
     expect(config.baseUrl).toBe('https://api.example.com/v1')
     expect(config.model).toBe('custom-model')
+    expect(config.reasoning).toBeUndefined()
   })
 })
 
