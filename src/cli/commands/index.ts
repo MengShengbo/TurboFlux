@@ -4,7 +4,7 @@ import { type TurboFluxConfig, getPresetByIdOrModelFrom, applyPreset, redactConf
 import { existsSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
-import { APPROVAL_POLICY_LABELS, normalizeApprovalPolicy, REASONING_EFFORTS } from '../../shared/agentTypes'
+import { APPROVAL_POLICY_LABELS, normalizeApprovalPolicy, type ReasoningEffort } from '../../shared/agentTypes'
 
 // /exit
 commandRegistry.register({
@@ -223,44 +223,43 @@ commandRegistry.register({
   },
 })
 
-// /reasoning
+// /effort
 commandRegistry.register({
-  name: 'reasoning',
-  description: 'Configure the active model native reasoning controls',
-  argumentHint: '[on|off|effort|budget <tokens>]',
+  name: 'effort',
+  description: 'Adjust the active model native reasoning effort',
+  argumentHint: '[level]',
   type: 'local',
   execute: (args, ctx) => {
     const capability = getModelReasoningCapabilities(ctx.config.model, ctx.config.provider)
-    if (!capability) return `${ctx.config.model || 'This model'} has no known native reasoning controls.`
+    if (!capability) return `${ctx.config.model || 'This model'} does not expose adjustable reasoning.`
 
     const input = args.trim().toLowerCase()
     const current = formatNativeReasoningSetting(ctx.config.model, ctx.config.reasoning, ctx.config.provider)
     if (!input) {
-      const controls = [
-        capability.supportsToggle ? 'on/off' : null,
+      const available = [
         capability.efforts.length > 0 ? capability.efforts.join('/') : null,
-        capability.control === 'budget' ? 'budget <tokens>' : null,
+        capability.supportsToggle ? 'on/off' : null,
+        capability.control === 'budget' ? '<token budget>' : null,
       ].filter(Boolean).join(', ')
-      return `Native reasoning: ${current || 'provider default'}\nControls: ${controls || 'fixed by model'}`
+      return `Effort: ${current || 'provider default'}\nAvailable: ${available || 'fixed by model'}`
     }
 
     let next: TurboFluxConfig
     if (input === 'on' || input === 'off') {
       if (!capability.supportsToggle) return 'This model keeps reasoning enabled and does not expose a toggle.'
       next = setConfigValue(ctx.config, 'reasoningEnabled', input)
-    } else if (input.startsWith('budget ')) {
-      if (capability.control !== 'budget') return 'This model does not use a manual reasoning token budget.'
-      next = setConfigValue(ctx.config, 'reasoningBudgetTokens', input.slice('budget '.length).trim())
-    } else if (REASONING_EFFORTS.includes(input as typeof REASONING_EFFORTS[number])) {
-      if (!capability.efforts.includes(input as typeof REASONING_EFFORTS[number])) {
-        return `Supported effort values: ${capability.efforts.join(', ') || 'none'}`
-      }
+    } else if (capability.efforts.includes(input as ReasoningEffort)) {
       next = setConfigValue(ctx.config, 'reasoningEffort', input)
+    } else if (capability.control === 'budget' && /^\d+$/.test(input)) {
+      next = setConfigValue(ctx.config, 'reasoningBudgetTokens', input)
     } else {
-      return 'Usage: /reasoning [on|off|effort|budget <tokens>]'
+      const available = capability.control === 'budget'
+        ? 'on, off, or a token budget such as 8192'
+        : [...capability.efforts, ...(capability.supportsToggle ? ['on', 'off'] : [])].join(', ') || 'fixed by model'
+      return `Available: ${available}`
     }
     ctx.setConfig(next)
-    return `Native reasoning set to ${formatNativeReasoningSetting(next.model, next.reasoning, next.provider)}.`
+    return `Effort set to ${formatNativeReasoningSetting(next.model, next.reasoning, next.provider)}.`
   },
 })
 

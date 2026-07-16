@@ -137,7 +137,7 @@ describe('/config', () => {
   })
 })
 
-describe('native reasoning and approval commands', () => {
+describe('native effort and approval commands', () => {
   it('sets only effort values supported by the active model', () => {
     let nextConfig: CommandContext['config'] | null = null
     const ctx = fullContext({
@@ -145,10 +145,34 @@ describe('native reasoning and approval commands', () => {
       setConfig: config => { nextConfig = config },
     })
 
-    const result = commandRegistry.execute('/reasoning xhigh', ctx)
+    const result = commandRegistry.execute('/effort xhigh', ctx)
 
     expect(result.text).toContain('xhigh')
     expect(nextConfig?.reasoning?.effort).toBe('xhigh')
+  })
+
+  it('shows only the effort values supported by the active model', () => {
+    const ctx = fullContext({
+      config: { ...fullContext().config, provider: 'deepseek', model: 'deepseek-v4-pro' },
+    })
+
+    const result = commandRegistry.execute('/effort', ctx)
+
+    expect(result.text).toContain('high/max')
+    expect(result.text).not.toContain('xhigh')
+  })
+
+  it('accepts a direct token budget for budget-controlled Claude models', () => {
+    let nextConfig: CommandContext['config'] | null = null
+    const ctx = fullContext({
+      config: { ...fullContext().config, provider: 'anthropic', model: 'claude-haiku-4-5' },
+      setConfig: config => { nextConfig = config },
+    })
+
+    const result = commandRegistry.execute('/effort 12000', ctx)
+
+    expect(result.text).toContain('12000t')
+    expect(nextConfig?.reasoning?.budgetTokens).toBe(12_000)
   })
 
   it('persists the agent-decides approval policy', () => {
