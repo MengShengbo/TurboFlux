@@ -35,7 +35,7 @@ export function StatusLine({
   const { columns } = useTerminalSize()
   const hasProviderUsage = tokenUsage.source === 'provider' && typeof tokenUsage.input === 'number'
   const total = hasProviderUsage ? tokenUsage.input! : 0
-  const contextWindow = config.contextWindow || 1_000_000
+  const contextWindow = config.contextWindow || 200_000
   const ratio = Math.min(1, total / contextWindow)
   const percentage = Math.round(ratio * 100)
 
@@ -51,7 +51,7 @@ export function StatusLine({
 
   const parts: string[] = []
   if (config.model) parts.push(config.model)
-  const reasoningSetting = formatNativeReasoningSetting(config.model, config.reasoning, config.provider)
+  const reasoningSetting = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
   if (reasoningSetting) parts.push(`reason:${reasoningSetting}`)
   parts.push(`approval:${config.approvalPolicy}`)
   parts.push(`git:${gitEnabled ? 'on' : 'off'}`)

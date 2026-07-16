@@ -13,13 +13,14 @@ export {
   getCheckpointsDir,
   getConfigDir,
   getConversationsDir,
-  getModelPresets,
   getPresetByIdOrModel,
   getPresetByIdOrModelFrom,
   loadConfig,
   saveConfig,
 } from './config'
-export type { ModelPreset, TurboFluxConfig } from './config'
+export type { ModelCapabilities, ModelMetadataSource, ModelPreset, TurboFluxConfig } from './config'
+export { discoverModelPresets, getModelPresets, readCachedModelDiscovery } from './modelDiscovery'
+export type { ModelDiscoveryResult } from './modelDiscovery'
 export { DefaultAgentStateProvider } from './runtime/stateProvider'
 export type { AgentRuntimeConfig } from './runtime/stateProvider'
 export { NodeToolExecutor } from './runtime/nodeToolExecutor'

@@ -23,7 +23,8 @@ import { formatMarkdown } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
 import type { ActiveTaskContext } from '../../core/taskManager'
-import { applyPreset, getModelPresets, saveConfig, type ModelPreset, type TurboFluxConfig } from '../../core/config'
+import { applyPreset, saveConfig, type ModelPreset, type TurboFluxConfig } from '../../core/config'
+import { discoverModelPresets, readCachedModelDiscovery } from '../../core/modelDiscovery'
 import { commandRegistry } from '../commands/index'
 import type { CommandContext } from '../commands/types'
 import { ConversationManager } from '../conversations/manager'
@@ -381,6 +382,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [currentMode, setCurrentMode] = useState<'vibe' | 'plan'>('vibe')
   const [gitEnabled, setGitEnabled] = useState(false)
   const [modelPresets, setModelPresets] = useState<ModelPreset[]>([])
+  const [modelDiscoveryStatus, setModelDiscoveryStatus] = useState({
+    isRefreshing: false,
+    stale: false,
+    error: undefined as string | undefined,
+  })
+  const modelDiscoveryRequestRef = useRef(0)
   const [lastActivity, setLastActivity] = useState<number>(Date.now())
   const [convListRevision, setConvListRevision] = useState(0)
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
@@ -618,17 +625,24 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     convManager.updateConfig(config)
   }, [stateProvider, convManager, config])
 
+  const loadModelPresets = useCallback(async (targetConfig: TurboFluxConfig, force = false) => {
+    const requestId = ++modelDiscoveryRequestRef.current
+    setModelDiscoveryStatus(current => ({ ...current, isRefreshing: true, error: force ? undefined : current.error }))
+    const result = await discoverModelPresets(targetConfig, { force })
+    if (requestId !== modelDiscoveryRequestRef.current) return
+    setModelPresets(result.models)
+    setModelDiscoveryStatus({ isRefreshing: false, stale: result.stale, error: result.error })
+  }, [])
+
   useEffect(() => {
-    let cancelled = false
-    getModelPresets(config.baseUrl)
-      .then(presets => {
-        if (!cancelled) setModelPresets(presets)
-      })
-      .catch(() => {
-        if (!cancelled) setModelPresets([])
-      })
-    return () => { cancelled = true }
-  }, [config.baseUrl])
+    const cached = readCachedModelDiscovery(config, true)
+    if (cached) {
+      setModelPresets(cached.models)
+      setModelDiscoveryStatus({ isRefreshing: cached.stale, stale: cached.stale, error: undefined })
+    }
+    void loadModelPresets(config)
+    return () => { modelDiscoveryRequestRef.current += 1 }
+  }, [config.activeApiConfigId, config.apiKey, config.baseUrl, config.provider, loadModelPresets])
 
   useEffect(() => {
     const unsub = engine.subscribe((event: AgentEventType) => {
@@ -1337,6 +1351,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <ModelPicker
       currentModel={config.model}
       models={modelPresets}
+      isRefreshing={modelDiscoveryStatus.isRefreshing}
+      stale={modelDiscoveryStatus.stale}
+      error={modelDiscoveryStatus.error}
+      onRefresh={() => { void loadModelPresets(config, true) }}
       onSelect={(preset) => {
         pop()
         const newConfig = applyPreset(config, preset)

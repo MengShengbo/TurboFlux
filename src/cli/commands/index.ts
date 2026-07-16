@@ -102,8 +102,8 @@ commandRegistry.register({
 // /model
 commandRegistry.register({
   name: 'model',
-  description: 'Switch model (flash/pro or custom model name)',
-  argumentHint: '[flash|pro|model-name]',
+  description: 'Discover and switch models available to the active API',
+  argumentHint: '[model-name]',
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
@@ -111,7 +111,7 @@ commandRegistry.register({
         const active = ctx.config.model === p.model ? ' *' : ''
         return `  ${p.id.padEnd(8)} ${p.name.padEnd(20)} ${p.description}${active}`
       })
-      return `Current: ${ctx.config.model}\n\nAvailable presets:\n${presetLines.join('\n')}\n\nUsage: /model <flash|pro|custom-model-name>`
+      return `Current: ${ctx.config.model}\n\nAvailable models:\n${presetLines.join('\n')}\n\nUsage: /model <model-name>`
     }
     const input = args.trim()
     const preset = getPresetByIdOrModelFrom(ctx.modelPresets, input)
@@ -120,7 +120,7 @@ commandRegistry.register({
       ctx.setConfig(updated)
       return `Switched to ${preset.name} (${preset.model})`
     }
-    const updated = { ...ctx.config, model: input }
+    const updated = setConfigValue(ctx.config, 'model', input)
     ctx.setConfig(updated)
     return `Model switched to: ${input}`
   },
@@ -230,11 +230,11 @@ commandRegistry.register({
   argumentHint: '[level]',
   type: 'local',
   execute: (args, ctx) => {
-    const capability = getModelReasoningCapabilities(ctx.config.model, ctx.config.provider)
+    const capability = getModelReasoningCapabilities(ctx.config.model, ctx.config.provider, ctx.config.modelCapabilities)
     if (!capability) return `${ctx.config.model || 'This model'} does not expose adjustable reasoning.`
 
     const input = args.trim().toLowerCase()
-    const current = formatNativeReasoningSetting(ctx.config.model, ctx.config.reasoning, ctx.config.provider)
+    const current = formatNativeReasoningSetting(ctx.config.model, ctx.config.reasoning, ctx.config.provider, ctx.config.modelCapabilities)
     if (!input) {
       const available = [
         capability.efforts.length > 0 ? capability.efforts.join('/') : null,
@@ -259,7 +259,7 @@ commandRegistry.register({
       return `Available: ${available}`
     }
     ctx.setConfig(next)
-    return `Effort set to ${formatNativeReasoningSetting(next.model, next.reasoning, next.provider)}.`
+    return `Effort set to ${formatNativeReasoningSetting(next.model, next.reasoning, next.provider, next.modelCapabilities)}.`
   },
 })
 

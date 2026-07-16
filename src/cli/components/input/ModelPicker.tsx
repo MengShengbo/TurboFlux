@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import { useTheme } from '../../theme/index'
 import type { ModelPreset } from '../../../core/config'
@@ -6,89 +6,144 @@ import type { ModelPreset } from '../../../core/config'
 interface Props {
   currentModel?: string
   models: ModelPreset[]
+  isRefreshing?: boolean
+  stale?: boolean
+  error?: string
+  onRefresh: () => void
   onSelect: (preset: ModelPreset) => void
   onCancel: () => void
 }
 
-export function ModelPicker({ currentModel, models, onSelect, onCancel }: Props) {
+const MAX_VISIBLE_MODELS = 10
+
+function formatTokens(value?: number): string {
+  if (!value) return '?'
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`
+  if (value >= 1_000) return `${Number((value / 1_000).toFixed(1))}K`
+  return String(value)
+}
+
+function capabilitySummary(model: ModelPreset): string {
+  const values = [
+    `ctx ${formatTokens(model.contextWindow)}`,
+    `out ${formatTokens(model.maxOutputTokens)}`,
+    model.capabilities?.tools ? 'tools' : null,
+    model.capabilities?.vision ? 'vision' : null,
+    model.capabilities?.reasoning ? 'reasoning' : null,
+  ].filter(Boolean)
+  return values.join('  ')
+}
+
+export function ModelPicker({
+  currentModel,
+  models,
+  isRefreshing = false,
+  stale = false,
+  error,
+  onRefresh,
+  onSelect,
+  onCancel,
+}: Props) {
   const theme = useTheme()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
-  const options = models.map(p => ({
-    id: p.id,
-    label: p.name,
-    description: p.description,
-    model: p.model,
-    provider: p.provider,
-    baseUrl: p.baseUrl,
-    contextWindow: p.contextWindow,
-    maxTokens: p.maxTokens,
-  }))
+  const [query, setQuery] = useState('')
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLowerCase()
+    if (!normalized) return models
+    return models.filter(model => [model.name, model.model, model.provider, model.description]
+      .some(value => value.toLowerCase().includes(normalized)))
+  }, [models, query])
+  const [selected, setSelected] = useState(0)
 
-  const initialIndex = Math.max(
-    0,
-    options.findIndex(o => o.model === currentModel || o.id === currentModel)
-  )
-  const [selected, setSelected] = useState(initialIndex)
+  useEffect(() => {
+    if (query) {
+      setSelected(0)
+      return
+    }
+    setSelected(Math.max(0, filtered.findIndex(model => model.model === currentModel)))
+  }, [currentModel, models, query])
 
-  useInput((_, key) => {
+  useEffect(() => {
+    setSelected(index => Math.max(0, Math.min(index, filtered.length - 1)))
+  }, [filtered.length])
+
+  useInput((input, key) => {
     if (key.escape) {
       onCancel()
       return
     }
+    if (key.ctrl && input.toLowerCase() === 'r') {
+      onRefresh()
+      return
+    }
     if (key.return) {
-      const opt = options[selected]
-      if (opt) onSelect({
-        id: opt.id,
-        name: opt.label,
-        description: opt.description,
-        model: opt.model,
-        provider: opt.provider,
-        baseUrl: opt.baseUrl,
-        contextWindow: opt.contextWindow,
-        maxTokens: opt.maxTokens,
-      })
+      const model = filtered[selected]
+      if (model) onSelect(model)
       return
     }
     if (key.upArrow) {
-      setSelected(s => Math.max(0, s - 1))
+      setSelected(index => Math.max(0, index - 1))
+      return
     }
     if (key.downArrow) {
-      setSelected(s => Math.min(options.length - 1, s + 1))
+      setSelected(index => Math.min(filtered.length - 1, index + 1))
+      return
+    }
+    if (key.backspace || key.delete) {
+      setQuery(value => value.slice(0, -1))
+      return
+    }
+    if (!key.ctrl && input && !/[\u0000-\u001F\u007F]/.test(input)) {
+      setQuery(value => `${value}${input}`)
     }
   }, { isActive: isInteractive })
 
+  const start = Math.max(0, Math.min(selected - Math.floor(MAX_VISIBLE_MODELS / 2), filtered.length - MAX_VISIBLE_MODELS))
+  const visible = filtered.slice(start, start + MAX_VISIBLE_MODELS)
+
   return (
-    <Box flexDirection="column" marginTop={1}>
-      <Text bold color={theme.brand}>Select model</Text>
+    <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={theme.brand} paddingX={1}>
+      <Box justifyContent="space-between">
+        <Text bold color={theme.brand}>Models</Text>
+        <Text color={isRefreshing ? theme.brandShimmer : stale ? theme.warning : theme.inactive}>
+          {isRefreshing ? 'refreshing' : stale ? 'cached' : `${models.length} available`}
+        </Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={theme.inactive}>Search  </Text>
+        <Text color={query ? theme.text : theme.inactive}>{query || 'type to filter'}</Text>
+      </Box>
       <Box flexDirection="column" marginTop={1}>
-        {options.map((opt, idx) => {
-          const isSelected = idx === selected
+        {visible.map((model, visibleIndex) => {
+          const index = start + visibleIndex
+          const isSelected = index === selected
+          const isCurrent = currentModel === model.model || currentModel === model.id
           return (
-            <Box key={opt.id} flexDirection="row">
-              <Box width={2}>
-                {isSelected ? (
-                  <Text color={theme.brand} bold>{'> '}</Text>
-                ) : (
-                  <Text>  </Text>
-                )}
-              </Box>
-              <Box flexDirection="column">
-                <Text color={isSelected ? theme.text : theme.inactive} dimColor={!isSelected}>
-                  {opt.label}
-                  {currentModel === opt.model || currentModel === opt.id ? (
-                    <Text color={theme.success}> *</Text>
-                  ) : null}
+            <Box key={`${model.baseUrl}:${model.model}`} flexDirection="column">
+              <Box>
+                <Box width={2}><Text color={theme.brand} bold={isSelected}>{isSelected ? '> ' : '  '}</Text></Box>
+                <Text color={isSelected ? theme.text : theme.inactive} bold={isSelected} dimColor={!isSelected}>
+                  {model.name}{isCurrent ? <Text color={theme.success}> *</Text> : null}
                 </Text>
-                {isSelected && (
-                  <Text dimColor color={theme.inactive}>{opt.description}</Text>
-                )}
+                <Text color={theme.inactive}>  {capabilitySummary(model)}</Text>
               </Box>
+              {isSelected ? (
+                <Box marginLeft={2} flexDirection="column">
+                  <Text color={theme.inactive} wrap="truncate-end">{model.model}</Text>
+                  <Text color={theme.inactive} wrap="truncate-end">
+                    {model.description}  [{model.metadataSources?.join(' + ') || 'unknown'}]
+                  </Text>
+                </Box>
+              ) : null}
             </Box>
           )
         })}
+        {filtered.length === 0 ? <Text color={theme.inactive}>No matching chat models.</Text> : null}
       </Box>
-      <Box marginTop={1}>
-        <Text dimColor>Up/Down navigate - Enter select - Esc cancel</Text>
+      {error ? <Box marginTop={1}><Text color={theme.warning} wrap="truncate-end">{error}</Text></Box> : null}
+      <Box marginTop={1} justifyContent="space-between">
+        <Text color={theme.inactive}>Up/Down select  Enter apply  Esc close</Text>
+        <Text color={theme.inactive}>Ctrl+R refresh</Text>
       </Box>
     </Box>
   )

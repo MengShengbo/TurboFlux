@@ -114,7 +114,7 @@ export type AgentEventType =
 export type AgentEventListener = (event: AgentEventType) => void
 
 function shouldOmitSamplingTemperature(config: APIConfig): boolean {
-  return resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider)?.omitTemperature === true
+  return resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)?.omitTemperature === true
 }
 
 function extractUnsupportedRequestParam(error?: string): string | null {
@@ -1166,7 +1166,7 @@ export class AgentEngine {
     const activeConfig = this.stateProvider.getActiveConfig()
     const activeModel = this.stateProvider.getActiveModel()
     return {
-      contextWindow: activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 1_000_000,
+      contextWindow: activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 200_000,
       maxOutputTokens: this.config.maxTokens || activeModel?.maxTokens || activeConfig?.maxTokens || 4096,
       model: activeModel?.id || activeConfig?.defaultModel,
       provider: activeModel?.provider || activeConfig?.provider,
@@ -2181,7 +2181,7 @@ Before retrying:
       messages: requestMessages,
       stream: true,
     }
-    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider)
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
     if (reasoningRequest?.thinking) {
       const thinking = { ...reasoningRequest.thinking }
       if (thinking.budget_tokens && thinking.budget_tokens >= anthropicMaxTokens) {
@@ -2507,7 +2507,7 @@ Before retrying:
     if (maxTokens > 0) {
       body.max_tokens = maxTokens
     }
-    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider)
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
     if (reasoningRequest?.thinking) body.thinking = reasoningRequest.thinking
     if (reasoningRequest?.reasoningEffort) body.reasoning_effort = reasoningRequest.reasoningEffort
     if (reasoningRequest?.outputConfig) body.output_config = reasoningRequest.outputConfig
@@ -2937,7 +2937,7 @@ Before retrying:
     const activeConfig = this.stateProvider.getActiveConfig()
     const activeModel = this.stateProvider.getActiveModel()
     const maxOutputTokens = this.config.maxTokens || activeModel?.maxTokens || 4096
-    const contextWindow = activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 1_000_000
+    const contextWindow = activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 200_000
     const policyProfile = resolveContextPolicyProfile(this.config.contextPolicy)
     const candidateTurns = this.buildContextCandidateTurns(contextWindow, maxOutputTokens)
 
@@ -3013,7 +3013,7 @@ Before retrying:
     config: APIConfig,
     model: APIModel | null,
   ): void {
-    const contextWindow = model?.contextWindow || config.contextWindow || this.config.contextWindow || 1_000_000
+    const contextWindow = model?.contextWindow || config.contextWindow || this.config.contextWindow || 200_000
     const maxOutputTokens = this.config.maxTokens || model?.maxTokens || config.maxTokens || 4096
     const limit = blockingContextLimit(contextWindow, maxOutputTokens)
     const counterOptions = { provider: config.provider || provider, model: model?.id || config.defaultModel }

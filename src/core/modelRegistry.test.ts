@@ -8,6 +8,7 @@ import {
   resolveNativeReasoningRequest,
   SUPPORTED_MODEL_SPECS,
 } from './modelRegistry'
+import type { ModelCapabilities } from './config'
 
 describe('modelRegistry', () => {
   it('includes the current model families exposed by official providers', () => {
@@ -64,6 +65,21 @@ describe('modelRegistry', () => {
       thinking: { type: 'enabled' },
       reasoningEffort: 'max',
     })
+  })
+
+  it('uses reasoning effort metadata advertised by an API', () => {
+    const discovered: ModelCapabilities = {
+      reasoning: true,
+      reasoningEfforts: ['low', 'high'],
+      supportedParameters: ['reasoning_effort'],
+    }
+
+    expect(resolveNativeReasoningRequest(
+      'vendor/new-model',
+      { effort: 'high' },
+      'custom',
+      discovered,
+    )).toMatchObject({ reasoningEffort: 'high' })
   })
 
   it('clamps unsupported effort values to each model default', () => {

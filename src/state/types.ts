@@ -1,5 +1,6 @@
 import type { AgentMode, AgentTurn, NativeReasoningConfig, TokenUsage } from '../shared/agentTypes'
 import type { MemoryKind, MemoryScope } from '../shared/memoryTypes'
+import type { ModelCapabilities } from '../core/config'
 
 export interface APIConfig {
   provider: 'openai' | 'anthropic' | 'deepseek' | 'kimi' | 'glm' | 'openrouter' | 'custom'
@@ -8,6 +9,7 @@ export interface APIConfig {
   defaultModel: string
   contextWindow?: number
   maxTokens?: number
+  modelCapabilities?: ModelCapabilities
   reasoning?: NativeReasoningConfig
   temperature?: number
   customHeaders?: Record<string, string>

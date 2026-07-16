@@ -1,5 +1,6 @@
 import type { TiktokenEncoding } from 'js-tiktoken'
 import type { NativeReasoningConfig, ReasoningEffort } from '../shared/agentTypes'
+import type { ModelCapabilities } from './config'
 
 export type SupportedModelProvider = 'openai' | 'anthropic' | 'deepseek' | 'kimi' | 'glm'
 export type SupportedModelId =
@@ -195,7 +196,11 @@ function capabilities(
   }
 }
 
-export function getModelReasoningCapabilities(model: string, provider?: string): ModelReasoningCapabilities | null {
+export function getModelReasoningCapabilities(
+  model: string,
+  provider?: string,
+  discovered?: ModelCapabilities,
+): ModelReasoningCapabilities | null {
   const key = modelFamilyKey(model)
   const providerKey = normalizeModelKey(provider)
 
@@ -292,6 +297,24 @@ export function getModelReasoningCapabilities(model: string, provider?: string):
     })
   }
 
+  if (discovered?.reasoning) {
+    const efforts = discovered.reasoningEfforts?.filter(effort => effort !== undefined) ?? []
+    const supportsEffort = efforts.length > 0 || discovered.supportedParameters?.includes('reasoning_effort')
+    if (supportsEffort) {
+      const available = efforts.length > 0 ? efforts : ['low', 'medium', 'high'] as ReasoningEffort[]
+      return capabilities('openai', 'effort', available, {
+        defaultEffort: available.includes('medium') ? 'medium' : available[0],
+        omitTemperature: false,
+        description: 'Reasoning effort reported by the active API model metadata.',
+      })
+    }
+    return capabilities('openai', 'fixed', [], {
+      supportsToggle: false,
+      omitTemperature: false,
+      description: 'Reasoning is supported, but the API did not advertise an adjustable control.',
+    })
+  }
+
   return null
 }
 
@@ -299,8 +322,9 @@ export function normalizeNativeReasoningConfig(
   model: string,
   config?: NativeReasoningConfig,
   provider?: string,
+  discovered?: ModelCapabilities,
 ): NativeReasoningConfig | undefined {
-  const capability = getModelReasoningCapabilities(model, provider)
+  const capability = getModelReasoningCapabilities(model, provider, discovered)
   if (!capability) return undefined
 
   const enabled = capability.supportsToggle ? config?.enabled ?? capability.defaultEnabled : true
@@ -321,9 +345,10 @@ export function resolveNativeReasoningRequest(
   model: string,
   config?: NativeReasoningConfig,
   provider?: string,
+  discovered?: ModelCapabilities,
 ): NativeReasoningRequest | null {
-  const capability = getModelReasoningCapabilities(model, provider)
-  const normalized = normalizeNativeReasoningConfig(model, config, provider)
+  const capability = getModelReasoningCapabilities(model, provider, discovered)
+  const normalized = normalizeNativeReasoningConfig(model, config, provider, discovered)
   if (!capability || !normalized) return null
 
   const request: NativeReasoningRequest = {
@@ -358,9 +383,14 @@ export function resolveNativeReasoningRequest(
   return request
 }
 
-export function formatNativeReasoningSetting(model: string, config?: NativeReasoningConfig, provider?: string): string | null {
-  const capability = getModelReasoningCapabilities(model, provider)
-  const normalized = normalizeNativeReasoningConfig(model, config, provider)
+export function formatNativeReasoningSetting(
+  model: string,
+  config?: NativeReasoningConfig,
+  provider?: string,
+  discovered?: ModelCapabilities,
+): string | null {
+  const capability = getModelReasoningCapabilities(model, provider, discovered)
+  const normalized = normalizeNativeReasoningConfig(model, config, provider, discovered)
   if (!capability || !normalized) return null
   if (normalized.enabled === false) return 'off'
   if (normalized.effort) return normalized.effort

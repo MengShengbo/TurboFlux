@@ -1,5 +1,5 @@
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
-import type { FastContextModelConfig, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
+import type { FastContextModelConfig, ModelCapabilities, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
 import type { ApprovalPolicy, NativeReasoningConfig } from '../../shared/agentTypes'
 
 export interface AgentRuntimeConfig {
@@ -9,6 +9,7 @@ export interface AgentRuntimeConfig {
   model: string
   contextWindow: number
   maxTokens: number
+  modelCapabilities?: ModelCapabilities
   approvalPolicy?: ApprovalPolicy
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
@@ -105,6 +106,7 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       defaultModel: config.model,
       contextWindow: config.contextWindow,
       maxTokens: config.maxTokens,
+      modelCapabilities: config.modelCapabilities,
       reasoning: config.reasoning,
     }
   }
@@ -118,6 +120,7 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       defaultModel: profile.model,
       contextWindow: profile.contextWindow,
       maxTokens: profile.maxTokens,
+      modelCapabilities: profile.modelCapabilities,
       reasoning: profile.reasoning,
     }
   }
