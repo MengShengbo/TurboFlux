@@ -1500,11 +1500,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 />
               )}
               <SessionPane running={isRunning} visible={startupFrame.showSession}>
-                {overlayNode ?? (pendingAsk ? (
-                  <Box flexDirection="column" flexGrow={1} justifyContent="center">
+                {overlayNode ?? (
+                  <Box flexDirection="column" flexBasis={0} flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+                    {transcriptNode}
                     {pendingAskNode}
                   </Box>
-                ) : transcriptNode)}
+                )}
               </SessionPane>
               {cockpit.showTaskRail && (
                 <TaskRail
