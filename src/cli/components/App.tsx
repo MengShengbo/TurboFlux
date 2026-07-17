@@ -9,6 +9,7 @@ import { FastContextBanner } from './tools/FastContextBanner'
 import { ConversationHistory, type ConversationEntry } from './ConversationHistory'
 import { RewindSelector } from './input/RewindSelector'
 import { ModelPicker } from './input/ModelPicker'
+import { EffortPicker, type EffortSelection } from './input/EffortPicker'
 import { PermissionDialog, type PermissionDecision } from './permissions/PermissionDialog'
 import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
@@ -23,8 +24,9 @@ import { formatMarkdown } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
 import type { ActiveTaskContext } from '../../core/taskManager'
-import { applyPreset, saveConfig, type ModelPreset, type TurboFluxConfig } from '../../core/config'
+import { applyPreset, saveConfig, setConfigValue, type ModelPreset, type TurboFluxConfig } from '../../core/config'
 import { discoverModelPresets, readCachedModelDiscovery } from '../../core/modelDiscovery'
+import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
 import { commandRegistry } from '../commands/index'
 import type { CommandContext } from '../commands/types'
 import { ConversationManager } from '../conversations/manager'
@@ -1132,6 +1134,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         push('modelPicker')
         return
       }
+      if (trimmed === '/effort') {
+        const capability = getModelReasoningCapabilities(config.model, config.provider, config.modelCapabilities)
+        const adjustable = capability && capability.control !== 'fixed'
+          && (capability.efforts.length > 0 || capability.supportsToggle || capability.control === 'budget')
+        if (adjustable) {
+          push('effortPicker')
+          return
+        }
+      }
       if (trimmed === '/resume') {
         push('history')
         return
@@ -1365,7 +1376,38 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     />
   ) : null
 
-  const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay
+  const effortCapability = getModelReasoningCapabilities(config.model, config.provider, config.modelCapabilities)
+  const effortOverlay = activeOverlay === 'effortPicker' && effortCapability ? (
+    <EffortPicker
+      model={config.model}
+      capability={effortCapability}
+      current={config.reasoning}
+      onSelect={(selection: EffortSelection) => {
+        pop()
+        let newConfig = config
+        if (selection.type === 'effort') {
+          newConfig = setConfigValue(newConfig, 'reasoningEnabled', 'on')
+          newConfig = setConfigValue(newConfig, 'reasoningEffort', selection.effort)
+        } else if (selection.type === 'toggle') {
+          newConfig = setConfigValue(newConfig, 'reasoningEnabled', selection.enabled ? 'on' : 'off')
+        } else {
+          newConfig = setConfigValue(newConfig, 'reasoningEnabled', 'on')
+          newConfig = setConfigValue(newConfig, 'reasoningBudgetTokens', String(selection.budgetTokens))
+        }
+        persistConfig(newConfig)
+        const value = formatNativeReasoningSetting(
+          newConfig.model,
+          newConfig.reasoning,
+          newConfig.provider,
+          newConfig.modelCapabilities,
+        )
+        appendMessages([{ id: genMsgId(), role: 'system', content: `Reasoning effort set to ${value || 'provider default'}` }])
+      }}
+      onCancel={() => pop()}
+    />
+  ) : null
+
+  const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay ?? effortOverlay
   const showPrompt = !singleShot && activeOverlay === null && !cursorMode && !pendingAsk
   const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
@@ -1562,6 +1604,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
         {/* Model picker overlay */}
         {modelOverlay}
+
+        {/* Effort picker overlay */}
+        {effortOverlay}
 
         {/* Input area */}
         {cursorHint}
