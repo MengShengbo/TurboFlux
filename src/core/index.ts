@@ -21,9 +21,39 @@ export {
 export type { ModelCapabilities, ModelMetadataSource, ModelPreset, TurboFluxConfig } from './config'
 export { discoverModelPresets, getModelPresets, readCachedModelDiscovery } from './modelDiscovery'
 export type { ModelDiscoveryResult } from './modelDiscovery'
+export { createTurboFluxRequestHeaders, getTurboFluxClientIdentity } from './clientIdentity'
+export { configureNetworkProxy, describeNetworkProxy, readWindowsProxySettings, resolveNetworkProxy } from './networkProxy'
+export type { NetworkProxyConfiguration, NetworkProxyStatus, WindowsProxySettings } from './networkProxy'
 export { DefaultAgentStateProvider } from './runtime/stateProvider'
 export type { AgentRuntimeConfig } from './runtime/stateProvider'
 export { NodeToolExecutor } from './runtime/nodeToolExecutor'
+export { RuntimeTaskManager } from './runtime/runtimeTaskManager'
+export { SubAgentTaskManager } from './runtime/subAgentTaskManager'
+export type {
+  CreateRuntimeTaskInput,
+  RuntimeTaskControl,
+  RuntimeTaskManagerOptions,
+  RuntimeTaskUpdate,
+} from './runtime/runtimeTaskManager'
+export type {
+  ReadSubAgentTranscriptOptions,
+  ReadSubAgentTranscriptResult,
+  StartedSubAgentTask,
+  StartSubAgentTaskContext,
+  StartSubAgentTaskInput,
+  SubAgentTaskDescriptor,
+  SubAgentTaskManagerOptions,
+  SubAgentTaskSnapshot,
+  SubAgentTranscriptRecord,
+} from './runtime/subAgentTaskManager'
+export type {
+  RuntimeRestartPolicy,
+  RuntimeTask,
+  RuntimeTaskEvent,
+  RuntimeTaskFilter,
+  RuntimeTaskKind,
+  RuntimeTaskStatus,
+} from '../shared/runtimeTaskTypes'
 export {
   getAllTools,
   getToolsForMode,

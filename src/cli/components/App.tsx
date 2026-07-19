@@ -138,6 +138,7 @@ function formatTaskToolName(name: string): string {
     case 'multi_edit': return 'multi-edit'
     case 'run_command': return 'shell'
     case 'read_terminal': return 'read terminal'
+    case 'write_terminal': return 'write terminal'
     case 'list_terminals': return 'list terminals'
     case 'kill_terminal': return 'stop terminal'
     default: return name
@@ -147,7 +148,7 @@ function formatTaskToolName(name: string): string {
 function serializeToolArgsForUi(args: Record<string, unknown> | undefined): string | undefined {
   if (!args) return undefined
   const clone: Record<string, unknown> = { ...args }
-  for (const key of ['content', 'old_content', 'new_content', 'old_string', 'new_string']) {
+  for (const key of ['content', 'data', 'old_content', 'new_content', 'old_string', 'new_string']) {
     if (typeof clone[key] === 'string') {
       clone[key] = `<${(clone[key] as string).length} chars>`
     }
@@ -225,35 +226,6 @@ export function shouldUseNoFlicker(
   if (isFalsyEnv(forced)) return false
   if (isTruthyEnv(forced)) return true
   return requested
-}
-
-export function clipTextToRows(text: string, maxRows: number, columns: number): string {
-  const width = Math.max(20, columns - 8)
-  const lines = text.split(/\r?\n/)
-  const kept: string[] = []
-  let rows = 0
-  let clipped = false
-
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i] ?? ''
-    const cost = Math.max(1, Math.ceil(Math.max(1, line.length) / width))
-    if (kept.length > 0 && rows + cost > maxRows) {
-      clipped = true
-      break
-    }
-    if (kept.length === 0 && cost > maxRows) {
-      kept.unshift(line.slice(Math.max(0, line.length - width * maxRows)))
-      rows = maxRows
-      clipped = true
-      break
-    }
-    kept.unshift(line)
-    rows += cost
-    if (rows >= maxRows) break
-  }
-
-  if (!clipped && kept.length === lines.length) return text
-  return `[... clipped for screen ...]\n${kept.join('\n')}`
 }
 
 export function sliceTurnsBeforeNthUserTurn(turns: AgentTurn[], userTurnOrdinal: number): AgentTurn[] {
@@ -648,6 +620,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   useEffect(() => {
     const unsub = engine.subscribe((event: AgentEventType) => {
+      convManager.recordEvent(event)
       switch (event.type) {
         case 'stream:start':
           setIsRunning(true)
@@ -766,6 +739,22 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'terminal:sessions':
           setTerminalSessions(event.sessions)
           break
+        case 'runtime-task:finished': {
+          const sessionId = event.task.metadata?.sessionId
+          if (event.task.kind === 'terminal' && typeof sessionId === 'string') {
+            setTerminalSessions(current => current.map(session => session.id === sessionId
+              ? {
+                  ...session,
+                  status: event.task.status === 'failed' ? 'error' : 'exited',
+                  exitCode: event.task.exitCode,
+                  error: event.task.error,
+                  updatedAt: event.task.updatedAt,
+                }
+              : session))
+          }
+          setLastActivity(Date.now())
+          break
+        }
         case 'ask:user':
           setPendingAsk({
             id: event.requestId || `ask-${Date.now()}`,
@@ -782,6 +771,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'context:segment_created':
           convManager.scheduleSave()
           setLastActivity(Date.now())
+          break
+        case 'model:protocol':
+          if (event.phase === 'fallback') {
+            appendMessages([{
+              id: genMsgId(),
+              role: 'system',
+              content: `Protocol fallback: ${event.message || 'request format mismatch'} → ${event.url}`,
+            }], { forceLatest: true })
+          }
           break
         case 'error':
           streamBufferRef.current = ''
@@ -1263,9 +1261,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, { isActive: isInteractive })
 
   const visibleStreamText = stripTextToolCallMarkup(streamText, { stripIncomplete: true })
-  const streamTextForDisplay = noFlickerActive
-    ? clipTextToRows(visibleStreamText, Math.max(2, Math.floor(transcriptRowBudget / 2)), terminal.columns)
-    : visibleStreamText
+  const streamTextForDisplay = visibleStreamText
 
   const runningNode = isRunning ? (
     <Box flexDirection="column" marginBottom={1}>
@@ -1419,12 +1415,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <Box flexDirection="column" marginBottom={1}>
       <Text dimColor>{`Selected message ${cursor!.index + 1}/${messages.length}`}</Text>
       <MessageList
-        messages={[{
-          ...cursorPreviewMessage,
-          content: clipTextToRows(cursorPreviewMessage.content, 8, terminal.columns),
-          tools: undefined,
-          changes: undefined,
-        }]}
+        messages={[cursorPreviewMessage]}
         verbose={verbose}
         diffMaxRows={0}
         selectedIndex={0}

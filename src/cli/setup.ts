@@ -156,9 +156,9 @@ function renderSetupLogoLine(line: string): string {
   let out = ''
   for (const ch of line) {
     if ('_/\\'.includes(ch)) {
-      out += chalk.hex('#6dfcff').bold(ch)
+      out += chalk.hex('#d6d6d6').bold(ch)
     } else if ('-`.\''.includes(ch)) {
-      out += chalk.hex('#32d9dd')(ch)
+      out += chalk.hex('#777777')(ch)
     } else {
       out += ch
     }

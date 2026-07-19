@@ -175,6 +175,120 @@ describe('runSubAgent', () => {
     }
   })
 
+  it('uses a Claude model hint and falls back from Messages to Chat', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    const events: SubAgentEvent[] = []
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init })
+      if (String(url).endsWith('/messages')) {
+        return new Response(JSON.stringify({ error: { message: 'route not found' } }), { status: 404 })
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'chat fallback finished' } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'inspect code',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'inspect the project',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'proxy-key',
+        baseUrl: 'https://proxy.test/v1',
+        provider: 'custom',
+        model: 'vendor/claude-fable-5',
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'chat fallback finished' })
+      expect(requests.map(request => request.url)).toEqual([
+        'https://proxy.test/v1/messages',
+        'https://proxy.test/v1/chat/completions',
+      ])
+      const firstHeaders = new Headers(requests[0].init?.headers)
+      expect(firstHeaders.get('x-api-key')).toBe('proxy-key')
+      expect(firstHeaders.get('authorization')).toBe('Bearer proxy-key')
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'model_retry',
+        reason: expect.stringContaining('Protocol fallback'),
+      }))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('falls back from Chat to Responses and converts the request shape', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; body: Record<string, any> }> = []
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) })
+      if (String(url).endsWith('/chat/completions')) {
+        return new Response(JSON.stringify({ error: { message: 'endpoint not found' } }), { status: 404 })
+      }
+      return new Response(JSON.stringify({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'responses finished' }] }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'inspect code',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'inspect the project',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'proxy-key',
+        baseUrl: 'https://proxy.test/v1',
+        provider: 'custom',
+        model: 'gpt-compatible-model',
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'responses finished' })
+      expect(requests.map(request => request.url)).toEqual([
+        'https://proxy.test/v1/chat/completions',
+        'https://proxy.test/v1/responses',
+      ])
+      expect(requests[1].body.messages).toBeUndefined()
+      expect(requests[1].body.input).toEqual(expect.arrayContaining([
+        expect.objectContaining({ role: 'user', content: expect.stringContaining('Objective:') }),
+      ]))
+      expect(requests[1].body.tools[0]).toMatchObject({ type: 'function', name: 'search_content' })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('retries a transient network failure and exposes the underlying cause', async () => {
     const originalFetch = globalThis.fetch
     const events: SubAgentEvent[] = []

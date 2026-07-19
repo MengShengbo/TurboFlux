@@ -33,6 +33,8 @@ export interface CommandOutput {
   exitCode: number
   timedOut?: boolean
   truncated?: boolean
+  logPath?: string
+  outputBytes?: number
 }
 
 export interface RequestOptions {

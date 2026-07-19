@@ -5,6 +5,8 @@ import { loadMcpSettings } from '../mcp/settings'
 import { SkillRuntime } from '../skills/runtime'
 import { syncAgentSkills } from '../subAgent'
 import { NodeToolExecutor } from './nodeToolExecutor'
+import { RuntimeTaskManager } from './runtimeTaskManager'
+import { SubAgentTaskManager } from './subAgentTaskManager'
 import { DefaultAgentStateProvider, type AgentRuntimeConfig } from './stateProvider'
 import { buildProfileSystemPromptSection, loadProfile } from '../profile'
 
@@ -27,6 +29,8 @@ export interface AgentRuntime {
   engine: AgentEngine
   stateProvider: DefaultAgentStateProvider
   toolExecutor: NodeToolExecutor
+  runtimeTaskManager: RuntimeTaskManager
+  subAgentTaskManager: SubAgentTaskManager
   skillRuntime: SkillRuntime
   mcpClient: McpClient
   disconnect: () => Promise<void>
@@ -59,8 +63,15 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
   const conversationId = options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`
   const stateProvider = new DefaultAgentStateProvider(options.config, options.workspacePath, { conversationId })
   const effectiveApprovalPolicy = options.approvalPolicy || options.config.approvalPolicy || 'ask'
+  const runtimeTaskManager = new RuntimeTaskManager({ defaultOwnerSessionId: conversationId })
+  const subAgentTaskManager = new SubAgentTaskManager({
+    workspacePath: options.workspacePath,
+    runtimeTaskManager,
+    ownerSessionId: conversationId,
+  })
   const toolExecutor = new NodeToolExecutor(options.workspacePath, {
     sandboxPolicy: options.sandboxPolicy || (effectiveApprovalPolicy === 'full' ? 'full' : 'workspace'),
+    runtimeTaskManager,
   })
   const engine = new AgentEngine(
     {
@@ -69,7 +80,11 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
     },
     toolExecutor,
     stateProvider,
+    subAgentTaskManager,
   )
+  const unsubscribeRuntimeTasks = runtimeTaskManager.subscribe(event => {
+    if (event.type === 'runtime-task:finished') engine.publishRuntimeTaskFinished(event.task)
+  })
 
   const skillRuntime = new SkillRuntime(options.workspacePath)
   options.registerSkills?.(skillRuntime)
@@ -108,12 +123,16 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
     engine,
     stateProvider,
     toolExecutor,
+    runtimeTaskManager,
+    subAgentTaskManager,
     skillRuntime,
     mcpClient,
     disconnect,
     destroy: async () => {
       await disconnect()
+      await runtimeTaskManager.stopAll('Agent runtime destroyed')
       await toolExecutor.ptyKillAll?.()
+      unsubscribeRuntimeTasks()
       engine.destroy()
     },
   }

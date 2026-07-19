@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  clipTextToRows,
   getEngineUserOrdinalForUiMessage,
   formatTaskProgressLabel,
   formatTaskToolSummary,
@@ -12,7 +11,7 @@ import type { Message } from './messages/Messages'
 import type { AgentTurn } from '../../shared/agentTypes'
 
 describe('no-flicker mode selection', () => {
-  it('uses the fixed cockpit by default for interactive sessions', () => {
+  it('keeps the full fixed cockpit by default for interactive sessions', () => {
     expect(shouldUseNoFlicker(true)).toBe(true)
   })
 
@@ -57,19 +56,6 @@ describe('no-flicker mode selection', () => {
         process.env.TURBOFLUX_NO_FLICKER = previous
       }
     }
-  })
-})
-
-describe('clipTextToRows', () => {
-  it('returns unchanged text when it fits', () => {
-    expect(clipTextToRows('short\ntext', 4, 80)).toBe('short\ntext')
-  })
-
-  it('keeps the tail of a very long line', () => {
-    const clipped = clipTextToRows('x'.repeat(200), 2, 40)
-
-    expect(clipped).toContain('[... clipped for screen ...]')
-    expect(clipped.endsWith('x'.repeat(64))).toBe(true)
   })
 })
 

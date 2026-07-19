@@ -1,31 +1,31 @@
 import type { Theme } from './types'
 
 export const darkTheme: Theme = {
-  brand: '#22d3ee',
-  brandShimmer: '#67e8f9',
+  brand: '#d6d6d6',
+  brandShimmer: '#ffffff',
 
-  success: '#4ade80',
-  error: '#fb7185',
-  warning: '#fbbf24',
-  info: '#60a5fa',
+  success: '#c8c8c8',
+  error: '#e8e8e8',
+  warning: '#d2d2d2',
+  info: '#b4b4b4',
 
-  text: '#f1f5f9',
-  inactive: '#94a3b8',
-  subtle: '#64748b',
+  text: '#e6e6e6',
+  inactive: '#8f8f8f',
+  subtle: '#5f5f5f',
 
-  background: '#05070a',
-  panelBackground: '#0b1118',
-  panelRaised: '#111a24',
-  surface: '#18222e',
-  divider: '#29384a',
+  background: '#000000',
+  panelBackground: '#080808',
+  panelRaised: '#121212',
+  surface: '#1a1a1a',
+  divider: '#303030',
 
-  diffAdded: '#166534',
-  diffRemoved: '#7f1d1d',
-  diffAddedWord: '#4ade80',
-  diffRemovedWord: '#f87171',
+  diffAdded: '#1c1c1c',
+  diffRemoved: '#0d0d0d',
+  diffAddedWord: '#e0e0e0',
+  diffRemovedWord: '#969696',
 
-  promptBorder: '#22d3ee',
-  promptBackground: '#0b1118',
-  statusLine: '#a8b4c4',
-  codeBackground: '#111a24',
+  promptBorder: '#555555',
+  promptBackground: '#0a0a0a',
+  statusLine: '#adadad',
+  codeBackground: '#111111',
 }

@@ -53,6 +53,17 @@ describe('PermissionPipeline', () => {
   })
 
   describe('high-risk command warnings', () => {
+    it('asks before writing to terminal stdin', () => {
+      const pipeline = new PermissionPipeline('ask')
+      const result = pipeline.check('write_terminal', { session_id: 'term-1', data: 'npm publish\n' })
+      expect(result.verdict).toBe('ask')
+    })
+
+    it('asks before cancelling a background subagent', () => {
+      const pipeline = new PermissionPipeline('ask')
+      expect(pipeline.check('cancel_agent', { agent_id: 'runtime_agent_1' }).verdict).toBe('ask')
+    })
+
     it('asks for git push --force', () => {
       const pipeline = new PermissionPipeline()
       const result = pipeline.check('run_command', { command: 'git push --force origin main' })

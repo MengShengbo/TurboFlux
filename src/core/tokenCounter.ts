@@ -1,5 +1,6 @@
 import { getEncoding, type Tiktoken, type TiktokenEncoding } from 'js-tiktoken'
 import { resolveTokenizerForModel } from './modelRegistry'
+import { createTurboFluxRequestHeaders } from './clientIdentity'
 
 export type TokenCountSource = 'provider' | 'tokenizer' | 'estimate' | 'unavailable'
 
@@ -102,13 +103,13 @@ export async function countAnthropicMessagesWithProvider(params: {
   const fetcher = params.fetchImpl ?? fetch
   const response = await fetcher(`${params.baseUrl.replace(/\/+$/, '')}/messages/count_tokens`, {
     method: 'POST',
-    headers: {
+    headers: createTurboFluxRequestHeaders({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${params.apiKey}`,
       'x-api-key': params.apiKey,
       'anthropic-version': '2023-06-01',
       ...(params.customHeaders ?? {}),
-    },
+    }),
     body: JSON.stringify({
       model: params.model,
       messages: params.messages,

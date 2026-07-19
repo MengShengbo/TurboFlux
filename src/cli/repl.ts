@@ -19,7 +19,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation } = options
 
   if (!config.apiKey) {
-    console.log(chalk.hex('#7cffea')('\n  No API key configured. Run "turboflux setup" to connect a model provider.\n'))
+    console.log(chalk.hex('#bdbdbd')('\n  No API key configured. Run "turboflux setup" to connect a model provider.\n'))
   }
 
   if (mcpServers?.length) {

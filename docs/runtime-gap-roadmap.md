@@ -42,6 +42,8 @@ Claude Code 的普通后台 Bash 任务仍依赖当前 CLI 进程，但具备独
 
 前台命令超时后只调用进程树终止逻辑，Promise 仍等待 `close` 或 `error`。Windows 下 `taskkill.exe` 被异步启动并 `unref()`，如果终止失败或子进程不触发关闭事件，Agent 可能一直卡住。
 
+状态：已于 2026-07-17 修复。超时后会进入固定终止宽限期；即使子进程不触发 `close`，工具调用也会强制结算并保留终止失败信息。
+
 验收标准：
 
 - 超时后进入固定长度的终止宽限期。
@@ -51,6 +53,8 @@ Claude Code 的普通后台 Bash 任务仍依赖当前 CLI 进程，但具备独
 ### stdout 与 stderr 会被丢弃一半
 
 当前成功命令只返回 stdout，失败命令只返回 stderr。编译器、测试框架和包管理器经常混合使用两个通道，导致模型看不到完整诊断。
+
+状态：已于 2026-07-18 完成。Agent 会同时收到带通道标签的 stdout、stderr、exitCode、timedOut 和 truncated；完整输出按通道追加写入 `.turboflux/runtime-logs/*.jsonl`，工具结果同时返回日志路径。
 
 验收标准：
 
@@ -72,6 +76,8 @@ Claude Code 的普通后台 Bash 任务仍依赖当前 CLI 进程，但具备独
 
 当前会话以完整 JSON 原子重写，并使用 500ms debounce。用户消息刚提交、模型正在流式输出或工具正在执行时发生硬崩溃，当前 turn 可能丢失。
 
+状态：已于 2026-07-18 完成。会话改为版本化 JSONL journal，立即追加用户 turn、assistant delta、tool call/result、interrupt 和 compact state；旧 `.json` 会话继续可读。回放会跳过损坏尾行、补记中断 assistant，并为缺失工具结果生成 `abort` 结果以恢复合法工具链。journal 压缩与归档仍属于后续维护项。
+
 验收标准：
 
 - 用户提交、assistant delta、tool call、tool result、interrupt 和 compact boundary 使用 append-only journal。
@@ -79,6 +85,8 @@ Claude Code 的普通后台 Bash 任务仍依赖当前 CLI 进程，但具备独
 - 恢复时清理无效工具链，并明确标记 interrupted turn。
 
 ## 建议的 RuntimeTaskManager
+
+状态：已于 2026-07-18 建立进程内 `RuntimeTaskManager`，前台 Shell、后台 Terminal、FastContext 和普通子代理已接入统一的创建、运行、停止与终态管理；命令日志和子代理 transcript 已落盘，重启时会恢复历史任务并将未完成任务标记为 `interrupted`，真实跨进程续跑仍需 Runtime Daemon。
 
 统一任务模型至少包含：
 
@@ -113,12 +121,16 @@ Runtime 需要提供：
 
 ### 第一阶段：进程内统一 Runtime
 
+进展：前台 Shell、后台 Terminal、FastContext 与普通子代理已接入统一任务状态和追加式日志，终态会发布 `runtime-task:finished`，Agent 可通过 `write_terminal` 写入 stdin，并通过 `list_agents`、`read_agent`、`cancel_agent` 管理后台子代理。日志轮转和日志缺口提示仍未完成。
+
 1. 将 Shell、Terminal、FastContext 和普通子代理接入统一任务状态。
 2. 输出采用 append-only 文件，读取使用 byte offset。
 3. 修复命令超时、退出码、stdout/stderr 和完成通知。
 4. 增加日志上限、轮转和缺口提示。
 
 ### 第二阶段：会话与子代理恢复
+
+进展：append-only 会话 journal、普通子代理独立 transcript、后台运行、取消和崩溃后 `interrupted` 回放已完成；向运行中 Agent 追加消息、重新启动 Agent 和可选 Git worktree 尚未完成。
 
 1. 将会话存储改为 append-only journal。
 2. 为普通子代理保存独立 transcript。
@@ -162,10 +174,10 @@ TurboFlux 已具备 context segments、reservoir、文件恢复、手动 compact
 
 ## 实施顺序
 
-1. 修复前台命令永久等待和输出丢失。
-2. 建立进程内 `RuntimeTaskManager`。
-3. 命令输出落盘、完成事件和 stdin 工具。
-4. append-only 会话 journal 与崩溃恢复。
-5. 后台及可恢复子代理。
-6. Runtime Daemon 与 detach/attach。
-7. Hooks、完整 MCP、sandbox、LSP 和远程调度。
+1. [x] 修复前台命令永久等待和输出丢失。
+2. [x] 建立进程内 `RuntimeTaskManager`。
+3. [x] 命令输出落盘、完成事件和 stdin 工具。
+4. [x] append-only 会话 journal 与崩溃恢复。
+5. [x] 后台及可恢复子代理。
+6. [ ] Runtime Daemon 与 detach/attach。
+7. [ ] Hooks、完整 MCP、sandbox、LSP 和远程调度。

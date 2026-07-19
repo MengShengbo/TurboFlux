@@ -114,7 +114,7 @@ export function MessageList({
               flexDirection="column"
               marginBottom={1}
               borderStyle={isSelected ? 'round' : undefined}
-              borderColor={isSelected ? 'green' : undefined}
+              borderColor={isSelected ? theme.brand : undefined}
               paddingX={isSelected ? 1 : 0}
             >
               <UserMessage content={msg.content} />

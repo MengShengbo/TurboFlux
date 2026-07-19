@@ -39,9 +39,9 @@ export function InteractiveDiff({ oldContent, newContent, filename, onAccept, on
       <Box justifyContent="space-between">
         <Text bold color={theme.brand}>{filename}</Text>
         <Text>
-          <Text color="green">+{addedLines}</Text>
+          <Text color={theme.diffAddedWord}>+{addedLines}</Text>
           <Text> </Text>
-          <Text color="red">-{removedLines}</Text>
+          <Text color={theme.diffRemovedWord}>-{removedLines}</Text>
         </Text>
       </Box>
 
@@ -54,13 +54,13 @@ export function InteractiveDiff({ oldContent, newContent, filename, onAccept, on
       {!decided && (
         <Box marginTop={1}>
           <Text bold color={theme.brand}>Apply this change? </Text>
-          <Text color="green">[y]es</Text>
+          <Text color={theme.success}>[y]es</Text>
           <Text> / </Text>
-          <Text color="red">[n]o</Text>
+          <Text color={theme.error}>[n]o</Text>
         </Box>
       )}
-      {decided === 'accepted' && <Text color="green" bold>Change accepted.</Text>}
-      {decided === 'rejected' && <Text color="red" bold>Change rejected.</Text>}
+      {decided === 'accepted' && <Text color={theme.success} bold>Change accepted.</Text>}
+      {decided === 'rejected' && <Text color={theme.error} bold>Change rejected.</Text>}
     </Box>
   )
 }

@@ -27,6 +27,8 @@ export interface TerminalSessionInfo {
   updatedAt: number
   isAgentSession: boolean
   title: string
+  runtimeTaskId?: string
+  logPath?: string
   exitCode?: number | null
   exitSignal?: string | null
   error?: string

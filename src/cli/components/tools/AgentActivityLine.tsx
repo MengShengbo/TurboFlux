@@ -16,8 +16,8 @@ interface AgentActivitySegment {
 }
 
 const SHIMMER_STEP = 2
-const BASE_COLOR = '#075985'
-const SWEEP_COLORS = ['#0e7490', '#0891b2', '#22d3ee', '#67e8f9', '#22d3ee', '#0891b2', '#0e7490']
+const BASE_COLOR = '#242424'
+const SWEEP_COLORS = ['#303030', '#4a4a4a', '#737373', '#f5f5f5', '#bdbdbd', '#737373', '#4a4a4a']
 
 export function AgentActivityLine({ active, persistent = false }: AgentActivityLineProps) {
   const { columns } = useTerminalSize()

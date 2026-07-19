@@ -16,6 +16,7 @@ import {
 import { writeFileAtomicSync } from './fileIO'
 import { getModelReasoningCapabilities, getSupportedModelSpec, normalizeNativeReasoningConfig } from './modelRegistry'
 import { normalizeBaseUrl } from './normalizeBaseUrl'
+import { createTurboFluxRequestHeaders } from './clientIdentity'
 
 const DISCOVERY_CACHE_VERSION = 1
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000
@@ -361,7 +362,7 @@ async function fetchJson(url: string, headers: Record<string, string>, maxBytes 
 }
 
 function requestHeaders(config: TurboFluxConfig): Record<string, string> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
+  const headers: Record<string, string> = createTurboFluxRequestHeaders({ Accept: 'application/json' })
   if (!config.apiKey) return headers
   if (config.provider === 'anthropic') {
     headers['x-api-key'] = config.apiKey
@@ -413,7 +414,7 @@ async function loadModelsDev(): Promise<JsonRecord | undefined> {
   const cached = readModelsDevCache()
   if (cached && Date.now() - cached.fetchedAt < REGISTRY_CACHE_TTL_MS) return cached.data
   try {
-    const data = asRecord(await fetchJson('https://models.dev/api.json', { Accept: 'application/json' }))
+    const data = asRecord(await fetchJson('https://models.dev/api.json', createTurboFluxRequestHeaders({ Accept: 'application/json' })))
     if (!data) return cached?.data
     writeFileAtomicSync(modelsDevCachePath(), JSON.stringify({ fetchedAt: Date.now(), data }), 0o600)
     return data

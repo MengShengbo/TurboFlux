@@ -2,10 +2,23 @@ import { isAbsolute, join, relative } from 'path'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
+import { createTurboFluxRequestHeaders } from './clientIdentity'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
 import type { SkillRuntime } from './skills/runtime'
 import type { LoadedSkill } from './skills/loader'
-import { normalizeBaseUrl } from './normalizeBaseUrl'
+import {
+  ModelProtocolRequestError,
+  buildModelProtocolUrl,
+  formatProtocolAttempt,
+  formatProtocolFailure,
+  planModelProtocols,
+  shouldFallbackProtocol,
+  toProtocolAttempt,
+  toResponsesInput,
+  toResponsesTools,
+  type ModelProtocol,
+  type ModelProtocolAttempt,
+} from './modelProtocol'
 
 export { type SubAgentDefinition }
 
@@ -524,6 +537,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
   let searchRecoveryUsed = false
   let readRecoveryUsed = false
+  let resolvedProtocol: ModelProtocol | null = null
 
   const addEvidence = (evidence: SubAgentEvidence): void => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
@@ -547,63 +561,137 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       emit({ type: 'model_wait', turn, elapsedMs: Date.now() - waitStartedAt, timeoutMs: requestTimeoutMs })
     }, 5_000)
     try {
-      const isAnthropic = provider === 'anthropic'
-      const requestBody = isAnthropic
-        ? {
-            model: modelId,
-            system: definition.systemPrompt,
-            messages: toAnthropicMessages(messages),
-            tools: tools.map(tool => ({
-              name: tool.function.name,
-              description: tool.function.description,
-              input_schema: tool.function.parameters,
-            })),
-            temperature: definition.temperature ?? 0,
-            max_tokens: definition.maxOutputTokens || 4096,
-          }
-        : {
-            model: modelId,
-            messages,
-            tools,
-            temperature: definition.temperature ?? 0,
-            max_tokens: definition.maxOutputTokens || 4096,
-            stream: false,
-          }
-      const url = isAnthropic
-        ? `${baseUrl.replace(/\/+$/, '')}/messages`
-        : `${normalizeBaseUrl(baseUrl)}/chat/completions`
-      const headers = isAnthropic
-        ? { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', ...customHeaders }
-        : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, ...customHeaders }
-      const res = await fetchWithTransientRetry(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(requestBody),
-      }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
-        emit({ type: 'model_retry', turn, attempt, delayMs, reason })
-      })
+      const providerHint = provider === 'anthropic' ? 'anthropic' : provider === 'openai' ? 'openai' : 'custom'
+      const plannedProtocols: ModelProtocol[] = planModelProtocols(providerHint, modelId)
+      const protocolCandidates: ModelProtocol[] = resolvedProtocol
+        ? [resolvedProtocol, ...plannedProtocols.filter(protocol => protocol !== resolvedProtocol)]
+        : plannedProtocols
+      const protocolAttempts: ModelProtocolAttempt[] = []
+      let parsedResponse = false
 
-      if (!res.ok) {
-        const errText = await res.text()
-        emit({ type: 'error', message: `API ${res.status}: ${errText.slice(0, 200)}` })
-        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: `API error: ${res.status}` }
+      for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
+        const protocol: ModelProtocol = protocolCandidates[protocolIndex]
+        const url = buildModelProtocolUrl(baseUrl, protocol)
+        const requestMessages = messages.map(message => ({ ...message })) as Array<Record<string, unknown>>
+        const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
+          ? {
+              model: modelId,
+              system: definition.systemPrompt,
+              messages: toAnthropicMessages(messages),
+              tools: tools.map(tool => ({
+                name: tool.function.name,
+                description: tool.function.description,
+                input_schema: tool.function.parameters,
+              })),
+              temperature: definition.temperature ?? 0,
+              max_tokens: definition.maxOutputTokens || 4096,
+            }
+          : protocol === 'openai_responses'
+            ? {
+                model: modelId,
+                instructions: definition.systemPrompt,
+                input: toResponsesInput(requestMessages),
+                tools: toResponsesTools(tools),
+                temperature: definition.temperature ?? 0,
+                max_output_tokens: definition.maxOutputTokens || 4096,
+                store: false,
+              }
+            : {
+                model: modelId,
+                messages,
+                tools,
+                temperature: definition.temperature ?? 0,
+                max_tokens: definition.maxOutputTokens || 4096,
+                stream: false,
+              }
+        const headers: Record<string, string> = createTurboFluxRequestHeaders(protocol === 'anthropic_messages'
+          ? {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+              ...(provider === 'anthropic' ? {} : { 'Authorization': `Bearer ${apiKey}` }),
+              ...customHeaders,
+            }
+          : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, ...customHeaders })
+        const res = await fetchWithTransientRetry(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(requestBody),
+        }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
+          emit({ type: 'model_retry', turn, attempt, delayMs, reason })
+        })
+
+        if (!res.ok) {
+          const errorText = await res.text()
+          const protocolError = new ModelProtocolRequestError(`HTTP ${res.status}: ${errorText || 'empty response'}`, {
+            protocol,
+            url,
+            status: res.status,
+            kind: 'http',
+          })
+          const attempt = toProtocolAttempt(protocolError)
+          protocolAttempts.push(attempt)
+          const nextProtocol = protocolCandidates[protocolIndex + 1]
+          if (nextProtocol && shouldFallbackProtocol(protocolError)) {
+            emit({
+              type: 'model_retry',
+              turn,
+              attempt: protocolIndex + 2,
+              delayMs: 0,
+              reason: `Protocol fallback: ${formatProtocolAttempt(attempt)} -> ${buildModelProtocolUrl(baseUrl, nextProtocol)}`,
+            })
+            continue
+          }
+          const failure = formatProtocolFailure(protocolAttempts)
+          emit({ type: 'error', message: failure })
+          return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: failure }
+        }
+
+        const response: any = await res.json()
+        if (protocol === 'anthropic_messages') {
+          const blocks = Array.isArray(response.content) ? response.content : []
+          messageText = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text || '').join('')
+          responseToolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any) => ({
+            id: block.id,
+            function: { name: block.name, arguments: JSON.stringify(block.input || {}) },
+          }))
+        } else if (protocol === 'openai_responses') {
+          if (!Array.isArray(response.output)) {
+            const message = `Responses endpoint ${url} returned no output array.`
+            emit({ type: 'error', message })
+            return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
+          }
+          messageText = response.output
+            .filter((item: any) => item?.type === 'message' && Array.isArray(item.content))
+            .flatMap((item: any) => item.content)
+            .filter((item: any) => (item?.type === 'output_text' || item?.type === 'refusal') && typeof item.text === 'string')
+            .map((item: any) => item.text)
+            .join('')
+          responseToolCalls = response.output
+            .filter((item: any) => item?.type === 'function_call' && typeof item.name === 'string')
+            .map((item: any, index: number) => ({
+              id: item.call_id || item.id || `call_${index}`,
+              function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : '{}' },
+            }))
+        } else {
+          const choice = response.choices?.[0]
+          if (!choice) {
+            const message = `Chat Completions endpoint ${url} returned no response choice.`
+            emit({ type: 'error', message })
+            return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
+          }
+          messageText = choice.message?.content || ''
+          responseToolCalls = choice.message?.tool_calls || []
+        }
+        resolvedProtocol = protocol
+        parsedResponse = true
+        break
       }
 
-      const response: any = await res.json()
-      if (isAnthropic) {
-        const blocks = Array.isArray(response.content) ? response.content : []
-        messageText = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text || '').join('')
-        responseToolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any) => ({
-          id: block.id,
-          function: { name: block.name, arguments: JSON.stringify(block.input || {}) },
-        }))
-      } else {
-        const choice = response.choices?.[0]
-        if (!choice) {
-          return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'No response choice' }
-        }
-        messageText = choice.message?.content || ''
-        responseToolCalls = choice.message?.tool_calls || []
+      if (!parsedResponse) {
+        const failure = formatProtocolFailure(protocolAttempts)
+        emit({ type: 'error', message: failure })
+        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: failure }
       }
     } catch (e: any) {
       if (e.name === 'AbortError') return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'Aborted' }

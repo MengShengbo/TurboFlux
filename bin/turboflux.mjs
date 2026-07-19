@@ -11,7 +11,8 @@ const tsxLoader = pathToFileURL(require.resolve('tsx')).href
 
 // Use node with tsx --import to run TypeScript directly.
 const { spawnSync } = await import('node:child_process')
-const args = ['--import', tsxLoader, entry, ...process.argv.slice(2)]
+const systemCaArgs = process.allowedNodeEnvironmentFlags.has('--use-system-ca') ? ['--use-system-ca'] : []
+const args = [...systemCaArgs, '--import', tsxLoader, entry, ...process.argv.slice(2)]
 
 const result = spawnSync(process.execPath, args, {
   stdio: 'inherit',

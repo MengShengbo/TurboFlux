@@ -5,6 +5,9 @@ import { startRepl } from './repl'
 import { loadConfig, redactConfig, saveConfig, setConfigValue } from '../core/config'
 import { runSetup } from './setup'
 import { normalizeApprovalPolicy, type ApprovalPolicy } from '../shared/agentTypes'
+import { configureNetworkProxy } from '../core/networkProxy'
+
+configureNetworkProxy()
 
 const program = new Command()
 
@@ -17,7 +20,7 @@ program
   .option('--provider-override <provider>', 'temporarily override API provider for this session')
   .option('-c, --command <prompt>', 'single-shot mode: run prompt and exit')
   .option('-v, --verbose', 'show tool call details')
-  .option('--no-flicker', 'use a fixed alternate-screen viewport to reduce redraw flicker')
+  .option('--no-flicker', 'keep the fixed alternate-screen viewport')
   .option('--scrollback', 'use classic terminal scrollback instead of the fixed cockpit')
   .option('--no-animation', 'skip the startup reveal animation')
   .option('--no-color', 'disable color output')

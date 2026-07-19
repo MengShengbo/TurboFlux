@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, rmSync, readdirSync, realpathSync, statSync } from 'fs'
+import { appendFileSync, readFileSync, existsSync, mkdirSync, rmSync, readdirSync, realpathSync, statSync, writeFileSync } from 'fs'
 import { basename, join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { homedir } from 'os'
@@ -14,12 +14,15 @@ import type { TerminalOutputChunk, TerminalSessionInfo } from '../../shared/term
 import { MemoryService } from '../../tools/memory/service'
 import { LocalHistoryService } from '../../tools/localHistory/service'
 import { hashText, writeFileAtomicSync } from '../fileIO'
+import { RuntimeTaskManager } from './runtimeTaskManager'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
 
 export interface NodeToolExecutorOptions {
   sandboxPolicy?: SandboxPolicy
+  runtimeTaskManager?: RuntimeTaskManager
+  ownerSessionId?: string
 }
 
 interface BackgroundTerminalSession {
@@ -28,11 +31,17 @@ interface BackgroundTerminalSession {
   chunks: TerminalOutputChunk[]
   nextSeq: number
   bufferChars: number
+  runtimeTaskId: string
+  logPath: string
+  outputBytes: number
+  logError?: string
 }
 
 const MAX_TERMINAL_CHUNKS = 500
 const MAX_TERMINAL_BUFFER_CHARS = 1_000_000
 const MAX_COMMAND_OUTPUT_CHARS = 2_000_000
+const COMMAND_TERMINATION_GRACE_MS = 2000
+const RUNTIME_LOG_DIRECTORY = join('.turboflux', 'runtime-logs')
 const TERMINAL_KILL_TIMEOUT_MS = 5000
 const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 const WEB_SEARCH_TIMEOUT_MS = 8000
@@ -58,6 +67,7 @@ export class NodeToolExecutor implements ToolExecutor {
   private sandboxPolicy: SandboxPolicy
   private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
   private activeStreams: Map<number, AbortController> = new Map()
+  private runtimeTaskManager: RuntimeTaskManager
 
   constructor(private workspacePath: string, options: NodeToolExecutorOptions = {}) {
     this.memoryService = new MemoryService()
@@ -65,6 +75,26 @@ export class NodeToolExecutor implements ToolExecutor {
     this.workspaceRoot = resolveNativePath(workspacePath)
     this.workspaceRealRoot = existsSync(this.workspaceRoot) ? realpathSync.native(this.workspaceRoot) : this.workspaceRoot
     this.sandboxPolicy = options.sandboxPolicy || 'workspace'
+    this.runtimeTaskManager = options.runtimeTaskManager || new RuntimeTaskManager({
+      defaultOwnerSessionId: options.ownerSessionId,
+    })
+  }
+
+  getRuntimeTaskManager(): RuntimeTaskManager {
+    return this.runtimeTaskManager
+  }
+
+  private createRuntimeTaskLog(taskId: string): string {
+    const directory = this.ensureWithinWorkspace(join(this.workspaceRoot, RUNTIME_LOG_DIRECTORY))
+    mkdirSync(directory, { recursive: true })
+    const logPath = this.ensureWithinWorkspace(join(directory, `${taskId}.jsonl`))
+    writeFileSync(logPath, '', { encoding: 'utf-8', mode: 0o600 })
+    return logPath
+  }
+
+  private appendRuntimeTaskLog(logPath: string, channel: 'stdout' | 'stderr', data: Buffer | string): void {
+    const record = JSON.stringify({ timestamp: Date.now(), channel, data: data.toString() })
+    appendFileSync(logPath, `${record}\n`, { encoding: 'utf-8', mode: 0o600 })
   }
 
   async readFile(path: string): Promise<Result<string>> {
@@ -552,37 +582,76 @@ export class NodeToolExecutor implements ToolExecutor {
     }
     const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
     const shellArgs = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
-    const proc = spawn(shell, shellArgs, {
+    const runtimeTask = this.runtimeTaskManager.createTask({
+      kind: 'shell',
+      command,
       cwd: safeCwd,
-      env: this.buildChildEnvironment(env),
-      detached: process.platform !== 'win32',
-      windowsHide: true,
+      interactive: false,
     })
-    return this.collectProcess(proc, timeout || 30000)
+    let logPath: string | undefined
+    try {
+      logPath = this.createRuntimeTaskLog(runtimeTask.id)
+      const proc = spawn(shell, shellArgs, {
+        cwd: safeCwd,
+        env: this.buildChildEnvironment(env),
+        detached: process.platform !== 'win32',
+        windowsHide: true,
+      })
+      this.runtimeTaskManager.setControl(runtimeTask.id, {
+        stop: () => this.stopProcessAndWait(proc),
+      })
+      this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
+      return this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.runtimeTaskManager.failTask(runtimeTask.id, message, { logPath, outputBytes: 0 })
+      return { success: false, error: message, data: { stdout: '', stderr: message, exitCode: 1, logPath, outputBytes: 0 } }
+    }
   }
 
   async runProcess(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number): Promise<Result<CommandOutput>> {
+    let runtimeTaskId: string | undefined
+    let logPath: string | undefined
     try {
       const safeCwd = this.ensureAllowedPath(cwd)
+      const runtimeTask = this.runtimeTaskManager.createTask({
+        kind: 'shell',
+        command: [command, ...args].join(' '),
+        cwd: safeCwd,
+        interactive: false,
+        metadata: { executable: command, args: [...args] },
+      })
+      runtimeTaskId = runtimeTask.id
+      logPath = this.createRuntimeTaskLog(runtimeTask.id)
       const proc = spawn(command, args, {
         cwd: safeCwd,
         env: this.buildChildEnvironment(env),
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
-      return await this.collectProcess(proc, timeout || 30000)
+      this.runtimeTaskManager.setControl(runtimeTask.id, {
+        stop: () => this.stopProcessAndWait(proc),
+      })
+      this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
+      return await this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
     } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
+      const message = error instanceof Error ? error.message : String(error)
+      if (runtimeTaskId) this.runtimeTaskManager.failTask(runtimeTaskId, message, { logPath, outputBytes: 0 })
+      return { success: false, error: message, data: { stdout: '', stderr: message, exitCode: 1, logPath, outputBytes: 0 } }
     }
   }
 
-  private collectProcess(proc: ChildProcessWithoutNullStreams, timeout: number): Promise<Result<CommandOutput>> {
+  private collectProcess(proc: ChildProcessWithoutNullStreams, timeout: number, runtimeTaskId?: string, logPath?: string): Promise<Result<CommandOutput>> {
     return new Promise(resolve => {
       let stdout = ''
       let stderr = ''
       let truncated = false
       let timedOut = false
       let settled = false
+      let outputBytes = 0
+      let logError: string | undefined
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+      let terminationGraceTimer: ReturnType<typeof setTimeout> | undefined
 
       const append = (current: string, value: Buffer | string): string => {
         if (current.length >= MAX_COMMAND_OUTPUT_CHARS) {
@@ -597,27 +666,74 @@ export class NodeToolExecutor implements ToolExecutor {
       const finish = (result: Result<CommandOutput>) => {
         if (settled) return
         settled = true
-        clearTimeout(timer)
-        resolve(result)
+        if (timeoutTimer) clearTimeout(timeoutTimer)
+        if (terminationGraceTimer) clearTimeout(terminationGraceTimer)
+        proc.stdout.off('data', onStdout)
+        proc.stderr.off('data', onStderr)
+        proc.off('error', onError)
+        proc.off('close', onClose)
+        const finalizedResult: Result<CommandOutput> = result.data
+          ? { ...result, data: { ...result.data, logPath, outputBytes } }
+          : result
+        if (runtimeTaskId) this.finishProcessRuntimeTask(runtimeTaskId, finalizedResult, logError)
+        resolve(finalizedResult)
       }
-      const timer = setTimeout(() => {
-        timedOut = true
-        this.terminateProcessTree(proc)
-      }, Math.max(1, timeout))
-
-      proc.stdout.on('data', data => { stdout = append(stdout, data) })
-      proc.stderr.on('data', data => { stderr = append(stderr, data) })
-      proc.on('error', error => {
+      const recordOutput = (channel: 'stdout' | 'stderr', data: Buffer | string) => {
+        outputBytes += Buffer.byteLength(data)
+        if (!logPath || logError) return
+        try {
+          this.appendRuntimeTaskLog(logPath, channel, data)
+        } catch (error) {
+          logError = error instanceof Error ? error.message : String(error)
+        }
+      }
+      const onStdout = (data: Buffer | string) => {
+        recordOutput('stdout', data)
+        stdout = append(stdout, data)
+      }
+      const onStderr = (data: Buffer | string) => {
+        recordOutput('stderr', data)
+        stderr = append(stderr, data)
+      }
+      const onError = (error: Error) => {
+        recordOutput('stderr', error.message)
         finish({ success: false, error: error.message, data: { stdout, stderr, exitCode: 1, timedOut, truncated } })
-      })
-      proc.on('close', code => {
+      }
+      const onClose = (code: number | null) => {
         const exitCode = code ?? 1
         const success = exitCode === 0 && !timedOut
         const error = timedOut
           ? `Command timed out after ${timeout}ms`
           : success ? undefined : `Command exited with code ${exitCode}`
         finish({ success, error, data: { stdout, stderr, exitCode, timedOut, truncated } })
-      })
+      }
+
+      proc.stdout.on('data', onStdout)
+      proc.stderr.on('data', onStderr)
+      proc.on('error', onError)
+      proc.on('close', onClose)
+      timeoutTimer = setTimeout(() => {
+        timedOut = true
+        try {
+          this.terminateProcessTree(proc)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          finish({
+            success: false,
+            error: `Command timed out after ${timeout}ms; process termination failed: ${message}`,
+            data: { stdout, stderr, exitCode: 1, timedOut, truncated },
+          })
+          return
+        }
+        if (settled) return
+        terminationGraceTimer = setTimeout(() => {
+          finish({
+            success: false,
+            error: `Command timed out after ${timeout}ms; process did not exit within the ${COMMAND_TERMINATION_GRACE_MS}ms termination grace period`,
+            data: { stdout, stderr, exitCode: 1, timedOut, truncated },
+          })
+        }, COMMAND_TERMINATION_GRACE_MS)
+      }, Math.max(1, timeout))
     })
   }
 
@@ -633,6 +749,53 @@ export class NodeToolExecutor implements ToolExecutor {
     } catch {
       proc.kill('SIGTERM')
     }
+  }
+
+  private stopProcessAndWait(proc: ChildProcessWithoutNullStreams): Promise<void> {
+    if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        proc.off('close', onClose)
+        proc.off('error', onError)
+        if (error) reject(error)
+        else resolve()
+      }
+      const onClose = () => finish()
+      const onError = (error: Error) => finish(error)
+      const timer = setTimeout(() => {
+        finish(new Error(`Process did not exit within ${COMMAND_TERMINATION_GRACE_MS}ms`))
+      }, COMMAND_TERMINATION_GRACE_MS)
+      proc.once('close', onClose)
+      proc.once('error', onError)
+      try {
+        this.terminateProcessTree(proc)
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+  }
+
+  private finishProcessRuntimeTask(taskId: string, result: Result<CommandOutput>, logError?: string): void {
+    const output = result.data
+    const patch = {
+      exitCode: output?.exitCode ?? 1,
+      outputBytes: output?.outputBytes || 0,
+      logPath: output?.logPath,
+      metadata: {
+        timedOut: output?.timedOut === true,
+        truncated: output?.truncated === true,
+        ...(logError ? { logError } : {}),
+      },
+    }
+    if (result.success) {
+      this.runtimeTaskManager.completeTask(taskId, patch)
+      return
+    }
+    this.runtimeTaskManager.failTask(taskId, result.error || `Process exited with code ${patch.exitCode}`, patch)
   }
 
   async validateCommand(command: string, cwd: string): Promise<Result<void>> {
@@ -653,6 +816,8 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   async ptyCreate(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session: TerminalSessionInfo }>> {
+    let runtimeTaskId: string | undefined
+    let proc: ChildProcessWithoutNullStreams | undefined
     try {
       const safeCwd = this.ensureAllowedPath(options?.cwd || this.workspaceRoot)
       const shell = options?.shell || DEFAULT_TERMINAL_SHELL
@@ -661,7 +826,16 @@ export class NodeToolExecutor implements ToolExecutor {
       const shellLabel = options?.shell ? shell : DEFAULT_TERMINAL_SHELL_LABEL
       const now = Date.now()
       const sessionId = `term_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-      const proc = spawn(shell, shellArgs, {
+      const runtimeTask = this.runtimeTaskManager.createTask({
+        kind: 'terminal',
+        command: shell,
+        cwd: safeCwd,
+        interactive: true,
+        metadata: { sessionId, shellId },
+      })
+      runtimeTaskId = runtimeTask.id
+      const logPath = this.createRuntimeTaskLog(runtimeTask.id)
+      proc = spawn(shell, shellArgs, {
         cwd: safeCwd,
         env: this.buildChildEnvironment(options?.env),
         detached: process.platform !== 'win32',
@@ -679,6 +853,8 @@ export class NodeToolExecutor implements ToolExecutor {
         updatedAt: now,
         isAgentSession: true,
         title: shell,
+        runtimeTaskId: runtimeTask.id,
+        logPath,
       }
       const session: BackgroundTerminalSession = {
         info,
@@ -686,12 +862,39 @@ export class NodeToolExecutor implements ToolExecutor {
         chunks: [],
         nextSeq: 1,
         bufferChars: 0,
+        runtimeTaskId: runtimeTask.id,
+        logPath,
+        outputBytes: 0,
       }
       this.backgroundTerminals.set(sessionId, session)
+      this.runtimeTaskManager.setControl(runtimeTask.id, {
+        stop: async () => {
+          const result = await this.ptyKill(sessionId)
+          if (!result.success) throw new Error(result.error || `Failed to stop terminal ${sessionId}`)
+        },
+        write: async data => {
+          const result = await this.ptyWrite(sessionId, data)
+          if (!result.success) throw new Error(result.error || `Failed to write terminal ${sessionId}`)
+        },
+      })
+      this.runtimeTaskManager.markRunning(runtimeTask.id, {
+        pid: proc.pid,
+        logPath,
+        outputBytes: 0,
+        outputOffset: 0,
+      })
 
-      const append = (data: Buffer | string) => {
+      const append = (channel: 'stdout' | 'stderr', data: Buffer | string) => {
         const text = data.toString()
         if (!text) return
+        session.outputBytes += Buffer.byteLength(data)
+        if (!session.logError) {
+          try {
+            this.appendRuntimeTaskLog(session.logPath, channel, data)
+          } catch (error) {
+            session.logError = error instanceof Error ? error.message : String(error)
+          }
+        }
         session.chunks.push({
           seq: session.nextSeq++,
           data: text,
@@ -707,26 +910,53 @@ export class NodeToolExecutor implements ToolExecutor {
           if (removed) session.bufferChars -= removed.data.length
         }
         session.info.updatedAt = Date.now()
+        this.runtimeTaskManager.updateTask(session.runtimeTaskId, {
+          outputBytes: session.outputBytes,
+          metadata: session.logError ? { logError: session.logError } : undefined,
+        })
       }
 
-      proc.stdout.on('data', append)
-      proc.stderr.on('data', append)
+      proc.stdout.on('data', data => append('stdout', data))
+      proc.stderr.on('data', data => append('stderr', data))
       proc.on('error', (err) => {
         session.info.status = 'error'
         session.info.error = err.message
         session.info.updatedAt = Date.now()
-        append(`\n[terminal error] ${err.message}\n`)
+        append('stderr', `\n[terminal error] ${err.message}\n`)
+        this.runtimeTaskManager.failTask(session.runtimeTaskId, err.message, {
+          outputBytes: session.outputBytes,
+          logPath: session.logPath,
+          metadata: session.logError ? { logError: session.logError } : undefined,
+        })
       })
       proc.on('close', (code, signal) => {
         session.info.status = 'exited'
         session.info.exitCode = code
         session.info.exitSignal = signal ?? null
         session.info.updatedAt = Date.now()
+        const patch = {
+          exitCode: code,
+          outputBytes: session.outputBytes,
+          logPath: session.logPath,
+          metadata: {
+            exitSignal: signal ?? null,
+            ...(session.logError ? { logError: session.logError } : {}),
+          },
+        }
+        if (code === 0) this.runtimeTaskManager.completeTask(session.runtimeTaskId, patch)
+        else this.runtimeTaskManager.failTask(
+          session.runtimeTaskId,
+          signal ? `Terminal exited with signal ${signal}` : `Terminal exited with code ${code ?? 1}`,
+          patch,
+        )
       })
 
       return { success: true, data: { sessionId, session: info }, session, sessionId }
     } catch (e) {
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+      const message = e instanceof Error ? e.message : String(e)
+      if (proc) this.terminateProcessTree(proc)
+      if (runtimeTaskId) this.runtimeTaskManager.failTask(runtimeTaskId, message)
+      return { success: false, error: message }
     }
   }
 
@@ -739,7 +969,10 @@ export class NodeToolExecutor implements ToolExecutor {
       session.proc.stdin.write(data)
       session.info.updatedAt = Date.now()
       const firstLine = data.split(/\r?\n/).find(line => line.trim())
-      if (firstLine) session.info.title = firstLine.trim()
+      if (firstLine) {
+        session.info.title = firstLine.trim()
+        this.runtimeTaskManager.updateTask(session.runtimeTaskId, { command: firstLine.trim() })
+      }
       return { success: true }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -785,6 +1018,7 @@ export class NodeToolExecutor implements ToolExecutor {
 
     try {
       if (session.info.status === 'running') {
+        this.runtimeTaskManager.markStopping(session.runtimeTaskId)
         const closed = this.waitForTerminalClose(session, TERMINAL_KILL_TIMEOUT_MS)
         if (!session.proc.stdin.destroyed) {
           session.proc.stdin.end()
@@ -795,13 +1029,25 @@ export class NodeToolExecutor implements ToolExecutor {
         }
         const didClose = await closed
         if (!didClose && session.info.status === 'running') {
+          this.runtimeTaskManager.updateTask(session.runtimeTaskId, {
+            error: `Terminal did not exit within ${TERMINAL_KILL_TIMEOUT_MS}ms`,
+          })
           return { success: false, error: `Terminal ${sessionId} did not exit within ${TERMINAL_KILL_TIMEOUT_MS}ms` }
         }
       }
       session.info.status = 'exited'
       session.info.updatedAt = Date.now()
+      this.runtimeTaskManager.markStopped(session.runtimeTaskId, 'Terminal stopped', {
+        exitCode: session.info.exitCode,
+        outputBytes: session.outputBytes,
+        logPath: session.logPath,
+        metadata: session.logError ? { logError: session.logError } : undefined,
+      })
       return { success: true }
     } catch (e) {
+      this.runtimeTaskManager.updateTask(session.runtimeTaskId, {
+        error: e instanceof Error ? e.message : String(e),
+      })
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
@@ -1580,7 +1826,45 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private formatNetworkError(url: string, error: unknown): string {
-    const message = error instanceof Error ? error.message : String(error)
-    return message
+    const parts: string[] = []
+    const seen = new Set<unknown>()
+    let current: unknown = error
+    for (let depth = 0; current !== undefined && current !== null && depth < 5; depth += 1) {
+      if (seen.has(current)) break
+      seen.add(current)
+      if (current instanceof Error) {
+        const record = current as Error & {
+          code?: unknown
+          errno?: unknown
+          syscall?: unknown
+          address?: unknown
+          port?: unknown
+          cause?: unknown
+        }
+        const metadata = [
+          record.code ? `code=${String(record.code)}` : '',
+          record.errno ? `errno=${String(record.errno)}` : '',
+          record.syscall ? `syscall=${String(record.syscall)}` : '',
+          record.address ? `address=${String(record.address)}` : '',
+          record.port ? `port=${String(record.port)}` : '',
+        ].filter(Boolean)
+        parts.push(`${record.message || record.name}${metadata.length > 0 ? ` (${metadata.join(', ')})` : ''}`)
+        current = record.cause
+        continue
+      }
+      if (typeof current === 'object') {
+        const record = current as Record<string, unknown>
+        const metadata = ['code', 'errno', 'syscall', 'address', 'port']
+          .filter(key => record[key] !== undefined)
+          .map(key => `${key}=${String(record[key])}`)
+        const message = typeof record.message === 'string' ? record.message : String(current)
+        parts.push(`${message}${metadata.length > 0 ? ` (${metadata.join(', ')})` : ''}`)
+        current = record.cause
+        continue
+      }
+      parts.push(String(current))
+      break
+    }
+    return `Network request to ${url} failed: ${parts.filter(Boolean).join(' <- caused by: ') || 'unknown network error'}`
   }
 }

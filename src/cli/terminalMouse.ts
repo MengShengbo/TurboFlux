@@ -34,6 +34,6 @@ export function shouldEnableMouseTracking(
   environment: NodeJS.ProcessEnv = process.env,
 ): boolean {
   if (!interactive || !fixedViewport) return false
-  const disabled = environment.TURBOFLUX_MOUSE?.trim().toLowerCase()
-  return !['0', 'false', 'off', 'no'].includes(disabled || '') && environment.TERM?.trim().toLowerCase() !== 'dumb'
+  const enabled = environment.TURBOFLUX_MOUSE?.trim().toLowerCase()
+  return ['1', 'true', 'on', 'yes'].includes(enabled || '') && environment.TERM?.trim().toLowerCase() !== 'dumb'
 }

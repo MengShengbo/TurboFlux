@@ -153,7 +153,9 @@ export class PermissionPipeline {
       'remember',
       'forget',
       'run_command',
+      'write_terminal',
       'kill_terminal',
+      'cancel_agent',
       'restore_checkpoint',
       'prune_checkpoints',
     ].includes(toolName)

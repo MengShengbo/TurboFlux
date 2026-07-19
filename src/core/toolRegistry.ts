@@ -265,6 +265,19 @@ const tools: EnhancedToolDef[] = [
     requiredMode: ['vibe', 'plan'],
   },
   {
+    name: 'write_terminal',
+    description: 'Write raw stdin to a running background terminal. Include a newline in data when submitting a shell command.',
+    category: 'execute',
+    parameters: [
+      { name: 'session_id', type: 'string', description: 'Terminal session id returned by run_command(run_in_background=true) or list_terminals.', required: true },
+      { name: 'data', type: 'string', description: 'Exact text or control sequence to write to stdin. Include \\n to submit a command.', required: true },
+    ],
+    isReadOnly: false,
+    isDestructive: true,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
     name: 'kill_terminal',
     description: 'Stop a background terminal session. Default: graceful interrupt (Ctrl+C). Use hard=true for immediate kill.',
     category: 'execute',
@@ -465,8 +478,8 @@ When NOT to use spawn_agent:
 - For a known string pattern in a known area, use search_content.
 - For a tiny known lookup where one targeted search is enough, stay with targeted read/search tools.
 
-Launch multiple agents concurrently for independent topics — use parallel tool calls.
-Each invocation is stateless. Provide a highly specific objective.`,
+Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results, list_agents to discover tasks, and cancel_agent to stop one.
+Launch multiple agents concurrently for independent topics and provide a highly specific objective.`,
     category: 'read',
     parameters: [
       { name: 'agent_type', type: 'string', description: 'Which subagent to spawn. Includes built-in types (fast_context, explorer, reviewer) and any custom agents from .turboflux/agents/.', required: true },
@@ -476,6 +489,43 @@ Each invocation is stateless. Provide a highly specific objective.`,
     isReadOnly: true,
     isDestructive: false,
     isConcurrencySafe: true,
+  },
+  {
+    name: 'list_agents',
+    description: 'List current and recovered background subagent tasks with IDs, types, objectives, and statuses.',
+    category: 'read',
+    parameters: [],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+    requiredMode: ['vibe', 'plan'],
+  },
+  {
+    name: 'read_agent',
+    description: 'Read a background subagent status, final result when available, and a page of its persisted transcript.',
+    category: 'read',
+    parameters: [
+      { name: 'agent_id', type: 'string', description: 'Agent ID returned by spawn_agent or list_agents.', required: true },
+      { name: 'offset', type: 'number', description: 'Optional zero-based transcript record offset. Defaults to the latest records.', required: false },
+      { name: 'limit', type: 'number', description: 'Maximum transcript records to return. Default 20, maximum 200.', required: false, default: 20 },
+    ],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+    requiredMode: ['vibe', 'plan'],
+    maxResultSizeChars: 30_000,
+  },
+  {
+    name: 'cancel_agent',
+    description: 'Cancel a running background subagent. Completed and recovered terminal tasks remain readable.',
+    category: 'manage',
+    parameters: [
+      { name: 'agent_id', type: 'string', description: 'Agent ID returned by spawn_agent or list_agents.', required: true },
+    ],
+    isReadOnly: false,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
   },
   {
     name: 'generate_change_summary',

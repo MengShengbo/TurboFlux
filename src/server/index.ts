@@ -6,6 +6,8 @@ import { once } from 'node:events'
 import { ADMIN_HTML } from './adminPage'
 import { getSupportedModelSpec, SUPPORTED_MODEL_SPECS } from '../core/modelRegistry'
 import { writeFileAtomicSync } from '../core/fileIO'
+import { configureNetworkProxy } from '../core/networkProxy'
+import { createTurboFluxRequestHeaders } from '../core/clientIdentity'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 8787
@@ -422,10 +424,10 @@ async function proxyOpenAiCompatibleRequest(req: IncomingMessage, res: ServerRes
   try {
     const upstreamResponse = await fetch(upstreamUrl, {
       method: req.method,
-      headers: {
+      headers: createTurboFluxRequestHeaders({
         'Authorization': `Bearer ${config.upstreamApiKey}`,
         'Content-Type': req.headers['content-type'] ?? 'application/json',
-      },
+      }),
       body: body.length > 0 ? body.toString('utf-8') : undefined,
       signal: controller.signal,
     })
@@ -465,7 +467,7 @@ async function testUpstream(config: ProxyConfig): Promise<{ ok: boolean; message
   try {
     const response = await fetch(`${config.upstreamBaseUrl}/models`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${config.upstreamApiKey}` },
+      headers: createTurboFluxRequestHeaders({ Authorization: `Bearer ${config.upstreamApiKey}` }),
       signal: controller.signal,
     })
     const text = await response.text()
@@ -576,6 +578,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, config: 
 }
 
 export function createTurboFluxServer(initialConfig = loadConfig()): Server {
+  configureNetworkProxy()
   let config = initialConfig
   assertSafeExposure(config)
   addLog('info', 'server', `Config loaded from ${config.configPath}`)

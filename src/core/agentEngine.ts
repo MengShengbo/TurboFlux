@@ -29,6 +29,7 @@ import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import type { FastContextScanEvent, FastContextScanResult } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
+import type { RuntimeTask } from '../shared/runtimeTaskTypes'
 import { runFastContextSubagent } from './fastContextSubagent'
 import { isMcpTool, parseMcpToolName, executeMcpTool, getMcpAgentTools, validateMcpToolArgs } from './mcp/toolBridge'
 import type { McpClient } from './mcp/client'
@@ -36,6 +37,21 @@ import type { SubAgentEvent, SubAgentEvidence } from '../shared/subAgentTypes'
 import type { CodeMapNode, CodeSearchHit, CodeSymbolKind } from '../shared/codeIndexTypes'
 import { resolvePath, toWorkspaceRelative } from './pathUtils'
 import { normalizeBaseUrl } from './normalizeBaseUrl'
+import { createTurboFluxRequestHeaders } from './clientIdentity'
+import {
+  ModelProtocolRequestError,
+  buildModelProtocolUrl,
+  formatProtocolAttempt,
+  formatProtocolFailure,
+  planModelProtocols,
+  protocolLabel,
+  shouldFallbackProtocol,
+  toProtocolAttempt,
+  toResponsesInput,
+  toResponsesTools,
+  type ModelProtocol,
+  type ModelProtocolAttempt,
+} from './modelProtocol'
 import {
   formatCodeMap,
 } from './toolDispatcher'
@@ -46,6 +62,8 @@ import type { TreeNode } from '../shared/types'
 import { parseTextToolCalls, stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import { detectGitRepo, fetchGitInfo, formatGitStatusForPrompt, gitCommitCheckpoint, gitResetToCommit } from './gitService'
 import { hashText } from './fileIO'
+import { RuntimeTaskManager } from './runtime/runtimeTaskManager'
+import { SubAgentTaskManager, type SubAgentTaskSnapshot } from './runtime/subAgentTaskManager'
 
 type TaskSystemCreationEvent = {
   status: 'planning' | 'creating' | 'completed' | 'error'
@@ -87,6 +105,7 @@ export type AgentEventType =
   | { type: 'session:complete'; session: AgentSession }
   | { type: 'error'; error: string }
   | { type: 'notification'; message: string; level: 'info' | 'success' | 'warning' | 'error' }
+  | { type: 'model:protocol'; phase: 'attempt' | 'fallback' | 'success'; protocol: ModelProtocol; url: string; message?: string }
   | { type: 'stream:delta'; text: string }
   | { type: 'stream:thinking_delta'; text: string }
   | { type: 'stream:tool_call_delta'; toolCallId: string; toolName: string; partialJson: string }
@@ -96,6 +115,7 @@ export type AgentEventType =
   | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string; requestId?: string; toolName?: string; path?: string }
   | { type: 'active:task'; context: import('./taskManager').ActiveTaskContext | null }
   | { type: 'terminal:sessions'; sessions: TerminalSessionInfo[] }
+  | { type: 'runtime-task:finished'; task: RuntimeTask }
   | {
     type: 'task:system'
     context: import('./taskManager').ActiveTaskContext | null
@@ -122,23 +142,39 @@ function extractUnsupportedRequestParam(error?: string): string | null {
   const quoted = error.match(/Unsupported parameter:\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
   if (quoted?.[1]) return quoted[1]
   const named = error.match(/(?:unknown|unrecognized|unsupported|invalid)\s+(?:parameter|field|key|argument)\s*[:=]?\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
-  return named?.[1] || null
+  if (named?.[1]) return named[1]
+  if (!/(?:extra inputs?|extra fields?|not permitted|not allowed|unsupported|unrecognized)/i.test(error)) return null
+  const knownOptionalParams = [
+    'cache_control', 'anthropic-beta', 'output_config', 'thinking', 'reasoning_effort',
+    'reasoning', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
+    'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store',
+  ]
+  return knownOptionalParams.find(param => error.toLowerCase().includes(param.toLowerCase())) || null
 }
 
 function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param: string): boolean {
-  const aliases = new Set<string>([param])
-  if (param === 'max_output_tokens' || param === 'max_completion_tokens' || param === 'max_tokens') {
+  const rootParam = param.split('.')[0]
+  const removable = new Set([
+    'temperature', 'max_output_tokens', 'max_completion_tokens', 'max_tokens',
+    'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls',
+    'thinking', 'reasoning', 'reasoning_effort', 'output_config',
+    'prompt_cache_key', 'prompt_cache_retention', 'store',
+  ])
+  if (!removable.has(rootParam)) return false
+  const aliases = new Set<string>([rootParam])
+  if (rootParam === 'max_output_tokens' || rootParam === 'max_completion_tokens' || rootParam === 'max_tokens') {
     aliases.add('max_output_tokens')
     aliases.add('max_completion_tokens')
     aliases.add('max_tokens')
   }
-  if (param === 'tools' || param === 'tool_choice' || param === 'parallel_tool_calls') {
+  if (rootParam === 'tools' || rootParam === 'tool_choice' || rootParam === 'parallel_tool_calls') {
     aliases.add('tools')
     aliases.add('tool_choice')
     aliases.add('parallel_tool_calls')
   }
-  if (param === 'thinking' || param === 'reasoning_effort' || param === 'output_config') {
+  if (rootParam === 'thinking' || rootParam === 'reasoning' || rootParam === 'reasoning_effort' || rootParam === 'output_config') {
     aliases.add('thinking')
+    aliases.add('reasoning')
     aliases.add('reasoning_effort')
     aliases.add('output_config')
   }
@@ -151,6 +187,45 @@ function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param
     }
   }
   return removed
+}
+
+function removeAnthropicCompatibleRequestParam(
+  body: Record<string, unknown>,
+  headers: Record<string, string>,
+  param: string,
+): boolean {
+  const pathParts = param.split('.')
+  const rootParam = pathParts[0]
+  const nestedParam = pathParts[pathParts.length - 1]
+  if (rootParam === 'cache_control' || nestedParam === 'cache_control') {
+    let removed = false
+    const strip = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(strip)
+      if (!value || typeof value !== 'object') return value
+      const output: Record<string, unknown> = {}
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (key === 'cache_control') {
+          removed = true
+          continue
+        }
+        output[key] = strip(child)
+      }
+      return output
+    }
+    for (const key of ['system', 'messages', 'tools']) {
+      if (body[key] !== undefined) body[key] = strip(body[key])
+    }
+    return removed
+  }
+  if (rootParam === 'anthropic-beta' || rootParam === 'anthropic_beta') {
+    if (headers['anthropic-beta'] === undefined) return false
+    delete headers['anthropic-beta']
+    return true
+  }
+  const removable = new Set(['temperature', 'thinking', 'output_config', 'tool_choice'])
+  if (!removable.has(rootParam) || !Object.prototype.hasOwnProperty.call(body, rootParam)) return false
+  delete body[rootParam]
+  return true
 }
 
 function stableHash(value: unknown): string {
@@ -228,6 +303,7 @@ interface FastContextBackgroundStart {
   status: FastContextBackgroundStatus
   objective: string
   promise: Promise<FastContextScanResult | null> | null
+  taskId?: string
 }
 
 export class AgentEngine {
@@ -253,9 +329,11 @@ export class AgentEngine {
   private fastContextRunPromise: Promise<FastContextScanResult | null> | null = null
   private fastContextRunObjective: string | null = null
   private fastContextAbortController: AbortController | null = null
+  private fastContextRuntimeTaskId: string | null = null
   private fastContextGeneration = 0
   private standaloneFastContextRunPromise: Promise<FastContextScanResult | null> | null = null
   private standaloneFastContextAbortController: AbortController | null = null
+  private standaloneFastContextRuntimeTaskId: string | null = null
   // Registry of background PTY sessions the agent has spawned via
   // run_command(run_in_background=true). Tracks the command + start time so
   // list_terminals / read_terminal can label them. Foreground commands use
@@ -330,15 +408,27 @@ export class AgentEngine {
 
   private toolExecutor: ToolExecutor
   private stateProvider: AgentStateProvider
+  private subAgentTaskManager: SubAgentTaskManager
   private mcpClient: McpClient | null = null
 
   setMcpClient(client: McpClient): void {
     this.mcpClient = client
   }
 
-  constructor(private config: AgentConfig, toolExecutor: ToolExecutor, stateProvider: AgentStateProvider) {
+  constructor(
+    private config: AgentConfig,
+    toolExecutor: ToolExecutor,
+    stateProvider: AgentStateProvider,
+    subAgentTaskManager?: SubAgentTaskManager,
+  ) {
     this.toolExecutor = toolExecutor
     this.stateProvider = stateProvider
+    this.subAgentTaskManager = subAgentTaskManager || new SubAgentTaskManager({
+      workspacePath: config.workspacePath || '',
+      runtimeTaskManager: new RuntimeTaskManager({ defaultOwnerSessionId: config.conversationId }),
+      ownerSessionId: config.conversationId,
+      storageDir: false,
+    })
     this.permissions.setApprovalPolicy(config.approvalPolicy || 'agent')
     const now = Date.now()
     this.session = {
@@ -384,6 +474,7 @@ export class AgentEngine {
     this.fastContextAbortController = null
     this.standaloneFastContextAbortController = null
     this.currentStreamId = null
+    this.subAgentTaskManager.destroy()
     this.listeners.clear()
   }
 
@@ -437,6 +528,7 @@ export class AgentEngine {
         status: this.fastContextRunObjective === nextObjective ? 'running' : 'busy',
         objective: this.fastContextRunObjective || nextObjective,
         promise: this.fastContextRunPromise,
+        taskId: this.fastContextRuntimeTaskId || undefined,
       }
     }
 
@@ -450,33 +542,53 @@ export class AgentEngine {
     this.fastContextAbortController = controller
 
     const generation = ++this.fastContextGeneration
-    const promise = this.runFastContextScan(nextObjective, {
-      signal: controller.signal,
-      injectPack: true,
-      maxTurns: tuning?.maxTurns,
-      maxParallel: tuning?.maxParallel,
-      generation,
+    const started = this.subAgentTaskManager.startTask<FastContextScanResult | null>({
+      kind: 'fast_context',
+      agentType: 'fast_context',
+      label: 'FastContext',
+      objective: nextObjective,
+      workspacePath: this.config.workspacePath,
+      ownerSessionId: this.config.conversationId,
+      controller,
+      run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
+        signal,
+        injectPack: true,
+        maxTurns: tuning?.maxTurns,
+        maxParallel: tuning?.maxParallel,
+        generation,
+        agentId: taskId,
+        recordEvent: event => recordEvent(event),
+      }),
+      isSuccess: result => result !== null,
+      getError: () => 'FastContext scan did not complete',
     })
+    const promise = started.promise
     this.fastContextRunPromise = promise
+    this.fastContextRuntimeTaskId = started.task.id
     void promise.finally(() => {
       parentSignal?.removeEventListener('abort', abortFromParent)
       if (this.fastContextRunPromise === promise) {
         this.fastContextRunPromise = null
         this.fastContextRunObjective = null
+        this.fastContextRuntimeTaskId = null
       }
       if (this.fastContextAbortController === controller) {
         this.fastContextAbortController = null
       }
     })
-    return { status: 'started', objective: nextObjective, promise }
+    return { status: 'started', objective: nextObjective, promise, taskId: started.task.id }
   }
 
   private clearFastContextBackground(): void {
     this.fastContextGeneration += 1
+    if (this.fastContextRuntimeTaskId) {
+      void this.subAgentTaskManager.stopTask(this.fastContextRuntimeTaskId, 'FastContext background scan cleared').catch(() => {})
+    }
     this.fastContextAbortController?.abort()
     this.fastContextAbortController = null
     this.fastContextRunPromise = null
     this.fastContextRunObjective = null
+    this.fastContextRuntimeTaskId = null
     this.fastContextObjective = null
     this.fastContextPack = null
   }
@@ -498,15 +610,31 @@ export class AgentEngine {
     if (this.standaloneFastContextRunPromise) return this.standaloneFastContextRunPromise
     const controller = new AbortController()
     this.standaloneFastContextAbortController = controller
-    const promise = this.runFastContextScan(nextObjective, {
-      signal: controller.signal,
-      injectPack: false,
+    const started = this.subAgentTaskManager.startTask<FastContextScanResult | null>({
+      kind: 'fast_context',
+      agentType: 'fast_context',
+      label: 'FastContext',
+      objective: nextObjective,
+      workspacePath: this.config.workspacePath || '',
+      ownerSessionId: this.config.conversationId,
+      controller,
+      run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
+        signal,
+        injectPack: false,
+        agentId: taskId,
+        recordEvent: event => recordEvent(event),
+      }),
+      isSuccess: result => result !== null,
+      getError: () => 'FastContext scan did not complete',
     })
+    const promise = started.promise
+    this.standaloneFastContextRuntimeTaskId = started.task.id
     this.standaloneFastContextRunPromise = promise
     void promise.finally(() => {
       if (this.standaloneFastContextRunPromise === promise) {
         this.standaloneFastContextRunPromise = null
         this.standaloneFastContextAbortController = null
+        this.standaloneFastContextRuntimeTaskId = null
       }
     })
     return promise
@@ -1073,10 +1201,20 @@ export class AgentEngine {
     return () => this.listeners.delete(listener)
   }
 
+  publishRuntimeTaskFinished(task: RuntimeTask): void {
+    this.emit({ type: 'runtime-task:finished', task })
+  }
+
   abort(): void {
     this.abortController?.abort()
     this.fastContextAbortController?.abort()
     this.standaloneFastContextAbortController?.abort()
+    if (this.fastContextRuntimeTaskId) {
+      void this.subAgentTaskManager.stopTask(this.fastContextRuntimeTaskId, 'Parent agent aborted').catch(() => {})
+    }
+    if (this.standaloneFastContextRuntimeTaskId) {
+      void this.subAgentTaskManager.stopTask(this.standaloneFastContextRuntimeTaskId, 'FastContext command aborted').catch(() => {})
+    }
     // Per-conv stream abort: only cancel THIS engine's HTTP stream in the
     // main process, not every active stream across all conversations.
     if (this.currentStreamId !== null) {
@@ -1712,7 +1850,7 @@ ${recentContext}`
       ? `${activeConfig.baseUrl.replace(/\/$/, '')}/messages`
       : `${normalizeBaseUrl(activeConfig.baseUrl)}/chat/completions`
 
-    const headers: Record<string, string> = provider === 'anthropic'
+    const headers: Record<string, string> = createTurboFluxRequestHeaders(provider === 'anthropic'
       ? {
           'Content-Type': 'application/json',
           'x-api-key': activeConfig.apiKey,
@@ -1723,7 +1861,7 @@ ${recentContext}`
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${activeConfig.apiKey}`,
           ...activeConfig.customHeaders,
-        }
+        })
 
     if (activeConfig.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://turboflux.dev'
@@ -1922,6 +2060,8 @@ Before retrying:
     maxTurns?: number
     maxParallel?: number
     generation?: number
+    agentId?: string
+    recordEvent?: (event: FastContextScanEvent) => void
   }): Promise<FastContextScanResult | null> {
     if (!this.config.workspacePath) return null
     if (options.signal?.aborted) return null
@@ -1930,11 +2070,14 @@ Before retrying:
     const emitIfCurrent = (event: AgentEventType) => {
       if (isCurrent()) this.emit(event)
     }
-    const onEvent = (event: FastContextScanEvent) => emitIfCurrent({ type: 'fast_context:event', event })
+    const onEvent = (event: FastContextScanEvent) => {
+      options.recordEvent?.(event)
+      emitIfCurrent({ type: 'fast_context:event', event })
+    }
 
     // FastContext is intentionally a subagent-only path. Ordinary model
     // turns stay steady and targeted; this mode is the explicit fast lane.
-    const agentId = `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+    const agentId = options.agentId || `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     const startedAt = Date.now()
     try {
       // Build (or reuse) a stable workspace skeleton primer. This is
@@ -1951,10 +2094,7 @@ Before retrying:
         objective,
         runKind: 'fast_context',
       })
-      emitIfCurrent({
-        type: 'fast_context:event',
-        event: { type: 'insight', text: `Building FastContext code map with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' },
-      })
+      onEvent({ type: 'insight', text: `Building FastContext code map with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' })
       const result = await runFastContextSubagent({
         workspacePath: this.config.workspacePath,
         objective,
@@ -1991,21 +2131,15 @@ Before retrying:
         emitIfCurrent({ type: 'fast_context:complete', result: failedResult })
         return null
       }
-      emitIfCurrent({
-        type: 'fast_context:event',
-        event: {
-          type: 'phase',
-          phase: 'error',
-          insight: `FastContext code map failed: ${message.slice(0, 120)}`,
-        },
+      onEvent({
+        type: 'phase',
+        phase: 'error',
+        insight: `FastContext code map failed: ${message.slice(0, 120)}`,
       })
-      emitIfCurrent({
-        type: 'fast_context:event',
-        event: {
-          type: 'insight',
-          text: 'FastContext did not run. Use targeted read/search tools or retry after fixing the model connection.',
-          tone: 'warning',
-        },
+      onEvent({
+        type: 'insight',
+        text: 'FastContext did not run. Use targeted read/search tools or retry after fixing the model connection.',
+        tone: 'warning',
       })
       emitIfCurrent({ type: 'fast_context:complete', result: failedResult })
     }
@@ -2066,21 +2200,69 @@ Before retrying:
       shell: this.config.shell,
     })
 
-    const provider = activeConfig.provider === 'anthropic' ? 'anthropic' : 'openai'
-    const messages = this.buildApiMessages(systemPrompt, provider)
-    this.injectAppendIntoMessages(messages, dynamicRuntimeContext || '', provider)
-    this.injectPreservedFilesIntoMessages(messages, provider)
-    this.enforceFinalMessageBudget(messages, provider, activeConfig, activeModel)
-
     const startTime = Date.now()
+    const protocolCandidates = planModelProtocols(activeConfig.provider, activeConfig.defaultModel)
+    const preservedFiles = this.preservedFiles.map(file => ({ ...file }))
+    const messagesByProvider = new Map<'openai' | 'anthropic', Array<Record<string, unknown>>>()
+    const messagesFor = (provider: 'openai' | 'anthropic') => {
+      const cached = messagesByProvider.get(provider)
+      if (cached) return cached
+      const messages = this.buildApiMessages(systemPrompt, provider)
+      this.injectAppendIntoMessages(messages, dynamicRuntimeContext || '', provider)
+      this.injectPreservedFilesIntoMessages(messages, provider, preservedFiles, false)
+      this.enforceFinalMessageBudget(messages, provider, activeConfig, activeModel)
+      messagesByProvider.set(provider, messages)
+      return messages
+    }
+    const attempts: ModelProtocolAttempt[] = []
+    if (preservedFiles.length > 0) this.preservedFiles = []
 
     try {
-      if (provider === 'anthropic') {
-        const effectiveSystemPrompt = messages.find(m => m.role === 'system' && typeof m.content === 'string')?.content as string | undefined
-        return await this.callAnthropicAPI(activeConfig, activeModel, effectiveSystemPrompt || systemPrompt, messages, startTime, turnStrategy)
-      } else {
-        return await this.callOpenAICompatibleAPI(activeConfig, activeModel, messages, startTime, turnStrategy)
+      for (let index = 0; index < protocolCandidates.length; index += 1) {
+        const protocol = protocolCandidates[index]
+        const url = buildModelProtocolUrl(activeConfig.baseUrl, protocol)
+        this.emit({ type: 'model:protocol', phase: 'attempt', protocol, url })
+        try {
+          let turn: AgentTurn
+          if (protocol === 'anthropic_messages') {
+            const messages = messagesFor('anthropic')
+            const effectiveSystemPrompt = messages.find(m => m.role === 'system' && typeof m.content === 'string')?.content as string | undefined
+            turn = await this.callAnthropicAPI(activeConfig, activeModel, effectiveSystemPrompt || systemPrompt, messages, startTime, turnStrategy)
+          } else if (protocol === 'openai_responses') {
+            turn = await this.callOpenAIResponsesAPI(activeConfig, activeModel, messagesFor('openai'), startTime, turnStrategy)
+          } else {
+            turn = await this.callOpenAICompatibleAPI(activeConfig, activeModel, messagesFor('openai'), startTime, turnStrategy)
+          }
+          this.emit({ type: 'model:protocol', phase: 'success', protocol, url })
+          return turn
+        } catch (error) {
+          if ((error as { aborted?: boolean })?.aborted === true || this.abortController?.signal.aborted) {
+            throw error
+          }
+          const protocolError = error instanceof ModelProtocolRequestError
+            ? error
+            : new ModelProtocolRequestError(error instanceof Error ? error.message : String(error), {
+              protocol,
+              url,
+              kind: 'internal',
+            })
+          const attempt = toProtocolAttempt(protocolError)
+          attempts.push(attempt)
+          const nextProtocol = protocolCandidates[index + 1]
+          if (!nextProtocol || !shouldFallbackProtocol(protocolError)) {
+            throw new Error(formatProtocolFailure(attempts))
+          }
+          this.emit({ type: 'stream:end' })
+          this.emit({
+            type: 'model:protocol',
+            phase: 'fallback',
+            protocol: nextProtocol,
+            url: buildModelProtocolUrl(activeConfig.baseUrl, nextProtocol),
+            message: `${formatProtocolAttempt(attempt)}; retrying with ${protocolLabel(nextProtocol)}`,
+          })
+        }
       }
+      throw new Error(formatProtocolFailure(attempts))
     } catch (error) {
       const errAborted = (error as { aborted?: boolean })?.aborted === true
         || this.abortController?.signal.aborted === true
@@ -2112,7 +2294,7 @@ Before retrying:
     startTime: number,
     turnStrategy?: TurnStrategy | null,
   ): Promise<AgentTurn> {
-    const url = `${config.baseUrl.replace(/\/+$/, '')}/messages`
+    const url = buildModelProtocolUrl(config.baseUrl, 'anthropic_messages')
     // Bug 3 fix: token-efficient-tools-2025-02-19 is a Claude 3.7 Sonnet
     // beta. Sonnet 3.5 / Sonnet 4 / Opus 4 / Haiku-3 reject the header on
     // some baseUrl proxies and the request 4xx's. Only opt in for models
@@ -2122,15 +2304,16 @@ Before retrying:
     const supportsTokenEfficientTools = (
       modelId.includes('claude-3-7') || modelId.includes('claude-3.7')
     )
-    const headers: Record<string, string> = {
+    const headers: Record<string, string> = createTurboFluxRequestHeaders({
       'Content-Type': 'application/json',
       'x-api-key': config.apiKey,
       'anthropic-version': '2023-06-01',
+      ...(config.provider === 'anthropic' ? {} : { 'Authorization': `Bearer ${config.apiKey}` }),
       ...(supportsTokenEfficientTools
         ? { 'anthropic-beta': 'token-efficient-tools-2025-02-19' }
         : {}),
       ...config.customHeaders,
-    }
+    })
 
     // Tool visibility is mode/policy based. Turn strategy may influence
     // context hints, but never hides tools from the model.
@@ -2196,7 +2379,7 @@ Before retrying:
       requestBody.tool_choice = { type: 'auto' }
     }
     this.emitPromptModuleSnapshot(systemPrompt, anthropicTools, requestMessages)
-    const body = JSON.stringify(requestBody)
+    let serializedBody = JSON.stringify(requestBody)
 
     // Record prompt state for cache-break detection.
     this.cacheMonitor.recordPromptState({
@@ -2246,8 +2429,10 @@ Before retrying:
     // 5-min timeout. Pre-allocating threads the same id through both.
     const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
     this.currentStreamId = streamId
+    let receivedStreamData = false
 
-    const result = await this.toolExecutor.streamMessage(url, headers, body, (line: string) => {
+    const handleStreamLine = (line: string) => {
+      receivedStreamData = true
       if (!line.startsWith('data:')) return
       const jsonStr = line.slice(5).trim()
       if (jsonStr === '[DONE]') return
@@ -2353,7 +2538,27 @@ Before retrying:
       } catch {
         // Malformed JSON chunk, skip
       }
-    }, { streamId, signal: this.abortController?.signal })
+    }
+    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+      streamId,
+      signal: this.abortController?.signal,
+    })
+    for (let retry = 0; !result.success && retry < 4; retry += 1) {
+      if (this.abortController?.signal.aborted || receivedStreamData) break
+      if (result.status !== 400 && result.status !== 422) break
+      const unsupportedParam = extractUnsupportedRequestParam(result.error)
+      if (!unsupportedParam || !removeAnthropicCompatibleRequestParam(requestBody, headers, unsupportedParam)) break
+      this.emit({
+        type: 'notification',
+        level: 'warning',
+        message: `Messages endpoint rejected "${unsupportedParam}"; retrying without that optional feature.`,
+      })
+      serializedBody = JSON.stringify(requestBody)
+      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+        streamId,
+        signal: this.abortController?.signal,
+      })
+    }
     this.currentStreamId = null
 
     if (!result.success) {
@@ -2364,7 +2569,13 @@ Before retrying:
         err.aborted = true
         throw err
       }
-      throw new Error(result.error || 'Anthropic request failed')
+      throw new ModelProtocolRequestError(result.error || 'Anthropic request failed', {
+        protocol: 'anthropic_messages',
+        url,
+        status: result.status,
+        kind: result.status ? 'http' : 'network',
+        receivedStreamData,
+      })
     }
     if (!sawMessageStop) {
       const parsedTextTools = parseTextToolCalls(textContent)
@@ -2373,7 +2584,12 @@ Before retrying:
         [...toolCallMap.values()].map(block => ({ name: block.name, argumentsJson: block.inputJson })),
       )
       if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
-        throw new Error('Anthropic stream ended before message_stop')
+        throw new ModelProtocolRequestError('Anthropic stream ended before message_stop', {
+          protocol: 'anthropic_messages',
+          url,
+          kind: 'response_shape',
+          receivedStreamData,
+        })
       }
       if (!completeToolPayloads) toolCallMap.clear()
       if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
@@ -2444,29 +2660,7 @@ Before retrying:
     }
   }
 
-  private async callOpenAICompatibleAPI(
-    config: APIConfig,
-    model: APIModel | null,
-    messages: Array<Record<string, unknown>>,
-    startTime: number,
-    turnStrategy?: TurnStrategy | null,
-  ): Promise<AgentTurn> {
-    const url = `${normalizeBaseUrl(config.baseUrl)}/chat/completions`
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-      ...config.customHeaders,
-    }
-
-    if (config.provider === 'openrouter') {
-      headers['HTTP-Referer'] = 'https://turboflux.dev'
-      headers['X-Title'] = 'Turboflux'
-    }
-
-    // Tool visibility is mode/policy based. Turn strategy may influence
-    // context hints, but never hides tools from the model. This keeps the
-    // static system/tool prefix stable and avoids intent misclassification
-    // turning an agentic request into a no-tool chat response.
+  private buildOpenAITools(config: APIConfig): object[] {
     const openaiTools = toolsToOpenAIFormat(this.config.mode, {
       disabledTools: [],
       strict: config.provider === 'openai',
@@ -2490,6 +2684,33 @@ Before retrying:
         })
       }
     }
+    return openaiTools
+  }
+
+  private async callOpenAICompatibleAPI(
+    config: APIConfig,
+    model: APIModel | null,
+    messages: Array<Record<string, unknown>>,
+    startTime: number,
+    turnStrategy?: TurnStrategy | null,
+  ): Promise<AgentTurn> {
+    const url = buildModelProtocolUrl(config.baseUrl, 'openai_chat')
+    const headers: Record<string, string> = createTurboFluxRequestHeaders({
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`,
+      ...config.customHeaders,
+    })
+
+    if (config.provider === 'openrouter') {
+      headers['HTTP-Referer'] = 'https://turboflux.dev'
+      headers['X-Title'] = 'Turboflux'
+    }
+
+    // Tool visibility is mode/policy based. Turn strategy may influence
+    // context hints, but never hides tools from the model. This keeps the
+    // static system/tool prefix stable and avoids intent misclassification
+    // turning an agentic request into a no-tool chat response.
+    const openaiTools = this.buildOpenAITools(config)
 
     const requestMessages = config.provider === 'openrouter'
       ? this.withOpenRouterCacheControl(messages)
@@ -2584,8 +2805,10 @@ Before retrying:
     // through streamMessage so streamAbort hits the right controller.
     const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
     this.currentStreamId = streamId
+    let receivedStreamData = false
 
     const handleStreamLine = (line: string) => {
+      receivedStreamData = true
       if (!line.startsWith('data:')) return
       const jsonStr = line.slice(5).trim()
       if (jsonStr === '[DONE]') {
@@ -2701,7 +2924,13 @@ Before retrying:
         err.aborted = true
         throw err
       }
-      throw new Error(result.error || 'Model request failed')
+      throw new ModelProtocolRequestError(result.error || 'Model request failed', {
+        protocol: 'openai_chat',
+        url,
+        status: result.status,
+        kind: result.status ? 'http' : 'network',
+        receivedStreamData,
+      })
     }
     if (!sawTerminalEvent) {
       const parsedTextTools = parseTextToolCalls(textContent)
@@ -2710,7 +2939,12 @@ Before retrying:
         [...toolCallMap.values()].map(entry => ({ name: entry.name, argumentsJson: entry.argumentsJson })),
       )
       if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
-        throw new Error('Model stream ended before a terminal event')
+        throw new ModelProtocolRequestError('Model stream ended before a terminal event', {
+          protocol: 'openai_chat',
+          url,
+          kind: 'response_shape',
+          receivedStreamData,
+        })
       }
       if (!completeToolPayloads) toolCallMap.clear()
       if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
@@ -2780,6 +3014,326 @@ Before retrying:
       // OpenAI-compatible providers (e.g. mimo, DeepSeek-R1) require the
       // reasoning_content from the previous assistant message to be echoed
       // back verbatim, otherwise they return a 400 "Param Incorrect" error.
+      rawReasoningPayload: reasoningContent
+        ? { provider: 'openai-compatible', blocks: [], reasoningContent }
+        : undefined,
+    })
+  }
+
+  private async callOpenAIResponsesAPI(
+    config: APIConfig,
+    model: APIModel | null,
+    messages: Array<Record<string, unknown>>,
+    startTime: number,
+    turnStrategy?: TurnStrategy | null,
+  ): Promise<AgentTurn> {
+    const protocol: ModelProtocol = 'openai_responses'
+    const url = buildModelProtocolUrl(config.baseUrl, protocol)
+    const headers: Record<string, string> = createTurboFluxRequestHeaders({
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`,
+      ...config.customHeaders,
+    })
+    if (config.provider === 'openrouter') {
+      headers['HTTP-Referer'] = 'https://turboflux.dev'
+      headers['X-Title'] = 'Turboflux'
+    }
+
+    const chatTools = this.buildOpenAITools(config)
+    const responseTools = toResponsesTools(chatTools)
+    const instructions = messages
+      .filter(message => message.role === 'system' || message.role === 'developer')
+      .map(message => typeof message.content === 'string' ? message.content : '')
+      .filter(Boolean)
+      .join('\n\n')
+    const input = toResponsesInput(messages)
+    const maxTokens = this.config.maxTokens || config.maxTokens || 0
+    const body: Record<string, unknown> = {
+      model: config.defaultModel,
+      instructions,
+      input,
+      stream: true,
+      store: false,
+    }
+    if (!shouldOmitSamplingTemperature(config)) {
+      body.temperature = this.config.temperature ?? config.temperature ?? 0.7
+    }
+    if (maxTokens > 0) body.max_output_tokens = maxTokens
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
+    const reasoningEffort = reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort
+    if (reasoningEffort) body.reasoning = { effort: reasoningEffort }
+    if (reasoningRequest?.omitTemperature) delete body.temperature
+    if (responseTools.length > 0) {
+      body.tools = responseTools
+      body.tool_choice = 'auto'
+      body.parallel_tool_calls = true
+    }
+    if (config.provider === 'openai') {
+      body.prompt_cache_key = this.buildPromptCacheKey(config.defaultModel, responseTools)
+      if (/gpt-5\.5/i.test(config.defaultModel)) body.prompt_cache_retention = '24h'
+    }
+
+    this.emitPromptModuleSnapshot(instructions, responseTools, input)
+    this.cacheMonitor.recordPromptState({
+      systemPrompt: instructions,
+      toolCount: responseTools.length,
+      toolNames: responseTools.map(tool => typeof tool.name === 'string' ? tool.name : 'unknown'),
+      toolSchemas: responseTools,
+      model: config.defaultModel,
+      provider: config.provider,
+      strategy: turnStrategy?.intent,
+      cacheControl: 'responses-auto-prefix',
+      extraBodyParams: {
+        protocol,
+        max_output_tokens: body.max_output_tokens ?? null,
+        temperature: body.temperature ?? null,
+        reasoning: body.reasoning ?? null,
+        tool_choice: body.tool_choice ?? null,
+        parallel_tool_calls: body.parallel_tool_calls ?? null,
+        prompt_cache_key: body.prompt_cache_key ?? null,
+        prompt_cache_retention: body.prompt_cache_retention ?? null,
+      },
+    })
+
+    this.emit({ type: 'stream:start' })
+    let textContent = ''
+    let reasoningContent = ''
+    let inputTokens = 0
+    let outputTokens = 0
+    let cacheReadTokens = 0
+    let sawTerminalEvent = false
+    let receivedStreamData = false
+    let streamFailure = ''
+    const toolCallMap = new Map<string, { id: string; name: string; argumentsJson: string }>()
+    const toolCallAliases = new Map<string, string>()
+    const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
+    this.currentStreamId = streamId
+
+    const ensureToolCall = (item: Record<string, any>, outputIndex?: number) => {
+      const id = typeof item.call_id === 'string' && item.call_id
+        ? item.call_id
+        : typeof item.id === 'string' && item.id
+          ? item.id
+          : `call_${outputIndex ?? toolCallMap.size}`
+      let entry = toolCallMap.get(id)
+      if (!entry) {
+        entry = {
+          id,
+          name: typeof item.name === 'string' ? item.name : '',
+          argumentsJson: typeof item.arguments === 'string' ? item.arguments : '',
+        }
+        toolCallMap.set(id, entry)
+      } else {
+        if (typeof item.name === 'string' && item.name) entry.name = item.name
+        if (typeof item.arguments === 'string' && item.arguments) entry.argumentsJson = item.arguments
+      }
+      if (typeof item.id === 'string') toolCallAliases.set(item.id, id)
+      if (typeof item.call_id === 'string') toolCallAliases.set(item.call_id, id)
+      if (typeof outputIndex === 'number') toolCallAliases.set(`idx-${outputIndex}`, id)
+      return entry
+    }
+
+    const updateUsage = (usage: Record<string, any> | undefined) => {
+      if (!usage) return
+      inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : inputTokens
+      outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : outputTokens
+      const cached = usage.input_tokens_details?.cached_tokens
+      if (typeof cached === 'number') cacheReadTokens = cached
+      this.emit({
+        type: 'stream:usage',
+        usage: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' },
+      })
+    }
+
+    const harvestCompletedOutput = (response: Record<string, any> | undefined) => {
+      updateUsage(response?.usage)
+      if (!Array.isArray(response?.output)) return
+      for (const item of response.output) {
+        if (!item || typeof item !== 'object') continue
+        if (item.type === 'function_call') {
+          ensureToolCall(item)
+          continue
+        }
+        if (item.type !== 'message' || textContent) continue
+        const completedText = Array.isArray(item.content)
+          ? item.content.filter((part: any) => part?.type === 'output_text' && typeof part.text === 'string').map((part: any) => part.text).join('')
+          : ''
+        if (completedText) {
+          textContent += completedText
+          this.emit({ type: 'stream:delta', text: completedText })
+        }
+      }
+    }
+
+    const handleStreamLine = (line: string) => {
+      receivedStreamData = true
+      if (!line.startsWith('data:')) return
+      const jsonText = line.slice(5).trim()
+      if (!jsonText || jsonText === '[DONE]') return
+      try {
+        const event = JSON.parse(jsonText) as Record<string, any>
+        const eventType = event.type
+        if (eventType === 'response.output_text.delta' || eventType === 'response.refusal.delta') {
+          if (typeof event.delta === 'string' && event.delta) {
+            textContent += event.delta
+            this.emit({ type: 'stream:delta', text: event.delta })
+          }
+        } else if (eventType === 'response.reasoning_summary_text.delta' || eventType === 'response.reasoning_text.delta') {
+          if (typeof event.delta === 'string' && event.delta) {
+            reasoningContent += event.delta
+            this.emit({ type: 'stream:thinking_delta', text: event.delta })
+          }
+        } else if (eventType === 'response.output_item.added' || eventType === 'response.output_item.done') {
+          if (event.item?.type === 'function_call') ensureToolCall(event.item, event.output_index)
+        } else if (eventType === 'response.function_call_arguments.delta' || eventType === 'response.function_call_arguments.done') {
+          const alias = typeof event.item_id === 'string'
+            ? event.item_id
+            : typeof event.call_id === 'string'
+              ? event.call_id
+              : `idx-${event.output_index ?? 0}`
+          const canonicalId = toolCallAliases.get(alias) || alias
+          let entry = toolCallMap.get(canonicalId)
+          if (!entry) {
+            entry = ensureToolCall({ call_id: canonicalId, name: event.name || '' }, event.output_index)
+          }
+          if (eventType.endsWith('.done') && typeof event.arguments === 'string') {
+            entry.argumentsJson = event.arguments
+          } else if (typeof event.delta === 'string') {
+            entry.argumentsJson += event.delta
+          }
+          this.emit({
+            type: 'stream:tool_call_delta',
+            toolCallId: entry.id,
+            toolName: entry.name,
+            partialJson: entry.argumentsJson,
+          })
+        } else if (eventType === 'response.completed') {
+          sawTerminalEvent = true
+          harvestCompletedOutput(event.response)
+        } else if (eventType === 'response.incomplete' || eventType === 'response.failed') {
+          sawTerminalEvent = true
+          harvestCompletedOutput(event.response)
+          streamFailure = event.response?.error?.message
+            || event.response?.incomplete_details?.reason
+            || `${eventType}: provider did not complete the response`
+        } else if (eventType === 'error') {
+          sawTerminalEvent = true
+          streamFailure = event.error?.message || event.message || 'Responses stream returned an error event'
+        }
+      } catch {
+        // Ignore malformed SSE data while preserving the no-cross-protocol-after-bytes invariant.
+      }
+    }
+
+    let serializedBody = JSON.stringify(body)
+    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+      streamId,
+      signal: this.abortController?.signal,
+    })
+    for (let retry = 0; !result.success && retry < 4; retry += 1) {
+      if (this.abortController?.signal.aborted || result.status !== 400 || receivedStreamData) break
+      const unsupportedParam = extractUnsupportedRequestParam(result.error)
+      if (!unsupportedParam || !removeOpenAICompatibleRequestParam(body, unsupportedParam)) break
+      this.emit({
+        type: 'notification',
+        level: 'warning',
+        message: `Responses endpoint rejected "${unsupportedParam}"; retrying without that request parameter.`,
+      })
+      serializedBody = JSON.stringify(body)
+      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+        streamId,
+        signal: this.abortController?.signal,
+      })
+    }
+    this.currentStreamId = null
+
+    if (!result.success) {
+      if (this.abortController?.signal.aborted) {
+        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
+        const aborted = new Error('aborted') as Error & { aborted?: boolean }
+        aborted.aborted = true
+        throw aborted
+      }
+      throw new ModelProtocolRequestError(result.error || 'Responses request failed', {
+        protocol,
+        url,
+        status: result.status,
+        kind: result.status ? 'http' : 'network',
+        receivedStreamData,
+      })
+    }
+    if (streamFailure) {
+      throw new ModelProtocolRequestError(streamFailure, {
+        protocol,
+        url,
+        kind: 'stream',
+        receivedStreamData,
+      })
+    }
+    if (!sawTerminalEvent) {
+      const parsedTextTools = parseTextToolCalls(textContent)
+      const hasVisibleText = Boolean(stripTextToolCallMarkup(textContent, { stripIncomplete: true }))
+      const completeToolPayloads = hasCompleteToolPayloads([...toolCallMap.values()].map(entry => ({
+        name: entry.name,
+        argumentsJson: entry.argumentsJson,
+      })))
+      if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
+        throw new ModelProtocolRequestError('Responses stream ended before a terminal event', {
+          protocol,
+          url,
+          kind: 'response_shape',
+          receivedStreamData,
+        })
+      }
+      if (!completeToolPayloads) toolCallMap.clear()
+      if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
+        textContent = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+      }
+    }
+
+    const toolCalls: ToolCall[] = []
+    for (const entry of toolCallMap.values()) {
+      let parsedArguments: Record<string, unknown> = {}
+      try {
+        parsedArguments = JSON.parse(entry.argumentsJson || '{}')
+      } catch {
+        parsedArguments = {}
+      }
+      toolCalls.push({ id: entry.id, name: entry.name, arguments: parsedArguments })
+    }
+    const textToolCalls = parseTextToolCalls(textContent)
+    if (textToolCalls.containsToolMarkup) {
+      textContent = textToolCalls.cleanedText
+      if (toolCalls.length === 0 && textToolCalls.toolCalls.length > 0) toolCalls.push(...textToolCalls.toolCalls)
+    }
+
+    const tokens = { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' as const }
+    this.session.totalTokens.input += tokens.input
+    this.session.totalTokens.output += tokens.output
+    this.contextManager.updateTokenCounting(tokens.input, tokens.output)
+    if (inputTokens > 0 || outputTokens > 0) {
+      this.stateProvider.recordTokenUsage({
+        provider: config.provider,
+        model: config.defaultModel,
+        inputTokens: Math.max(0, inputTokens - cacheReadTokens),
+        outputTokens,
+        cached: cacheReadTokens,
+        totalInputTokens: inputTokens,
+      })
+    }
+    const cacheDiagnosis = this.cacheMonitor.checkCacheBreak(cacheReadTokens, 0)
+    if (cacheDiagnosis.broken) this.emit({ type: 'cache:diagnostic', result: cacheDiagnosis })
+    this.emit({ type: 'stream:end' })
+
+    return this.createAssistantTurn(textContent, toolCalls, {
+      model: model?.name,
+      tokens,
+      duration: Date.now() - startTime,
+      mode: this.config.mode,
+      reasoningEnabled: reasoningRequest?.enabled,
+      reasoningEffort,
+      thinking: { content: reasoningContent, source: 'provider' },
       rawReasoningPayload: reasoningContent
         ? { provider: 'openai-compatible', blocks: [], reasoningContent }
         : undefined,
@@ -2899,8 +3453,10 @@ Before retrying:
   private injectPreservedFilesIntoMessages(
     messages: Array<Record<string, unknown>>,
     provider: 'openai' | 'anthropic',
+    sourceFiles: Array<{ path: string; content: string }> = this.preservedFiles,
+    consume = true,
   ): void {
-    if (this.preservedFiles.length === 0) return
+    if (sourceFiles.length === 0) return
 
     // Dedup: skip files already present in recent session turns.
     const recentReadPaths = new Set<string>()
@@ -2914,9 +3470,9 @@ Before retrying:
       }
     }
 
-    const filesToInject = this.preservedFiles.filter(f => !recentReadPaths.has(f.path))
+    const filesToInject = sourceFiles.filter(f => !recentReadPaths.has(f.path))
     if (filesToInject.length === 0) {
-      this.preservedFiles = []
+      if (consume) this.preservedFiles = []
       return
     }
 
@@ -2930,7 +3486,7 @@ Before retrying:
     parts.push('</recent_files>')
     const block = parts.join('\n\n')
     this.appendTextAtConversationTail(messages, block, provider)
-    this.preservedFiles = []
+    if (consume) this.preservedFiles = []
   }
 
   private buildApiMessages(systemPrompt: string, provider: 'openai' | 'anthropic'): Array<Record<string, unknown>> {
@@ -4051,6 +4607,107 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     return JSON.stringify(toolCall.arguments).slice(0, 200)
   }
 
+  private emitSubAgentProgress(agentType: string, label: string, event: SubAgentEvent): void {
+    if (event.type === 'turn_start') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'phase', phase: 'scanning', wave: event.turn, maxWaves: event.maxTurns, insight: `${label} turn ${event.turn}` },
+      })
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'worker', id: `spawn-${agentType}-${event.turn}`, label: `${label} turn ${event.turn}`, status: 'running' },
+      })
+    } else if (event.type === 'model_wait') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: `${label} model pending (${Math.floor(event.elapsedMs / 1000)}s)`, tone: 'info' },
+      })
+    } else if (event.type === 'model_retry') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: `${label} retrying model request: ${event.reason}`, tone: 'warning' },
+      })
+    } else if (event.type === 'tool_call') {
+      const argSummary = (() => { try { return JSON.stringify(event.args).slice(0, 120) } catch { return '' } })()
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'file', path: `${event.tool}(${argSummary})`, status: 'discovered', workerId: `spawn-${agentType}-${event.turn}`, reason: event.tool },
+      })
+    } else if (event.type === 'tool_result') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: event.summary, tone: event.ok ? 'info' : 'warning' },
+      })
+    } else if (event.type === 'evidence') {
+      this.emit({
+        type: 'fast_context:event',
+        event: {
+          type: 'hit',
+          hit: {
+            path: event.evidence.path,
+            line: event.evidence.startLine,
+            startLine: event.evidence.startLine,
+            endLine: event.evidence.endLine,
+            preview: event.evidence.preview,
+            reason: event.evidence.reason,
+          },
+        },
+      })
+    } else if (event.type === 'turn_complete') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'worker', id: `spawn-${agentType}-${event.turn}`, label: `${label} turn ${event.turn}`, status: 'completed' },
+      })
+    } else if (event.type === 'error') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: `${label} error: ${event.message}`, tone: 'warning' },
+      })
+    }
+  }
+
+  private formatSubAgentTask(task: SubAgentTaskSnapshot): string {
+    const runtime = task.runtimeTask
+    const lines = [
+      `Agent ID: ${task.id}`,
+      `Type: ${task.agentType}`,
+      `Status: ${runtime.status}`,
+      `Objective: ${task.objective}`,
+      `Started: ${new Date(task.startedAt).toISOString()}`,
+    ]
+    if (runtime.endedAt) lines.push(`Ended: ${new Date(runtime.endedAt).toISOString()}`)
+    if (runtime.error) lines.push(`Error: ${runtime.error}`)
+    if (task.transcriptPath) lines.push(`Transcript: ${task.transcriptPath}`)
+
+    if (task.result && task.kind === 'fast_context') {
+      const result = task.result as Partial<FastContextScanResult>
+      lines.push('', result.evidencePack?.trim() || `FastContext scanned ${result.filesScanned || 0} file(s).`)
+    } else if (task.result) {
+      const result = task.result as {
+        ok?: boolean
+        turns?: number
+        elapsedMs?: number
+        finalText?: string
+        evidence?: SubAgentEvidence[]
+        error?: string
+      }
+      lines.push('', `<subagent_report type="${task.agentType}" turns="${result.turns || 0}" elapsed_ms="${result.elapsedMs || 0}">`)
+      lines.push('', 'final_report:', result.finalText || result.error || '(empty)', '')
+      const evidence = result.evidence || []
+      if (evidence.length > 0) {
+        lines.push('evidence (top 12):')
+        for (const item of evidence.slice(0, 12)) {
+          const preview = item.preview.split('\n').slice(0, 3).map(line => `    ${line.replace(/\s+/g, ' ').trim().slice(0, 200)}`).join('\n')
+          lines.push(`  - ${item.path}:L${item.startLine}-${item.endLine} · ${item.reason}`)
+          if (preview) lines.push(preview)
+        }
+        if (evidence.length > 12) lines.push(`  (... ${evidence.length - 12} more evidence range(s))`)
+      }
+      lines.push('', '</subagent_report>')
+    }
+    return lines.join('\n')
+  }
+
   private async dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
     const workspace = this.stateProvider.getWorkspace()
     const basePath = workspace?.path || ''
@@ -4326,12 +4983,12 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const background = this.startFastContextBackground(scanObjective, { maxTurns, maxParallel })
         if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
         if (background.status === 'busy') {
-          return `FastContext background scan is already working on: ${background.objective}\nContinue now with targeted search/read tools; do not wait or call explore_code again.`
+          return `FastContext background scan is already working on: ${background.objective}\nAgent ID: ${background.taskId || 'unavailable'}\nContinue now with targeted search/read tools; do not wait or call explore_code again.`
         }
         if (background.status === 'running') {
-          return 'FastContext background scan is already running for this objective. Continue now with targeted search/read tools; evidence will be injected automatically when ready.'
+          return `FastContext background scan is already running for this objective. Agent ID: ${background.taskId || 'unavailable'}. Continue now with targeted search/read tools; evidence will be injected automatically when ready.`
         }
-        return 'FastContext background scan started. Continue now with targeted search_content/search_symbols/get_codemap and read_file calls; do not wait. Ranked evidence will be injected automatically on a later model turn.'
+        return `FastContext background scan started. Agent ID: ${background.taskId}. Continue now with targeted search_content/search_symbols/get_codemap and read_file calls; do not wait. Ranked evidence will be injected automatically on a later model turn.`
       }
 
       case 'list_memories': {
@@ -4415,6 +5072,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           if (!sessionId) {
             return `Error: failed to spawn agent terminal${ptyResult?.error ? ` — ${ptyResult.error}` : ''}`
           }
+          const terminalLogPath = ptyResult.data?.session?.logPath
           const writeResult = await this.toolExecutor.ptyWrite?.(sessionId, `${command}\n`)
           if (!writeResult?.success) {
             await this.toolExecutor.ptyKill?.(sessionId)
@@ -4423,15 +5081,28 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           }
           this.agentBackgroundSessions.set(sessionId, { command, startedAt: Date.now() })
           await this.emitTerminalSessions()
-          return `Background command started in agent terminal ${sessionId}\nCommand: ${command}\nUse read_terminal(session_id="${sessionId}") to view output, kill_terminal to stop.`
+          return `Background command started in agent terminal ${sessionId}\nCommand: ${command}${terminalLogPath ? `\nLog: ${terminalLogPath}` : ''}\nUse read_terminal(session_id="${sessionId}") to view output, write_terminal to send stdin, or kill_terminal to stop.`
         }
 
         // Foreground: exec-based path for one-shot commands
         const foregroundCommand = args.command as string
         try {
           const result = await this.toolExecutor.runCommand(foregroundCommand, cwd, env, timeout, approved)
-          if (!result.success) return `Error (code ${result.data?.exitCode}):\n${result.data?.stderr || 'Unknown error'}`
-          return `Command executed successfully:\n${result.data?.stdout || 'No output'}`
+          const commandOutput = result.data
+          const outputSections: string[] = []
+          if (commandOutput?.stdout) outputSections.push(`stdout:\n${commandOutput.stdout}`)
+          if (commandOutput?.stderr) outputSections.push(`stderr:\n${commandOutput.stderr}`)
+          if (commandOutput?.truncated) outputSections.push('[command output truncated]')
+          if (commandOutput?.logPath) outputSections.push(`log: ${commandOutput.logPath}`)
+          const formattedOutput = outputSections.join('\n\n') || 'No output'
+          const statusDetails = [
+            `code ${commandOutput?.exitCode ?? 'unknown'}`,
+            commandOutput?.timedOut ? 'timed out' : '',
+          ].filter(Boolean).join(', ')
+          if (!result.success) {
+            return `Error (${statusDetails})${result.error ? `: ${result.error}` : ''}\n${formattedOutput}`
+          }
+          return `Command executed successfully (${statusDetails}):\n${formattedOutput}`
         } catch (e) {
           return `Error executing command: ${e instanceof Error ? e.message : String(e)}`
         }
@@ -4445,7 +5116,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.ptyGetBuffer?.(sessionId)
         if (!result?.success) return `Error: ${result?.error || 'failed to read terminal buffer'}`
         await this.emitTerminalSessions()
-        const session = result.session as { status: string; exitCode?: number; cwd: string } | undefined
+        const session = result.session as { status: string; exitCode?: number; cwd: string; logPath?: string } | undefined
         const allChunks = (result.chunks || []) as Array<{ seq: number; data: string }>
         // Filter by since_seq so polling loops only see new output. Each
         // chunk carries a monotonic seq from terminalManager.
@@ -4464,12 +5135,23 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? ` • since_seq=${sinceSeq} • new_chunks=${chunks.length}`
           : ''
         const statusLine = session
-          ? `[session ${sessionId} • status=${session.status}${typeof session.exitCode === 'number' ? ` • exit=${session.exitCode}` : ''} • cwd=${session.cwd} • last_seq=${lastSeq}${sinceNotice}]`
+          ? `[session ${sessionId} • status=${session.status}${typeof session.exitCode === 'number' ? ` • exit=${session.exitCode}` : ''} • cwd=${session.cwd}${session.logPath ? ` • log=${session.logPath}` : ''} • last_seq=${lastSeq}${sinceNotice}]`
           : `[session ${sessionId} • last_seq=${lastSeq}${sinceNotice}]`
         const body = chunks.length === 0 && sinceSeq > 0
           ? '[no new output since last read]'
           : `${truncatedNotice}${tailed.join('\n')}`
         return `${statusLine}\n${body}`
+      }
+
+      case 'write_terminal': {
+        const sessionId = args.session_id as string
+        const data = args.data as string
+        if (!sessionId) return `Error: session_id is required`
+        if (typeof data !== 'string' || data.length === 0) return `Error: data is required`
+        const result = await this.toolExecutor.ptyWrite?.(sessionId, data)
+        if (!result?.success) return `Error: ${result?.error || 'failed to write terminal stdin'}`
+        await this.emitTerminalSessions()
+        return `Wrote ${Buffer.byteLength(data)} byte(s) to terminal ${sessionId}.`
       }
 
       case 'kill_terminal': {
@@ -4507,15 +5189,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       case 'list_terminals': {
         const result = await this.toolExecutor.ptyList?.()
         if (!result?.success) return `Error: ${result?.error || 'failed to list terminals'}`
-        const rawSessions = (result.sessions || []) as Array<{ isAgentSession?: boolean; id: string; status: string; exitCode?: number; cwd: string }>
+        const rawSessions = (result.sessions || []) as Array<{ isAgentSession?: boolean; id: string; status: string; exitCode?: number; cwd: string; logPath?: string }>
         const sessions = rawSessions.filter(s => s.isAgentSession || this.agentBackgroundSessions.has(s.id))
         await this.emitTerminalSessions()
         if (sessions.length === 0) return 'No agent terminal sessions active.'
-        const lines = sessions.map((s: { id: string; status: string; exitCode?: number; cwd: string }) => {
+        const lines = sessions.map((s: { id: string; status: string; exitCode?: number; cwd: string; logPath?: string }) => {
           const meta = this.agentBackgroundSessions.get(s.id)
           const cmd = meta ? ` • last: ${meta.command}` : ''
           const exit = typeof s.exitCode === 'number' ? ` • exit=${s.exitCode}` : ''
-          return `- ${s.id} • ${s.status}${exit} • cwd=${s.cwd}${cmd}`
+          const log = s.logPath ? ` • log=${s.logPath}` : ''
+          return `- ${s.id} • ${s.status}${exit} • cwd=${s.cwd}${log}${cmd}`
         })
         return `${sessions.length} agent terminal session(s):\n${lines.join('\n')}`
       }
@@ -4836,6 +5519,52 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         return output
       }
 
+      case 'list_agents': {
+        const tasks = this.subAgentTaskManager.listTasks()
+        if (tasks.length === 0) return 'No subagent tasks found.'
+        return tasks.map(task => {
+          const elapsedMs = (task.runtimeTask.endedAt || Date.now()) - task.startedAt
+          return `[${task.runtimeTask.status}] ${task.id} · ${task.agentType} · ${elapsedMs}ms\n  ${task.objective}`
+        }).join('\n')
+      }
+
+      case 'read_agent': {
+        const agentId = String(args.agent_id || '').trim()
+        if (!agentId) return 'Error: agent_id is required'
+        const task = this.subAgentTaskManager.getTask(agentId)
+        if (!task) return `Error: unknown agent_id "${agentId}".`
+        const transcript = this.subAgentTaskManager.readTranscript(agentId, {
+          offset: typeof args.offset === 'number' ? args.offset : undefined,
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
+        })
+        const lines = [this.formatSubAgentTask(task)]
+        if (transcript.records.length > 0) {
+          lines.push('', `Transcript records ${transcript.offset}-${transcript.nextOffset - 1} of ${transcript.total}:`)
+          transcript.records.forEach((record, index) => {
+            let detail: string
+            if (record.type === 'start') detail = `${record.task.agentType} started`
+            else if (record.type === 'event') {
+              try { detail = JSON.stringify(record.event).slice(0, 1200) } catch { detail = '[unserializable event]' }
+            } else if (record.type === 'result') detail = `result ${record.status}${record.error ? `: ${record.error}` : ''}`
+            else detail = `${record.status}${record.error ? `: ${record.error}` : ''}`
+            lines.push(`${transcript.offset + index}: ${record.type} · ${detail}`)
+          })
+          if (transcript.nextOffset < transcript.total) lines.push(`Next offset: ${transcript.nextOffset}`)
+        }
+        return lines.join('\n')
+      }
+
+      case 'cancel_agent': {
+        const agentId = String(args.agent_id || '').trim()
+        if (!agentId) return 'Error: agent_id is required'
+        try {
+          const task = await this.subAgentTaskManager.stopTask(agentId)
+          return `Subagent ${agentId} is ${task.status}.`
+        } catch (error) {
+          return `Error: ${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+
       case 'spawn_agent': {
         const agentType = String(args.agent_type || '').trim()
         const objective = String(args.objective || '').trim()
@@ -4848,138 +5577,80 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           if (!this.config.workspacePath) return 'Error: no workspace path set'
           const objective = (args.objective as string | undefined) || 'Locate relevant files for the current task'
           const background = this.startFastContextBackground(objective)
+          if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
           if (background.status === 'busy') {
-            return `FastContext is already running on: ${background.objective}. Continue with normal targeted read/search tools.`
+            return `FastContext is already running on: ${background.objective}. Agent ID: ${background.taskId || 'unavailable'}. Continue with normal targeted read/search tools.`
           }
           if (background.status === 'running') {
-            return 'FastContext is already running for this objective. Continue with normal targeted read/search tools.'
+            return `FastContext is already running for this objective. Agent ID: ${background.taskId || 'unavailable'}. Continue with normal targeted read/search tools.`
           }
-          return 'FastContext subagent started in the background. Continue with normal targeted read/search tools; its ranked evidence will be injected automatically when ready.'
+          return `FastContext subagent started in the background. Agent ID: ${background.taskId}. Continue with normal targeted read/search tools; use read_agent for persisted progress/results.`
         }
         if (!this.config.workspacePath) {
           return 'Error: no workspace open; cannot spawn subagent.'
         }
         const startedAt = Date.now()
-        const agentId = `sa-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+        const enrichedObjective = extraContext ? `${objective}\n\nAdditional context from parent agent:\n${extraContext}` : objective
+        const started = this.subAgentTaskManager.startTask<Awaited<ReturnType<typeof runSubAgent>>>({
+          kind: 'agent',
+          agentType: def.id,
+          label: def.label,
+          objective,
+          workspacePath: this.config.workspacePath,
+          ownerSessionId: this.config.conversationId,
+          run: async ({ signal, recordEvent }) => {
+            const onSubEvent = (event: SubAgentEvent) => {
+              recordEvent(event)
+              this.emitSubAgentProgress(def.id, def.label, event)
+            }
+            const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath!)
+            const activeConfig = this.stateProvider.getActiveConfig()
+            const activeModel = this.stateProvider.getActiveModel()
+            return runSubAgent({
+              definition: def,
+              objective: enrichedObjective,
+              workspacePath: this.config.workspacePath!,
+              toolExecutor: this.toolExecutor,
+              apiKey: activeConfig?.apiKey || '',
+              baseUrl: activeConfig?.baseUrl || 'https://api.deepseek.com',
+              provider: activeConfig?.provider,
+              customHeaders: activeConfig?.customHeaders,
+              model: activeModel?.id || activeConfig?.defaultModel,
+              codemap: skeleton,
+              abortSignal: signal,
+              onEvent: onSubEvent,
+            })
+          },
+          isSuccess: result => result.ok,
+          getError: result => result.error || 'Subagent failed',
+        })
         this.emit({
           type: 'subagent:start',
-          agentId,
+          agentId: started.task.id,
           agentType: def.id,
           label: def.label,
           objective,
           runKind: 'spawn_agent',
         })
-        const evidence: SubAgentEvidence[] = []
-        const onSubEvent = (event: SubAgentEvent) => {
-          // Surface progress through the same fast_context event channel so
-          // the existing UI banner can render the spawned agent's tool calls
-          // without a separate component.
-          if (event.type === 'turn_start') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'phase', phase: 'scanning', wave: event.turn, maxWaves: event.maxTurns, insight: `${def.label} turn ${event.turn}` },
-            })
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'worker', id: `spawn-${def.id}-${event.turn}`, label: `${def.label} turn ${event.turn}`, status: 'running' },
-            })
-          } else if (event.type === 'model_wait') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'insight', text: `${def.label} model pending (${Math.floor(event.elapsedMs / 1000)}s)`, tone: 'info' },
-            })
-          } else if (event.type === 'model_retry') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'insight', text: `${def.label} retrying model request: ${event.reason}`, tone: 'warning' },
-            })
-          } else if (event.type === 'tool_call') {
-            const argSummary = (() => { try { return JSON.stringify(event.args).slice(0, 120) } catch { return '' } })()
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'file', path: `${event.tool}(${argSummary})`, status: 'discovered', workerId: `spawn-${def.id}-${event.turn}`, reason: event.tool },
-            })
-          } else if (event.type === 'tool_result') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'insight', text: event.summary, tone: event.ok ? 'info' : 'warning' },
-            })
-          } else if (event.type === 'evidence') {
-            evidence.push(event.evidence)
-            this.emit({
-              type: 'fast_context:event',
-              event: {
-                type: 'hit',
-                hit: {
-                  path: event.evidence.path,
-                  line: event.evidence.startLine,
-                  startLine: event.evidence.startLine,
-                  endLine: event.evidence.endLine,
-                  preview: event.evidence.preview,
-                  reason: event.evidence.reason,
-                },
-              },
-            })
-          } else if (event.type === 'turn_complete') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'worker', id: `spawn-${def.id}-${event.turn}`, label: `${def.label} turn ${event.turn}`, status: 'completed' },
-            })
-          } else if (event.type === 'error') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'insight', text: `${def.label} error: ${event.message}`, tone: 'warning' },
-            })
-          }
-        }
-        const enrichedObjective = extraContext ? `${objective}\n\nAdditional context from parent agent:\n${extraContext}` : objective
-        const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
-        const activeConfig = this.stateProvider.getActiveConfig()
-        const activeModel = this.stateProvider.getActiveModel()
-        try {
-          const result = await runSubAgent({
-            definition: def,
-            objective: enrichedObjective,
-            workspacePath: this.config.workspacePath,
-            toolExecutor: this.toolExecutor,
-            apiKey: activeConfig?.apiKey || '',
-            baseUrl: activeConfig?.baseUrl || 'https://api.deepseek.com',
-            provider: activeConfig?.provider,
-            customHeaders: activeConfig?.customHeaders,
-            model: activeModel?.id || activeConfig?.defaultModel,
-            codemap: skeleton,
-            abortSignal: this.abortController?.signal,
-            onEvent: onSubEvent,
-          })
-          if (!result.ok) {
-            this.emit({ type: 'subagent:end', agentId, agentType: def.id, ok: false, elapsedMs: Date.now() - startedAt, runKind: 'spawn_agent' })
-            return `Subagent ${def.label} failed: ${result.error || 'unknown error'} (after ${result.turns} turn(s), ${Date.now() - startedAt}ms).`
-          }
-          const lines: string[] = [
-            `<subagent_report type="${def.id}" turns="${result.turns}" elapsed_ms="${result.elapsedMs}" files="${evidence.length}">`,
-            '',
-            'final_report:',
-            result.finalText || '(empty)',
-            '',
-          ]
-          if (evidence.length > 0) {
-            lines.push('evidence (top 12):')
-            for (const ev of evidence.slice(0, 12)) {
-              const preview = ev.preview.split('\n').slice(0, 3).map(l => `    ${l.replace(/\s+/g, ' ').trim().slice(0, 200)}`).join('\n')
-              lines.push(`  - ${ev.path}:L${ev.startLine}-${ev.endLine} · ${ev.reason}`)
-              if (preview) lines.push(preview)
-            }
-            if (evidence.length > 12) {
-              lines.push(`  (... ${evidence.length - 12} more file(s) examined but not echoed back)`)
-            }
-          }
-          lines.push('', '</subagent_report>')
-          this.emit({ type: 'subagent:end', agentId, agentType: def.id, ok: true, elapsedMs: Date.now() - startedAt, runKind: 'spawn_agent' })
-          return lines.join('\n')
-        } catch (error) {
-          this.emit({ type: 'subagent:end', agentId, agentType: def.id, ok: false, elapsedMs: Date.now() - startedAt, runKind: 'spawn_agent' })
-          return `Subagent ${def.label} threw: ${error instanceof Error ? error.message : String(error)}`
-        }
+        void started.promise.then(
+          result => this.emit({
+            type: 'subagent:end',
+            agentId: started.task.id,
+            agentType: def.id,
+            ok: result.ok,
+            elapsedMs: Date.now() - startedAt,
+            runKind: 'spawn_agent',
+          }),
+          () => this.emit({
+            type: 'subagent:end',
+            agentId: started.task.id,
+            agentType: def.id,
+            ok: false,
+            elapsedMs: Date.now() - startedAt,
+            runKind: 'spawn_agent',
+          }),
+        )
+        return `Subagent ${def.label} started in the background. Agent ID: ${started.task.id}. Use read_agent to inspect progress/results, list_agents to list tasks, or cancel_agent to stop it.`
       }
 
       case 'use_skill': {

@@ -30,4 +30,22 @@ describe('tool mode boundaries', () => {
     expect(webSearch.input_schema.properties.domains.items).toEqual({ type: 'string' })
     expect(validateToolArgs('read_file', { path: 'a.ts', surprise: true })).toEqual({ valid: false, error: 'Unexpected parameter: surprise' })
   })
+
+  it('exposes validated terminal stdin writes only in vibe mode', () => {
+    expect(getToolsForMode('vibe').some(tool => tool.name === 'write_terminal')).toBe(true)
+    expect(getToolsForMode('plan').some(tool => tool.name === 'write_terminal')).toBe(false)
+    expect(validateToolArgs('write_terminal', { session_id: 'term-1', data: 'yes\n' })).toEqual({ valid: true })
+  })
+
+  it('exposes background subagent lifecycle tools with mode-safe cancellation', () => {
+    const vibeTools = getToolsForMode('vibe')
+    const planTools = getToolsForMode('plan')
+
+    expect(vibeTools.some(tool => tool.name === 'list_agents')).toBe(true)
+    expect(vibeTools.some(tool => tool.name === 'read_agent')).toBe(true)
+    expect(vibeTools.some(tool => tool.name === 'cancel_agent')).toBe(true)
+    expect(planTools.some(tool => tool.name === 'read_agent')).toBe(true)
+    expect(planTools.some(tool => tool.name === 'cancel_agent')).toBe(false)
+    expect(validateToolArgs('read_agent', { agent_id: 'runtime_agent_1', offset: 0, limit: 25 })).toEqual({ valid: true })
+  })
 })

@@ -1,8 +1,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
+import { PassThrough } from 'node:stream'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CommandOutput, Result } from '../../tools/executor.js'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
 import { hashText } from '../fileIO.js'
 
@@ -146,9 +150,77 @@ describe('NodeToolExecutor sandbox policies', () => {
   it('reports non-zero process exits as failures', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
     const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(7)'], workspace)
+    const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
 
     expect(result.success).toBe(false)
     expect(result.data?.exitCode).toBe(7)
+    expect(runtimeTask).toMatchObject({ status: 'failed', exitCode: 7, interactive: false })
+  }))
+
+  it('tracks successful foreground processes through completion', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const result = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write("done"); process.stderr.write("warn")'], workspace)
+    const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
+    const logRecords = readFileSync(runtimeTask!.logPath!, 'utf-8').trim().split('\n').map(line => JSON.parse(line))
+
+    expect(result.success).toBe(true)
+    expect(result.data?.logPath).toBe(runtimeTask?.logPath)
+    expect(runtimeTask).toMatchObject({
+      status: 'completed',
+      cwd: workspace,
+      exitCode: 0,
+      outputBytes: 8,
+      interactive: false,
+    })
+    expect(runtimeTask?.command).toContain(process.execPath)
+    expect(logRecords).toEqual(expect.arrayContaining([
+      expect.objectContaining({ channel: 'stdout', data: 'done' }),
+      expect.objectContaining({ channel: 'stderr', data: 'warn' }),
+    ]))
+  }))
+
+  it('settles after the termination grace period when a timed-out process never closes', async () => withWorkspace(async ({ workspace }) => {
+    vi.useFakeTimers()
+    try {
+      const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+      const proc = Object.assign(new EventEmitter(), {
+        pid: 12345,
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+      }) as unknown as ChildProcessWithoutNullStreams
+      const runtime = executor as unknown as {
+        collectProcess: (proc: ChildProcessWithoutNullStreams, timeout: number, runtimeTaskId?: string) => Promise<Result<CommandOutput>>
+        terminateProcessTree: (proc: ChildProcessWithoutNullStreams) => void
+      }
+      const terminate = vi.spyOn(runtime, 'terminateProcessTree').mockImplementation(() => {})
+      const runtimeTask = executor.getRuntimeTaskManager().createTask({ kind: 'shell', status: 'running' })
+      let settled = false
+
+      const pending = runtime.collectProcess(proc, 25, runtimeTask.id)
+      void pending.finally(() => { settled = true })
+      proc.stdout.emit('data', Buffer.from('partial stdout'))
+      proc.stderr.emit('data', Buffer.from('partial stderr'))
+
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(terminate).toHaveBeenCalledWith(proc)
+      expect(settled).toBe(true)
+      await expect(pending).resolves.toMatchObject({
+        success: false,
+        data: {
+          stdout: 'partial stdout',
+          stderr: 'partial stderr',
+          timedOut: true,
+        },
+      })
+      expect(executor.getRuntimeTaskManager().getTask(runtimeTask.id)).toMatchObject({
+        status: 'failed',
+        metadata: { timedOut: true },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   }))
 
   it('does not leak parent-process secrets into child commands', async () => withWorkspace(async ({ workspace }) => {
@@ -327,6 +399,25 @@ it('aborts only the requested streaming response', async () => withWorkspace(asy
   }
 }))
 
+it('preserves nested network causes in model request diagnostics', () => {
+  const executor = new NodeToolExecutor(process.cwd())
+  const cause = Object.assign(new Error('connection timed out'), {
+    code: 'UND_ERR_CONNECT_TIMEOUT',
+    address: '65.75.209.177',
+    port: 443,
+  })
+  const error = new TypeError('fetch failed', { cause })
+  const message = (executor as unknown as {
+    formatNetworkError: (url: string, value: unknown) => string
+  }).formatNetworkError('https://example.test/v1/messages', error)
+
+  expect(message).toContain('https://example.test/v1/messages')
+  expect(message).toContain('fetch failed')
+  expect(message).toContain('UND_ERR_CONNECT_TIMEOUT')
+  expect(message).toContain('address=65.75.209.177')
+  expect(message).toContain('port=443')
+})
+
 it('runs and inspects an agent background terminal session', async () => withWorkspace(async ({ workspace }) => {
   const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
 
@@ -335,6 +426,13 @@ it('runs and inspects an agent background terminal session', async () => withWor
   expect(created?.success).toBe(true)
   const sessionId = created?.data?.sessionId
   expect(sessionId).toBeTruthy()
+  const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'terminal' })[0]
+  expect(runtimeTask).toMatchObject({
+    status: 'running',
+    interactive: true,
+    metadata: { sessionId },
+  })
+  expect(created?.data?.session.logPath).toBe(runtimeTask?.logPath)
 
   const command = process.platform === 'win32'
     ? 'echo turbo-terminal-ok && exit'
@@ -367,6 +465,11 @@ it('runs and inspects an agent background terminal session', async () => withWor
 
   const afterKill = await executor.ptyList?.()
   expect(afterKill?.sessions?.find((session: any) => session.id === sessionId)?.status).toBe('exited')
+  expect(executor.getRuntimeTaskManager().getTask(runtimeTask!.id)).toMatchObject({
+    status: 'completed',
+    exitCode: 0,
+  })
+  expect(readFileSync(runtimeTask!.logPath!, 'utf-8')).toContain('turbo-terminal-ok')
 }))
 
 describe('NodeToolExecutor webSearch', () => {
