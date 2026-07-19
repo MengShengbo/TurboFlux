@@ -25,4 +25,15 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('web_search')
     expect(prompt).toContain('current or external facts')
   })
+
+  it('treats the configured workspace as authoritative', () => {
+    const prompt = buildSystemPrompt('vibe', {
+      workspacePath: 'C:\\Users\\Administrator',
+      workspaceName: 'Administrator',
+    })
+
+    expect(prompt).toContain('This path is the authoritative current workspace')
+    expect(prompt).toContain('Historical mentions of other projects do not change it')
+    expect(prompt).toContain('without supporting tool output')
+  })
 })

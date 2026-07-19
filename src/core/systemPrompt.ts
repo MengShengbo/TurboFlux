@@ -161,7 +161,11 @@ function buildEnvironmentSection(options: SystemPromptOptions): string {
   const date = SESSION_START_DATE
   const shell = options.shell || 'powershell'
   const workspace = options.workspacePath
-    ? `<workspace path="${options.workspacePath}" name="${options.workspaceName ?? ''}" />`
+    ? `<workspace path="${options.workspacePath}" name="${options.workspaceName ?? ''}">
+This path is the authoritative current workspace. Historical mentions of other projects do not change it.
+Never claim a file, directory, or project was opened or inspected without supporting tool output in the conversation.
+Resolve relative filesystem paths from this workspace.
+</workspace>`
     : '<workspace>None</workspace>'
   return `<environment>
 <date>${date}</date>

@@ -87,6 +87,73 @@ export function splitTurnsForCompaction(turns: AgentTurn[], keepRecent: number):
   }
 }
 
+const CANCELLED_TOOL_RESULT_TEXT = 'Cancelled before the tool completed.'
+
+function contentBlocks(message: Record<string, unknown>): Array<Record<string, unknown>> {
+  if (Array.isArray(message.content)) {
+    return message.content.filter(block => block && typeof block === 'object') as Array<Record<string, unknown>>
+  }
+  if (typeof message.content === 'string' && message.content) {
+    return [{ type: 'text', text: message.content }]
+  }
+  return []
+}
+
+export function normalizeAnthropicToolMessages(
+  messages: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const normalized: Array<Record<string, unknown>> = []
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    const blocks = contentBlocks(message)
+    const toolUseIds = message.role === 'assistant'
+      ? blocks
+          .filter(block => block.type === 'tool_use' && typeof block.id === 'string')
+          .map(block => block.id as string)
+      : []
+
+    if (toolUseIds.length === 0) {
+      if (message.role === 'user' && blocks.some(block => block.type === 'tool_result')) {
+        const nonToolBlocks = blocks.filter(block => block.type !== 'tool_result')
+        if (nonToolBlocks.length > 0) normalized.push({ ...message, content: nonToolBlocks })
+      } else {
+        normalized.push(message)
+      }
+      continue
+    }
+
+    normalized.push(message)
+    const expectedIds = new Set(toolUseIds)
+    const resultsById = new Map<string, Record<string, unknown>>()
+    const trailingUserBlocks: Array<Record<string, unknown>> = []
+    let nextIndex = index + 1
+
+    while (nextIndex < messages.length && messages[nextIndex]?.role === 'user') {
+      for (const block of contentBlocks(messages[nextIndex])) {
+        const resultId = typeof block.tool_use_id === 'string' ? block.tool_use_id : ''
+        if (block.type === 'tool_result' && expectedIds.has(resultId)) {
+          if (!resultsById.has(resultId)) resultsById.set(resultId, block)
+        } else if (block.type !== 'tool_result') {
+          trailingUserBlocks.push(block)
+        }
+      }
+      nextIndex += 1
+    }
+
+    const resultBlocks = toolUseIds.map(toolUseId => resultsById.get(toolUseId) ?? {
+      type: 'tool_result',
+      tool_use_id: toolUseId,
+      content: CANCELLED_TOOL_RESULT_TEXT,
+      is_error: true,
+    })
+    normalized.push({ role: 'user', content: [...resultBlocks, ...trailingUserBlocks] })
+    index = nextIndex - 1
+  }
+
+  return normalized
+}
+
 type PromptModuleSnapshot = {
   id: string
   label: string
@@ -2170,6 +2237,14 @@ Before retrying:
     const strategyContext = this.turnStrategyPlanner.buildStrategyContext(turnStrategy)
     const fastContextPackForTurn = this.fastContextPack
     const dynamicRuntimeContext = [
+      this.config.workspacePath
+        ? this.wrapRuntimeContextSection('current_workspace', [
+            `The active workspace is exactly: ${this.config.workspacePath}`,
+            'Historical references to other projects are context only, not the current workspace.',
+            'Do not claim a file, directory, or project was opened, inspected, or selected unless a tool result in this conversation proves it.',
+            'Resolve relative filesystem paths against this active workspace.',
+          ].join('\n'))
+        : null,
       this.config.appendSystemPrompt,
       strategyContext,
       fastContextPackForTurn,
@@ -2353,7 +2428,9 @@ Before retrying:
     const maxTokens = this.config.maxTokens || config.maxTokens || 0
     const anthropicMaxTokens = maxTokens > 0 ? maxTokens : (model?.maxTokens || 8192)
     const temperature = this.config.temperature ?? config.temperature ?? 0.7
-    const requestMessages = this.withAnthropicMessageCacheControl(messages.filter(m => m.role !== 'system'))
+    const requestMessages = this.withAnthropicMessageCacheControl(
+      normalizeAnthropicToolMessages(messages.filter(m => m.role !== 'system')),
+    )
     const requestBody: Record<string, unknown> = {
       model: config.defaultModel,
       max_tokens: anthropicMaxTokens,
@@ -4129,6 +4206,24 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         }
       }
     }
+
+    const completedIds = new Set(allResults.map(result => result.toolCallId))
+    for (const toolCall of toolCalls) {
+      if (completedIds.has(toolCall.id)) continue
+      this.linkToolCallToActiveTask(toolCall)
+      this.emit({ type: 'tool:call', toolCall })
+      const result: ToolResult = {
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        output: CANCELLED_TOOL_RESULT_TEXT,
+        isError: true,
+        errorKind: 'abort',
+      }
+      allResults.push(result)
+      this.emit({ type: 'tool:result', toolResult: result })
+      this.updateTaskToolCallStatus(toolCall.id, 'cancelled', result.output)
+    }
+    if (completedIds.size !== allResults.length) this.emitActiveTaskContext()
 
     // Auto-create checkpoint if there are file modifications without explicit checkpoint
     // This ensures code changes are always recoverable even if AI forgets to checkpoint

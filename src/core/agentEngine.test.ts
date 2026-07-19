@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -39,6 +39,54 @@ describe('appendRuntimeContextToLatestUserMessage', () => {
       { type: 'text', text: 'continue' },
       { type: 'text', text: '<runtime_context>internal</runtime_context>' },
     ])
+  })
+})
+
+describe('normalizeAnthropicToolMessages', () => {
+  it('combines matching results and synthesizes missing results immediately after tool use', () => {
+    const messages = normalizeAnthropicToolMessages([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'checking' },
+          { type: 'tool_use', id: 'tc1', name: 'read_file', input: { path: 'a.ts' } },
+          { type: 'tool_use', id: 'tc2', name: 'read_file', input: { path: 'b.ts' } },
+        ],
+      },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'a' }] },
+      { role: 'user', content: [{ type: 'text', text: 'continue' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ])
+
+    expect(messages).toHaveLength(3)
+    expect(messages[1]).toEqual({
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'tc1', content: 'a' },
+        {
+          type: 'tool_result',
+          tool_use_id: 'tc2',
+          content: 'Cancelled before the tool completed.',
+          is_error: true,
+        },
+        { type: 'text', text: 'continue' },
+      ],
+    })
+  })
+
+  it('drops orphan and duplicate tool results', () => {
+    const messages = normalizeAnthropicToolMessages([
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'orphan', content: 'bad' }, { type: 'text', text: 'hello' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'tc1', name: 'read_file', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'first' }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'duplicate' }] },
+    ])
+
+    expect(messages[0]).toEqual({ role: 'user', content: [{ type: 'text', text: 'hello' }] })
+    expect(messages[2]).toEqual({
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'tc1', content: 'first' }],
+    })
   })
 })
 
@@ -82,6 +130,43 @@ describe('AgentEngine MCP dispatch', () => {
     expect(result).toMatchObject({ isError: false, output: 'mcp result' })
     expect(callTool).toHaveBeenCalledWith('files', 'replace', { path: 'a.ts' })
     engine.destroy()
+  })
+})
+
+describe('AgentEngine aborted tool execution', () => {
+  it('returns cancellation results for every tool that did not run', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+    }, {} as ToolExecutor, stateProvider)
+    ;(engine as unknown as { abortController: AbortController }).abortController = new AbortController()
+    engine.abort()
+
+    try {
+      const results = await (engine as unknown as {
+        executeToolCalls: (toolCalls: ToolCall[]) => Promise<ToolResult[]>
+      }).executeToolCalls([
+        { id: 'tc1', name: 'read_file', arguments: { path: 'a.ts' } },
+        { id: 'tc2', name: 'read_file', arguments: { path: 'b.ts' } },
+      ])
+
+      expect(results).toEqual([
+        expect.objectContaining({ toolCallId: 'tc1', isError: true, errorKind: 'abort' }),
+        expect.objectContaining({ toolCallId: 'tc2', isError: true, errorKind: 'abort' }),
+      ])
+    } finally {
+      engine.destroy()
+    }
   })
 })
 
@@ -665,6 +750,56 @@ describe('AgentEngine model protocol compatibility', () => {
     try {
       await expect(harness.callModel()).resolves.toMatchObject({ content: 'messages-ok' })
       expect(harness.executor.streamMessage).toHaveBeenCalledOnce()
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
+  it('repairs incomplete historical tool use in the final Anthropic request', async () => {
+    let requestBody: Record<string, any> | undefined
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async (_url, _headers, body, onLine) => {
+      requestBody = JSON.parse(body)
+      onLine(`data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'repaired' } })}`)
+      onLine(`data: ${JSON.stringify({ type: 'message_stop' })}`)
+      return { success: true, data: '' }
+    })
+    harness.engine.restoreFromTurns([
+      { id: 'u1', role: 'user', content: 'inspect both', timestamp: 1 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        timestamp: 2,
+        toolCalls: [
+          { id: 'tc1', name: 'read_file', arguments: { path: 'a.ts' } },
+          { id: 'tc2', name: 'read_file', arguments: { path: 'b.ts' } },
+        ],
+      },
+      {
+        id: 'tr1',
+        role: 'tool_result',
+        content: 'a',
+        timestamp: 3,
+        toolResults: [{ toolCallId: 'tc1', name: 'read_file', output: 'a', isError: false }],
+      },
+    ])
+
+    try {
+      await expect(harness.callModel()).resolves.toMatchObject({ content: 'repaired' })
+      const assistantIndex = requestBody?.messages.findIndex((message: Record<string, any>) =>
+        message.role === 'assistant'
+        && message.content.some((block: Record<string, any>) => block.type === 'tool_use' && block.id === 'tc2'))
+      expect(assistantIndex).toBeGreaterThanOrEqual(0)
+      const repairedResultMessage = requestBody?.messages[assistantIndex + 1]
+      expect(repairedResultMessage?.role).toBe('user')
+      expect(repairedResultMessage?.content.slice(0, 2)).toEqual([
+        expect.objectContaining({ type: 'tool_result', tool_use_id: 'tc1', content: 'a' }),
+        expect.objectContaining({
+          type: 'tool_result',
+          tool_use_id: 'tc2',
+          is_error: true,
+        }),
+      ])
     } finally {
       harness.engine.destroy()
     }
