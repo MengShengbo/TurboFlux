@@ -1,0 +1,654 @@
+{
+  "metadata": {
+    "date": "2026-07-20T18:06:14.078Z",
+    "commit": "629e4c25bc646c98113cddca4c86622a286cffdc",
+    "workspace": "C:\\Users\\Administrator\\Desktop\\TurboFlux-legacy-backup-20260612-045013",
+    "model": "claude-sonnet-5",
+    "provider": "anthropic",
+    "endpointHost": "ai.zyyun.xyz",
+    "timeoutMs": 240000,
+    "cases": 8,
+    "rounds": 1,
+    "rescoredAt": "2026-07-20T18:41:44.686Z"
+  },
+  "cases": [
+    {
+      "id": "cli-entry",
+      "category": "location",
+      "objective": "Locate the TurboFlux CLI startup entry, command parsing, and handoff into the interactive app.",
+      "relevantPaths": [
+        "bin/turboflux.mjs",
+        "src/cli/index.ts",
+        "src/cli/repl.ts"
+      ]
+    },
+    {
+      "id": "fast-context-scheduling",
+      "category": "workflow",
+      "objective": "Locate FastContext background scheduling, subagent retrieval, and evidence injection into the main agent. Identify the real execution path.",
+      "relevantPaths": [
+        "src/core/agentEngine.ts",
+        "src/core/fastContextSubagent.ts",
+        "src/core/subAgent.ts"
+      ]
+    },
+    {
+      "id": "transcript-scroll",
+      "category": "workflow",
+      "objective": "Locate row-level transcript viewport scrolling and terminal mouse-wheel handling in the CLI UI.",
+      "relevantPaths": [
+        "src/cli/components/TranscriptViewport.tsx",
+        "src/cli/components/App.tsx",
+        "src/cli/terminalMouse.ts"
+      ]
+    },
+    {
+      "id": "chinese-setup-copy",
+      "category": "location",
+      "objective": "FastContext 子代理模型配置这段中文界面文案在哪里实现？请定位真实源码。",
+      "relevantPaths": [
+        "src/cli/setup.ts"
+      ]
+    },
+    {
+      "id": "clipboard-images",
+      "category": "workflow",
+      "objective": "Locate clipboard image paste, image attachment parsing, and conversion into model messages.",
+      "relevantPaths": [
+        "src/cli/imageAttachments.ts",
+        "src/cli/components/App.tsx",
+        "src/core/contextManager.ts"
+      ]
+    },
+    {
+      "id": "background-terminal-lifecycle",
+      "category": "workflow",
+      "objective": "Trace how a background terminal command is started, persisted, polled, restored into UI state, and terminated. Identify the true execution core and its callers.",
+      "relevantPaths": [
+        "src/core/agentEngine.ts",
+        "src/core/runtime/nodeToolExecutor.ts",
+        "src/shared/terminalTypes.ts"
+      ]
+    },
+    {
+      "id": "model-request-compatibility",
+      "category": "workflow",
+      "objective": "Trace model-native reasoning request construction, unsupported parameter removal, protocol fallback, and retry behavior for FastContext model calls.",
+      "relevantPaths": [
+        "src/core/subAgent.ts",
+        "src/core/modelRegistry.ts",
+        "src/core/modelProtocol.ts",
+        "src/core/agentEngine.ts"
+      ]
+    },
+    {
+      "id": "interrupted-stream-persistence",
+      "category": "workflow",
+      "objective": "Trace how Ctrl+C interrupts a streaming assistant response while preserving partial text through engine turns, conversation journal persistence, and transcript rendering.",
+      "relevantPaths": [
+        "src/core/agentEngine.ts",
+        "src/cli/components/App.tsx",
+        "src/cli/conversations/manager.ts",
+        "src/cli/conversations/store.ts"
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "system": "turboflux",
+      "caseId": "cli-entry",
+      "category": "location",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 63238.7901,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 13,
+      "searchCalls": 0,
+      "readCalls": 13,
+      "rankedPaths": [
+        "bin/turboflux.mjs",
+        "src/cli/index.ts",
+        "src/cli/repl.ts",
+        "src/cli/components/app.tsx"
+      ],
+      "usage": {
+        "inputTokens": 1259,
+        "outputTokens": 1170,
+        "cacheCreationInputTokens": 1781,
+        "cacheReadInputTokens": 11145
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: Locate the TurboFlux CLI startup entry, command parsing, and handoff into the interactive app.\nretrieval: 8 turn(s), 62936ms\nquality: 12 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. `bin/turboflux.mjs:1-28` — Process entry point (npm bin shim). Confidence: high. Resolves `src/cli/index.ts`, spawns `node --import tsx <entry> <argv>` synchronously with inherited stdio, forwarding `process.argv.slice(2)`. This is the actual OS-level entry invoked when a user runs `turboflux`.\n\n2. `package.json:1-11` — Package manifest / config boundary. Confidence: high. Confirms `\"bin\": { \"turboflux\": \"./bin/turboflux.mjs\" }`, `\"type\": \"module\"`, and that `commander` + `ink` + `tsx` are runtime deps, validating the mjs shim's use of tsx-loader and the CLI's use of Commander for argument parsing.\n\n3. `src/cli/index.ts:1-80` — Command parsing core. Confidence: high. Builds a Commander `Command`, calls `configureNetworkProxy()`, defines the default action (workspace arg + flags: `--model-override`, `--provider-override`, `-c/--command`, `-v/--verbose`, `--no-flicker`, `--scrollback`, `--no-animation`, `--approval-policy`, `--mcp`), loads config via `loadConfig()`, validates/normalizes `approvalPolicy`, then calls `startRepl(...)`. Also defines a `config` subcommand (show/set) using `redactConfig`/`setConfigValue`/`saveConfig`. This is the true command-parsing implementation, not just an entry stub.\n\n4. `src/cli/repl.ts:1-37` — Handoff layer between CLI parsing and interactive app. Confidence: high. `startRepl()` checks for missing `apiKey` (prints setup hint), optionally loads MCP settings via `loadMcpSettings(workspacePath)` and logs explicitly-enabled MCP servers, then calls `startInkApp({...})`. This is the direct caller bridging parsed CLI options into the Ink-based interactive UI.\n\n5. `src/cli/components/App.tsx:1-80` (with `startInkApp` symbol located at line 1615 via search_symbols, not yet read in full) — Interactive app implementation entry. Confidence: medium. File imports Ink's `render`, defines `AppProps` matching `ReplOptions` fields (`workspacePath`, `config`, `singleShot`, `verbose`, `noFlicker`, `approvalPolicy`, `mcpServers`, `startupAnimation`), and wires in agent runtime (`createAgentRuntime`), command registry, conversation manager, and startup animation helpers. `startInkApp` (declared at line 1615, confirmed by symbol search but its body not read) is the presumed final handoff point that calls Ink's `render()` to mount the `App` component.\n\nEXECUTION_FLOW\n`bin/turboflux.mjs` (OS entry, spawns node+tsx) → `src/cli/index.ts` (Commander parses argv, loads config, resolves workspace path/flags) → `startRepl()` in `src/cli/repl.ts` (pre-flight checks: API key presence, MCP server selection logging) → `startInkApp()` in `src/cli/components/App.tsx` (mounts Ink `App` component, presumed via `render()`, handing control to the interactive TUI runtime which pulls in `createAgentRuntime`, `commandRegistry`, `ConversationManager`).\n\nSEARCHES_TRIED\n- read_file on `bin/turboflux.mjs`, `src/cli/index.ts` (multiple offsets), `src/cli/repl.ts`, `src/cli/components/App.tsx`, `package.json`\n- search_symbols(\"startRepl\") → found in `src/cli/repl.ts:18`\n- search_symbols(\"startInkApp\") → found in `src/cli/components/App.tsx:1615`\n- search_files(\"src/cli/repl.ts*\") → confirmed file location\n- search_content for `\"bin\"|turboflux` in package.json (no match on first attempt due to regex/quoting; resolved by direct read_file)\n\nUNCERTAINTY\n- Did not read `src/cli/components/App.tsx` lines around 1615 (the actual `startInkApp` function body), so the exact mechanics of the Ink `render()` call and how `App` mounts are confirmed only by symbol location, not by content inspection.\n- Did not read `src/cli/index.ts` beyond line 80 (setup/runSetup subcommand and any additional subcommands like MCP management) — full command surface may include more subcommands not captured here.\n- Did not inspect `src/core/config.ts` (`loadConfig`/`saveConfig`) or `src/core/networkProxy.ts`, so config-loading and proxy-setup internals are unverified, only referenced as imports.\n\n</fast_context_pack>",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "claude-code",
+      "caseId": "cli-entry",
+      "category": "location",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 49119.905999999995,
+      "apiDurationMs": 46734,
+      "turns": 10,
+      "apiRequests": 10,
+      "apiRetries": 0,
+      "toolCalls": 9,
+      "searchCalls": 4,
+      "readCalls": 5,
+      "rankedPaths": [
+        "bin/turboflux.mjs",
+        "src/cli/index.ts",
+        "src/cli/repl.ts",
+        "src/cli/components/app.tsx",
+        "src/cli/commands/registry.ts"
+      ],
+      "usage": {
+        "inputTokens": 570,
+        "outputTokens": 1400,
+        "cacheCreationInputTokens": 993,
+        "cacheReadInputTokens": 6441,
+        "costUsd": 0.09455350000000001
+      },
+      "report": "I have enough to build the map. Let me also confirm the bin entry role quickly (already read).\n\nRANKED_CODE_MAP\n\n- `bin/turboflux.mjs` — lines 1-30 — role: process entry shim — confidence: high — why: this is the `bin` target declared in `package.json` (`\"turboflux\": \"./bin/turboflux.mjs\"`); it resolves `tsx` as an ESM loader and spawns `node --import tsx src/cli/index.ts <args>`, forwarding argv and inheriting stdio. This is the actual first code that runs when the CLI is invoked.\n\n- `src/cli/index.ts` — lines 1-127 — role: CLI command parsing / argument entry point — confidence: high — why: sets up `commander`, defines the default action (workspace arg, model/provider overrides, approval policy, MCP flags, animation/flicker flags), plus `config` and `setup` subcommands. The default action loads config and calls `startRepl(...)` (line 47), which is the handoff point into the interactive app. `program.parse(process.argv)` (line 126) triggers everything.\n\n- `src/cli/repl.ts` — lines 1-37 — role: handoff/bridge between CLI args and the Ink UI — confidence: high — why: `startRepl` receives parsed CLI options, does pre-flight checks (missing API key warning, MCP server selection logging via `loadMcpSettings`), then calls `startInkApp(...)` (line 36) to actually launch the interactive terminal app.\n\n- `src/cli/components/App.tsx` — lines 1615-1648 (entry function), 335 (root `App` component) — role: interactive app bootstrap — confidence: high — why: `startInkApp` is the final handoff target from `repl.ts`. It computes `workspaceName`, detects TTY interactivity, decides flicker/no-flicker rendering mode, and calls Ink's `render()` on the root `<App>` component, which owns the full session loop (agent runtime, message list, prompt input, tool execution UI).\n\n- `src/cli/commands/registry.ts` — lines 1-99 — role: in-app slash-command parser — confidence: medium — why: once inside the interactive app, user input starting with `/` is parsed and dispatched here (`parse`, `execute`, `get`). This is the command parsing layer for the running session (distinct from the commander-based CLI arg parsing in `index.ts`), and it's used by `App.tsx` via `commandRegistry` (imported at line 30 of App.tsx).\n\nEXECUTION_FLOW\n1. User runs `turboflux` → npm bin resolves to `bin/turboflux.mjs`, which spawns `node` with the `tsx` loader pointed at `src/cli/index.ts`, forwarding CLI args.\n2. `src/cli/index.ts` builds a `commander` program: default action parses workspace path, overrides, approval policy, MCP server list; `config` and `setup` are separate subcommands. `program.parse(process.argv)` invokes the matched action.\n3. Default action loads config (`loadConfig`) and calls `startRepl({...})` in `src/cli/repl.ts`.\n4. `startRepl` does pre-flight checks (API key presence, MCP server settings) then calls `startInkApp({...})` in `src/cli/components/App.tsx`.\n5. `startInkApp` computes workspace name, TTY/flicker mode, and calls Ink's `render(<App .../>)`, starting the interactive React/Ink UI.\n6. Inside the running `App` component, user-typed input beginning with `/` is routed through `commandRegistry` (`src/cli/commands/registry.ts` + `src/cli/commands/index.ts`) to execute local/prompt/jsx-producing commands, separate from the initial CLI argument parsing.\n\nSEARCHES_TRIED\n- Read `package.json` for `bin`/`main`/scripts to find CLI entry.\n- Read `bin/turboflux.mjs` directly.\n- Listed `src/cli/*` directory tree.\n- Read `src/cli/index.ts` and `src/cli/repl.ts` in full.\n- Grepped `App.tsx` for `startInkApp`/`render`/`export function` to locate bootstrap and root component.\n- Read `src/cli/components/App.tsx` lines 1-100 and 1610-1648.\n- Read `src/cli/commands/registry.ts` in full.\n\nUNCERTAINTY\n- `src/cli/components/App.tsx` root `App` function body (lines ~335-1610) was not fully read; internal session-loop details (agent runtime wiring, message handling) are not verified beyond imports and the bootstrap function.\n- `src/cli/commands/index.ts` (484 lines, where individual commands are registered) was not read in detail — only inferred its role from imports and `registry.ts`.\n- `src/cli/setup.ts` (invoked by the `setup` subcommand) was not read; not ranked since it's a secondary CLI path, not the main startup/handoff flow.",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "turboflux",
+      "caseId": "fast-context-scheduling",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 80548.82439999998,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 8,
+      "searchCalls": 0,
+      "readCalls": 8,
+      "rankedPaths": [
+        "src/core/fastcontextsubagent.ts",
+        "src/core/agentengine.ts"
+      ],
+      "usage": {
+        "inputTokens": 1309,
+        "outputTokens": 1604,
+        "cacheCreationInputTokens": 713,
+        "cacheReadInputTokens": 12423
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: Locate FastContext background scheduling, subagent retrieval, and evidence injection into the main agent. Identify the real execution path.\nretrieval: 8 turn(s), 79852ms\nquality: 8 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. `src/core/fastContextSubagent.ts` (lines 1-80, plus symbol hit at line 654)\n   - Role: Core FastContext execution implementation — defines `RunParams`, `FAST_CONTEXT_DEFINITION` (id `fast_context`, `driver: 'main-model'`, `maxTurns: 8`, `maxParallel: 6`), prefetch file globs, stop-word/failure/entry term sets, and exports `runFastContextSubagent(params): Promise<FastContextScanResult>` (confirmed via search_symbols at line 654). This is the actual subagent retrieval engine that scores/decorates evidence hits.\n   - Confidence: High\n   - Why: Read directly this run. Imports `buildFastContextSystemPrompt` and `runSubAgent` from `./subAgent`, confirming it delegates the actual model-driven search loop to `subAgent.ts` while owning FastContext-specific scoring/config.\n\n2. `src/core/agentEngine.ts` (lines 1-80, import/type surface)\n   - Role: Main agent engine — the caller/orchestrator that wires FastContext into the primary agent loop. Imports `runFastContextSubagent`, `getFastContextTuning`, `normalizeFastContextLevel`, `FastContextLevel/ScanEvent/ScanResult` types, `SubAgentEvent`/`SubAgentEvidence` types, and `SubAgentTaskManager`/`RuntimeTaskManager` for background task tracking. Also imports `getSubAgentDefinition`, `runSubAgent`, `loadDynamicAgents`, `getAvailableAgentTypes` from `./subAgent`.\n   - Confidence: High (as integration surface), Medium (for exact behavior — I only read the import header this run, not the function bodies)\n   - Why: Read directly this run. This is the module that owns `startFastContextBackground`/`clearFastContextBackground` and the `spawn_agent` tool dispatch (per search_content line hits: 581, 585, 651, 1541, 1698-1702, 5100, 5685-5768), but I have not yet read those bodies myself in this run, so I'm not asserting their exact behavior beyond what's search-grounded.\n\nEXECUTION_FLOW (best evidence gathered this run, partially search-grounded / partially read-confirmed)\n- Main agent loop in `agentEngine.ts` triggers `startFastContextBackground(objective, { level })` (search-confirmed at lines 581, 1541, 5100, 5697) which returns a `FastContextBackgroundStart` status object (`'started' | 'running' | 'busy' | 'unavailable'`, defined ~line 367-370, search-confirmed only).\n- That background job invokes `runFastContextSubagent` (imported at agentEngine.ts:33, read-confirmed) which is implemented in `fastContextSubagent.ts` and internally calls `runSubAgent` from `subAgent.ts` (search-confirmed import, not body-read) to actually drive the model-based search/read loop and collect `SubAgentEvidence[]`.\n- Evidence flows back as a `FastContextScanResult` (evidence + scored hits), and formatting/output truncation into the `RANKED_CODE_MAP` text block happens in `fastContextSubagent.ts` (search-confirmed at prefetch lines 647-672, not re-read by me this run).\n- Separately, `spawn_agent` tool dispatch in `agentEngine.ts` (search-confirmed ~line 5685-5768) is the more general subagent path (any agent type, not just FastContext), sharing the same `runSubAgent`/evidence infrastructure per `subAgentTypes.ts`.\n- Injection into the main agent's context: `agentEngine.ts` holds `SubAgentEvidence` typed references (line 36, read-confirmed) and `SubAgentTaskManager` (line 66, read-confirmed) for background task/result tracking — strongly suggesting evidence is surfaced back into the main loop via a task-result read path (`read_agent` tool per `toolRegistry.ts` search hit), but I did not read that dispatch body this run.\n\nSEARCHES_TRIED\n- search_content: `spawn_agent|spawnAgent` across `src` → found dispatch in `agentEngine.ts` (~5685-5768), tool definition in `toolRegistry.ts` (~473-531), UI rendering in `ToolCallTree.tsx`/`ActiveWorkPanel.tsx`.\n- search_content: `FastContextBackground|fastContextBackground|startFastContext|scheduleFastContext` in `src` → found `startFastContextBackground`/`clearFastContextBackground` definitions and 6 call sites in `agentEngine.ts`.\n- search_symbols: `FastContextSubagent` → confirmed `runFastContextSubagent` export at `fastContextSubagent.ts:654`.\n- search_content: `SubAgentEvidence|injectEvidence|evidence` in `agentEngine.ts` → no direct \"evidence\" keyword hits (case-sensitive miss).\n- search_content: `SubAgentEvidence` across `src` → mapped full evidence type flow across `subAgentTypes.ts`, `agentEngine.ts`, `fastContextSubagent.ts`, `subAgent.ts`.\n- read_file: `src/core/agentEngine.ts` (multiple attempts, all returned lines 1-80 — the offset parameter did not advance past the import header in this run).\n- read_file: `src/core/fastContextSubagent.ts` (lines 1-80).\n\nUNCERTAINTY\n- I was unable to read past line 80 of `agentEngine.ts` in this run (repeated read_file calls returned the same import-header slice), so the actual bodies of `startFastContextBackground` (~358-651), the `spawn_agent` dispatch (~5685-5768), and any explicit evidence-injection-into-main-context code are search-located but not read-confirmed by me this run.\n- `src/core/subAgen...\n\n</fast_context_pack>",
+      "recallAt5": 0.6666666666666666,
+      "recallAt10": 0.6666666666666666,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 0.375,
+      "executionFlowPresent": true,
+      "qualityIndex": 73.75
+    },
+    {
+      "system": "claude-code",
+      "caseId": "fast-context-scheduling",
+      "category": "workflow",
+      "success": false,
+      "timedOut": true,
+      "latencyMs": 240056.6578,
+      "turns": 23,
+      "apiRequests": 23,
+      "apiRetries": 0,
+      "toolCalls": 20,
+      "searchCalls": 10,
+      "readCalls": 10,
+      "rankedPaths": [],
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "cacheReadInputTokens": 0
+      },
+      "report": "This confirms the tool description matches the \"returns immediately, evidence injected later\" model. I have enough to build the report.",
+      "error": "Timed out after 240000ms",
+      "recallAt5": 0,
+      "recallAt10": 0,
+      "reciprocalRank": 0,
+      "top1Hit": false,
+      "citationRate": 0,
+      "executionFlowPresent": false,
+      "qualityIndex": 0
+    },
+    {
+      "system": "turboflux",
+      "caseId": "transcript-scroll",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 73466.19550000003,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 21,
+      "searchCalls": 0,
+      "readCalls": 21,
+      "rankedPaths": [
+        "src/cli/components/app.tsx",
+        "src/cli/components/transcriptviewport.tsx",
+        "src/cli/terminalmouse.ts",
+        "src/cli/terminalmouse.test.ts",
+        "src/cli/components/input/promptinput.tsx"
+      ],
+      "usage": {
+        "inputTokens": 1283,
+        "outputTokens": 1842,
+        "cacheCreationInputTokens": 746,
+        "cacheReadInputTokens": 12353
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: Locate row-level transcript viewport scrolling and terminal mouse-wheel handling in the CLI UI.\nretrieval: 8 turn(s), 70182ms\nquality: 9 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. **src/cli/components/App.tsx:1195-1210 (mouse wheel input handler), :1464-1477 (TranscriptViewport wiring), :44-53 (imports)** — role: primary caller/execution core. Confidence: high.\n   Read-confirmed: imports at lines 44-53 pull in `DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, parseTerminalMouseWheel, shouldEnableMouseTracking` from `../terminalMouse` and `DEFAULT_MOUSE_WHEEL_ROWS, TranscriptViewport, clampTranscriptScroll, getTranscriptPageRows, revealTranscriptRange` from `./TranscriptViewport`. search_content confirmed exact call sites: `parseTerminalMouseWheel(ch)` at line 1195 (raw terminal input decoded into wheel events), `<TranscriptViewport onScrollRowsChange={setScrollRowsFromBottom}>` at 1464-1477 (component mounted with scroll state setter), `shouldEnableMouseTracking(...)` at 464 gating `process.stdout.write(ENABLE_MOUSE_TRACKING)` at 465, and `handleTranscriptMetrics` callback at 841 consuming `TranscriptViewportMetrics`. This is where terminal mouse-wheel escape sequences become row scroll deltas applied to the transcript.\n\n2. **src/cli/components/TranscriptViewport.tsx:1-80** — role: core scroll math / viewport model. Confidence: high.\n   Read directly. Defines `DEFAULT_MOUSE_WHEEL_ROWS = 3`, `clampTranscriptScroll`, `getTranscriptViewportWindow` (computes `topRow`/`bottomRow`/`maxScrollRows` from `contentRows`, `viewportRows`, `scrollRowsFromBottom`), `preserveTranscriptAnchor` (keeps scroll position stable when content grows), `getTranscriptPageRows`, and `revealTranscriptRange` (auto-scroll to bring a range into view). The `TranscriptViewport` component (declared just past line 87, confirmed via search_content) wraps children in an Ink `Box` using `useBoxMetrics` to measure `contentRows`/`viewportRows` and calls `onScrollRowsChange`/`onMetricsChange`. This is the actual row-level scrolling implementation that App.tsx drives.\n\n3. **src/cli/terminalMouse.ts:1-39** — role: terminal mouse protocol parser (SGR mouse mode). Confidence: high.\n   Read directly. `parseTerminalMouseWheel` regex-matches SGR mouse escape sequences (`\\u001b[<btn;x;y[mM]`), filters wheel events via bit 64, and derives `up`/`down` direction from bit 1. `ENABLE_MOUSE_TRACKING`/`DISABLE_MOUSE_TRACKING` are the raw escape codes toggling `?1000h`/`?1006h` (SGR extended mouse mode). `shouldEnableMouseTracking` gates activation on `interactive`, `fixedViewport`, and the `TURBOFLUX_MOUSE` env var (excluding `TERM=dumb`). This is the low-level terminal input boundary feeding App.tsx's handler.\n\n4. **src/cli/terminalMouse.test.ts:1-12** — role: behavioral spec / regression guard for the parser. Confidence: medium.\n   Confirmed via search_content: tests assert `parseTerminalMouseWheel('\\u001b[<64;40;12M')` → `up` and `'[<65;41;13M'` → `down`, plus `isTerminalMouseInput` detection. Useful for verifying wheel direction/button-bit semantics without re-deriving them from the regex.\n\n5. **src/cli/components/input/PromptInput.tsx:141 (with import at line 7)** — role: adjacent consumer guarding against mouse input leaking into text input. Confidence: medium.\n   Confirmed via search_content: imports `isTerminalMouseInput` and short-circuits (`if (isTerminalMouseInput(ch)) return`) so SGR mouse escape sequences aren't typed into the prompt box. Relevant boundary showing mouse events are filtered out before reaching text input handling, distinct from the transcript scroll path.\n\nEXECUTION_FLOW\nTerminal emits SGR mouse escape sequence on wheel scroll → App.tsx's raw input handler (around line 1195) calls `parseTerminalMouseWheel(ch)` from `terminalMouse.ts` to decode direction/x/y → resulting wheel event is translated into a row delta (using `DEFAULT_MOUSE_WHEEL_ROWS` from `TranscriptViewport.tsx`) and applied via `clampTranscriptScroll`/state update → `scrollRowsFromBottom` state flows into `<TranscriptViewport>` (mounted ~line 1464) as a prop → `TranscriptViewport` component computes the visible window with `getTranscriptViewportWindow` using measured `contentRows`/`viewportRows` (via Ink's `useBoxMetrics`) and reports back through `onScrollRowsChange`/`onMetricsChange` → `handleTranscriptMetrics` (line 841) stores `TranscriptViewportMetrics` in App state, closing the loop for subsequent scroll clamping. Mouse tracking itself is enabled/disabled at App mount via `shouldEnableMouseTracking` gating writes of `ENABLE_MOUSE_TRACKING`/`DISABLE_MOUSE_TRACKING` escape codes to stdout (line 464-465). `PromptInput.tsx` independently filters out mouse escape sequences so they don't pollute typed input.\n\nSEARCHES_TRIED\n- read_file on prefetched candidates: `TranscriptViewport.tsx`, `terminalMouse.ts` (full content confirmed)\n- search_content for `TranscriptViewport|parseTerminalMouseWheel|onScrollRowsChange|shouldEnableMouseTracking` in `src/cli/**/*.tsx` → located App.tsx as the sole component-level caller\n- search_content for `parseTerminalMouseWheel|ENABLE_MOUSE_TRACKING|isTerminalMouseInput` across `src/cli` → surfaced `...\n\n</fast_context_pack>",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "claude-code",
+      "caseId": "transcript-scroll",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 113372.50469999999,
+      "apiDurationMs": 60797,
+      "turns": 10,
+      "apiRequests": 10,
+      "apiRetries": 0,
+      "toolCalls": 9,
+      "searchCalls": 4,
+      "readCalls": 5,
+      "rankedPaths": [
+        "src/cli/components/app.tsx",
+        "src/cli/components/transcriptviewport.tsx",
+        "src/cli/terminalmouse.ts",
+        "src/cli/components/transcriptviewport.test.ts",
+        "src/cli/terminalmouse.test.ts"
+      ],
+      "usage": {
+        "inputTokens": 515,
+        "outputTokens": 1975,
+        "cacheCreationInputTokens": 209,
+        "cacheReadInputTokens": 6178,
+        "costUsd": 0.1126905
+      },
+      "report": "Good, I have enough to compose the report.\n\nRANKED_CODE_MAP\n\n- `src/cli/components/App.tsx` — lines 1183-1240 (mouse wheel input dispatch), 826-880 (scroll state, `scrollTranscriptBy`, `handleTranscriptMetrics`, page-step keys), 463-469 (mouse tracking enable/disable on mount). Role: central wiring — reads raw terminal input via Ink's `useInput`, parses mouse-wheel escape sequences, hit-tests against the transcript's on-screen rectangle, and converts wheel/page/arrow key events into row-scroll deltas applied to `scrollRowsFromBottom` state. Confidence: high. Why it matters: this is the actual event handler that turns terminal mouse wheel events and keyboard scroll keys into transcript viewport movement; without it the viewport component below is inert.\n\n- `src/cli/components/TranscriptViewport.tsx` — lines 1-157 (whole file). Role: the row-level virtualized scrolling viewport itself. Defines the scroll math (`clampTranscriptScroll`, `getTranscriptViewportWindow`, `preserveTranscriptAnchor`, `getTranscriptPageRows`, `revealTranscriptRange`) and the `TranscriptViewport` React component that measures content/viewport height in terminal rows and renders a clipped, offset `Box` (via `top={-window.topRow}`) to simulate scrolling in the terminal. Confidence: high. Why it matters: this is the core row-level viewport implementation — it owns the scroll-row bookkeeping and clamping logic that `App.tsx` drives.\n\n- `src/cli/terminalMouse.ts` — lines 1-39 (whole file). Role: low-level terminal mouse protocol handling. Defines `parseTerminalMouseWheel` (parses SGR mouse escape sequences `\\x1b[<b;x;yM` into up/down wheel events), `isTerminalMouseInput`, and the enable/disable mouse tracking escape codes plus `shouldEnableMouseTracking` gating logic (checks `TURBOFLUX_MOUSE` env var and TERM). Confidence: high. Why it matters: this is the actual terminal mouse-wheel protocol parser/decoder that `App.tsx` calls into; it's the lowest-level piece translating raw ANSI input bytes into wheel direction/coordinates.\n\n- `src/cli/components/TranscriptViewport.test.ts` — role: unit tests for the viewport scroll math (clamping, anchor preservation, page rows, range revealing). Confidence: medium (supporting evidence, not core logic). Why it matters: confirms intended behavior/edge cases of the scrolling math in TranscriptViewport.tsx (e.g., anchor preservation when content grows, clamping bounds), useful for verifying correctness of row-level scroll behavior.\n\n- `src/cli/terminalMouse.test.ts` — role: unit tests for `parseTerminalMouseWheel`/`shouldEnableMouseTracking`. Confidence: medium. Why it matters: documents expected SGR mouse sequence formats and env-var gating behavior for enabling wheel support, useful for confirming protocol assumptions.\n\nEXECUTION_FLOW\n1. On mount/interactive-mode entry, `App.tsx` (~463-469) writes `ENABLE_MOUSE_TRACKING` (SGR mouse mode escape codes from `terminalMouse.ts`) to stdout when `shouldEnableMouseTracking` passes (interactive + fixed/no-flicker viewport + `TURBOFLUX_MOUSE` env flag).\n2. Ink's `useInput` handler in `App.tsx` (~1183) receives raw keypress/escape chunks; when in no-flicker mode it calls `parseTerminalMouseWheel(ch)` (`terminalMouse.ts`) to extract wheel events with x/y coordinates and direction.\n3. `App.tsx` computes the transcript's on-screen rectangle (header/footer/rail offsets) and filters wheel events to those inside it, accumulating a row delta (± `DEFAULT_MOUSE_WHEEL_ROWS`, imported from `TranscriptViewport.tsx`).\n4. The delta (or page-up/down/shift-arrow key delta) is passed to `scrollTranscriptBy`, which updates `scrollRowsFromBottom` state via `clampTranscriptScroll` (bounded by `transcriptMetricsRef.current.maxScrollRows`).\n5. `TranscriptViewport` component receives `scrollRowsFromBottom` as a prop, measures actual rendered content/viewport row counts via `useBoxMetrics`, recomputes the visible window (`getTranscriptViewportWindow`), reports metrics back up (`onMetricsChange` → `handleTranscriptMetrics`), and renders the message list offset by `-topRow` to produce the scrolled view.\n\nSEARCHES_TRIED\n- grep for \"scroll\" and \"wheel\" across .ts/.tsx (excluding node_modules), surfaced many unrelated matches from `.claude/worktrees` reference copies, `tmp/layout-references`, and `dist/` build output; filtered to the live `src/cli` sources.\n- grep for `MouseWheel|scrollRowsFromBottom|TranscriptViewport|DEFAULT_MOUSE_WHEEL_ROWS|onScrollRowsChange|ENABLE_MOUSE_TRACKING|isTerminalMouseInput` within `src/cli/components/App.tsx` to locate exact wiring line numbers.\n- grep for `scrollTranscriptBy|pageStep|normalizedScrollRows|handleTranscriptMetrics` to trace scroll state derivation and key handlers.\n- Read `TranscriptViewport.tsx` and `terminalMouse.ts` in full; read `App.tsx` lines 380-480, 826-870, and 1170-1240 directly.\n\nUNCERTAINTY\n- Did not inspect `dist/cli/terminalMouse.d.ts` or `dist/cli/components/TranscriptViewport.d.ts` (compiled output, redundant with source).\n- Did not read `App.test.ts` or the remainder of `App.tsx` outside the cited ranges; there may be additional scroll-related key bindings (e.g., 'j'/'k' or mouse-drag) further in the file not captured here.\n- The `.claude/worktrees/...claude-code-reference` and `tmp/layout-references/...` trees contain a large parallel/reference codebase with similarly named scroll/wheel concepts (Ink's own `ScrollBox`, `use-terminal-viewport.ts`, etc.) — these were excluded as out-of-scope reference/vendor material rather than the actual TurboFlux CLI, but worth flagging in case that assumption is wrong.",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 0.6,
+      "executionFlowPresent": true,
+      "qualityIndex": 96
+    },
+    {
+      "system": "turboflux",
+      "caseId": "chinese-setup-copy",
+      "category": "location",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 65074.51889999991,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 9,
+      "searchCalls": 0,
+      "readCalls": 9,
+      "rankedPaths": [
+        "src/cli/setup.ts",
+        "src/core/config.ts",
+        "core/config.ts"
+      ],
+      "usage": {
+        "inputTokens": 1399,
+        "outputTokens": 1270,
+        "cacheCreationInputTokens": 771,
+        "cacheReadInputTokens": 13003
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: FastContext 子代理模型配置这段中文界面文案在哪里实现？请定位真实源码。\nretrieval: 8 turn(s), 64800ms\nquality: 7 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. `src/cli/setup.ts:702-722` — **Primary implementation.** Function `configureFastContextModel()` directly renders the Chinese copy: `console.log(chalk.cyan('FastContext 子代理模型'))` (line 706) and the interactive selector `promptSelect('选择 FastContext 子代理模型策略', [...])` (line 709). This is the true source of the \"FastContext 子代理模型配置\" UI text. Confidence: high — content confirmed via direct grep of the file returning literal source lines, and file structure confirmed via read_file (imports/exports, function scoping).\n\n2. `src/cli/setup.ts:933` — **Menu label / entry point text.** `console.log('  3. FastContext 子代理模型')` — this is the setup main-menu line item that surfaces the same Chinese label to the user before they enter the flow in candidate #1. Confidence: high — confirmed via search_content literal match.\n\n3. `src/cli/setup.ts:893, 975, 1031` — **Callers invoking the core implementation.** Three call sites `await configureFastContextModel()` — one during initial setup flow (~893) and two inside menu/interactive branch handling (~975, ~1031), showing this config screen is reachable both from first-run setup and from the persistent settings menu. Confidence: high — confirmed via search_content literal matches; exact surrounding logic (branch conditions) not read in full due to tool read offset issue this session.\n\n4. `src/core/config.ts` (imported symbols: `setFastContextModelConfig`, `getFastContextApiConfig`) — **State/persistence boundary.** `setup.ts` imports these directly (see read_file lines 3-22 of setup.ts) to read/write the FastContext model config that this UI screen manages. Confidence: medium — import relationship read-confirmed in setup.ts, but I did not open `core/config.ts` itself this session, so the persistence implementation details are unverified.\n\nEXECUTION_FLOW\n- User runs `setup` CLI flow → main menu prints options including `\"3. FastContext 子代理模型\"` (setup.ts:933).\n- Selecting that option (or during initial `init` flow, setup.ts:893) calls `configureFastContextModel()` (setup.ts:702).\n- That function prints the section header `'FastContext 子代理模型'` and prompts the user via `promptSelect('选择 FastContext 子代理模型策略', [...])` (setup.ts:706-709) to choose a sub-agent model strategy.\n- The chosen strategy is persisted through `setFastContextModelConfig` (imported from `../core/config`) and later read back via `getFastContextApiConfig` when FastContext actually runs its sub-agent scans.\n- Additional call sites at setup.ts:975 and 1031 re-invoke the same function from other menu/interactive branches (e.g., \"reconfigure\" or settings-edit paths), confirming this is the single shared implementation rather than duplicated copy.\n\nSEARCHES_TRIED\n- `search_content(\"FastContext 模型|FastContext模型|独立 FastContext 模型\")` in `src` — no matches (ruled out roadmap-doc-style phrasing as the real source).\n- `search_content(\"子代理模型|FastContext.*模型配置|configureFastContextModel\")` in `src` — matched exactly `src/cli/setup.ts` at lines 702, 706, 709, 893, 933, 975, 1031, confirming this file as the sole owner of the literal Chinese copy.\n- `read_file(\"src/cli/setup.ts\")` (multiple attempts, offsets 1-80) — confirmed file imports (`../core/config`, `../core/modelRegistry`, `../shared/agentTypes`, `../core/profile`) and top-level structure, establishing the config/state dependency chain.\n\nUNCERTAINTY\n- The read_file tool repeatedly returned only lines 1-80 of `setup.ts` regardless of offset in this session (apparent tool/offset malfunction), so I could not directly read_file the exact 690-1040 region containing `configureFastContextModel`. That region's content is nonetheless confirmed via search_content returning literal matching lines, and is also corroborated by the deterministic prefetch snippet (setup.ts:697-722) shown in the task input, which independently shows the same function body.\n- `src/core/config.ts` (the persistence layer for `setFastContextModelConfig`/`getFastContextApiConfig`) was not opened this session — its role is inferred from the import statement in `setup.ts`, not confirmed via direct read.\n- Did not verify whether `fastContextUi.ts` or `App.tsx` (from the deterministic prefetch) render any duplicate/secondary copy of this Chinese text in the TUI; search results suggest the setup wizard (`setup.ts`) is the sole source, but this wasn't exhaustively ruled out for runtime TUI components.\n\n</fast_context_pack>",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "claude-code",
+      "caseId": "chinese-setup-copy",
+      "category": "location",
+      "success": false,
+      "timedOut": true,
+      "latencyMs": 240046.11690000002,
+      "turns": 10,
+      "apiRequests": 10,
+      "apiRetries": 0,
+      "toolCalls": 10,
+      "searchCalls": 7,
+      "readCalls": 3,
+      "rankedPaths": [],
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "cacheReadInputTokens": 0
+      },
+      "report": "",
+      "error": "Timed out after 240000ms",
+      "recallAt5": 0,
+      "recallAt10": 0,
+      "reciprocalRank": 0,
+      "top1Hit": false,
+      "citationRate": 0,
+      "executionFlowPresent": false,
+      "qualityIndex": 0
+    },
+    {
+      "system": "turboflux",
+      "caseId": "clipboard-images",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 60878.618200000026,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 13,
+      "searchCalls": 0,
+      "readCalls": 13,
+      "rankedPaths": [
+        "src/cli/imageattachments.ts",
+        "src/cli/components/app.tsx",
+        "src/cli/components/input/promptinput.tsx",
+        "src/core/contextmanager.ts",
+        "src/shared/plugintypes.ts"
+      ],
+      "usage": {
+        "inputTokens": 1332,
+        "outputTokens": 1530,
+        "cacheCreationInputTokens": 776,
+        "cacheReadInputTokens": 12610
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: Locate clipboard image paste, image attachment parsing, and conversion into model messages.\nretrieval: 8 turn(s), 60493ms\nquality: 9 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. src/cli/imageAttachments.ts:1-80 — Core implementation. `resolveImagePrompt(input, workspacePath, options)` is the central conversion function: it collects inline image refs and `<imageN>` / `[Image #N]` placeholders from prompt text, resolves file paths via `resolveInputPath`, reads/validates files via `attachImageFile` (mime allowlist in `IMAGE_MIME_BY_EXT`, `MAX_IMAGE_BYTES` cap), and falls back to `captureClipboardImageAttachment(1, warnings, workspacePath)` when a placeholder exists but no file ref resolved to an attachment. Returns `{ prompt, attachments, warnings }` — this is the parsing/attachment-building core referenced by the objective. Confidence: high.\n\n2. src/cli/components/App.tsx:1-53 (imports) and :1043, :1441 (usage sites confirmed via search, not yet read directly beyond import lines) — Caller/UI layer. Imports `captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt` from `../imageAttachments` (line 45), and wires a `handlePasteImage` callback (found via search at line 1043) passed to `PromptInput` as `onPasteImage` (line 1441). This is the entry point where clipboard-paste events in the terminal UI trigger the image-attachment pipeline. Confidence: high (import line read directly; callback lines confirmed by search but not yet read in full — see uncertainty).\n\n3. src/cli/components/input/PromptInput.tsx (found via search, not read this pass but strongly indicated) — `onPasteImage?: () => boolean` prop, invoked at line 136 (`if (text.length === 0 && onPasteImage?.()) return`) and line 144, is the keystroke-level trigger (Ctrl+V) that calls back into App.tsx's `handlePasteImage`. Confidence: medium (search-confirmed only, not read this session).\n\n4. src/core/contextManager.ts:1-10, 237-245 — Consumer/conversion boundary into model messages. Imports `AgentAttachment` and defines `attachmentToDataUrl(attachment: AgentAttachment): string | null` and `attachmentManifestText(attachments: AgentAttachment[]): string`, which is the layer that turns `AgentAttachment[]` (produced by `resolveImagePrompt`/`attachImageFile`) into the data-URL / manifest form used when building model messages. Confidence: high (file read; function bodies at 237-245 not yet expanded beyond signatures).\n\n5. src/shared/pluginTypes.ts:487-512 (from prefetch, not independently read this session) — Declares the plugin vendor hook `imageProcessor.readClipboardImage?(maxWidth?, maxHeight?): Promise<ClipboardImageResult | null>`, the abstraction `captureClipboardImageAttachment` likely delegates to for actual OS clipboard reads. Confidence: low-medium (not read directly this run, carried from prefetch).\n\nEXECUTION_FLOW\nUser pastes image (Ctrl+V) in `PromptInput.tsx` → `onPasteImage` prop fires → `App.tsx` `handlePasteImage` (line ~1043) calls into `imageAttachments.ts` helpers (`captureClipboardImageAttachment`, `hasImageReference`, `imagePlaceholderForIndex`, `reconcileDraftImagePrompt`) to insert a placeholder token into the draft prompt and stage a clipboard-derived attachment. On submit, `resolveImagePrompt(input, workspacePath, options)` (imageAttachments.ts:38-74) re-scans the final prompt text for both file-path image refs and placeholder tokens, resolves/validates each via `resolveInputPath` + `attachImageFile`, and for any remaining unresolved placeholder falls back to a fresh `captureClipboardImageAttachment` clipboard read. The resulting `attachments: AgentAttachment[]` then flow into `src/core/contextManager.ts`, where `attachmentToDataUrl` and `attachmentManifestText` convert attachments into data-URL/manifest content suitable for inclusion in model messages.\n\nSEARCHES_TRIED\n- search_content: `readClipboardImage|pasteImage|onPasteImage` across src\n- search_content: `attachImageFile|imagePlaceholder|resolveInputPath` across src\n- search_content: `AgentAttachment` in src/core\n- read_file: src/cli/imageAttachments.ts (lines 1-80, repeated)\n- read_file: src/cli/components/App.tsx (lines 1-80, repeated)\n- read_file: src/core/contextManager.ts (lines 1-80)\n\nUNCERTAINTY\n- Tool output for read_file consistently returned only lines 1-80 of each target file regardless of offset attempts in this session, so `attachImageFile`, `captureClipboardImageAttachment`, `resolveInputPath`, and `normalizeExistingAttachments` implementations (imageAttachments.ts beyond line 80), the `handlePasteImage` body and PromptInput wiring in App.tsx (beyond line 80), and the full `attachmentToDataUrl`/`attachmentManifestText` bodies in contextManager.ts were not directly read — their existence and signatures are confirmed via search_content grep matches only, not full-body read confirmation.\n- src/cli/components/input/PromptInput.tsx and src/shared/pluginTypes.ts (the clipboard vendor hook) were identified via search/prefetch but not opened this session; ranking for these is lower confidence.\n- The actual OS-level clipboard image ca...\n\n</fast_context_pack>",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "claude-code",
+      "caseId": "clipboard-images",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 106966.46360000002,
+      "apiDurationMs": 96220,
+      "turns": 15,
+      "apiRequests": 15,
+      "apiRetries": 0,
+      "toolCalls": 14,
+      "searchCalls": 10,
+      "readCalls": 4,
+      "rankedPaths": [
+        "src/cli/imageattachments.ts",
+        "src/core/contextmanager.ts",
+        "src/cli/components/app.tsx",
+        "src/core/agentengine.ts",
+        "src/shared/agenttypes.ts"
+      ],
+      "usage": {
+        "inputTokens": 857,
+        "outputTokens": 2286,
+        "cacheCreationInputTokens": 246,
+        "cacheReadInputTokens": 12725,
+        "costUsd": 0.13867000000000002
+      },
+      "report": "RANKED_CODE_MAP\n\n1. **src/cli/imageAttachments.ts** — lines 1-362 — role: core clipboard/image ingestion logic — confidence: high — why it matters: this is the primary module. `captureClipboardImageAttachment` (219-233) drives Windows-only clipboard capture, trying file-drop-list paths first (`captureClipboardImageFileAttachment`/`readClipboardImageRefs`, 278-322, via a PowerShell script reading `Clipboard.GetFileDropList`/`GetText`) then falling back to raw bitmap capture (`captureClipboardBitmapAttachment`, 235-276, via `System.Windows.Forms.Clipboard.GetImage()` saved to PNG). `resolveImagePrompt` (38-74) parses pasted text for image references (markdown, `<image>` tags, file paths) via `collectImageRefs` (98-132), replaces them with `[Image #N]` placeholders, and copies attached files into `~/.turboflux/attachments` (`attachImageFile`, 185-217). `imageAttachmentToDataUrl` (355-361) base64-encodes an attachment for model consumption.\n\n2. **src/core/contextManager.ts** — lines 234-295 — role: conversion of image attachments into provider-specific model message content — confidence: high — why it matters: `buildUserContentWithAttachments` (256-295) is where attachments become actual LLM message parts: for Anthropic it emits `{type: 'image', source: {type: 'base64', media_type, data}}`, for OpenAI-style it emits `{type: 'image_url', image_url: {url: dataUrl}}`. `attachmentToDataUrl` (237-243) reads the file and enforces `MAX_DIRECT_IMAGE_BYTES` (5MB) and an allowed MIME set (`VISION_IMAGE_MIMES`, 234). `attachmentManifestText` (245-254) builds a text manifest that accompanies the images. Called at line 866 during message construction.\n\n3. **src/cli/components/App.tsx** — lines 1013-1181 — role: UI wiring for clipboard paste and attach flow — confidence: high — why it matters: `attachClipboardImage` (1013-1041) is bound to a keypress (e.g. Ctrl+V) and calls `captureClipboardImageAttachment`, then inserts an `[Image #N]` placeholder into the composed input and updates `draftAttachments` state. `handlePasteText` (1047-1058) intercepts raw text paste events and runs `resolveImagePrompt` to detect embedded image refs. `handleSubmit` (1116-1181) does a final `resolveImagePrompt` pass before calling `runPrompt`, which passes `attachments` into `engine.run(prompt, { attachments })` (line 933).\n\n4. **src/core/agentEngine.ts** — lines 5860-5870 (also 1488, 1527, 963, 1021-1022) — role: attaching image metadata to conversation turns — confidence: high — why it matters: `createUserTurn` stores attachments on `AgentTurn.metadata.attachments`, and `run()` (1488) threads the `attachments` option from the UI into the turn that later gets converted by `contextManager.buildUserContentWithAttachments`.\n\n5. **src/shared/agentTypes.ts** — lines 95-106 — role: type definitions — confidence: medium — why it matters: defines `AgentAttachment` (`id`, `type: 'image'`, `path`, `mime`, `filename`, `size`) and where it hangs off `AgentTurn.metadata.attachments`, the shape threaded through the whole pipeline above.\n\nEXECUTION_FLOW\nUser presses paste/attach key or pastes text in `App.tsx` → `attachClipboardImage`/`handlePasteText` call into `imageAttachments.ts` (`captureClipboardImageAttachment` or `resolveImagePrompt`) → Windows clipboard is read via spawned PowerShell (file drop list or bitmap image), image bytes are copied/saved under `~/.turboflux/attachments` and wrapped as an `AgentAttachment` → placeholder `[Image #N]` inserted into the input text, attachment stored in React state (`draftAttachments`) → on submit, `handleSubmit` re-resolves any remaining image refs then calls `runPrompt(prompt, attachments)` → `agentEngine.run()` builds an `AgentTurn` via `createUserTurn`, storing attachments in `turn.metadata.attachments` → when building the request payload, `contextManager.buildUserContentWithAttachments` reads each attachment's file, base64-encodes it, and emits provider-specific content blocks (Anthropic `image` block or OpenAI `image_url` block) merged with a text manifest, producing the final multimodal message sent to the model.\n\nSEARCHES_TRIED\n- `grep -ril \"clipboard\"` and `grep -liE \"clipboard|paste\"` across the repo (surfaced both `claude-code-reference/` vendor copy and the actual `src/` app code)\n- `find src -type f | grep -i -E \"prompt|image|attach|message\"` to locate the app's own image/attachment files\n- `grep -rl \"imageAttachmentToDataUrl|resolveImagePrompt|AgentAttachment\"` to trace usage across `src/`\n- Targeted reads of `src/cli/imageAttachments.ts`, `src/core/contextManager.ts`, `src/cli/components/App.tsx`, `src/core/agentEngine.ts`, `src/shared/agentTypes.ts`\n\nUNCERTAINTY\n- `claude-code-reference/src/utils/imagePaste.ts`, `imageStore.ts`, `screenshotClipboard.ts`, and `pasteStore.ts` exist as a vendored reference implementation but are not part of TurboFlux's actual runtime (`src/`); I did not read them since they aren't wired into this app's execution path, but they may be a useful design reference if TurboFlux later needs cross-platform (macOS/Linux) clipboard support, since the current implementation is Windows-only (enforced explicitly at imageAttachments.ts:220-223).\n- I did not trace how `image_url`/`image` content blocks are ultimately serialized into the actual HTTP request bodies sent to each provider's SDK (that would live further down in the provider client code, not reviewed here).\n- I have not run the build/tests; this was a read-only retrieval task per instructions.",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "turboflux",
+      "caseId": "background-terminal-lifecycle",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 95809.81960000005,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 14,
+      "searchCalls": 0,
+      "readCalls": 14,
+      "rankedPaths": [
+        "src/core/runtime/nodetoolexecutor.ts",
+        "src/core/agentengine.ts",
+        "src/tools/executor.ts",
+        "src/shared/terminaltypes.ts",
+        "src/cli/components/app.tsx",
+        "src/core/runtime/agentruntime.ts"
+      ],
+      "usage": {
+        "inputTokens": 1305,
+        "outputTokens": 1756,
+        "cacheCreationInputTokens": 709,
+        "cacheReadInputTokens": 12359
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: Trace how a background terminal command is started, persisted, polled, restored into UI state, and terminated. Identify the true execution core and its callers.\nretrieval: 8 turn(s), 95423ms\nquality: 8 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. `src/core/runtime/nodeToolExecutor.ts:40-77` (also grep-verified 1040-1300) — role: execution core. read_file confirmed the `BackgroundTerminalSession` state shape (`info`, `proc: ChildProcessWithoutNullStreams`, `chunks`, `nextSeq`, `bufferChars`, `runtimeTaskId`, `logPath`, `outputBytes`, `logError`) and lifecycle constants (`MAX_TERMINAL_CHUNKS`, `MAX_TERMINAL_BUFFER_CHARS`, `RUNTIME_LOG_DIRECTORY = .turboflux/runtime-logs`, `TERMINAL_KILL_TIMEOUT_MS`, `DEFAULT_TERMINAL_SHELL`). search_content additionally located `ptyWrite` (1159), `ptyKill` (1211), `ptyKillAll` (1258), `killTerminalProcessTree` (1268), `waitForTerminalClose` (1293), and session creation (1055). This is the true runtime core: it spawns the shell process via `child_process.spawn`, buffers output chunks, writes a persisted log file, and owns kill/cleanup. Confidence: high.\n\n2. `src/core/agentEngine.ts:1-66` (also grep-verified 4367-5311) — role: primary caller/orchestrator. read_file confirmed the module imports `TerminalSessionInfo` from `shared/terminalTypes` and `RuntimeTaskManager`. search_content located the actual call sites: `emitTerminalSessions()` (4367), `getTerminalSession()` (4378), and the tool-handling block (5192-5311) that starts a session, does `this.toolExecutor.ptyWrite(sessionId, ...)`, kills on failure via `ptyKill`, and re-emits session state after each mutation. This is the layer that turns a model tool-call into a start/write/poll/kill sequence against the executor. Confidence: high.\n\n3. `src/tools/executor.ts:108-113` — role: contract/interface boundary between agentEngine and nodeToolExecutor. search_content confirmed `ptyWrite?`, `ptyKill?`, `ptyKillAll?` are declared here as optional methods on `ToolExecutor`. This is the abstraction seam — agentEngine only calls through this interface, nodeToolExecutor is one concrete implementation. Not independently read via read_file in this run; ranked lower-confidence on that basis. Confidence: medium.\n\n4. `src/shared/terminalTypes.ts:1-25` — role: schema/state definition. search_content confirmed `TerminalSessionStatus = 'starting' | 'running' | 'exited' | 'error'` and the `TerminalSessionInfo` shape (status field visible at line 25). This is the persisted/serialized session state shared between core and UI. Not read via read_file directly; confidence: medium.\n\n5. `src/cli/components/App.tsx` (lines ~372, 565, 740-745, 1485-1606) — role: UI restoration/polling consumer. search_content confirmed `useState<TerminalSessionInfo[]>` (372), reset on session change (565), an event handler that does `setTerminalSessions(event.sessions)` and a per-id map update by `sessionId` (740-745) — this is the polling/restore-into-UI-state path — plus `activeTerminalCount` derived from `status === 'running' || 'starting'` (1485) feeding `TerminalSessionsFooter`. Not read via read_file; confidence: medium.\n\n6. `src/core/runtime/agentRuntime.ts:134` — role: termination path on process/runtime shutdown, calling `toolExecutor.ptyKillAll?.()`. Found via search_content only, not read. Confidence: low-medium (single grep line, context not verified).\n\nEXECUTION_FLOW\nStart: agentEngine tool-call handler (agentEngine.ts ~5192) invokes the executor through the `ToolExecutor` interface (executor.ts:108-113) → concrete implementation in `nodeToolExecutor.ts` spawns a child process, creates a `BackgroundTerminalSession` (info/proc/chunks/logPath/runtimeTaskId) around line 1055.\nPersist: nodeToolExecutor appends output chunks in-memory (bounded by `MAX_TERMINAL_CHUNKS`/`MAX_TERMINAL_BUFFER_CHARS`) and writes to a log file under `.turboflux/runtime-logs` (`logPath`), tracked via `RuntimeTaskManager`.\nWrite/poll: agentEngine calls `ptyWrite(sessionId, data)` to send input and `getTerminalSession(sessionId)` / `emitTerminalSessions()` to poll/broadcast current session state after each interaction (agentEngine.ts 5268-5300).\nRestore into UI: the emitted `TerminalSessionInfo[]` reaches the CLI layer where `App.tsx` stores it in `terminalSessions` state, updates it per-session-id on events, and renders it through `TerminalSessionsFooter`.\nTerminate: agentEngine calls `ptyKill(sessionId)` (or `ptyKillAll` from `agentRuntime.ts` on shutdown) → nodeToolExecutor's `killTerminalProcessTree` and `waitForTerminalClose` (1268-1300ish) handle graceful termination with a timeout (`TERMINAL_KILL_TIMEOUT_MS`), then `emitTerminalSessions()` broadcasts the final `exited`/`error` status.\n\nSEARCHES_TRIED\n- search_content: `ptyWrite|ptyKill|ptyStart|ptySpawn|pty\\.spawn|node-pty` across `src`\n- search_content: `terminalSessions|TerminalSession\\b|emitTerminalSessions` across `src`\n- read_file: `src/core/runtime/nodeToolExecutor.ts` (repeated attempts, all returned lines 1-80; deeper offsets into 1000+ range were not successfully retrieved in this run)\n- read_file: `src/core/agentEngine.ts` (repeated attempts, all returned lines 1-80; deeper offsets into 4300+/5100+ range were not successfully retrieved in thi...\n\n</fast_context_pack>",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "claude-code",
+      "caseId": "background-terminal-lifecycle",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 208739.8267000001,
+      "apiDurationMs": 202692,
+      "turns": 26,
+      "apiRequests": 26,
+      "apiRetries": 0,
+      "toolCalls": 25,
+      "searchCalls": 15,
+      "readCalls": 10,
+      "rankedPaths": [
+        "src/core/runtime/nodetoolexecutor.ts",
+        "src/core/agentengine.ts",
+        "src/core/runtime/runtimetaskmanager.ts",
+        "src/core/runtime/agentruntime.ts",
+        "src/cli/components/app.tsx",
+        "src/cli/components/tools/terminalsessionsfooter.tsx"
+      ],
+      "usage": {
+        "inputTokens": 1580,
+        "outputTokens": 3406,
+        "cacheCreationInputTokens": 441,
+        "cacheReadInputTokens": 26047,
+        "costUsd": 0.2176595
+      },
+      "report": "All confirmed by direct reads. Here's the report.\n\nRANKED_CODE_MAP\n\n1. `src/core/runtime/nodeToolExecutor.ts` — lines 1014-1306\n   Role: **Execution core.** `ptyCreate` spawns the actual child process (`spawn()`) that backs a background terminal session, wires stdout/stderr into an in-memory chunk buffer (`BackgroundTerminalSession.chunks`) capped by `MAX_TERMINAL_CHUNKS`/`MAX_TERMINAL_BUFFER_CHARS`, and persists output to a log file via `appendRuntimeTaskLog`. `ptyWrite` sends stdin (used to actually launch the requested command in the shell). `ptyGetBuffer` is the poll endpoint returning buffered chunks. `ptyInterruptCommand`/`ptyKill`/`ptyKillAll` handle termination, including process-tree kill via `taskkill`/`SIGTERM`. `ptyList` reports current sessions.\n   Confidence: high — this is where the OS process is created, buffered, and torn down; every other layer calls through it.\n   Why it matters: it's the single source of truth for a running background terminal; nothing above it touches `child_process` directly for terminals.\n\n2. `src/core/agentEngine.ts` — lines 5173-5321 (tool dispatch) and 4361-4383, 1269-1285 (event plumbing)\n   Role: **Primary caller / orchestrator.** The `run_command` tool case (with `run_in_background: true`) calls `ptyCreate` then `ptyWrite` to start the command, and stores bookkeeping in `agentBackgroundSessions`. `read_terminal`, `write_terminal`, `kill_terminal`, `list_terminals` tool cases call `ptyGetBuffer`, `ptyWrite`, `ptyInterruptCommand`/`ptyKill`, and `ptyList` respectively — this is the polling and termination surface exposed to the LLM/agent loop. `emitTerminalSessions` (4367) re-polls `ptyList` and emits a `terminal:sessions` event after every state-changing action, and `publishRuntimeTaskFinished` (1274) re-emits terminal task completion events.\n   Confidence: high — read directly, confirms it's the sole consumer of the executor's pty* API.\n   Why it matters: it's the layer that turns raw process control into agent-visible terminal semantics (start/poll/write/kill) and decides when to push UI-facing events.\n\n3. `src/core/runtime/runtimeTaskManager.ts` — full file (1-249)\n   Role: **Persistence/state layer for lifecycle tracking**, parallel to the terminal session map. `createTask`/`markRunning`/`updateTask`/`completeTask`/`failTask`/`markStopped` track status transitions (starting → running → completed/failed/stopped/interrupted) for every terminal (and other runtime kinds), independent of the raw process handle. It exposes `subscribe` for event-driven propagation (`runtime-task:created/updated/finished`) and a `RuntimeTaskControl` (stop/write) abstraction that `ptyCreate` registers so termination/writes can be routed generically.\n   Confidence: high.\n   Why it matters: this is the durable \"task record\" that survives independent of the child process object, and is what triggers UI restoration/finish notifications via `agentRuntime.ts`.\n\n4. `src/core/runtime/agentRuntime.ts` — lines 62-139\n   Role: **Wiring/composition root.** Constructs `RuntimeTaskManager`, `NodeToolExecutor`, and `AgentEngine` together, subscribes to `runtimeTaskManager` events and forwards `runtime-task:finished` into `engine.publishRuntimeTaskFinished`. Also owns cleanup (`destroy()` calls `runtimeTaskManager.stopAll()` and `toolExecutor.ptyKillAll?.()`), which is the actual top-level termination path when the whole agent session shuts down.\n   Confidence: high.\n   Why it matters: shows how the execution core (executor), the persistence layer (task manager), and the event-facing engine are bound together, and is the true termination point at process/session teardown.\n\n5. `src/cli/components/App.tsx` — lines 372, 736-757, 1485, 1606 and `src/cli/components/tools/TerminalSessionsFooter.tsx` (full file)\n   Role: **UI restoration/render.** `App.tsx` holds `terminalSessions` state, updates it on `terminal:sessions` events (full poll snapshot) and incrementally patches individual sessions on `runtime-task:finished` events (exit code/status without a full re-poll). `TerminalSessionsFooter` renders the count/label of currently running background terminals from that state.\n   Confidence: high.\n   Why it matters: this is where polled/persisted terminal state actually becomes visible UI, closing the loop from process spawn to what the user sees.\n\nEXECUTION_FLOW\n1. Agent calls tool `run_command` with `run_in_background: true` → `agentEngine.ts` (~5187) calls `toolExecutor.ptyCreate()`.\n2. `nodeToolExecutor.ts:ptyCreate` (1014) spawns the shell process, creates a `RuntimeTaskManager` task (kind `terminal`), registers a `stop`/`write` control, stores a `BackgroundTerminalSession` in `backgroundTerminals` map, and attaches `stdout`/`stderr`/`close` listeners that append output chunks and log to disk.\n3. `agentEngine.ts` then calls `ptyWrite(sessionId, command + '\\n')` to actually execute the command in that shell, and tracks it in `agentBackgroundSessions`; calls `emitTerminalSessions()` to push a `terminal:sessions` event.\n4. Polling: agent (or user via CLI) calls `read_terminal` → `agentEngine.ts:read_terminal` case (5228) → `toolExecutor.ptyGetBuffer(sessionId)` (nodeToolExecutor.ts:1178) returns buffered chunks filtered by `since_seq`; each call also triggers `emitTerminalSessions()` for UI refresh.\n5. Termination: `kill_terminal` tool → `agentEngine.ts` (5274) tries `ptyInterruptCommand` (SIGINT/taskkill) first, falls back to `ptyKill` (1211) which closes stdin, waits, then force-kills the process tree (`killTerminalProcessTree`, 1268) and marks the `RuntimeTaskManager` task stopped.\n6. Restoration/propagation into UI: `RuntimeTaskManager` emits `runtime-task:finished` → `agentRuntime.ts` (85) forwards it into `engine.publishRuntimeTaskFinished` → `AgentEngine` emits `runtime-task:finished` app event → `App.tsx` (742) patches `terminalSessions` state → `TerminalSessionsFooter.tsx` renders the live count.\n7. Full-session teardown: `agentRuntime.ts:destroy()` calls `runtimeTaskManager.stopAll()` and `toolExecutor.ptyKillAll?.()` (nodeToolExecutor.ts:1258) which iterates `backgroundTerminals` and kills each remaining session.\n\nSEARCHES_TRIED\n- grep for `background`, `terminal_output`, `pollTerminal` etc. across the repo (mostly hit an unrelated `tmp/layout-references` copy and a separate `claude-code-reference`/worktree copy, which were excluded as not the primary source tree).\n- grep for `ptyCreate|ptyGetBuffer|node-pty` across `src` to locate the interface (`src/tools/executor.ts`) and its only real implementation (`nodeToolExecutor.ts`).\n- grep in `agentEngine.ts` for each `pty*` call site to find the caller/orchestration logic.\n- grep for `emitTerminalSessions`, `agentBackgroundSessions`, `terminal:sessions` to trace event emission.\n- grep for `runtime-task:finished` / `publishRuntimeTaskFinished` / `runtimeTaskManager.subscribe` to trace the persistence-to-UI event bridge.\n- grep in `App.tsx` for `terminalSessions` / `TerminalSessionsFooter` to confirm UI restoration.\n\nUNCERTAINTY\n- There is a second, near-identical copy of the runtime code under `.claude/worktrees/agent-abb66d60c552ace03/src/main/terminalManager.ts` (Electron-style main process) and `claude-code-reference/` which appear to be a separate/legacy Electron implementation or reference snapshot, not wired into the CLI runtime I traced. I did not read those files, so I can't state whether they represent a second live execution path or are purely vendored/reference material; flagging this in case the \"true\" execution core the task refers to is that Electron variant rather than the CLI/Node one confirmed here.\n- I did not read `src/state` or `runtimeTaskTypes.ts` in depth; the exact shape of `RuntimeTask.metadata.sessionId` linking (used in `App.tsx:743`) is inferred from `ptyCreate`'s `metadata: { sessionId, shellId }` at nodeToolExecutor.ts:1030, which is consistent but not cross-verified against the type definition file.",
+      "recallAt5": 0.6666666666666666,
+      "recallAt10": 0.6666666666666666,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 0.8,
+      "executionFlowPresent": true,
+      "qualityIndex": 78
+    },
+    {
+      "system": "turboflux",
+      "caseId": "model-request-compatibility",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 66777.52249999996,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 17,
+      "searchCalls": 1,
+      "readCalls": 16,
+      "rankedPaths": [
+        "src/core/agentengine.ts",
+        "src/core/modelregistry.ts",
+        "src/core/modelprotocol.ts",
+        "src/core/subagent.ts"
+      ],
+      "usage": {
+        "inputTokens": 1292,
+        "outputTokens": 1691,
+        "cacheCreationInputTokens": 702,
+        "cacheReadInputTokens": 12323
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: Trace model-native reasoning request construction, unsupported parameter removal, protocol fallback, and retry behavior for FastContext model calls.\nretrieval: 8 turn(s), 66402ms\nquality: 9 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. **src/core/agentEngine.ts:2440-2470, 2600-2650, 2800-2830, 2980-3000, 3140-3160, 3300-3330** (read via grep-confirmed lines + file header) — role: execution core. Contains `extractUnsupportedRequestParam` (regex parser for provider error text like \"Unsupported parameter: X\"), `removeOpenAICompatibleRequestParam`/`removeAnthropicCompatibleRequestParam` (mutate request body/headers to strip the rejected field), and per-protocol request builders (Anthropic Messages ~2465, OpenAI Chat ~2824, OpenAI Responses ~3154) that each apply `reasoningRequest?.omitTemperature` to delete `temperature`, then retry-loop on failure by extracting the unsupported param and re-invoking without it (`if (!unsupportedParam || !removeXCompatibleRequestParam(...)) break`). Confidence: high — this is the true execution core for request construction + unsupported-param stripping + retry.\n\n2. **src/core/modelRegistry.ts:37-77, 193, 241-363** (read) — role: reasoning-capability config/state boundary. Defines `ModelReasoningCapabilities`, `NativeReasoningRequest` (with `omitTemperature`, `thinking`, `outputConfig`), and `resolveNativeReasoningRequest` (line 344) which is the function `agentEngine.ts` calls (import at line 27) to decide whether to omit `temperature` and what reasoning-effort/thinking shape to send per model family (OpenAI `effort` control vs Anthropic `thinking.budget_tokens` vs toggle). Confidence: high — this is the config source agentEngine consults before building the native reasoning request.\n\n3. **src/core/modelProtocol.ts:1-80+** (read) — role: protocol fallback policy/schema. Defines `ModelProtocol` union (`anthropic_messages`, `openai_chat`, `openai_responses`), `PROTOCOL_PATHS`, `DIRECT_FALLBACK_STATUSES` (404/405/415 — hard endpoint mismatch, fallback allowed), `NEVER_CROSS_PROTOCOL_STATUSES` (401/403/408/409/425/429 — auth/rate-limit errors must retry same protocol, never cross-fallback), and `PROTOCOL_MISMATCH_DETAIL` regex used to sniff protocol-shape errors from response bodies. Also exports `planModelProtocols` (protocol ordering per provider/model), `buildModelProtocolUrl`, `ModelProtocolRequestError`. Confidence: high — this is the protocol-fallback and retry-safety schema that agentEngine imports directly (see import block lines 41-54).\n\n4. **src/core/subAgent.ts:322-339, 759-793** (search-confirmed, not yet read this turn but pattern matches agentEngine's exact mirrored logic: `extractUnsupportedRequestParam`, `removeCompatibleRequestParam`, `omitTemperature` deletion, retry with reason message) — role: secondary caller/execution path for sub-agent model calls, duplicating the same unsupported-param-removal and retry pattern as agentEngine.ts but parameterized by `protocol`. Confidence: medium (grep-confirmed only, not read this turn — listed as a caller candidate, not verified via read_file).\n\nEXECUTION_FLOW\n`modelRegistry.resolveNativeReasoningRequest(model, reasoningConfig, provider, capabilities)` → determines `omitTemperature`/`thinking`/`outputConfig` per model family → `agentEngine.ts` per-protocol request builder (Anthropic ~2465 / OpenAI Chat ~2824 / OpenAI Responses ~3154) constructs body, deletes `temperature` if `omitTemperature` → request sent to `buildModelProtocolUrl(baseUrl, protocol)` (from `modelProtocol.ts`) → on HTTP/network failure, `shouldFallbackProtocol`/status sets (`DIRECT_FALLBACK_STATUSES` vs `NEVER_CROSS_PROTOCOL_STATUSES` in `modelProtocol.ts`) decide whether to try the next protocol in `planModelProtocols` order or retry same protocol → separately, on a 4xx body indicating an unsupported param, `extractUnsupportedRequestParam(error)` parses the field name, `removeXCompatibleRequestParam` strips it from the body/headers, and the same-protocol request is retried with a logged reason message (`\"...retrying without that optional feature/parameter\"`).\n\nSEARCHES_TRIED\n- get_codemap on src/core for \"model request construction, reasoning effort, protocol fallback, retry behavior\" (surfaced unrelated subdirs: agents/mcp/persona/runtime/skills, not the top-level files — false lead)\n- search_content for `omitTemperature|unsupported.*param|stripParam|removeParam` across src/core (confirmed agentEngine.ts and subAgent.ts as parallel implementations, modelRegistry.ts as capability source)\n- search_content for function declarations `resolveNativeReasoningRequest|removeAnthropicCompatibleRequestParam|removeOpenAICompatibleRequestParam|removeCompatibleRequestParam` (pinpointed exact line numbers in agentEngine.ts, subAgent.ts, modelRegistry.ts)\n- read_file on modelProtocol.ts, agentEngine.ts (header/imports), modelRegistry.ts (types + header) — repeated across turns due to tool-call retries, content consistent each time\n\nUNCERTAINTY\n- subAgent.ts (lines 322-339, 759-793) was only grep-confirmed, not read directly this turn — I could not verify its exact retry-loop structure or whether it diverges from agentEngine.ts's pattern (e.g., does it use `planModelProtocols` for...\n\n</fast_context_pack>",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    },
+    {
+      "system": "claude-code",
+      "caseId": "model-request-compatibility",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 91260.07520000008,
+      "apiDurationMs": 86135,
+      "turns": 15,
+      "apiRequests": 15,
+      "apiRetries": 0,
+      "toolCalls": 14,
+      "searchCalls": 7,
+      "readCalls": 7,
+      "rankedPaths": [
+        "src/core/subagent.ts",
+        "src/core/modelprotocol.ts",
+        "src/core/modelregistry.ts",
+        "src/core/fastcontextsubagent.ts"
+      ],
+      "usage": {
+        "inputTokens": 957,
+        "outputTokens": 2381,
+        "cacheCreationInputTokens": 335,
+        "cacheReadInputTokens": 14285,
+        "costUsd": 0.1470925
+      },
+      "report": "RANKED_CODE_MAP\n\n1. `src/core/subAgent.ts` — lines 690-880 — role: core request-construction/retry/protocol-fallback engine for FastContext (and other) subagent model calls — confidence: high — this is the heart of the traced behavior: it plans protocol candidates (`planModelProtocols`), builds the model-native reasoning request per protocol (`resolveNativeReasoningRequest`, lines 745-759, attaching `thinking`/`reasoning`/`output_config`/`reasoning_effort` and dropping `temperature` when required), runs a bounded compatibility retry loop (lines 771-795) that detects unsupported-parameter rejections and strips them (`extractUnsupportedRequestParam` + `removeCompatibleRequestParam`), and on outright HTTP failure decides whether to fall back to the next protocol (`shouldFallbackProtocol`) or give up with a formatted failure.\n\n2. `src/core/subAgent.ts` — lines 305-378 — role: unsupported-parameter detection and removal helpers (`extractUnsupportedRequestParam`, `removeCompatibleRequestParam`) — confidence: high — defines exactly which optional fields (`thinking`, `reasoning`, `reasoning_effort`, `output_config`, `temperature`, `anthropic-beta`, etc.) are treated as safely removable per protocol when a provider rejects them, and how error text is parsed to identify the offending field.\n\n3. `src/core/subAgent.ts` — lines 450-492 — role: `fetchWithTransientRetry`, transient HTTP/network retry with backoff — confidence: high — implements the retry-after/backoff logic for transient statuses (408/409/429/500/502/503/504) and transient network error codes, feeding the `onRetry` callback that emits `model_retry` events; this is the layer beneath the compatibility-stripping loop and protocol fallback.\n\n4. `src/core/modelProtocol.ts` — lines 1-129 — role: protocol model/types, `ModelProtocolRequestError`, `planModelProtocols`, `shouldFallbackProtocol`, and failure formatting — confidence: high — defines the ordering of protocol candidates by provider/model (Claude-like models try `anthropic_messages` first), the status-code rules for when cross-protocol fallback is allowed (never on auth/429/5xx, direct fallback on 404/405/415, conditional on 400/422 via regex sniffing of error text), and the attempt-formatting/failure-reporting used by `subAgent.ts`.\n\n5. `src/core/modelRegistry.ts` — lines 300-400 — role: `resolveNativeReasoningRequest`/`normalizeNativeReasoningConfig` — confidence: high — translates a model's discovered reasoning capability (effort, adaptive-effort, budget, toggle-effort, toggle, fixed) into the actual wire-format reasoning payload (`thinking`, `reasoning_effort`, `output_config`) and whether `temperature` must be omitted; this is what `subAgent.ts` calls to build the reasoning portion of each request before protocol-specific field placement.\n\n6. `src/core/fastContextSubagent.ts` — lines 17-25, 769-801 — role: FastContext caller of `runSubAgent`, wiring `reasoning`/`modelCapabilities`/`provider` through to the shared request pipeline, and handling the case where the model call fails (`result.ok === false`) by falling back to deterministic prefetch evidence instead of throwing — confidence: medium-high — shows how FastContext-specific retrieval sits on top of the generic reasoning/protocol/retry machinery in `subAgent.ts`, and its own fallback behavior (not protocol fallback, but evidence fallback) when the model-native call ultimately fails.\n\nEXECUTION_FLOW\n`fastContextSubagent.ts` (`runFastContextScan`) builds a `SubAgentDefinition` and calls `runSubAgent()` in `subAgent.ts`, passing `reasoning`, `modelCapabilities`, `provider`, `apiKey`/`baseUrl`. Inside `runSubAgent`'s per-turn loop, `planModelProtocols(providerHint, modelId)` (modelProtocol.ts) orders candidate protocols (Anthropic Messages / OpenAI Chat / OpenAI Responses). For each candidate protocol, `resolveNativeReasoningRequest` (modelRegistry.ts) computes the model-native reasoning fields, which are attached to the request body differently per protocol (`thinking`/`output_config` for Anthropic, `reasoning.effort` for Responses, `reasoning`/`reasoning_effort`/`output_config` for Chat), and `temperature` is deleted when `omitTemperature` is set. The request is sent via `fetchWithTransientRetry`, which itself retries up to 4 times on transient HTTP statuses or network errors with backoff delays, emitting `model_retry` events. If the response is a 400/422 with an \"unsupported parameter\" style error, `extractUnsupportedRequestParam` identifies the field and `removeCompatibleRequestParam` strips it from the body/headers, then the same protocol is retried (up to 4 compatibility attempts) before giving up. If the HTTP call still fails, a `ModelProtocolRequestError` is created and `shouldFallbackProtocol` decides whether to try the next protocol candidate (never for auth/429/5xx, yes for 404/405/415, conditionally for 400/422 based on message content) or terminate with a formatted multi-attempt failure message. On total failure, `fastContextSubagent.ts` falls back to its deterministic prefetch evidence rather than surfacing a hard error, provided any prefetch evidence exists.\n\nSEARCHES_TRIED\n- grep for files referencing \"FastContext\" across src/dist to locate relevant modules\n- grep for \"reasoning\" in `fastContextSubagent.ts`\n- grep for \"reasoning|unsupported|fallback|retry|protocol\" in `subAgent.ts`\n- grep for `resolveNativeReasoningRequest` usages across core/shared\n- grep for protocol-related function definitions (`planModelProtocols`, `shouldFallbackProtocol`, `buildModelProtocolUrl`, `fetchWithTransientRetry`, etc.)\n- read full targeted line ranges in `subAgent.ts`, `modelProtocol.ts`, `modelRegistry.ts`, `fastContextSubagent.ts`\n\nUNCERTAINTY\n`agentEngine.ts` also calls `resolveNativeReasoningRequest` in three places (lines ~2456, 2820, 3151) for the main agent loop, but I did not read those sections since the question specifically concerns FastContext model calls, which route through `subAgent.ts`'s `runSubAgent`. If FastContext ever bypasses `subAgent.ts` and hits `agentEngine.ts` request paths directly, those call sites would be additional relevant locations — I have not verified they are unused by FastContext, only that `fastContextSubagent.ts` calls `runSubAgent`.",
+      "recallAt5": 0.75,
+      "recallAt10": 0.75,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 85
+    },
+    {
+      "system": "turboflux",
+      "caseId": "interrupted-stream-persistence",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 107012.89559999993,
+      "turns": 8,
+      "apiRequests": 8,
+      "apiRetries": 0,
+      "toolCalls": 6,
+      "searchCalls": 0,
+      "readCalls": 6,
+      "rankedPaths": [
+        "src/cli/components/app.tsx",
+        "src/cli/conversations/store.ts",
+        "src/cli/conversations/types.ts",
+        "src/core/agentengine.ts"
+      ],
+      "usage": {
+        "inputTokens": 1301,
+        "outputTokens": 2294,
+        "cacheCreationInputTokens": 733,
+        "cacheReadInputTokens": 12427
+      },
+      "report": "<fast_context_pack role=\"code_map_locator\">\nobjective: Trace how Ctrl+C interrupts a streaming assistant response while preserving partial text through engine turns, conversation journal persistence, and transcript rendering.\nretrieval: 8 turn(s), 106553ms\nquality: 8 read-confirmed evidence range(s)\nisolation: subagent raw tool history is not injected; only this compact result enters the main context.\nstatus: complete\nauthority: llm_verified_code_map\n\nuse_policy:\n- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.\n- Read only the files/ranges needed for the current task and verify again before editing.\n\nllm_ranked_code_map:\nRANKED_CODE_MAP\n\n1. src/cli/components/App.tsx — lines 1-80 (imports) read-confirmed; interrupt handler located via search at lines 1183-1257 (`useInput` callback, `key.ctrl && ch === 'c'` check at line 1188)\n   Role: UI entry point that owns the ink `useInput` keypress handler. This is the caller that detects Ctrl+C during an active engine turn and triggers the abort/interrupt path (via `engine.run(...)` awaited at line ~930 per prefetch, and the runtime created by `createAgentRuntime` imported at line 25).\n   Confidence: high for role/location, medium for internal mechanics (only the import header was directly read via read_file this run; the actual handler body at 1183-1257 was confirmed by search_content grep context, not a full read_file pass).\n   Why ranked #1: it is the only concrete caller-side artifact tying a literal Ctrl+C keystroke to the engine, and directly imports `createAgentRuntime`, `ConversationManager`, and `TranscriptViewport` — the three other legs of this trace (engine turns, journal persistence, transcript rendering).\n\n2. src/cli/conversations/store.ts — lines 1-80 read-confirmed (file header, `conversationsDir`, `conversationPath`, `readJournal`); persistence/recovery logic at lines ~90-230 confirmed via search_content context lines (`pendingStream`, `interrupted` flag propagation, `metadata: { interrupted: true }`, synthetic abort tool results, `appendConversationJournal`).\n   Role: implementation core for \"conversation journal persistence.\" `readJournal` parses the `.jsonl` journal line by line (tolerating corrupt trailing lines via `truncated`), and a reconstruction routine (~lines 90-230) walks journal entries, tracks `pendingStream` (partial assistant text accumulated so far), and marks `interrupted = true` when a stream is cut off before a `stream_end` entry or when a tool call has no matching result — this is the exact mechanism that preserves partial text through an interrupt.\n   Confidence: high — read_file confirms the file structure and journal-reading logic; search_content confirms the interrupted-state reconstruction lines with enough surrounding context to trust the behavior described.\n   Why ranked #2: this is the true persistence core the objective asks about — partial streamed text plus an `interrupted` boolean survive a Ctrl+C via this journal replay logic, not via the live in-memory turn alone.\n\n3. src/cli/conversations/types.ts — `ConversationJournalEntry` type (symbol-confirmed at line 33) including a `stream_end` variant carrying `interrupted: boolean` (symbol/grep-confirmed at line 39).\n   Role: schema boundary defining the journal entry shape store.ts reads/writes, in particular the `interrupted` flag that flows from the Ctrl+C event into persisted state and later into transcript rendering (via `metadata.interrupted` referenced in App.test.ts).\n   Confidence: medium — confirmed via search_symbols/search_content only, not yet opened with read_file in this run.\n   Why ranked #3: it's the contract between the engine/journal writer and the reader, but I did not directly read_file this file, so I'm flagging it as supporting evidence rather than a fully verified candidate.\n\n4. src/core/agentEngine.ts — `AgentTurn` shape with `interrupted?: boolean` under `metadata` (per deterministic prefetch, lines 72-97) and `splitTurnsForCompaction`.\n   Role: likely defines the in-memory turn model that App.tsx's `engine.run()` produces, including the `interrupted` metadata flag surfaced in App.test.ts (\"preserves the interrupted marker when restoring engine turns\").\n   Confidence: low-for-this-run — this file was only seen via the deterministic prefetch quote and my own search_content pass against it returned no matches (likely because I searched the wrong terms); I never got a successful read_file result for it in this session.\n   Why included: it's the probable \"engine turns\" leg of the three-part objective (engine turns / journal / transcript), but it must be treated as unverified until directly read.\n\nEXECUTION_FLOW (best-supported hypothesis, partially verified)\n1. User presses Ctrl+C while an assistant response is streaming → ink's `useInput` handler in `App.tsx` (~line 1188, `key.ctrl && ch === 'c'`) fires.\n2. The handler signals the in-flight engine run to stop (likely via an `AbortController`/interrupt call on the runtime created by `createAgentRuntime`, consistent with abort patterns found in `nodeToolExecutor.ts` and `subAgentTaskManager.ts`, though the exact App.tsx-to-engine wiring at line 1188+ was not read directly this run).\n3. The engine turn that was mid-stream is finalized with an `interrupted: true` marker (per `AgentTurn.metadata.interrupted` referenced in `agentEngine.ts` prefetch and asserted in `App.test.ts`).\n4. `ConversationManager` (imported in App.tsx) persists the partial state through `store.ts`: the journal writer appends a `stream_end` entry with `interrupted: true`, and on next read, `readJournal` + the reconstruction pass (store.ts ~90-230) re...\n\n</fast_context_pack>",
+      "recallAt5": 0.75,
+      "recallAt10": 0.75,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 85
+    },
+    {
+      "system": "claude-code",
+      "caseId": "interrupted-stream-persistence",
+      "category": "workflow",
+      "success": true,
+      "timedOut": false,
+      "latencyMs": 122910.80799999996,
+      "apiDurationMs": 118892,
+      "turns": 18,
+      "apiRequests": 18,
+      "apiRetries": 0,
+      "toolCalls": 17,
+      "searchCalls": 8,
+      "readCalls": 9,
+      "rankedPaths": [
+        "src/cli/components/app.tsx",
+        "src/core/agentengine.ts",
+        "src/cli/conversations/manager.ts",
+        "src/cli/conversations/store.ts",
+        "src/cli/components/messages/messages.tsx",
+        "src/cli/conversations/types.ts"
+      ],
+      "usage": {
+        "inputTokens": 1212,
+        "outputTokens": 3127,
+        "cacheCreationInputTokens": 665,
+        "cacheReadInputTokens": 19054,
+        "costUsd": 0.1958365
+      },
+      "report": "This confirms the terminal rendering path for the \"Interrupted\" label under partial content. Enough evidence gathered across all four layers.\n\nRANKED_CODE_MAP\n\n1. src/cli/components/App.tsx — lines 1060-1114 (handleInterrupt, SIGINT wiring), 621-677 (stream event reducer), 900-975 (run-prompt catch/interrupt path)\nRole: UI/engine-turn glue. Ctrl+C via ink's `useInput` (line ~1188) and the `process.on('SIGINT', ...)` handler both call `handleInterrupt`, which sets `abortingRef`, calls `engine.abort()`, and either restores the unsent prompt to the input box (if no response text arrived yet) or lets the `stream:end`/catch handler render the partial text. The `stream:delta`/`stream:end` switch buffers streamed text in `streamBufferRef` and, on interruption, strips incomplete tool-call markup before appending it as an assistant message with `interrupted: true`.\nConfidence: high\nWhy it matters: this is the actual point where a Ctrl+C keypress becomes an abort signal and where partial streamed text is turned into a rendered/persisted turn.\n\n2. src/core/agentEngine.ts — lines 1278-1300 (`abort()`), 2631-2668 and 5927-5937 (`finishInterruptedStream`)\nRole: engine-turn layer. `abort()` aborts the per-conversation `AbortController`, cancels the in-flight HTTP stream via `toolExecutor.streamAbort`, and stops any FastContext sub-agent tasks. When the stream promise rejects because of that abort, the engine calls `finishInterruptedStream`, which strips incomplete tool markup from the accumulated `textContent` and synthesizes an `AgentTurn` with `metadata.interrupted = true`, then emits `stream:end` with `interrupted: true`.\nConfidence: high\nWhy it matters: this is where partial text collected mid-turn is converted into a durable, well-formed turn object instead of being silently discarded, and is the emission point that both the UI and the journal subscribe to.\n\n3. src/cli/conversations/manager.ts — lines 28-76 (`recordEvent`, `scheduleSave`)\nRole: conversation journal persistence. Every `stream:delta` is appended to an on-disk journal as a `stream_delta` entry; `stream:end` appends a `stream_end` entry carrying the `interrupted` flag; `session:complete`/any subsequent event schedules a debounced `persist()` that writes the full turn list (including the interrupted assistant turn) to the conversation file.\nConfidence: high\nWhy it matters: shows how the partial text isn't just kept in memory but streamed to a journal incrementally, so it survives even a hard process kill, not just a graceful Ctrl+C.\n\n4. src/cli/conversations/store.ts — lines 87-96 and 109-230 (`createRecoveredAssistantTurn`, `replayConversation`)\nRole: journal replay/recovery on load. Reconstructs `pendingStream` content by concatenating `stream_delta` entries between `stream_start`/`stream_end` journal markers; if a stream was left open (no `stream_end`, or process died mid-turn), it synthesizes a `recovered-assistant-*` turn from the buffered content and marks the conversation's `recovery.interrupted = true`.\nConfidence: high\nWhy it matters: this is the durability counterpart to `finishInterruptedStream` — it proves partial text is recoverable from disk even without an in-memory abort path, closing the loop from streaming to journal to reload.\n\n5. src/cli/components/messages/Messages.tsx — lines 8-36 (`Message` type, `AssistantMessage`)\nRole: transcript rendering. `AssistantMessage` renders the (possibly partial) `content` through markdown formatting and, when `interrupted` is true, appends a dimmed \"Interrupted\" label below it.\nConfidence: high\nWhy it matters: final rendering step showing how the preserved partial text is visually distinguished from a normal completed response in the transcript.\n\n6. src/cli/conversations/types.ts — lines ~20-40 (`ConversationJournalEntry` union, turn `metadata.interrupted`)\nRole: shared schema for journal entries and turn metadata.\nConfidence: medium\nWhy it matters: defines the `stream_delta`/`stream_end`/`interrupted` contract that manager.ts writes and store.ts replays; useful for confirming the field names used across layers, though it's a type-only file with no logic.\n\nEXECUTION_FLOW\nCtrl+C is captured two ways in App.tsx: ink's `useInput` hook (`key.ctrl && ch === 'c'`) and a raw `process.on('SIGINT', ...)` listener, both funneling into `handleInterrupt`. That sets `abortingRef.current = true` and calls `engine.abort()` on the `AgentEngine` (agentEngine.ts). `abort()` fires the engine's `AbortController`, which unblocks the in-flight `streamMessage` await; because `signal.aborted` is now true, the engine's stream-processing code takes the aborted branch and calls `finishInterruptedStream(textContent, ...)`, which strips incomplete tool-call markup from whatever text had accumulated so far and returns an `AgentTurn` with `metadata.interrupted = true`, then emits `stream:end { interrupted: true }`.\n\nTwo subscribers react to engine events: the `ConversationManager` (manager.ts) had already been appending every `stream:delta` chunk to an on-disk journal, and now appends the `stream_end` entry with `interrupted: true`, then schedules a debounced `persist()` that writes the recovered turn list to the conversation file. The `App.tsx` event-subscription switch does the equivalent in memory: it takes the buffered `streamBufferRef` text, strips incomplete markup, and appends it into the visible message list with `interrupted: true`. If `engine.run()`'s promise instead rejects with an aborted error (race between abort and stream resolution), the `catch` block in `App.tsx`'s run-prompt handler performs the same buffered-text recovery and message append. Finally, `Messages.tsx`'s `AssistantMessage` renders that partial content with an \"Interrupted\" label. On a later app restart, `store.ts`'s `replayConversation` reconstructs the same partial turn from the journal's `stream_delta`/`stream_end` entries if the process was killed before those in-memory paths completed.\n\nSEARCHES_TRIED\n- grep for `sigint|interrupt|abort` across `src/**/*.ts` (excluded `.claude/worktrees` reference copies of Claude Code itself, which are not TurboFlux's own source)\n- targeted grep in `agentEngine.ts` for `finishInterruptedStream` call sites\n- targeted grep in `App.tsx` for `ctrl|sigint|useInput|abort()|interrupt`\n- targeted grep in `conversations/manager.ts`, `store.ts`, `types.ts` for `interrupt|abort`\n- targeted grep in `messages/MessageList.tsx` and `messages/Messages.tsx` for `interrupt`\n- read full relevant line ranges in each hit file to confirm role rather than relying on grep context alone\n\nUNCERTAINTY\nI did not read `src/cli/conversations/store.ts` lines beyond 230 (save/load top-level functions) or `MessageList.tsx` in full, so there may be additional minor rendering details (e.g. streaming-in-progress display vs. finalized message) not captured here. I also did not trace `toolExecutor.streamAbort` in `src/tools/executor.ts` or `nodeToolExecutor.ts`, which handles the actual HTTP-level stream cancellation; it's plausible but unconfirmed that partial bytes already received are flushed through `handleStreamLine` before the abort takes effect, which is what populates `textContent` prior to `finishInterruptedStream`. I did not check `dist/` (compiled output) for consistency, only `src/`. All ranked files were read directly with the file-reading tool.",
+      "recallAt5": 1,
+      "recallAt10": 1,
+      "reciprocalRank": 1,
+      "top1Hit": true,
+      "citationRate": 1,
+      "executionFlowPresent": true,
+      "qualityIndex": 100
+    }
+  ]
+}
