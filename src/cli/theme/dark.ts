@@ -1,24 +1,31 @@
 import type { Theme } from './types'
 
 export const darkTheme: Theme = {
-  brand: '#00f5c8',
-  brandShimmer: '#7cffea',
+  brand: '#d6d6d6',
+  brandShimmer: '#ffffff',
 
-  success: '#22f59d',
-  error: '#f87171',
-  warning: '#7cffea',
-  info: '#2dd4bf',
+  success: '#c8c8c8',
+  error: '#e8e8e8',
+  warning: '#d2d2d2',
+  info: '#b4b4b4',
 
-  text: '#e2e8f0',
-  inactive: '#94a3b8',
-  subtle: '#475569',
+  text: '#e6e6e6',
+  inactive: '#8f8f8f',
+  subtle: '#5f5f5f',
 
-  diffAdded: '#166534',
-  diffRemoved: '#7f1d1d',
-  diffAddedWord: '#4ade80',
-  diffRemovedWord: '#f87171',
+  background: '#000000',
+  panelBackground: '#080808',
+  panelRaised: '#121212',
+  surface: '#1a1a1a',
+  divider: '#303030',
 
-  promptBorder: '#475569',
-  statusLine: '#94a3b8',
-  codeBackground: '#1e293b',
+  diffAdded: '#1c1c1c',
+  diffRemoved: '#0d0d0d',
+  diffAddedWord: '#e0e0e0',
+  diffRemovedWord: '#969696',
+
+  promptBorder: '#555555',
+  promptBackground: '#0a0a0a',
+  statusLine: '#adadad',
+  codeBackground: '#111111',
 }

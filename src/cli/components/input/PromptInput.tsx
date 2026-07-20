@@ -4,6 +4,7 @@ import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
 import { getSafeFrameWidth } from '../../terminalLayout'
+import { isTerminalMouseInput } from '../../terminalMouse'
 
 interface PasteTextResult {
   value: string
@@ -137,6 +138,8 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
   }, { isActive: isInteractive })
 
   useInput((ch, key) => {
+    if (isTerminalMouseInput(ch)) return
+
     if (isImagePasteShortcut(ch, key)) {
       onPasteImage?.()
       return
@@ -152,6 +155,8 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
       }
       return
     }
+
+    if ((key.ctrl || key.shift) && (key.upArrow || key.downArrow)) return
 
     if (key.upArrow) {
       if (showCompletions) {
@@ -252,7 +257,7 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
 
   const placeholder = mode === 'plan' ? 'Describe what to plan...'
     : 'What are we building today?'
-  const frameWidth = getSafeFrameWidth(columns)
+  const frameWidth = getSafeFrameWidth(columns, 3)
   const cursorChar = value[cursorOffset] ?? ' '
   const beforeCursor = value.slice(0, cursorOffset)
   const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
@@ -271,14 +276,12 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
         </Box>
       )}
       <Box
-        borderStyle="round"
-        borderColor={theme.promptBorder}
-        borderLeft={false}
-        borderRight={false}
         width={frameWidth}
         flexDirection="row"
         paddingLeft={1}
         paddingRight={1}
+        paddingY={1}
+        backgroundColor={theme.promptBackground}
       >
         <Text bold color={theme.brand}>{'> '}</Text>
         {value ? (

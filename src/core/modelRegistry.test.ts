@@ -1,42 +1,89 @@
 import { describe, expect, it } from 'vitest'
-import { canonicalModelId, getSupportedModelSpec, isSupportedModel, resolveReasoningParam, SUPPORTED_MODEL_SPECS } from './modelRegistry'
+import {
+  canonicalModelId,
+  getModelReasoningCapabilities,
+  getSupportedModelSpec,
+  isSupportedModel,
+  normalizeNativeReasoningConfig,
+  resolveNativeReasoningRequest,
+  SUPPORTED_MODEL_SPECS,
+} from './modelRegistry'
+import type { ModelCapabilities } from './config'
 
 describe('modelRegistry', () => {
-  it('only exposes the conservative supported-model whitelist', () => {
-    expect(SUPPORTED_MODEL_SPECS.map(model => model.id)).toEqual([
-      'deepseek-v4-pro',
-      'deepseek-v4-flash',
-      'gpt-5.5',
-      'gpt-5.4',
-      'claude-opus-4-8',
-      'claude-opus-4-7',
-      'claude-opus-4-6',
-      'claude-sonnet-4-6',
-    ])
+  it('includes the current model families exposed by official providers', () => {
+    const ids = SUPPORTED_MODEL_SPECS.map(model => model.id)
+    expect(ids).toContain('gpt-5.6')
+    expect(ids).toContain('gpt-5.6-sol')
+    expect(ids).toContain('claude-fable-5')
+    expect(ids).toContain('claude-mythos-5')
+    expect(ids).toContain('claude-opus-4-8')
+    expect(ids).toContain('claude-sonnet-5')
+    expect(ids).toContain('deepseek-v4-pro')
+    expect(ids).toContain('kimi-k3')
+    expect(ids).toContain('glm-5.2')
     expect(isSupportedModel('gpt-4o')).toBe(false)
-    expect(isSupportedModel('claude-sonnet-4')).toBe(false)
   })
 
-  it('normalizes user-facing aliases to canonical ids', () => {
+  it('normalizes aliases and routed model names', () => {
     expect(canonicalModelId('DeepSeekV4Pro')).toBe('deepseek-v4-pro')
-    expect(canonicalModelId('ClaudeOpus4.8')).toBe('claude-opus-4-8')
-    expect(canonicalModelId('GPT5.5')).toBe('gpt-5.5')
+    expect(canonicalModelId('anthropic/claude-opus-4-8')).toBe('claude-opus-4-8')
+    expect(canonicalModelId('claude-haiku-4-5')).toBe('claude-haiku-4-5-20251001')
   })
 
   it('keeps model ceilings separate from conservative request defaults', () => {
-    const gpt = getSupportedModelSpec('gpt-5.5')
+    const gpt = getSupportedModelSpec('gpt-5.6')
     const deepseek = getSupportedModelSpec('deepseek-v4-pro')
 
     expect(gpt?.contextWindow).toBe(1_050_000)
     expect(gpt?.maxOutputTokens).toBe(128_000)
     expect(gpt?.defaultRequestTokens).toBe(16_384)
     expect(deepseek?.maxOutputTokens).toBe(384_000)
-    expect(deepseek?.defaultRequestTokens).toBe(16_384)
   })
 
-  it('maps TurboFlux thinking modes to provider-specific reasoning controls', () => {
-    expect(resolveReasoningParam('gpt-5.5', 'max')).toEqual({ kind: 'openai-chat', effort: 'xhigh' })
-    expect(resolveReasoningParam('deepseek-v4-pro', 'standard')).toEqual({ kind: 'deepseek-chat', thinking: 'enabled', effort: 'high' })
-    expect(resolveReasoningParam('claude-opus-4-8', 'off')).toEqual({ kind: 'anthropic-adaptive', thinking: 'disabled' })
+  it('exposes provider-native effort ranges instead of TurboFlux modes', () => {
+    expect(getModelReasoningCapabilities('gpt-5.6')?.efforts).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+    expect(getModelReasoningCapabilities('claude-opus-4-8')?.efforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(getModelReasoningCapabilities('deepseek-v4-pro')?.efforts).toEqual(['high', 'max'])
+    expect(getModelReasoningCapabilities('kimi-k3')?.supportsToggle).toBe(false)
+  })
+
+  it('builds the native request shape for each provider family', () => {
+    expect(resolveNativeReasoningRequest('gpt-5.6', { effort: 'xhigh' })).toMatchObject({ reasoningEffort: 'xhigh' })
+    expect(resolveNativeReasoningRequest('claude-opus-4-8', { effort: 'max' })).toMatchObject({
+      thinking: { type: 'adaptive' },
+      outputConfig: { effort: 'max' },
+    })
+    expect(resolveNativeReasoningRequest('deepseek-v4-pro', { effort: 'max' })).toMatchObject({
+      thinking: { type: 'enabled' },
+      reasoningEffort: 'max',
+    })
+    expect(resolveNativeReasoningRequest('kimi-k2.6', { enabled: true })).toMatchObject({
+      thinking: { type: 'enabled', keep: 'all' },
+    })
+    expect(resolveNativeReasoningRequest('glm-5.2')).toMatchObject({
+      thinking: { type: 'enabled' },
+      reasoningEffort: 'max',
+    })
+  })
+
+  it('uses reasoning effort metadata advertised by an API', () => {
+    const discovered: ModelCapabilities = {
+      reasoning: true,
+      reasoningEfforts: ['low', 'high'],
+      supportedParameters: ['reasoning_effort'],
+    }
+
+    expect(resolveNativeReasoningRequest(
+      'vendor/new-model',
+      { effort: 'high' },
+      'custom',
+      discovered,
+    )).toMatchObject({ reasoningEffort: 'high' })
+  })
+
+  it('clamps unsupported effort values to each model default', () => {
+    expect(normalizeNativeReasoningConfig('deepseek-v4-pro', { effort: 'low' })?.effort).toBe('high')
+    expect(normalizeNativeReasoningConfig('claude-fable-5', { enabled: false })?.enabled).toBe(true)
   })
 })

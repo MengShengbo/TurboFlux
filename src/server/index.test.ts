@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
@@ -69,7 +69,8 @@ describe('TurboFlux backend server', () => {
   })
 
   it('persists API config changes and exposes configured models for /v1/models', async () => {
-    const baseUrl = await listen(createTurboFluxServer(testConfig({ upstreamApiKey: undefined })))
+    const config = testConfig({ upstreamApiKey: undefined })
+    const baseUrl = await listen(createTurboFluxServer(config))
 
     const saved = await fetch(`${baseUrl}/admin/api/config`, {
       method: 'PUT',
@@ -93,6 +94,8 @@ describe('TurboFlux backend server', () => {
     const models = await fetch(`${baseUrl}/v1/models`).then(r => r.json()) as { data: Array<{ id: string; context_window: number }> }
     expect(models.data.map(model => model.id)).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro'])
     expect(models.data[0].context_window).toBe(1000000)
+    expect(readFileSync(config.configPath, 'utf-8')).not.toContain('sk-new-secret')
+    expect(readFileSync(join(config.configPath, '..', 'server-credentials.json'), 'utf-8')).toContain('sk-new-secret')
   })
 
   it('serves placeholder users and in-process logs for the admin console', async () => {

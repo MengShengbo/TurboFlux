@@ -1,15 +1,23 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { getSupportedModelSpec, SUPPORTED_MODEL_SPECS } from './modelRegistry'
+import { getSupportedModelSpec, normalizeNativeReasoningConfig, SUPPORTED_MODEL_SPECS } from './modelRegistry'
+import { normalizeApprovalPolicy, type ApprovalPolicy, type NativeReasoningConfig } from '../shared/agentTypes'
+import { loadCredentialSnapshot, saveCredentialSnapshot } from './credentialStore'
+import { writeFileAtomicSync } from './fileIO'
 
 export interface TurboFluxConfig {
-  provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
+  provider: 'openai' | 'anthropic' | 'deepseek' | 'kimi' | 'glm' | 'openrouter' | 'custom'
   apiKey: string
   baseUrl: string
   model: string
   contextWindow: number
   maxTokens: number
+  maxOutputTokens?: number
+  modelCapabilities?: ModelCapabilities
+  modelMetadataSources?: ModelMetadataSource[]
+  approvalPolicy: ApprovalPolicy
+  reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
   fastContextModel?: FastContextModelConfig
@@ -23,7 +31,26 @@ export interface ModelPreset {
   baseUrl: string
   contextWindow: number
   maxTokens: number
+  maxOutputTokens?: number
+  reasoning?: NativeReasoningConfig
   description: string
+  capabilities?: ModelCapabilities
+  metadataSources?: ModelMetadataSource[]
+  availability?: 'api' | 'configured' | 'builtin'
+}
+
+export type ModelMetadataSource = 'api' | 'gateway' | 'models.dev' | 'builtin' | 'default'
+
+export interface ModelCapabilities {
+  tools?: boolean
+  vision?: boolean
+  reasoning?: boolean
+  structuredOutput?: boolean
+  inputModalities?: string[]
+  outputModalities?: string[]
+  supportedParameters?: string[]
+  supportedEndpoints?: string[]
+  reasoningEfforts?: Array<NonNullable<NativeReasoningConfig['effort']>>
 }
 
 export type TurboFluxProvider = TurboFluxConfig['provider']
@@ -38,6 +65,10 @@ export interface TurboFluxApiConfigProfile {
   model: string
   contextWindow: number
   maxTokens: number
+  maxOutputTokens?: number
+  modelCapabilities?: ModelCapabilities
+  modelMetadataSources?: ModelMetadataSource[]
+  reasoning?: NativeReasoningConfig
   createdAt: number
   updatedAt: number
 }
@@ -58,15 +89,48 @@ export interface ProviderPreset {
   description: string
 }
 
-const CONFIG_DIR = join(homedir(), '.turboflux')
+const CONFIG_DIR = process.env.TURBOFLUX_CONFIG_DIR || join(homedir(), '.turboflux')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const CONVERSATIONS_DIR = join(CONFIG_DIR, 'conversations')
 const CHECKPOINTS_DIR = join(CONFIG_DIR, 'checkpoints')
 
+function hydrateCredentials(raw: Partial<TurboFluxConfig>): Partial<TurboFluxConfig> {
+  const stored = loadCredentialSnapshot()
+  const envApiKey = process.env.TURBOFLUX_API_KEY?.trim()
+  const activeId = typeof raw.activeApiConfigId === 'string'
+    ? raw.activeApiConfigId
+    : Array.isArray(raw.apiConfigs) ? raw.apiConfigs[0]?.id : undefined
+  const profiles = Array.isArray(raw.apiConfigs)
+    ? raw.apiConfigs.map(profile => ({
+        ...profile,
+        apiKey: envApiKey && profile.id === activeId
+          ? envApiKey
+          : stored.apiConfigs?.[profile.id] || profile.apiKey || '',
+      }))
+    : raw.apiConfigs
+  return {
+    ...raw,
+    apiKey: envApiKey || stored.apiKey || raw.apiKey || '',
+    apiConfigs: profiles,
+  }
+}
+
+function stripCredentials(config: TurboFluxConfig): TurboFluxConfig {
+  return {
+    ...config,
+    apiKey: '',
+    apiConfigs: config.apiConfigs?.map(profile => ({ ...profile, apiKey: '' })),
+  }
+}
+
+function writeConfigDocument(config: TurboFluxConfig): void {
+  writeFileAtomicSync(CONFIG_FILE, JSON.stringify(stripCredentials(config), null, 2), 0o600)
+}
+
 export const DEFAULT_FREE_MODEL = ''
-export const DEFAULT_CONTEXT_WINDOW = 1_000_000
+export const DEFAULT_CONTEXT_WINDOW = 200_000
 export const DEFAULT_MAX_TOKENS = 16_384
-export const TURBOFLUX_PROVIDERS: TurboFluxProvider[] = ['openai', 'anthropic', 'deepseek', 'openrouter', 'custom']
+export const TURBOFLUX_PROVIDERS: TurboFluxProvider[] = ['openai', 'anthropic', 'deepseek', 'kimi', 'glm', 'openrouter', 'custom']
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
@@ -82,7 +146,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: 'OpenAI',
     provider: 'openai',
     baseUrl: 'https://api.openai.com/v1',
-    defaultModel: 'gpt-5.5',
+    defaultModel: 'gpt-5.6',
     description: 'Official OpenAI-compatible API.',
   },
   {
@@ -90,7 +154,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     name: 'Anthropic',
     provider: 'anthropic',
     baseUrl: 'https://api.anthropic.com/v1',
-    defaultModel: 'claude-sonnet-4-6',
+    defaultModel: 'claude-opus-4-8',
     description: 'Official Anthropic Messages API.',
   },
   {
@@ -108,6 +172,22 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.deepseek.com',
     defaultModel: 'deepseek-v4-flash',
     description: 'OpenAI-compatible DeepSeek API.',
+  },
+  {
+    id: 'kimi',
+    name: 'Kimi',
+    provider: 'kimi',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    defaultModel: 'kimi-k3',
+    description: 'Moonshot Kimi OpenAI-compatible API.',
+  },
+  {
+    id: 'glm',
+    name: 'GLM',
+    provider: 'glm',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    defaultModel: 'glm-5.2',
+    description: 'Zhipu GLM OpenAI-compatible API.',
   },
 ]
 
@@ -131,7 +211,15 @@ export const MODEL_PRESETS: ModelPreset[] = SUPPORTED_MODEL_SPECS.map(spec => ({
   baseUrl: baseUrlForProvider(providerForModel(spec.id)),
   contextWindow: spec.contextWindow,
   maxTokens: spec.defaultRequestTokens,
+  maxOutputTokens: spec.maxOutputTokens,
+  reasoning: normalizeNativeReasoningConfig(spec.id, undefined, spec.provider),
   description: spec.description,
+  capabilities: {
+    vision: spec.supportsVision,
+    reasoning: Boolean(normalizeNativeReasoningConfig(spec.id, undefined, spec.provider)),
+  },
+  metadataSources: ['builtin'],
+  availability: 'builtin',
 }))
 
 const DEFAULT_CONFIG: TurboFluxConfig = {
@@ -141,6 +229,8 @@ const DEFAULT_CONFIG: TurboFluxConfig = {
   model: DEFAULT_FREE_MODEL,
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
+  approvalPolicy: 'ask',
+  reasoning: undefined,
   apiConfigs: [],
   activeApiConfigId: undefined,
   fastContextModel: EMPTY_FAST_CONTEXT_MODEL,
@@ -193,6 +283,7 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : DEFAULT_CONFIG.apiKey
   const contextWindow = positiveInteger(raw.contextWindow, DEFAULT_CONFIG.contextWindow)
   const maxTokens = positiveInteger(raw.maxTokens, DEFAULT_CONFIG.maxTokens)
+  const approvalPolicy = normalizeApprovalPolicy(raw.approvalPolicy, DEFAULT_CONFIG.approvalPolicy)
   const profiles = normalizeApiConfigProfiles((raw as any).apiConfigs)
   let activeApiConfigId = typeof raw.activeApiConfigId === 'string' ? raw.activeApiConfigId : undefined
   const activeProfile = profiles.find(profile => profile.id === activeApiConfigId)
@@ -209,6 +300,7 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
       model,
       contextWindow,
       maxTokens,
+      reasoning: normalizeNativeReasoningConfig(model, raw.reasoning, provider, raw.modelCapabilities),
       createdAt: now,
       updatedAt: now,
     })
@@ -227,6 +319,11 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
     model: selected?.model ?? model,
     contextWindow: selected?.contextWindow ?? contextWindow,
     maxTokens: selected?.maxTokens ?? maxTokens,
+    maxOutputTokens: selected?.maxOutputTokens,
+    modelCapabilities: selected?.modelCapabilities,
+    modelMetadataSources: selected?.modelMetadataSources,
+    approvalPolicy,
+    reasoning: selected?.reasoning ?? normalizeNativeReasoningConfig(model, raw.reasoning, provider, raw.modelCapabilities),
     apiConfigs: nextProfiles,
     activeApiConfigId,
     fastContextModel,
@@ -241,6 +338,8 @@ function buildApiConfigProfile(raw: Partial<TurboFluxApiConfigProfile> & Partial
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : DEFAULT_CONFIG.apiKey
   const contextWindow = positiveInteger(raw.contextWindow, DEFAULT_CONFIG.contextWindow)
   const maxTokens = positiveInteger(raw.maxTokens, DEFAULT_CONFIG.maxTokens)
+  const maxOutputTokens = raw.maxOutputTokens === undefined ? undefined : positiveInteger(raw.maxOutputTokens, maxTokens)
+  const reasoning = normalizeNativeReasoningConfig(model, raw.reasoning, provider, raw.modelCapabilities)
   const id = typeof raw.id === 'string' && raw.id.trim()
     ? raw.id.trim()
     : `api_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
@@ -253,6 +352,10 @@ function buildApiConfigProfile(raw: Partial<TurboFluxApiConfigProfile> & Partial
     model,
     contextWindow,
     maxTokens,
+    maxOutputTokens,
+    modelCapabilities: raw.modelCapabilities,
+    modelMetadataSources: raw.modelMetadataSources,
+    reasoning,
     createdAt: positiveInteger(raw.createdAt, now),
     updatedAt: positiveInteger(raw.updatedAt, now),
   }
@@ -322,6 +425,10 @@ function activeFieldsFromProfile(config: TurboFluxConfig, profile?: TurboFluxApi
     model: profile.model,
     contextWindow: profile.contextWindow,
     maxTokens: profile.maxTokens,
+    maxOutputTokens: profile.maxOutputTokens,
+    modelCapabilities: profile.modelCapabilities,
+    modelMetadataSources: profile.modelMetadataSources,
+    reasoning: profile.reasoning,
     activeApiConfigId: profile.id,
   }
 }
@@ -338,6 +445,7 @@ function syncActiveProfile(config: TurboFluxConfig): TurboFluxConfig {
       model: '',
       contextWindow: positiveInteger(config.contextWindow, DEFAULT_CONFIG.contextWindow),
       maxTokens: positiveInteger(config.maxTokens, DEFAULT_CONFIG.maxTokens),
+      reasoning: undefined,
       apiConfigs: [],
       activeApiConfigId: undefined,
       fastContextModel: EMPTY_FAST_CONTEXT_MODEL,
@@ -356,6 +464,10 @@ function syncActiveProfile(config: TurboFluxConfig): TurboFluxConfig {
     model: config.model,
     contextWindow: config.contextWindow,
     maxTokens: config.maxTokens,
+    maxOutputTokens: config.maxOutputTokens,
+    modelCapabilities: config.modelCapabilities,
+    modelMetadataSources: config.modelMetadataSources,
+    reasoning: config.reasoning,
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   })
@@ -389,22 +501,65 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
     }
     case 'model':
       if (!value.trim()) throw new Error('model cannot be empty')
-      return updateActive({ ...config, model: value.trim() })
+      return updateActive({
+        ...config,
+        model: value.trim(),
+        maxOutputTokens: undefined,
+        modelCapabilities: undefined,
+        modelMetadataSources: undefined,
+        reasoning: normalizeNativeReasoningConfig(value.trim(), config.reasoning, config.provider),
+      })
+    case 'approvalPolicy':
+      if (!['ask', 'agent', 'full', 'request', 'auto'].includes(value.toLowerCase())) {
+        throw new Error('approvalPolicy must be ask, agent, or full')
+      }
+      return { ...config, approvalPolicy: normalizeApprovalPolicy(value.toLowerCase(), config.approvalPolicy) }
+    case 'reasoningEnabled': {
+      const normalized = value.toLowerCase()
+      if (!['true', 'false', 'on', 'off', 'enabled', 'disabled'].includes(normalized)) {
+        throw new Error('reasoningEnabled must be on or off')
+      }
+      return updateActive({
+        ...config,
+        reasoning: normalizeNativeReasoningConfig(config.model, {
+          ...config.reasoning,
+          enabled: ['true', 'on', 'enabled'].includes(normalized),
+        }, config.provider, config.modelCapabilities),
+      })
+    }
+    case 'reasoningEffort':
+      return updateActive({
+        ...config,
+        reasoning: normalizeNativeReasoningConfig(config.model, {
+          ...config.reasoning,
+          effort: value.toLowerCase() as NativeReasoningConfig['effort'],
+        }, config.provider, config.modelCapabilities),
+      })
+    case 'reasoningBudgetTokens': {
+      const parsed = Number(value)
+      if (!Number.isInteger(parsed) || parsed < 1024) throw new Error('reasoningBudgetTokens must be at least 1024')
+      return updateActive({
+        ...config,
+        reasoning: normalizeNativeReasoningConfig(config.model, {
+          ...config.reasoning,
+          budgetTokens: parsed,
+        }, config.provider, config.modelCapabilities),
+      })
+    }
     case 'contextWindow':
     case 'maxTokens': {
       const parsed = Number(value)
       if (!Number.isInteger(parsed) || parsed <= 0) {
         throw new Error(`${key} must be a positive integer`)
       }
+      if (key === 'maxTokens' && config.maxOutputTokens && parsed > config.maxOutputTokens) {
+        throw new Error(`maxTokens cannot exceed this model's ${config.maxOutputTokens} token output limit`)
+      }
       return updateActive({ ...config, [key]: parsed } as TurboFluxConfig)
     }
     default:
-      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens`)
+      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens, approvalPolicy, reasoningEnabled, reasoningEffort, reasoningBudgetTokens`)
   }
-}
-
-export async function getModelPresets(_baseUrl?: string): Promise<ModelPreset[]> {
-  return MODEL_PRESETS
 }
 
 function applyKnownModelMetadata(config: TurboFluxConfig, presets: ModelPreset[]): TurboFluxConfig {
@@ -412,6 +567,7 @@ function applyKnownModelMetadata(config: TurboFluxConfig, presets: ModelPreset[]
   return spec ? {
     ...config,
     model: spec.id,
+    reasoning: normalizeNativeReasoningConfig(spec.id, config.reasoning, spec.provider),
   } : config
 }
 
@@ -431,23 +587,23 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
   ensureDirectories()
 
   if (!existsSync(CONFIG_FILE)) {
-    const initial = applyKnownModelMetadata({ ...DEFAULT_CONFIG }, MODEL_PRESETS)
-    writeFileSync(CONFIG_FILE, JSON.stringify(initial, null, 2), 'utf-8')
+    const initial = applyKnownModelMetadata(normalizeConfig(hydrateCredentials(DEFAULT_CONFIG)), MODEL_PRESETS)
+    writeConfigDocument(initial)
     return initial
   }
 
   try {
     const raw = readFileSync(CONFIG_FILE, 'utf-8').replace(/^\uFEFF/, '')
     const userConfig = JSON.parse(raw)
-    const merged = normalizeConfig({ ...DEFAULT_CONFIG, ...userConfig })
+    const merged = normalizeConfig(hydrateCredentials({ ...DEFAULT_CONFIG, ...userConfig }))
   if (looksLikeLegacyLocalProxyDefault(userConfig)) {
       const reset = emptyConfigWithProfiles()
-      writeFileSync(CONFIG_FILE, JSON.stringify(reset, null, 2), 'utf-8')
+      writeConfigDocument(reset)
       return reset
     }
     if (looksLikeLegacyBundledDefault(userConfig)) {
       const migrated = emptyConfigWithProfiles()
-      writeFileSync(CONFIG_FILE, JSON.stringify(migrated, null, 2), 'utf-8')
+      writeConfigDocument(migrated)
       return migrated
     }
     const withBackendMetadata = applyKnownModelMetadata(merged, MODEL_PRESETS)
@@ -456,7 +612,9 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
       withBackendMetadata.maxTokens !== merged.maxTokens ||
       withBackendMetadata.model !== merged.model
     ) {
-      writeFileSync(CONFIG_FILE, JSON.stringify(withBackendMetadata, null, 2), 'utf-8')
+      saveConfig(withBackendMetadata)
+    } else if (userConfig.apiKey || userConfig.apiConfigs?.some((profile: TurboFluxApiConfigProfile) => profile.apiKey)) {
+      saveConfig(withBackendMetadata)
     }
     return syncActiveProfile(withBackendMetadata)
   } catch {
@@ -466,11 +624,24 @@ export async function loadConfig(): Promise<TurboFluxConfig> {
 
 export function saveConfig(config: TurboFluxConfig): void {
   ensureDirectories()
-  writeFileSync(CONFIG_FILE, JSON.stringify(syncActiveProfile(normalizeConfig(config)), null, 2), 'utf-8')
+  const normalized = syncActiveProfile(normalizeConfig(config))
+  saveCredentialSnapshot({
+    apiKey: normalized.apiKey || undefined,
+    apiConfigs: Object.fromEntries((normalized.apiConfigs || []).filter(profile => profile.apiKey).map(profile => [profile.id, profile.apiKey])),
+  })
+  writeConfigDocument(normalized)
 }
 
 export function getConfigDir(): string {
   return CONFIG_DIR
+}
+
+export function redactConfig(config: TurboFluxConfig): TurboFluxConfig {
+  return {
+    ...config,
+    apiKey: config.apiKey ? '***' : '',
+    apiConfigs: config.apiConfigs?.map(profile => ({ ...profile, apiKey: profile.apiKey ? '***' : '' })),
+  }
 }
 
 export function getConversationsDir(): string {
@@ -499,7 +670,11 @@ export function applyPreset(config: TurboFluxConfig, preset: ModelPreset): Turbo
     model: preset.model,
     baseUrl: preset.baseUrl,
     contextWindow: preset.contextWindow,
-    maxTokens: preset.maxTokens,
+    maxTokens: Math.min(preset.maxTokens, preset.maxOutputTokens ?? preset.maxTokens),
+    maxOutputTokens: preset.maxOutputTokens,
+    modelCapabilities: preset.capabilities,
+    modelMetadataSources: preset.metadataSources,
+    reasoning: normalizeNativeReasoningConfig(preset.model, preset.reasoning ?? config.reasoning, preset.provider, preset.capabilities),
   })
 }
 
@@ -514,6 +689,14 @@ export function configFromProviderPreset(preset: ProviderPreset, apiKey: string,
     model: spec?.id ?? selectedModel,
     contextWindow: spec?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: spec?.defaultRequestTokens ?? DEFAULT_MAX_TOKENS,
+    maxOutputTokens: spec?.maxOutputTokens,
+    modelCapabilities: spec ? {
+      vision: spec.supportsVision,
+      reasoning: Boolean(normalizeNativeReasoningConfig(spec.id, undefined, preset.provider)),
+    } : undefined,
+    modelMetadataSources: spec ? ['builtin'] : ['default'],
+    approvalPolicy: 'ask',
+    reasoning: normalizeNativeReasoningConfig(spec?.id ?? selectedModel, undefined, preset.provider),
     apiConfigs: [],
     activeApiConfigId: 'main',
     fastContextModel: { mode: 'follow-main' },

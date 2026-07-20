@@ -1,13 +1,17 @@
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
-import type { FastContextModelConfig, TurboFluxApiConfigProfile } from '../config'
+import type { FastContextModelConfig, ModelCapabilities, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
+import type { ApprovalPolicy, NativeReasoningConfig } from '../../shared/agentTypes'
 
 export interface AgentRuntimeConfig {
-  provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
+  provider: TurboFluxProvider
   apiKey: string
   baseUrl: string
   model: string
   contextWindow: number
   maxTokens: number
+  modelCapabilities?: ModelCapabilities
+  approvalPolicy?: ApprovalPolicy
+  reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
   fastContextModel?: FastContextModelConfig
@@ -22,6 +26,26 @@ export interface RuntimeTokenUsageEvent {
   totalInputTokens?: number
   totalTokens?: number
   cacheHitRate?: number
+}
+
+function normalizeContextSegments(segments: ContextSegment[]): ContextSegment[] {
+  const normalized: ContextSegment[] = []
+  const sorted = segments.slice().sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+  for (const segment of sorted) {
+    const covered = new Set(segment.coveredTurnIds || [])
+    for (let index = normalized.length - 1; index >= 0; index -= 1) {
+      const existing = normalized[index]
+      const sameBoundary = existing.startMessageId === segment.startMessageId && existing.endMessageId === segment.endMessageId
+      const overlaps = covered.size > 0 && (existing.coveredTurnIds || []).some(id => covered.has(id))
+      if (sameBoundary || overlaps) normalized.splice(index, 1)
+    }
+    normalized.push({
+      ...segment,
+      coveredTurnIds: segment.coveredTurnIds ? [...segment.coveredTurnIds] : undefined,
+      createdAt: segment.createdAt ?? Date.now(),
+    })
+  }
+  return normalized
 }
 
 export class DefaultAgentStateProvider implements AgentStateProvider {
@@ -82,6 +106,8 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       defaultModel: config.model,
       contextWindow: config.contextWindow,
       maxTokens: config.maxTokens,
+      modelCapabilities: config.modelCapabilities,
+      reasoning: config.reasoning,
     }
   }
 
@@ -94,6 +120,8 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       defaultModel: profile.model,
       contextWindow: profile.contextWindow,
       maxTokens: profile.maxTokens,
+      modelCapabilities: profile.modelCapabilities,
+      reasoning: profile.reasoning,
     }
   }
 
@@ -123,28 +151,11 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
   }
 
   addContextSegment(segment: ContextSegment): void {
-    const createdAt = segment.createdAt ?? Date.now()
-    const nextSegment = { ...segment, createdAt }
-    const existingIndex = this.contextSegments.findIndex(existing =>
-      existing.startMessageId === nextSegment.startMessageId
-      && existing.endMessageId === nextSegment.endMessageId
-    )
-
-    if (existingIndex >= 0) {
-      this.contextSegments = this.contextSegments.map((existing, index) =>
-        index === existingIndex ? nextSegment : existing
-      )
-      return
-    }
-
-    this.contextSegments = [...this.contextSegments, nextSegment]
+    this.contextSegments = normalizeContextSegments([...this.contextSegments, segment])
   }
 
   setContextSegments(segments: ContextSegment[]): void {
-    this.contextSegments = segments.map(segment => ({
-      ...segment,
-      createdAt: segment.createdAt ?? Date.now(),
-    }))
+    this.contextSegments = normalizeContextSegments(segments)
   }
 
   getContextReservoir(): ContextReservoirEntry[] {

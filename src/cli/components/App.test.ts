@@ -1,100 +1,31 @@
 import { describe, expect, it } from 'vitest'
 import {
-  buildTranscriptSlice,
-  clipTextToRows,
-  getNextTranscriptOffsetAfterAppend,
   getEngineUserOrdinalForUiMessage,
-  getNextThinkingMode,
   formatTaskProgressLabel,
   formatTaskToolSummary,
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
+  turnsToMessages,
 } from './App'
 import type { Message } from './messages/Messages'
 import type { AgentTurn } from '../../shared/agentTypes'
 
-function message(id: string, content: string): Message {
-  return { id, role: 'assistant', content }
-}
-
-function diffMessage(id: string): Message {
-  return {
-    id,
-    role: 'assistant',
-    content: '',
-    changes: [{
-      path: 'src/example.ts',
-      operation: 'edit',
-      before: 'const value = 1\n',
-      after: 'const value = 2\n',
-    }],
-  }
-}
-
-describe('no-flicker transcript slicing', () => {
-  it('keeps the newest messages inside the row budget', () => {
-    const messages = [
-      message('1', 'one'),
-      message('2', 'two'),
-      message('3', 'three'),
-      message('4', 'four'),
-    ]
-
-    const slice = buildTranscriptSlice(messages, 6, 80, 0)
-
-    expect(slice.start).toBe(2)
-    expect(slice.end).toBe(4)
-    expect(slice.messages.map(m => m.id)).toEqual(['3', '4'])
-  })
-
-  it('can page upward from the latest transcript tail', () => {
-    const messages = [
-      message('1', 'one'),
-      message('2', 'two'),
-      message('3', 'three'),
-      message('4', 'four'),
-    ]
-
-    const slice = buildTranscriptSlice(messages, 6, 80, 2)
-
-    expect(slice.start).toBe(0)
-    expect(slice.end).toBe(2)
-    expect(slice.messages.map(m => m.id)).toEqual(['1', '2'])
-  })
-
-  it('clips an oversized single message instead of overflowing the viewport', () => {
-    const longText = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n')
-
-    const slice = buildTranscriptSlice([message('1', longText)], 5, 80, 0)
-
-    expect(slice.start).toBe(0)
-    expect(slice.end).toBe(1)
-    expect(slice.messages[0]?.content).toContain('[... clipped for screen ...]')
-    expect(slice.messages[0]?.content).toContain('line 20')
-  })
-
-  it('budgets diff cards as rendered rows when slicing history', () => {
-    const slice = buildTranscriptSlice([
-      diffMessage('diff'),
-      message('plain', 'tail'),
-    ], 8, 80, 0, 0)
-
-    expect(slice.messages.map(m => m.id)).toEqual(['diff', 'plain'])
-  })
-})
-
 describe('no-flicker mode selection', () => {
-  it('uses normal terminal scrollback by default for interactive sessions', () => {
-    expect(shouldUseNoFlicker(true)).toBe(false)
+  it('keeps the full fixed cockpit by default for interactive sessions', () => {
+    expect(shouldUseNoFlicker(true)).toBe(true)
   })
 
-  it('can use the fixed viewport when explicitly requested', () => {
+  it('keeps the fixed viewport when explicitly requested', () => {
     expect(shouldUseNoFlicker(true, undefined, true)).toBe(true)
   })
 
   it('stays disabled for one-shot and non-interactive output', () => {
     expect(shouldUseNoFlicker(true, 'hello', true)).toBe(false)
     expect(shouldUseNoFlicker(false, undefined, true)).toBe(false)
+  })
+
+  it('can opt back into classic terminal scrollback', () => {
+    expect(shouldUseNoFlicker(true, undefined, false)).toBe(false)
   })
 
   it('can be disabled for terminals that dislike alternate screen', () => {
@@ -128,29 +59,6 @@ describe('no-flicker mode selection', () => {
   })
 })
 
-describe('clipTextToRows', () => {
-  it('returns unchanged text when it fits', () => {
-    expect(clipTextToRows('short\ntext', 4, 80)).toBe('short\ntext')
-  })
-
-  it('keeps the tail of a very long line', () => {
-    const clipped = clipTextToRows('x'.repeat(200), 2, 40)
-
-    expect(clipped).toContain('[... clipped for screen ...]')
-    expect(clipped.endsWith('x'.repeat(64))).toBe(true)
-  })
-})
-
-describe('transcript offset behavior', () => {
-  it('stays pinned to latest when the viewport is already at the bottom', () => {
-    expect(getNextTranscriptOffsetAfterAppend(0, 2, true)).toBe(0)
-  })
-
-  it('preserves the current history view when new messages append', () => {
-    expect(getNextTranscriptOffsetAfterAppend(3, 2, false)).toBe(5)
-  })
-})
-
 describe('task progress labels', () => {
   it('does not surface 99% as the primary task state', () => {
     expect(formatTaskProgressLabel(0)).toBe('')
@@ -163,15 +71,6 @@ describe('task progress labels', () => {
     expect(formatTaskToolSummary(0, 0, 0, 0)).toBe('planning')
     expect(formatTaskToolSummary(2, 4, 1, 0)).toBe('tools 2/4, 1 running')
     expect(formatTaskToolSummary(3, 4, 0, 1)).toBe('tools 3/4, 1 failed')
-  })
-})
-
-describe('thinking mode shortcuts', () => {
-  it('cycles through thinking effort modes like a status-bar mode switcher', () => {
-    expect(getNextThinkingMode('auto')).toBe('off')
-    expect(getNextThinkingMode('off')).toBe('standard')
-    expect(getNextThinkingMode('standard')).toBe('max')
-    expect(getNextThinkingMode('max')).toBe('auto')
   })
 })
 
@@ -202,5 +101,23 @@ describe('rewind helpers', () => {
     ]
 
     expect(sliceTurnsBeforeNthUserTurn(turns, 1).map(turn => turn.id)).toEqual(['turn-u1', 'turn-a1'])
+  })
+})
+
+describe('interrupted assistant messages', () => {
+  it('preserves the interrupted marker when restoring engine turns', () => {
+    const messages = turnsToMessages([{
+      id: 'partial-assistant',
+      role: 'assistant',
+      content: 'partial response',
+      timestamp: 1,
+      metadata: { interrupted: true },
+    }])
+
+    expect(messages).toEqual([expect.objectContaining({
+      id: 'partial-assistant',
+      content: 'partial response',
+      interrupted: true,
+    })])
   })
 })

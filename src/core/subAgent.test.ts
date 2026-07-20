@@ -2,12 +2,66 @@ import { describe, expect, it, vi } from 'vitest'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import { runSubAgent } from './subAgent'
+import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 describe('runSubAgent', () => {
+  it('reports model wait progress and enforces a caller-specific timeout', async () => {
+    const originalFetch = globalThis.fetch
+    const events: SubAgentEvent[] = []
+    vi.useFakeTimers()
+    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        const error = new Error('aborted')
+        error.name = 'AbortError'
+        reject(error)
+      }, { once: true })
+    })) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const resultPromise = runSubAgent({
+        definition,
+        objective: 'find the entry point',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        requestTimeoutMs: 6_000,
+        onEvent: event => events.push(event),
+      })
+
+      await vi.advanceTimersByTimeAsync(6_000)
+      const result = await resultPromise
+
+      expect(result).toMatchObject({ ok: false, error: 'Model request timed out after 6000ms' })
+      expect(events.filter(event => event.type === 'model_wait')).toHaveLength(2)
+    } finally {
+      globalThis.fetch = originalFetch
+      vi.useRealTimers()
+    }
+  })
+
   it('executes independent tool calls in parallel and returns results in request order', async () => {
     const originalFetch = globalThis.fetch
     const calls: Array<{ at: number; path: string }> = []
@@ -55,6 +109,7 @@ describe('runSubAgent', () => {
       toolExecutor: executor,
       apiKey: 'test',
       baseUrl: 'http://example.test',
+      model: 'test-model',
     })
 
     globalThis.fetch = originalFetch
@@ -62,5 +117,536 @@ describe('runSubAgent', () => {
     expect(result.ok).toBe(true)
     expect(calls.map(call => call.path.replace(/\\/g, '/'))).toEqual(['C:/repo/a.ts', 'C:/repo/b.ts'])
     expect(Math.abs(calls[1].at - calls[0].at)).toBeLessThan(40)
+  })
+
+  it('uses Anthropic messages, headers, and tool-result blocks', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(input), init })
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          content: [{ type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.ts' } }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: 'finished' }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: 'export const value = 1' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'inspect code',
+      maxTurns: 2,
+      maxParallel: 2,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'inspect a.ts',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'anthropic-key',
+        baseUrl: 'https://api.anthropic.test/v1',
+        provider: 'anthropic',
+        model: 'claude-test',
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'finished' })
+      expect(requests).toHaveLength(2)
+      expect(requests[0].url).toBe('https://api.anthropic.test/v1/messages')
+      expect(new Headers(requests[0].init?.headers).get('x-api-key')).toBe('anthropic-key')
+      const secondBody = JSON.parse(String(requests[1].init?.body))
+      expect(JSON.stringify(secondBody.messages)).toContain('tool_result')
+      expect(secondBody.model).toBe('claude-test')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('uses a Claude model hint and falls back from Messages to Chat', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    const events: SubAgentEvent[] = []
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init })
+      if (String(url).endsWith('/messages')) {
+        return new Response(JSON.stringify({ error: { message: 'route not found' } }), { status: 404 })
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'chat fallback finished' } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'inspect code',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'inspect the project',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'proxy-key',
+        baseUrl: 'https://proxy.test/v1',
+        provider: 'custom',
+        model: 'vendor/claude-fable-5',
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'chat fallback finished' })
+      expect(requests.map(request => request.url)).toEqual([
+        'https://proxy.test/v1/messages',
+        'https://proxy.test/v1/chat/completions',
+      ])
+      const firstHeaders = new Headers(requests[0].init?.headers)
+      expect(firstHeaders.get('x-api-key')).toBe('proxy-key')
+      expect(firstHeaders.get('authorization')).toBe('Bearer proxy-key')
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'model_retry',
+        reason: expect.stringContaining('Protocol fallback'),
+      }))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('falls back from Chat to Responses and converts the request shape', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Array<{ url: string; body: Record<string, any> }> = []
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) })
+      if (String(url).endsWith('/chat/completions')) {
+        return new Response(JSON.stringify({ error: { message: 'endpoint not found' } }), { status: 404 })
+      }
+      return new Response(JSON.stringify({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'responses finished' }] }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'inspect code',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'inspect the project',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'proxy-key',
+        baseUrl: 'https://proxy.test/v1',
+        provider: 'custom',
+        model: 'gpt-compatible-model',
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'responses finished' })
+      expect(requests.map(request => request.url)).toEqual([
+        'https://proxy.test/v1/chat/completions',
+        'https://proxy.test/v1/responses',
+      ])
+      expect(requests[1].body.messages).toBeUndefined()
+      expect(requests[1].body.input).toEqual(expect.arrayContaining([
+        expect.objectContaining({ role: 'user', content: expect.stringContaining('Objective:') }),
+      ]))
+      expect(requests[1].body.tools[0]).toMatchObject({ type: 'function', name: 'search_content' })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('retries a transient network failure and exposes the underlying cause', async () => {
+    const originalFetch = globalThis.fetch
+    const events: SubAgentEvent[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        const cause = Object.assign(new Error('socket closed'), {
+          code: 'ECONNRESET',
+          address: '127.0.0.1',
+          port: 443,
+        })
+        throw new TypeError('fetch failed', { cause })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'finished' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find the entry point',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'finished' })
+      expect(requestCount).toBe(2)
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'model_retry',
+        attempt: 2,
+        reason: expect.stringContaining('ECONNRESET'),
+      }))
+      expect(events.find(event => event.type === 'model_retry' && event.reason.includes('127.0.0.1:443'))).toBeTruthy()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it.each([429, 503])('retries transient HTTP status %s once', async status => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response('temporary failure', { status, headers: { 'retry-after': '0' } })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'finished' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find the entry point',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'finished' })
+      expect(requestCount).toBe(2)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('rewrites an empty search wave once before concluding', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)))
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'search-1',
+                function: { name: 'search_content', arguments: JSON.stringify({ pattern: 'missing' }) },
+              }],
+            },
+          }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'RANKED_CODE_MAP\nUNCERTAINTY: no evidence' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 2,
+      maxParallel: 2,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find missing behavior',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      })
+
+      expect(result.ok).toBe(true)
+      expect(requestBodies).toHaveLength(2)
+      expect(JSON.stringify(requestBodies[1].messages)).toContain('last search wave returned no matches')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('requires read evidence before accepting a FastContext final report', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)))
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'RANKED_CODE_MAP\n1. src/a.ts candidate only' } }],
+        }), { status: 200 })
+      }
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'read-1',
+                function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/a.ts', offset: 1, limit: 20 }) },
+              }],
+            },
+          }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'RANKED_CODE_MAP\n1. src/a.ts L1-L2 role=entry confidence=high' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: 'export const entry = true\nrun()' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 3,
+      maxParallel: 2,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find entry',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        initialEvidence: [{
+          path: 'src/a.ts',
+          startLine: 1,
+          endLine: 1,
+          preview: 'src/a.ts',
+          reason: 'prefetch search: entry',
+        }],
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: expect.stringContaining('L1-L2') })
+      expect(requestBodies).toHaveLength(3)
+      expect(JSON.stringify(requestBodies[1].messages)).toContain('Quality gate: candidate paths are not enough')
+      expect(result.evidence?.some(evidence => evidence.reason === 'file read')).toBe(true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('keeps only executable tool calls in assistant history when parallel calls are capped', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)))
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [
+                { id: 'read-a', function: { name: 'read_file', arguments: JSON.stringify({ path: 'a.ts' }) } },
+                { id: 'read-b', function: { name: 'read_file', arguments: JSON.stringify({ path: 'b.ts' }) } },
+              ],
+            },
+          }],
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'finished' } }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async (path: string) => ({ success: true, data: `content for ${path}` }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'explorer',
+      label: 'Explorer',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 2,
+      maxParallel: 1,
+    }
+
+    try {
+      await runSubAgent({
+        definition,
+        objective: 'read candidates',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      })
+
+      const assistantMessage = requestBodies[1].messages.find((message: any) => message.role === 'assistant' && message.tool_calls)
+      expect(assistantMessage.tool_calls).toHaveLength(1)
+      expect(assistantMessage.tool_calls[0].id).toBe('read-a')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('reports search infrastructure failures instead of pretending there were no matches', async () => {
+    const originalFetch = globalThis.fetch
+    const events: SubAgentEvent[] = []
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: '',
+          tool_calls: [{
+            id: 'search-1',
+            function: { name: 'search_files', arguments: JSON.stringify({ pattern: '**/*.ts' }) },
+          }],
+        },
+      }],
+    }), { status: 200 })) as unknown as typeof fetch
+
+    const executor = {
+      searchFiles: async () => ({ success: false, error: 'rg unavailable' }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+      readFile: async () => ({ success: true, data: '' }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find source files',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({ ok: true, truncated: true })
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'tool_result',
+        tool: 'search_files',
+        ok: false,
+        summary: expect.stringContaining('rg unavailable'),
+      }))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })

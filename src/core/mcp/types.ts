@@ -3,6 +3,7 @@ export interface McpServerConfig {
   args?: string[]
   url?: string
   env?: Record<string, string>
+  inheritEnv?: string[]
   enabled: boolean
 }
 
@@ -15,4 +16,10 @@ export interface McpToolInfo {
   description: string
   inputSchema: Record<string, unknown>
   serverName: string
+  annotations?: {
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+    idempotentHint?: boolean
+    openWorldHint?: boolean
+  }
 }

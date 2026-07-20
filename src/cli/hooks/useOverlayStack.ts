@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
 
-export type OverlayName = 'history' | 'rewind' | 'modelPicker' | null
+export type OverlayName = 'history' | 'rewind' | 'modelPicker' | 'effortPicker' | null
 
 export function useOverlayStack() {
   const [active, setActive] = useState<OverlayName>(null)

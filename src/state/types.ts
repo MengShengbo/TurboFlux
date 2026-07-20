@@ -1,13 +1,16 @@
-import type { AgentMode, AgentTurn, TokenUsage } from '../shared/agentTypes'
+import type { AgentMode, AgentTurn, NativeReasoningConfig, TokenUsage } from '../shared/agentTypes'
 import type { MemoryKind, MemoryScope } from '../shared/memoryTypes'
+import type { ModelCapabilities } from '../core/config'
 
 export interface APIConfig {
-  provider: 'openai' | 'anthropic' | 'deepseek' | 'openrouter' | 'custom'
+  provider: 'openai' | 'anthropic' | 'deepseek' | 'kimi' | 'glm' | 'openrouter' | 'custom'
   apiKey: string
   baseUrl: string
   defaultModel: string
   contextWindow?: number
   maxTokens?: number
+  modelCapabilities?: ModelCapabilities
+  reasoning?: NativeReasoningConfig
   temperature?: number
   customHeaders?: Record<string, string>
 }
@@ -37,6 +40,7 @@ export interface ContextSegment {
   originalCharCount: number
   isValid: boolean
   createdAt?: number
+  coveredTurnIds?: string[]
 }
 
 export interface ContextReservoirEntry {

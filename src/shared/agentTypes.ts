@@ -1,12 +1,20 @@
 export type AgentMode = 'vibe' | 'plan'
 
-export type ApprovalPolicy = 'request' | 'auto' | 'full'
+export type ApprovalPolicy = 'ask' | 'agent' | 'full'
+
+export type LegacyApprovalPolicy = 'request' | 'auto'
 
 export type SandboxPolicy = 'workspace' | 'readonly' | 'full'
 
-export type ThinkingMode = 'auto' | 'off' | 'standard' | 'max'
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
-export type ResolvedThinkingMode = Exclude<ThinkingMode, 'auto'>
+export type ReasoningEffort = typeof REASONING_EFFORTS[number]
+
+export interface NativeReasoningConfig {
+  enabled?: boolean
+  effort?: ReasoningEffort
+  budgetTokens?: number
+}
 
 export type ContextPolicyMode = 'normal' | 'qualityFirst'
 
@@ -25,6 +33,7 @@ export interface AgentTool {
   isDestructive: boolean
   isConcurrencySafe: boolean
   requiredMode?: AgentMode[]
+  inputSchema?: Record<string, unknown>
 }
 
 export interface ToolParameter {
@@ -34,6 +43,7 @@ export interface ToolParameter {
   required: boolean
   enum?: string[]
   default?: unknown
+  schema?: Record<string, unknown>
 }
 
 export interface TaskNode {
@@ -75,10 +85,11 @@ export interface AgentTurn {
     tokens?: TokenUsage
     duration?: number
     mode?: AgentMode
-    thinkingMode?: ThinkingMode
-    resolvedThinkingMode?: ResolvedThinkingMode
+    reasoningEnabled?: boolean
+    reasoningEffort?: ReasoningEffort
     thinking?: ThinkingTrace
     rawReasoningPayload?: RawReasoningPayload
+    interrupted?: boolean
     checkpointId?: string
     checkpointLabel?: string
     attachments?: AgentAttachment[]
@@ -207,7 +218,6 @@ export interface AgentConfig {
   mode: AgentMode
   approvalPolicy?: ApprovalPolicy
   sandboxPolicy?: SandboxPolicy
-  thinkingMode?: ThinkingMode
   temperature: number
   maxTokens: number
   maxTurns: number
@@ -243,18 +253,23 @@ export const MODE_DESCRIPTIONS: Record<AgentMode, string> = {
   plan: '规划模式 - 先制定详细计划，用户审批后执行',
 }
 
-export const THINKING_MODE_LABELS: Record<ThinkingMode, string> = {
-  auto: 'Auto',
-  off: 'None',
-  standard: 'Thinking',
-  max: 'Thinking Max',
+export const APPROVAL_POLICY_LABELS: Record<ApprovalPolicy, string> = {
+  ask: 'Request approval',
+  agent: 'Approve low risk',
+  full: 'Full access',
 }
 
-export const THINKING_MODE_DESCRIPTIONS: Record<ThinkingMode, string> = {
-  auto: '根据问题复杂度自动决定是否进入思考流程。',
-  off: '普通对话输出，不主动进入额外思考流程。',
-  standard: '为复杂任务启用问题建模、证据优先检索、有限反思与结论前验证。',
-  max: '为高难任务启用竞争假设、外部证据校验、批判复核与更严格停止条件。',
+export const APPROVAL_POLICY_DESCRIPTIONS: Record<ApprovalPolicy, string> = {
+  ask: 'Ask before file changes, commands, MCP tools, and external actions.',
+  agent: 'Continue with low-risk workspace actions and ask only when risk is detected.',
+  full: 'Allow unrestricted local and network access; catastrophic operations remain blocked.',
+}
+
+export function normalizeApprovalPolicy(value: unknown, fallback: ApprovalPolicy = 'ask'): ApprovalPolicy {
+  if (value === 'ask' || value === 'agent' || value === 'full') return value
+  if (value === 'request') return 'ask'
+  if (value === 'auto') return 'agent'
+  return fallback
 }
 
 export function isTerminalStatus(status: TaskStatus): boolean {

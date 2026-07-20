@@ -14,6 +14,18 @@ export interface McpConnection {
 export class McpClient {
   private connections: Map<string, McpConnection> = new Map()
 
+  private buildEnvironment(config: McpServerConfig): Record<string, string> {
+    const defaultNames = process.platform === 'win32'
+      ? ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']
+      : ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR']
+    const environment: Record<string, string> = {}
+    for (const name of new Set([...defaultNames, ...(config.inheritEnv || [])])) {
+      const value = process.env[name]
+      if (typeof value === 'string') environment[name] = value
+    }
+    return { ...environment, ...(config.env || {}) }
+  }
+
   async connect(name: string, config: McpServerConfig): Promise<McpConnection> {
     if (!config.command) {
       throw new Error(`MCP server "${name}" has no command configured`)
@@ -22,7 +34,7 @@ export class McpClient {
     const transport = new StdioClientTransport({
       command: config.command,
       args: config.args || [],
-      env: { ...process.env, ...(config.env || {}) } as Record<string, string>,
+      env: this.buildEnvironment(config),
     })
 
     const client = new Client(
@@ -59,6 +71,7 @@ export class McpClient {
         description: tool.description || '',
         inputSchema: (tool.inputSchema as Record<string, unknown>) || {},
         serverName,
+        annotations: tool.annotations,
       }))
     } catch {
       return []

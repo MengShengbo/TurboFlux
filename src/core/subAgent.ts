@@ -2,9 +2,23 @@ import { isAbsolute, join, relative } from 'path'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
+import { createTurboFluxRequestHeaders } from './clientIdentity'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
 import type { SkillRuntime } from './skills/runtime'
 import type { LoadedSkill } from './skills/loader'
+import {
+  ModelProtocolRequestError,
+  buildModelProtocolUrl,
+  formatProtocolAttempt,
+  formatProtocolFailure,
+  planModelProtocols,
+  shouldFallbackProtocol,
+  toProtocolAttempt,
+  toResponsesInput,
+  toResponsesTools,
+  type ModelProtocol,
+  type ModelProtocolAttempt,
+} from './modelProtocol'
 
 export { type SubAgentDefinition }
 
@@ -237,9 +251,14 @@ export interface RunSubAgentOptions {
   toolExecutor: ToolExecutor
   apiKey: string
   baseUrl: string
+  provider?: string
+  customHeaders?: Record<string, string>
   model?: string
   codemap?: string | null
   abortSignal?: AbortSignal
+  requestTimeoutMs?: number
+  retrievalContext?: string
+  initialEvidence?: SubAgentEvidence[]
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -258,12 +277,170 @@ interface ToolCallRequest {
   function: { name: string; arguments: string }
 }
 
+type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
+
+const TRANSIENT_HTTP_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504])
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'EAI_AGAIN',
+  'ENETDOWN',
+  'ENETRESET',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+])
+
+async function fetchWithTimeout(url: string, init: RequestInit, parentSignal?: AbortSignal, timeoutMs = 120_000): Promise<Response> {
+  const controller = new AbortController()
+  let timedOut = false
+  const abort = () => controller.abort()
+  if (parentSignal?.aborted) controller.abort()
+  else parentSignal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (timedOut && !parentSignal?.aborted) {
+      throw new Error(`Model request timed out after ${timeoutMs}ms`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+    parentSignal?.removeEventListener('abort', abort)
+  }
+}
+
+function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      const error = new Error('Aborted')
+      error.name = 'AbortError'
+      reject(error)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delayMs)
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function errorCode(error: unknown): string | undefined {
+  let current: unknown = error
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (typeof current === 'object') {
+      const code = (current as { code?: unknown }).code
+      if (typeof code === 'string') return code
+      current = (current as { cause?: unknown }).cause
+      continue
+    }
+    break
+  }
+  return undefined
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+  const code = errorCode(error)
+  if (code && TRANSIENT_NETWORK_CODES.has(code)) return true
+  return error instanceof TypeError && /fetch failed|network|socket/i.test(error.message)
+}
+
+function retryAfterMs(response: Response): number {
+  const value = response.headers.get('retry-after')?.trim()
+  if (!value) return 200
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.max(0, Math.min(2_000, seconds * 1_000))
+  const at = Date.parse(value)
+  return Number.isFinite(at) ? Math.max(0, Math.min(2_000, at - Date.now())) : 200
+}
+
+async function fetchWithTransientRetry(
+  url: string,
+  init: RequestInit,
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+  onRetry: (attempt: number, delayMs: number, reason: string) => void,
+): Promise<Response> {
+  const startedAt = Date.now()
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const remainingMs = timeoutMs - (Date.now() - startedAt)
+    if (remainingMs < 1) {
+      throw lastError || new Error(`Model request timed out after ${timeoutMs}ms`)
+    }
+
+    try {
+      const response = await fetchWithTimeout(url, init, parentSignal, remainingMs)
+      if (attempt === 1 && TRANSIENT_HTTP_STATUSES.has(response.status)) {
+        const delayMs = Math.min(retryAfterMs(response), Math.max(0, remainingMs - 1))
+        onRetry(2, delayMs, `API ${response.status}`)
+        await response.body?.cancel().catch(() => undefined)
+        await abortableDelay(delayMs, parentSignal)
+        continue
+      }
+      return response
+    } catch (error) {
+      lastError = error
+      const isAbort = parentSignal?.aborted || (error instanceof Error && error.name === 'AbortError')
+      const isTimeout = error instanceof Error && /timed out after \d+ms/i.test(error.message)
+      if (attempt === 2 || isAbort || isTimeout || !isTransientNetworkError(error)) throw error
+
+      const elapsedMs = Date.now() - startedAt
+      const delayMs = Math.min(200, Math.max(0, timeoutMs - elapsedMs - 1))
+      if (delayMs <= 0) throw error
+      onRetry(2, delayMs, formatSubAgentError(error))
+      await abortableDelay(delayMs, parentSignal)
+    }
+  }
+
+  throw lastError || new Error('Model request failed')
+}
+
+function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, unknown>> {
+  return messages.filter(message => message.role !== 'system').map(message => {
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      return {
+        role: 'assistant',
+        content: [
+          ...(message.content ? [{ type: 'text', text: message.content }] : []),
+          ...message.tool_calls.map(toolCall => ({
+            type: 'tool_use',
+            id: toolCall.id,
+            name: toolCall.function.name,
+            input: JSON.parse(toolCall.function.arguments || '{}'),
+          })),
+        ],
+      }
+    }
+    if (message.role === 'tool') {
+      return {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: message.tool_call_id, content: message.content }],
+      }
+    }
+    return { role: message.role, content: message.content }
+  })
+}
+
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
-  const { definition, objective, workspacePath, toolExecutor, apiKey, baseUrl, model, codemap, abortSignal, onEvent } = options
+  const { definition, objective, workspacePath, toolExecutor, apiKey, baseUrl, provider, customHeaders, model, codemap, abortSignal, onEvent } = options
+  const requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? 120_000)
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
 
-  const messages: Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string }> = []
+  const messages: SubAgentMessage[] = []
 
   messages.push({ role: 'system', content: definition.systemPrompt })
 
@@ -272,7 +449,15 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     messages.push({ role: 'assistant', content: 'READY' })
   }
 
-  messages.push({ role: 'user', content: `Objective: ${objective}\n\nBuild a ranked code map: likely entry points, implementations, callers/config/schema, and suspected root-cause evidence. Be fast and precise.` })
+  const retrievalContext = options.retrievalContext?.trim()
+  messages.push({
+    role: 'user',
+    content: [
+      `Objective: ${objective}`,
+      retrievalContext ? `\nDeterministic prefetch (grounded starting points, not proof):\n${retrievalContext}` : '',
+      '\nBuild a ranked code map: likely entry points, implementations, callers/config/schema, and suspected root-cause evidence. Be fast and precise.',
+    ].filter(Boolean).join('\n'),
+  })
 
   const tools = [
     {
@@ -341,65 +526,209 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     },
   ]
 
-  const modelId = model?.trim() || definition.driver?.trim()
+  const modelId = model?.trim()
   if (!modelId) {
     const message = `Subagent ${definition.label} requires an active model from the main agent.`
     emit({ type: 'error', message })
     return { ok: false, finalText: '', evidence: [], turns: 0, elapsedMs: Date.now() - startedAt, truncated: false, error: message }
   }
   let turn = 0
+  const collectedEvidence: SubAgentEvidence[] = [...(options.initialEvidence || [])]
+  const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
+  let searchRecoveryUsed = false
+  let readRecoveryUsed = false
+  let resolvedProtocol: ModelProtocol | null = null
+
+  const addEvidence = (evidence: SubAgentEvidence): void => {
+    const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
+    if (evidenceKeys.has(key)) return
+    evidenceKeys.add(key)
+    collectedEvidence.push(evidence)
+  }
+
+  const hasReadEvidence = (): boolean => collectedEvidence.some(evidence => /(?:file read|read confirmation|prefetch read)/i.test(evidence.reason))
 
   while (turn < definition.maxTurns) {
     if (abortSignal?.aborted) break
     turn++
     emit({ type: 'turn_start', turn, maxTurns: definition.maxTurns })
 
-    let response: any
+    let messageText = ''
+    let responseToolCalls: ToolCallRequest[] = []
+    const waitStartedAt = Date.now()
+    emit({ type: 'model_wait', turn, elapsedMs: 0, timeoutMs: requestTimeoutMs })
+    const waitTimer = setInterval(() => {
+      emit({ type: 'model_wait', turn, elapsedMs: Date.now() - waitStartedAt, timeoutMs: requestTimeoutMs })
+    }, 5_000)
     try {
-      const body = JSON.stringify({
-        model: modelId,
-        messages,
-        tools,
-        temperature: definition.temperature ?? 0,
-        max_tokens: definition.maxOutputTokens || 4096,
-        stream: false,
-      })
+      const providerHint = provider === 'anthropic' ? 'anthropic' : provider === 'openai' ? 'openai' : 'custom'
+      const plannedProtocols: ModelProtocol[] = planModelProtocols(providerHint, modelId)
+      const protocolCandidates: ModelProtocol[] = resolvedProtocol
+        ? [resolvedProtocol, ...plannedProtocols.filter(protocol => protocol !== resolvedProtocol)]
+        : plannedProtocols
+      const protocolAttempts: ModelProtocolAttempt[] = []
+      let parsedResponse = false
 
-      const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body,
-        signal: abortSignal,
-      })
+      for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
+        const protocol: ModelProtocol = protocolCandidates[protocolIndex]
+        const url = buildModelProtocolUrl(baseUrl, protocol)
+        const requestMessages = messages.map(message => ({ ...message })) as Array<Record<string, unknown>>
+        const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
+          ? {
+              model: modelId,
+              system: definition.systemPrompt,
+              messages: toAnthropicMessages(messages),
+              tools: tools.map(tool => ({
+                name: tool.function.name,
+                description: tool.function.description,
+                input_schema: tool.function.parameters,
+              })),
+              temperature: definition.temperature ?? 0,
+              max_tokens: definition.maxOutputTokens || 4096,
+            }
+          : protocol === 'openai_responses'
+            ? {
+                model: modelId,
+                instructions: definition.systemPrompt,
+                input: toResponsesInput(requestMessages),
+                tools: toResponsesTools(tools),
+                temperature: definition.temperature ?? 0,
+                max_output_tokens: definition.maxOutputTokens || 4096,
+                store: false,
+              }
+            : {
+                model: modelId,
+                messages,
+                tools,
+                temperature: definition.temperature ?? 0,
+                max_tokens: definition.maxOutputTokens || 4096,
+                stream: false,
+              }
+        const headers: Record<string, string> = createTurboFluxRequestHeaders(protocol === 'anthropic_messages'
+          ? {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+              ...(provider === 'anthropic' ? {} : { 'Authorization': `Bearer ${apiKey}` }),
+              ...customHeaders,
+            }
+          : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, ...customHeaders })
+        const res = await fetchWithTransientRetry(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(requestBody),
+        }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
+          emit({ type: 'model_retry', turn, attempt, delayMs, reason })
+        })
 
-      if (!res.ok) {
-        const errText = await res.text()
-        emit({ type: 'error', message: `API ${res.status}: ${errText.slice(0, 200)}` })
-        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: `API error: ${res.status}` }
+        if (!res.ok) {
+          const errorText = await res.text()
+          const protocolError = new ModelProtocolRequestError(`HTTP ${res.status}: ${errorText || 'empty response'}`, {
+            protocol,
+            url,
+            status: res.status,
+            kind: 'http',
+          })
+          const attempt = toProtocolAttempt(protocolError)
+          protocolAttempts.push(attempt)
+          const nextProtocol = protocolCandidates[protocolIndex + 1]
+          if (nextProtocol && shouldFallbackProtocol(protocolError)) {
+            emit({
+              type: 'model_retry',
+              turn,
+              attempt: protocolIndex + 2,
+              delayMs: 0,
+              reason: `Protocol fallback: ${formatProtocolAttempt(attempt)} -> ${buildModelProtocolUrl(baseUrl, nextProtocol)}`,
+            })
+            continue
+          }
+          const failure = formatProtocolFailure(protocolAttempts)
+          emit({ type: 'error', message: failure })
+          return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: failure }
+        }
+
+        const response: any = await res.json()
+        if (protocol === 'anthropic_messages') {
+          const blocks = Array.isArray(response.content) ? response.content : []
+          messageText = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text || '').join('')
+          responseToolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any) => ({
+            id: block.id,
+            function: { name: block.name, arguments: JSON.stringify(block.input || {}) },
+          }))
+        } else if (protocol === 'openai_responses') {
+          if (!Array.isArray(response.output)) {
+            const message = `Responses endpoint ${url} returned no output array.`
+            emit({ type: 'error', message })
+            return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
+          }
+          messageText = response.output
+            .filter((item: any) => item?.type === 'message' && Array.isArray(item.content))
+            .flatMap((item: any) => item.content)
+            .filter((item: any) => (item?.type === 'output_text' || item?.type === 'refusal') && typeof item.text === 'string')
+            .map((item: any) => item.text)
+            .join('')
+          responseToolCalls = response.output
+            .filter((item: any) => item?.type === 'function_call' && typeof item.name === 'string')
+            .map((item: any, index: number) => ({
+              id: item.call_id || item.id || `call_${index}`,
+              function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : '{}' },
+            }))
+        } else {
+          const choice = response.choices?.[0]
+          if (!choice) {
+            const message = `Chat Completions endpoint ${url} returned no response choice.`
+            emit({ type: 'error', message })
+            return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
+          }
+          messageText = choice.message?.content || ''
+          responseToolCalls = choice.message?.tool_calls || []
+        }
+        resolvedProtocol = protocol
+        parsedResponse = true
+        break
       }
 
-      response = await res.json()
+      if (!parsedResponse) {
+        const failure = formatProtocolFailure(protocolAttempts)
+        emit({ type: 'error', message: failure })
+        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: failure }
+      }
     } catch (e: any) {
       if (e.name === 'AbortError') return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'Aborted' }
-      emit({ type: 'error', message: e.message })
-      return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: e.message }
+      const message = formatSubAgentError(e)
+      emit({ type: 'error', message })
+      return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
+    } finally {
+      clearInterval(waitTimer)
     }
 
-    const choice = response.choices?.[0]
-    if (!choice) {
-      return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'No response choice' }
-    }
-
-    const msg = choice.message
-    if (!msg.tool_calls || msg.tool_calls.length === 0) {
-      emit({ type: 'final', text: msg.content || '' })
+    if (responseToolCalls.length === 0) {
+      const isFastContext = definition.id === 'fast_context'
+      if (isFastContext && !hasReadEvidence() && collectedEvidence.length > 0 && !readRecoveryUsed && turn < definition.maxTurns) {
+        messages.push({ role: 'assistant', content: messageText })
+        messages.push({
+          role: 'user',
+          content: 'Quality gate: candidate paths are not enough. Use read_file on the strongest candidates, inspect the relevant line ranges, then return the required RANKED_CODE_MAP with grounded evidence.',
+        })
+        readRecoveryUsed = true
+        continue
+      }
+      if (isFastContext && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
+        messages.push({ role: 'assistant', content: messageText })
+        messages.push({
+          role: 'user',
+          content: 'Recovery search: the first pass produced no concrete evidence. Rewrite the objective into exact identifiers, visible text, and likely file globs; run a different search strategy before concluding.',
+        })
+        searchRecoveryUsed = true
+        continue
+      }
+      emit({ type: 'final', text: messageText })
       emit({ type: 'turn_complete', turn, calls: 0 })
-      return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: msg.content }
+      return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: messageText, evidence: collectedEvidence }
     }
 
-    messages.push({ role: 'assistant', content: msg.content || '', tool_calls: msg.tool_calls })
-
-    const toolCalls = (msg.tool_calls as ToolCallRequest[]).slice(0, definition.maxParallel)
+    const toolCalls = responseToolCalls.slice(0, definition.maxParallel)
+    messages.push({ role: 'assistant', content: messageText, tool_calls: toolCalls })
     const entries = toolCalls.map(tc => {
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.function.arguments) } catch {}
@@ -418,8 +747,21 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           } satisfies ToolExecResult,
         }
       }
-      const result = await executeSubAgentTool(entry.tc.function.name, entry.args, workspacePath, toolExecutor)
-      return { entry, result }
+      try {
+        const result = await executeSubAgentTool(entry.tc.function.name, entry.args, workspacePath, toolExecutor)
+        return { entry, result }
+      } catch (error) {
+        const message = formatSubAgentError(error)
+        return {
+          entry,
+          result: {
+            ok: false,
+            output: `Tool failed: ${message}`,
+            summary: `${entry.tc.function.name} failed: ${message}`,
+            evidence: [],
+          } satisfies ToolExecResult,
+        }
+      }
     }))
 
     for (const { entry, result } of results) {
@@ -427,6 +769,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       emit({ type: 'tool_result', tool: tc.function.name, ok: result.ok, summary: result.summary, turn })
 
       for (const ev of result.evidence) {
+        addEvidence(ev)
         emit({ type: 'evidence', evidence: ev })
       }
 
@@ -434,9 +777,24 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     }
 
     emit({ type: 'turn_complete', turn, calls: results.length })
+
+    if (
+      definition.id === 'fast_context'
+      && results.length > 0
+      && results.every(({ result }) => result.ok)
+      && results.every(({ result }) => result.evidence.length === 0)
+      && !searchRecoveryUsed
+      && turn < definition.maxTurns
+    ) {
+      messages.push({
+        role: 'user',
+        content: 'The last search wave returned no matches. Rewrite the query once using narrower and broader variants, related filenames, symbols, and visible text; do not conclude until one alternate search has run.',
+      })
+      searchRecoveryUsed = true
+    }
   }
 
-  return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, truncated: turn >= definition.maxTurns }
+  return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: turn >= definition.maxTurns }
 }
 
 interface ToolExecResult {
@@ -451,12 +809,19 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
 
   switch (name) {
     case 'search_content': {
-      const pattern = args.pattern || ''
+      const pattern = String(args.pattern || '').trim()
+      if (!pattern) {
+        return { ok: false, output: 'Search pattern is required.', summary: 'grep failed: missing pattern', evidence }
+      }
       const basePath = args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath
       const filePattern = typeof args.file_pattern === 'string' ? args.file_pattern : undefined
       const caseInsensitive = args.case_sensitive === true ? false : true
       const res = await executor.searchContent(pattern, basePath, filePattern, caseInsensitive)
-      if (!res.success || !res.data || res.data.length === 0) {
+      if (!res.success) {
+        const error = res.error || 'unknown search error'
+        return { ok: false, output: `Search failed: ${error}`, summary: `grep "${pattern}" failed: ${error}`, evidence }
+      }
+      if (!res.data || res.data.length === 0) {
         return { ok: true, output: 'No matches found.', summary: `grep "${pattern}" → 0 hits`, evidence }
       }
       const hits = res.data.slice(0, 15)
@@ -476,30 +841,40 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
     }
 
     case 'read_file': {
-      const filePath = resolveWorkspacePath(workspacePath, args.path)
+      const requestedPath = String(args.path || '').trim()
+      if (!requestedPath) {
+        return { ok: false, output: 'File path is required.', summary: 'read failed: missing path', evidence }
+      }
+      const filePath = resolveWorkspacePath(workspacePath, requestedPath)
+      const relativePath = toWorkspaceRelative(workspacePath, filePath)
       const res = await executor.readFile(filePath)
       if (!res.success || !res.data) {
-        return { ok: false, output: `File not found: ${args.path}`, summary: `read ${args.path} → not found`, evidence }
+        const error = res.error || 'file not found'
+        return { ok: false, output: `Read failed: ${error}`, summary: `read ${relativePath} failed: ${error}`, evidence }
       }
       const allLines = res.data.split('\n')
-      const offset = (args.offset || 1) - 1
-      const limit = args.limit || 60
+      const offset = Math.max(0, Math.floor(Number(args.offset) || 1) - 1)
+      const limit = Math.max(1, Math.min(200, Math.floor(Number(args.limit) || 60)))
       const slice = allLines.slice(offset, offset + limit)
       const preview = slice.slice(0, 10).join('\n')
       evidence.push({
-        path: args.path,
+        path: relativePath,
         startLine: offset + 1,
         endLine: offset + slice.length,
         preview,
         reason: 'file read',
       })
-      return { ok: true, output: slice.map((l, i) => `${offset + i + 1} | ${l}`).join('\n'), summary: `read ${args.path}:${offset + 1}-${offset + slice.length}`, evidence }
+      return { ok: true, output: slice.map((line, index) => `${offset + index + 1} | ${line}`).join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence }
     }
 
     case 'search_files': {
       const pattern = args.pattern || '**/*.ts'
       const res = await executor.searchFiles(pattern, workspacePath)
-      if (!res.success || !res.data?.matches?.length) {
+      if (!res.success) {
+        const error = res.error || 'unknown file search error'
+        return { ok: false, output: `File search failed: ${error}`, summary: `glob "${pattern}" failed: ${error}`, evidence }
+      }
+      if (!res.data?.matches?.length) {
         return { ok: true, output: 'No files found.', summary: `glob "${pattern}" → 0 files`, evidence }
       }
       const matches = res.data.matches.slice(0, 20)
@@ -528,7 +903,11 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         limit: 20,
       })
       const hits = normalizeCodeSearchHits(res.data).slice(0, 15)
-      if (!res.success || hits.length === 0) {
+      if (!res.success) {
+        const error = res.error || 'unknown symbol search error'
+        return { ok: false, output: `Symbol search failed: ${error}`, summary: `symbols "${query}" failed: ${error}`, evidence }
+      }
+      if (hits.length === 0) {
         return { ok: true, output: 'No symbols found.', summary: `symbols "${query}" -> 0 hits`, evidence }
       }
       const lines = hits.map(hit => {
@@ -558,7 +937,11 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       })
       const map = res.data?.map
       const nodes = Array.isArray(map) ? map : map ? [map] : []
-      if (!res.success || nodes.length === 0) {
+      if (!res.success) {
+        const error = res.error || 'unknown codemap error'
+        return { ok: false, output: `Codemap failed: ${error}`, summary: `codemap "${query}" failed: ${error}`, evidence }
+      }
+      if (nodes.length === 0) {
         return { ok: true, output: 'No codemap found.', summary: `codemap "${query}" -> 0 nodes`, evidence }
       }
       const lines: string[] = []
@@ -571,4 +954,23 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
     default:
       return { ok: false, output: `Unknown tool: ${name}`, summary: `unknown tool ${name}`, evidence }
   }
+}
+
+function formatSubAgentError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+
+  const metadata = error as Error & { code?: unknown; address?: unknown; port?: unknown }
+  const endpoint = metadata.address !== undefined
+    ? `${String(metadata.address)}${metadata.port !== undefined ? `:${String(metadata.port)}` : ''}`
+    : metadata.port !== undefined ? `port ${String(metadata.port)}` : ''
+  const details = [metadata.code, endpoint].filter(value => value !== undefined && value !== '')
+  const suffix = details.length > 0 ? ` [${details.join(' ')}]` : ''
+  if (!error.cause) return `${error.message}${suffix}`
+
+  const cause = error.cause instanceof Error
+    ? formatSubAgentError(error.cause)
+    : typeof error.cause === 'object' && error.cause !== null
+      ? formatSubAgentError(Object.assign(new Error(String((error.cause as { message?: unknown }).message || 'request cause')), error.cause))
+      : String(error.cause)
+  return `${error.message}${suffix} (${cause})`
 }

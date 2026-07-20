@@ -1,8 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:http'
+import { PassThrough } from 'node:stream'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CommandOutput, Result } from '../../tools/executor.js'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
+import { hashText } from '../fileIO.js'
 
 function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))
@@ -57,6 +63,38 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(readFileSync(join(workspace, 'nested', 'file.txt'), 'utf-8')).toBe('hello')
   }))
 
+  it('uses optimistic version checks and preserves concurrent edits', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'inside.txt')
+    writeFileSync(filePath, 'first', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+    const expectedHash = hashText('first')
+
+    writeFileSync(filePath, 'editor change', 'utf-8')
+    const conflict = await executor.writeFile(filePath, 'agent change', { expectedHash })
+    const createConflict = await executor.writeFile(filePath, 'overwrite', { expectNotExists: true })
+
+    expect(conflict.success).toBe(false)
+    expect(conflict.error).toContain('changed since it was read')
+    expect(createConflict.success).toBe(false)
+    expect(readFileSync(filePath, 'utf-8')).toBe('editor change')
+  }))
+
+  it('blocks workspace paths that escape through a symlink or junction', async () => withWorkspace(async ({ workspace, outside }) => {
+    writeFileSync(join(outside, 'secret.txt'), 'outside', 'utf-8')
+    const linkPath = join(workspace, 'linked')
+    try {
+      symlinkSync(outside, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      return
+    }
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.readFile(join(linkPath, 'secret.txt'))
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('Path outside workspace')
+  }))
+
   it('blocks writes and command execution in readonly policy', async () => withWorkspace(async ({ workspace }) => {
     writeFileSync(join(workspace, 'inside.txt'), 'inside', 'utf-8')
     const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'readonly' })
@@ -98,6 +136,107 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.error).toContain('relative path outside the workspace')
   }))
 
+  it('requires an explicit permission decision for workspace shell commands', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const blocked = await executor.runCommand('echo hello', workspace)
+    const approved = await executor.runCommand('echo hello', workspace, {}, 5000, true)
+
+    expect(blocked.success).toBe(false)
+    expect(blocked.error).toContain('explicit permission')
+    expect(approved.success).toBe(true)
+  }))
+
+  it('reports non-zero process exits as failures', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(7)'], workspace)
+    const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
+
+    expect(result.success).toBe(false)
+    expect(result.data?.exitCode).toBe(7)
+    expect(runtimeTask).toMatchObject({ status: 'failed', exitCode: 7, interactive: false })
+  }))
+
+  it('tracks successful foreground processes through completion', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const result = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write("done"); process.stderr.write("warn")'], workspace)
+    const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
+    const logRecords = readFileSync(runtimeTask!.logPath!, 'utf-8').trim().split('\n').map(line => JSON.parse(line))
+
+    expect(result.success).toBe(true)
+    expect(result.data?.logPath).toBe(runtimeTask?.logPath)
+    expect(runtimeTask).toMatchObject({
+      status: 'completed',
+      cwd: workspace,
+      exitCode: 0,
+      outputBytes: 8,
+      interactive: false,
+    })
+    expect(runtimeTask?.command).toContain(process.execPath)
+    expect(logRecords).toEqual(expect.arrayContaining([
+      expect.objectContaining({ channel: 'stdout', data: 'done' }),
+      expect.objectContaining({ channel: 'stderr', data: 'warn' }),
+    ]))
+  }))
+
+  it('settles after the termination grace period when a timed-out process never closes', async () => withWorkspace(async ({ workspace }) => {
+    vi.useFakeTimers()
+    try {
+      const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+      const proc = Object.assign(new EventEmitter(), {
+        pid: 12345,
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+      }) as unknown as ChildProcessWithoutNullStreams
+      const runtime = executor as unknown as {
+        collectProcess: (proc: ChildProcessWithoutNullStreams, timeout: number, runtimeTaskId?: string) => Promise<Result<CommandOutput>>
+        terminateProcessTree: (proc: ChildProcessWithoutNullStreams) => void
+      }
+      const terminate = vi.spyOn(runtime, 'terminateProcessTree').mockImplementation(() => {})
+      const runtimeTask = executor.getRuntimeTaskManager().createTask({ kind: 'shell', status: 'running' })
+      let settled = false
+
+      const pending = runtime.collectProcess(proc, 25, runtimeTask.id)
+      void pending.finally(() => { settled = true })
+      proc.stdout.emit('data', Buffer.from('partial stdout'))
+      proc.stderr.emit('data', Buffer.from('partial stderr'))
+
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(terminate).toHaveBeenCalledWith(proc)
+      expect(settled).toBe(true)
+      await expect(pending).resolves.toMatchObject({
+        success: false,
+        data: {
+          stdout: 'partial stdout',
+          stderr: 'partial stderr',
+          timedOut: true,
+        },
+      })
+      expect(executor.getRuntimeTaskManager().getTask(runtimeTask.id)).toMatchObject({
+        status: 'failed',
+        metadata: { timedOut: true },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  }))
+
+  it('does not leak parent-process secrets into child commands', async () => withWorkspace(async ({ workspace }) => {
+    process.env.TURBOFLUX_TEST_SECRET = 'do-not-inherit'
+    try {
+      const executor = new NodeToolExecutor(workspace)
+      const hidden = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.TURBOFLUX_TEST_SECRET || "missing")'], workspace)
+      const explicit = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.EXPLICIT_VALUE || "missing")'], workspace, { EXPLICIT_VALUE: 'allowed' })
+
+      expect(hidden.data?.stdout).toBe('missing')
+      expect(explicit.data?.stdout).toBe('allowed')
+    } finally {
+      delete process.env.TURBOFLUX_TEST_SECRET
+    }
+  }))
+
   it('blocks code map target paths that escape the workspace', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
 
@@ -126,6 +265,30 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(JSON.stringify(result.data?.map)).toContain('Card.tsx')
   }))
 
+  it('returns line-numbered content and symbol search results', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'src'), { recursive: true })
+    mkdirSync(join(workspace, 'tmp'), { recursive: true })
+    mkdirSync(join(workspace, '.claude'), { recursive: true })
+    writeFileSync(join(workspace, 'src', 'FluxRunner.ts'), 'export class FluxRunner {\n  run() { return true }\n}\n', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'ignored.txt'), 'export class FluxIgnored {}\n', 'utf-8')
+    writeFileSync(join(workspace, 'tmp', 'FluxHidden.ts'), 'export class FluxHidden {}\n', 'utf-8')
+    writeFileSync(join(workspace, '.claude', 'FluxShadow.ts'), 'export class FluxShadow {}\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const content = await executor.searchContent('FluxRunner', workspace, '*.ts')
+    const symbols = await executor.searchCodeSymbols({ query: 'flux', workspacePath: workspace })
+
+    expect(content.success).toBe(true)
+    expect(content.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ line: 1, text: expect.stringContaining('FluxRunner') }),
+    ]))
+    expect(content.data?.some(hit => hit.file.endsWith('ignored.txt'))).toBe(false)
+    expect(symbols.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'src/FluxRunner.ts', title: 'FluxRunner', line: 1 }),
+    ]))
+    expect(symbols.data?.some(hit => /FluxHidden|FluxShadow/.test(hit.title))).toBe(false)
+  }))
+
   it('creates local history checkpoints for workspace files', async () => withWorkspace(async ({ workspace }) => {
     const filePath = join(workspace, 'inside.txt')
     writeFileSync(filePath, 'after', 'utf-8')
@@ -138,6 +301,54 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result?.success).toBe(true)
     expect(result?.checkpointId).toMatch(/^cp_/)
     expect(result?.label).toBe('test checkpoint')
+  }))
+
+  it('lists and restores local history checkpoints', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'inside.txt')
+    writeFileSync(filePath, 'checkpoint version', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+    const created = await executor.checkpointCreate(workspace, 'restorable', [filePath], 'explicit', { [filePath]: 'before' })
+    writeFileSync(filePath, 'later edit', 'utf-8')
+
+    const listed = await executor.checkpointList(workspace, 10)
+    const restored = await executor.checkpointRestore(workspace, created.checkpointId)
+
+    expect(listed.data).toEqual(expect.arrayContaining([expect.objectContaining({ id: created.checkpointId })]))
+    expect(restored.success).toBe(true)
+    expect(restored.data?.safetyCheckpointId).toBeTruthy()
+    expect(readFileSync(filePath, 'utf-8')).toBe('checkpoint version')
+  }))
+
+  it('discovers useful dot-directories but skips secret env files', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, '.github', 'workflows'), { recursive: true })
+    writeFileSync(join(workspace, '.github', 'workflows', 'ci.yml'), 'name: ci', 'utf-8')
+    writeFileSync(join(workspace, '.env'), 'SECRET=value', 'utf-8')
+    writeFileSync(join(workspace, '.env.example'), 'SECRET=', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const yaml = await executor.searchFiles('**/*.yml', workspace)
+    const envFiles = await executor.searchFiles('.env*', workspace)
+
+    expect(yaml.data?.matches.some(path => path.endsWith('ci.yml'))).toBe(true)
+    expect(envFiles.data?.matches.some(path => path.endsWith('.env.example'))).toBe(true)
+    expect(envFiles.data?.matches.some(path => path.endsWith('.env'))).toBe(false)
+  }))
+
+  it('supports root files and brace globs used by code-search agents', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'src', 'cli'), { recursive: true })
+    writeFileSync(join(workspace, 'package.json'), '{}', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'cli', 'index.ts'), 'export {}', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'cli', 'main.js'), 'export {}', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const manifests = await executor.searchFiles('**/{package.json,pyproject.toml,Cargo.toml}', workspace)
+    const entries = await executor.searchFiles('**/{index,main}.{ts,js}', workspace)
+
+    expect(manifests.data?.matches).toEqual([join(workspace, 'package.json')])
+    expect(entries.data?.matches).toEqual(expect.arrayContaining([
+      join(workspace, 'src', 'cli', 'index.ts'),
+      join(workspace, 'src', 'cli', 'main.js'),
+    ]))
   }))
 
   it('blocks local history checkpoints in readonly policy', async () => withWorkspace(async ({ workspace }) => {
@@ -157,11 +368,55 @@ const windowsIt = process.platform === 'win32' ? it : it.skip
 windowsIt('does not mistake Windows command switches for absolute paths', async () => withWorkspace(async ({ workspace }) => {
   const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
 
-  const result = await executor.runCommand('cmd /c echo ok /s', workspace)
+  const result = await executor.runCommand('cmd /c echo ok /s', workspace, {}, 5000, true)
 
   expect(result.success).toBe(true)
   expect(result.data?.stdout).toContain('ok')
 }))
+
+it('aborts only the requested streaming response', async () => withWorkspace(async ({ workspace }) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    response.write('data: {"partial":true}\n\n')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Missing test server address')
+    const executor = new NodeToolExecutor(workspace)
+    const pending = executor.streamMessage(
+      `http://127.0.0.1:${address.port}`,
+      {},
+      '{}',
+      () => {},
+      { streamId: 42, timeoutMs: 5000 },
+    )
+    await new Promise(resolve => setTimeout(resolve, 25))
+    await executor.streamAbort(42)
+    await expect(pending).resolves.toMatchObject({ success: false, error: 'Request aborted' })
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}))
+
+it('preserves nested network causes in model request diagnostics', () => {
+  const executor = new NodeToolExecutor(process.cwd())
+  const cause = Object.assign(new Error('connection timed out'), {
+    code: 'UND_ERR_CONNECT_TIMEOUT',
+    address: '65.75.209.177',
+    port: 443,
+  })
+  const error = new TypeError('fetch failed', { cause })
+  const message = (executor as unknown as {
+    formatNetworkError: (url: string, value: unknown) => string
+  }).formatNetworkError('https://example.test/v1/messages', error)
+
+  expect(message).toContain('https://example.test/v1/messages')
+  expect(message).toContain('fetch failed')
+  expect(message).toContain('UND_ERR_CONNECT_TIMEOUT')
+  expect(message).toContain('address=65.75.209.177')
+  expect(message).toContain('port=443')
+})
 
 it('runs and inspects an agent background terminal session', async () => withWorkspace(async ({ workspace }) => {
   const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
@@ -171,6 +426,13 @@ it('runs and inspects an agent background terminal session', async () => withWor
   expect(created?.success).toBe(true)
   const sessionId = created?.data?.sessionId
   expect(sessionId).toBeTruthy()
+  const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'terminal' })[0]
+  expect(runtimeTask).toMatchObject({
+    status: 'running',
+    interactive: true,
+    metadata: { sessionId },
+  })
+  expect(created?.data?.session.logPath).toBe(runtimeTask?.logPath)
 
   const command = process.platform === 'win32'
     ? 'echo turbo-terminal-ok && exit'
@@ -203,6 +465,11 @@ it('runs and inspects an agent background terminal session', async () => withWor
 
   const afterKill = await executor.ptyList?.()
   expect(afterKill?.sessions?.find((session: any) => session.id === sessionId)?.status).toBe('exited')
+  expect(executor.getRuntimeTaskManager().getTask(runtimeTask!.id)).toMatchObject({
+    status: 'completed',
+    exitCode: 0,
+  })
+  expect(readFileSync(runtimeTask!.logPath!, 'utf-8')).toContain('turbo-terminal-ok')
 }))
 
 describe('NodeToolExecutor webSearch', () => {

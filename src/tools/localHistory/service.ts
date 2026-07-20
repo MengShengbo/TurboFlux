@@ -9,6 +9,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { createHash } from 'crypto'
+import { writeFileAtomic } from '../../core/fileIO'
 import {
   type FileRevision,
   type FileSnapshot,
@@ -80,11 +81,27 @@ export class LocalHistoryService {
   private resolveWorkspaceFilePath(workspacePath: string, filePath: string): string | null {
     const workspaceRoot = path.resolve(workspacePath)
     const candidatePath = path.resolve(path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath))
-    const relativePath = path.relative(workspaceRoot, candidatePath)
+    const realWorkspaceRoot = fs.existsSync(workspaceRoot) ? fs.realpathSync.native(workspaceRoot) : workspaceRoot
+    const realCandidatePath = this.resolveRealPath(candidatePath)
+    const relativePath = path.relative(realWorkspaceRoot, realCandidatePath)
     if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
       return null
     }
     return candidatePath
+  }
+
+  private resolveRealPath(filePath: string): string {
+    if (fs.existsSync(filePath)) return fs.realpathSync.native(filePath)
+    const missingParts: string[] = []
+    let current = filePath
+    while (!fs.existsSync(current)) {
+      const parent = path.dirname(current)
+      if (parent === current) break
+      missingParts.unshift(path.basename(current))
+      current = parent
+    }
+    const existingParent = fs.existsSync(current) ? fs.realpathSync.native(current) : current
+    return path.resolve(existingParent, ...missingParts)
   }
 
   // ---------- Initialization ----------
@@ -99,7 +116,7 @@ export class LocalHistoryService {
 
     const idxPath = this.indexPath(workspacePath)
     if (!fs.existsSync(idxPath)) {
-      await fs.promises.writeFile(idxPath, JSON.stringify({ checkpoints: [] }), 'utf-8')
+      await writeFileAtomic(idxPath, JSON.stringify({ checkpoints: [] }))
     }
   }
 
@@ -116,7 +133,7 @@ export class LocalHistoryService {
     const revPath = path.join(revDir, hash)
 
     if (!fs.existsSync(revPath)) {
-      await fs.promises.writeFile(revPath, content, 'utf-8')
+      await writeFileAtomic(revPath, content)
     }
 
     return hash
@@ -237,7 +254,7 @@ export class LocalHistoryService {
 
     // Write checkpoint manifest
     const cpPath = path.join(this.checkpointsDir(workspacePath), `${checkpointId}.json`)
-    await fs.promises.writeFile(cpPath, JSON.stringify(checkpoint), 'utf-8')
+    await writeFileAtomic(cpPath, JSON.stringify(checkpoint))
 
     // Update index
     await this.addToIndex(workspacePath, checkpointId, label, timestamp, files.length, source)
@@ -303,7 +320,7 @@ export class LocalHistoryService {
       idx.checkpoints = idx.checkpoints.slice(0, 200)
     }
 
-    await fs.promises.writeFile(idxPath, JSON.stringify(idx), 'utf-8')
+    await writeFileAtomic(idxPath, JSON.stringify(idx))
   }
 
   // ---------- Query ----------
@@ -493,7 +510,7 @@ export class LocalHistoryService {
           await this.recordFileRevision(workspacePath, targetPath, previousContent, 'restore', 'Restore preimage', checkpoint.id)
           const dir = path.dirname(targetPath)
           await fs.promises.mkdir(dir, { recursive: true })
-          await fs.promises.writeFile(targetPath, snap.content, 'utf-8')
+          await writeFileAtomic(targetPath, snap.content)
           await this.recordFileRevision(workspacePath, targetPath, snap.content, 'restore', checkpoint.label, checkpoint.id)
         }
         restoredFiles.push(targetPath)
@@ -563,7 +580,7 @@ export class LocalHistoryService {
       const lines = (await fs.promises.readFile(histPath, 'utf-8')).trim().split('\n')
       if (lines.length > 100) {
         const trimmed = lines.slice(lines.length - 100).join('\n') + '\n'
-        await fs.promises.writeFile(histPath, trimmed, 'utf-8')
+        await writeFileAtomic(histPath, trimmed)
       }
     } catch {
       // Ignore trim errors
@@ -596,7 +613,7 @@ export class LocalHistoryService {
         }
       }
 
-      await fs.promises.writeFile(idxPath, JSON.stringify(idx), 'utf-8')
+      await writeFileAtomic(idxPath, JSON.stringify(idx))
     } catch {
       // Ignore
     }

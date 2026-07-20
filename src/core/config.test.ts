@@ -22,9 +22,15 @@ const baseConfig: TurboFluxConfig = {
   model: 'gpt-5.5',
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
+  approvalPolicy: 'ask',
 }
 
 describe('setConfigValue', () => {
+  it('uses a 200K compatibility default context window', () => {
+    expect(DEFAULT_CONTEXT_WINDOW).toBe(200_000)
+    expect(createEmptyConfig().contextWindow).toBe(200_000)
+  })
+
   it('stores positive integer fields as numbers', () => {
     const next = setConfigValue(baseConfig, 'contextWindow', '2048')
 
@@ -48,6 +54,36 @@ describe('setConfigValue', () => {
   it('rejects unknown keys', () => {
     expect(() => setConfigValue(baseConfig, 'debugMode', 'true')).toThrow(/Unknown config key/)
   })
+
+  it('keeps request output within a discovered model ceiling', () => {
+    const limited = { ...baseConfig, maxOutputTokens: 8192 }
+
+    expect(() => setConfigValue(limited, 'maxTokens', '16384')).toThrow(/cannot exceed/)
+    expect(setConfigValue(limited, 'maxTokens', '4096').maxTokens).toBe(4096)
+  })
+
+  it('accepts reasoning efforts advertised by a discovered model', () => {
+    const discovered: TurboFluxConfig = {
+      ...baseConfig,
+      model: 'vendor/reasoning-model',
+      modelCapabilities: {
+        reasoning: true,
+        reasoningEfforts: ['low', 'high'],
+        supportedParameters: ['reasoning_effort'],
+      },
+    }
+    const next = setConfigValue(discovered, 'reasoningEffort', 'high')
+
+    expect(next.reasoning?.effort).toBe('high')
+  })
+
+  it('migrates legacy approval names and stores native reasoning effort', () => {
+    const approval = setConfigValue(baseConfig, 'approvalPolicy', 'auto')
+    const reasoning = setConfigValue({ ...baseConfig, provider: 'openai', model: 'gpt-5.6' }, 'reasoningEffort', 'xhigh')
+
+    expect(approval.approvalPolicy).toBe('agent')
+    expect(reasoning.reasoning?.effort).toBe('xhigh')
+  })
 })
 
 describe('provider presets', () => {
@@ -67,6 +103,7 @@ describe('provider presets', () => {
     expect(config.baseUrl).toBe('https://api.openai.com/v1')
     expect(config.model).toBe('gpt-5.5')
     expect(config.contextWindow).toBeGreaterThan(100_000)
+    expect(config.reasoning?.effort).toBe('medium')
   })
 
   it('supports custom OpenAI-compatible endpoints', () => {
@@ -76,6 +113,7 @@ describe('provider presets', () => {
     expect(config.provider).toBe('custom')
     expect(config.baseUrl).toBe('https://api.example.com/v1')
     expect(config.model).toBe('custom-model')
+    expect(config.reasoning).toBeUndefined()
   })
 })
 

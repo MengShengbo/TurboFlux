@@ -11,12 +11,19 @@ export interface Theme {
   inactive: string
   subtle: string
 
+  background: string
+  panelBackground: string
+  panelRaised: string
+  surface: string
+  divider: string
+
   diffAdded: string
   diffRemoved: string
   diffAddedWord: string
   diffRemovedWord: string
 
   promptBorder: string
+  promptBackground: string
   statusLine: string
   codeBackground: string
 }

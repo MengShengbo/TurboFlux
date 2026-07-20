@@ -2,8 +2,12 @@
 import { resolve } from 'path'
 import { Command } from 'commander'
 import { startRepl } from './repl'
-import { loadConfig, saveConfig, setConfigValue } from '../core/config'
+import { loadConfig, redactConfig, saveConfig, setConfigValue } from '../core/config'
 import { runSetup } from './setup'
+import { normalizeApprovalPolicy, type ApprovalPolicy } from '../shared/agentTypes'
+import { configureNetworkProxy } from '../core/networkProxy'
+
+configureNetworkProxy()
 
 const program = new Command()
 
@@ -16,8 +20,12 @@ program
   .option('--provider-override <provider>', 'temporarily override API provider for this session')
   .option('-c, --command <prompt>', 'single-shot mode: run prompt and exit')
   .option('-v, --verbose', 'show tool call details')
-  .option('--no-flicker', 'use a fixed alternate-screen viewport to reduce redraw flicker')
+  .option('--no-flicker', 'keep the fixed alternate-screen viewport')
+  .option('--scrollback', 'use classic terminal scrollback instead of the fixed cockpit')
+  .option('--no-animation', 'skip the startup reveal animation')
   .option('--no-color', 'disable color output')
+  .option('--approval-policy <policy>', 'tool approval policy: ask, agent, or full')
+  .option('--mcp <servers>', 'explicitly start configured MCP servers (comma-separated names or all)')
   .action(async (workspace: string, opts) => {
     const workspacePath = resolve(workspace)
     const config = await loadConfig()
@@ -25,12 +33,26 @@ program
     if (opts.modelOverride) config.model = opts.modelOverride
     if (opts.providerOverride) config.provider = opts.providerOverride
 
+    const rawApprovalPolicy = opts.approvalPolicy ? String(opts.approvalPolicy).toLowerCase() : undefined
+    if (rawApprovalPolicy && !['ask', 'agent', 'full', 'request', 'auto'].includes(rawApprovalPolicy)) {
+      throw new Error(`Invalid approval policy: ${rawApprovalPolicy}`)
+    }
+    const approvalPolicy: ApprovalPolicy | undefined = rawApprovalPolicy
+      ? normalizeApprovalPolicy(rawApprovalPolicy)
+      : undefined
+    const mcpServers = typeof opts.mcp === 'string'
+      ? opts.mcp.split(',').map((name: string) => name.trim()).filter(Boolean)
+      : undefined
+
     await startRepl({
       workspacePath,
       config,
       singleShot: opts.command || undefined,
       verbose: opts.verbose || false,
-      noFlicker: opts.flicker === false,
+      noFlicker: opts.scrollback !== true,
+      approvalPolicy,
+      mcpServers,
+      startupAnimation: opts.animation !== false,
     })
   })
 
@@ -44,7 +66,7 @@ program
   .action(async (action: string, key?: string, value?: string) => {
     const config = await loadConfig()
     if (action === 'show') {
-      const display = { ...config, apiKey: config.apiKey ? '***' + config.apiKey.slice(-4) : '(not set)' }
+      const display = redactConfig(config)
       console.log(JSON.stringify(display, null, 2))
     } else if (action === 'set' && key && value) {
       try {
@@ -64,7 +86,7 @@ program
 program
   .command('setup [action]')
   .description('Configure TurboFlux provider, language, persona, and custom behavior')
-  .option('-p, --provider <provider>', 'provider preset (deepseek, openai, anthropic, openrouter, custom)')
+  .option('-p, --provider <provider>', 'provider preset (openai, anthropic, deepseek, kimi, glm, openrouter, custom)')
   .option('-k, --api-key <key>', 'provider API key')
   .option('-b, --base-url <url>', 'custom base URL')
   .option('-m, --model <model>', 'model name')
@@ -75,6 +97,7 @@ program
   .option('-o, --output-style <styles>', 'comma-separated available personas, "all", or "skip"')
   .option('-d, --default-output-style <style>', 'default persona/output style')
   .option('--custom-instructions <text>', 'global custom instructions injected into TurboFlux')
+  .option('--approval-policy <policy>', 'approval policy (ask, agent, or full)')
   .option('-y, --yes', 'accept defaults for missing options')
   .action(async (action: string | undefined, opts) => {
     try {
@@ -91,6 +114,7 @@ program
         outputStyle: opts.outputStyle,
         defaultOutputStyle: opts.defaultOutputStyle,
         customInstructions: opts.customInstructions,
+        approvalPolicy: opts.approvalPolicy,
         yes: Boolean(opts.yes),
       })
     } catch (error) {

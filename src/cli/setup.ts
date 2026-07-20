@@ -20,7 +20,19 @@ import {
   type TurboFluxApiConfigProfile,
   type TurboFluxConfig,
 } from '../core/config'
-import { getSupportedModelSpec } from '../core/modelRegistry'
+import {
+  formatNativeReasoningSetting,
+  getModelReasoningCapabilities,
+  getSupportedModelSpec,
+  normalizeNativeReasoningConfig,
+} from '../core/modelRegistry'
+import {
+  APPROVAL_POLICY_LABELS,
+  normalizeApprovalPolicy,
+  type ApprovalPolicy,
+  type NativeReasoningConfig,
+} from '../shared/agentTypes'
+import { TURBOFLUX_WORDMARK_LINES } from './brand'
 import {
   DEFAULT_PROFILE,
   PERSONA_DEFINITIONS,
@@ -49,6 +61,7 @@ export interface SetupOptions {
   outputStyle?: string
   defaultOutputStyle?: string
   customInstructions?: string
+  approvalPolicy?: string
 }
 
 type SetupAction =
@@ -59,6 +72,7 @@ type SetupAction =
   | 'language'
   | 'persona'
   | 'custom'
+  | 'approval'
   | 'show'
   | 'reset'
   | 'exit'
@@ -71,6 +85,7 @@ const MAIN_ACTIONS = new Set<SetupAction>([
   'language',
   'persona',
   'custom',
+  'approval',
   'show',
   'reset',
   'exit',
@@ -129,8 +144,9 @@ function normalizeAction(action?: string): SetupAction {
   if (['4', 'lang', 'language'].includes(normalized)) return 'language'
   if (['5', 'persona', 'style', 'output-style', 'output'].includes(normalized)) return 'persona'
   if (['6', 'custom', 'instructions', 'prompt'].includes(normalized)) return 'custom'
-  if (['7', 'show', 'current', 'status'].includes(normalized)) return 'show'
-  if (['8', 'reset', 'clear'].includes(normalized)) return 'reset'
+  if (['7', 'approval', 'permissions', 'permission'].includes(normalized)) return 'approval'
+  if (['8', 'show', 'current', 'status'].includes(normalized)) return 'show'
+  if (['9', 'reset', 'clear'].includes(normalized)) return 'reset'
   if (['q', 'quit', 'exit'].includes(normalized)) return 'exit'
   if (MAIN_ACTIONS.has(normalized as SetupAction)) return normalized as SetupAction
   return 'menu'
@@ -140,9 +156,9 @@ function renderSetupLogoLine(line: string): string {
   let out = ''
   for (const ch of line) {
     if ('_/\\'.includes(ch)) {
-      out += chalk.hex('#6dfcff').bold(ch)
+      out += chalk.hex('#d6d6d6').bold(ch)
     } else if ('-`.\''.includes(ch)) {
-      out += chalk.hex('#32d9dd')(ch)
+      out += chalk.hex('#777777')(ch)
     } else {
       out += ch
     }
@@ -157,17 +173,10 @@ function printBanner(profile = loadProfile()): void {
     'Model profiles · FastContext subagent · Language · Persona · Behavior',
   )
   const title = zh(profile, '终端工作台初始化', 'Terminal workbench setup')
-  const mark = [
-    '  ______          __        ________          ',
-    ' /_  __/_  ______/ /_  ____/ ____/ /_  ___  __',
-    '  / / / / / / __  / / / / /_  / / / / / / |/_/',
-    ' / / / /_/ / /_/ / /_/ / __/ / /_/ / /_>  <  ',
-    '/_/  \\__,_/\\__,_/\\__,_/_/    \\____/\\__/_/|_|  ',
-  ]
   console.log('')
   console.log(`  ${chalk.dim('─'.repeat(72))}`)
   console.log('')
-  console.log(mark.map(line => `  ${renderSetupLogoLine(line)}`).join('\n'))
+  console.log(TURBOFLUX_WORDMARK_LINES.map(line => `  ${renderSetupLogoLine(line)}`).join('\n'))
   console.log('')
   console.log(`  ${chalk.white.bold('TurboFlux Setup')} ${chalk.dim('v0.1.5')} ${chalk.gray(`- ${title}`)}`)
   console.log(`  ${chalk.gray(subtitle)}`)
@@ -222,6 +231,8 @@ function printSummary(config: TurboFluxConfig, profile: TurboFluxProfile): void 
   console.log(`  apiKey:            ${maskKey(config.apiKey)}`)
   console.log(`  contextWindow:     ${config.contextWindow.toLocaleString()}`)
   console.log(`  maxTokens:         ${config.maxTokens.toLocaleString()}`)
+  console.log(`  reasoning:         ${formatNativeReasoningSetting(config.model, config.reasoning, config.provider) || '(provider default)'}`)
+  console.log(`  approvalPolicy:    ${APPROVAL_POLICY_LABELS[config.approvalPolicy]} (${config.approvalPolicy})`)
   console.log(`  fastContextModel:  ${fastContextText}`)
   console.log(`  interfaceLanguage: ${profile.interfaceLanguage}`)
   console.log(`  aiOutputLanguage:  ${outputLanguage}`)
@@ -348,7 +359,7 @@ function hasPersonaOptions(options: SetupOptions): boolean {
 }
 
 function hasDirectOptions(options: SetupOptions): boolean {
-  return hasApiOptions(options) || hasLanguageOptions(options) || hasPersonaOptions(options) || options.customInstructions !== undefined
+  return hasApiOptions(options) || hasLanguageOptions(options) || hasPersonaOptions(options) || options.customInstructions !== undefined || options.approvalPolicy !== undefined
 }
 
 function shouldKeepCurrentApiKey(current: TurboFluxConfig, preset: ProviderPreset, baseUrl: string): boolean {
@@ -437,6 +448,45 @@ function modelLimits(model: string): { contextWindow: number; maxTokens: number 
   }
 }
 
+async function promptNativeReasoning(
+  model: string,
+  provider: TurboFluxConfig['provider'],
+  current?: NativeReasoningConfig,
+): Promise<NativeReasoningConfig | undefined> {
+  const capability = getModelReasoningCapabilities(model, provider)
+  if (!capability) return undefined
+
+  let next = normalizeNativeReasoningConfig(model, current, provider) ?? { enabled: capability.defaultEnabled }
+  console.log(chalk.gray(`  Native reasoning: ${capability.description}`))
+
+  if (capability.supportsToggle) {
+    const enabled = await promptSelect('思考能力', [
+      { name: '开启 - 使用该模型原生推理能力', value: 'enabled' },
+      { name: '关闭 - 使用非思考输出', value: 'disabled' },
+    ], next?.enabled === false ? 'disabled' : 'enabled')
+    next = normalizeNativeReasoningConfig(model, { ...next, enabled: enabled === 'enabled' }, provider) ?? next
+  }
+
+  if (next?.enabled !== false && capability.efforts.length > 1) {
+    const effort = await promptSelect('推理强度', capability.efforts.map(item => ({
+      name: item,
+      value: item,
+    })), next.effort ?? capability.defaultEffort ?? capability.efforts[0])
+    next = normalizeNativeReasoningConfig(model, { ...next, effort }, provider) ?? next
+  }
+
+  if (next?.enabled !== false && capability.control === 'budget') {
+    const budget = await promptInput('思考 token 预算', {
+      default: String(next.budgetTokens ?? capability.defaultBudgetTokens ?? 8192),
+      required: true,
+      validate: value => Number.isInteger(Number(value)) && Number(value) >= 1024 ? true : '请输入不小于 1024 的整数',
+    })
+    next = normalizeNativeReasoningConfig(model, { ...next, budgetTokens: Number(budget) }, provider) ?? next
+  }
+
+  return next
+}
+
 async function promptProvider(current?: TurboFluxApiConfigProfile | TurboFluxConfig): Promise<ProviderPreset> {
   const defaultPreset = current ? getProviderPreset(current.provider) : undefined
   const providerId = await promptSelect('选择 Provider', PROVIDER_PRESETS.map(item => ({
@@ -495,6 +545,9 @@ async function promptProfileFields(options: {
   if (!baseUrl) throw new Error('Base URL is required.')
 
   const limits = modelLimits(model)
+  const reasoning = directMode
+    ? normalizeNativeReasoningConfig(model, source.reasoning, preset.provider)
+    : await promptNativeReasoning(model, preset.provider, source.reasoning)
   const profiles = getApiConfigProfiles(currentConfig).filter(item => item.id !== existing?.id)
   const defaultName = existing?.name
     || uniqueProfileName(preset.id === 'custom' ? 'Custom API' : preset.name, profiles)
@@ -514,6 +567,7 @@ async function promptProfileFields(options: {
     model,
     contextWindow: existing?.contextWindow || limits.contextWindow,
     maxTokens: existing?.maxTokens || limits.maxTokens,
+    reasoning,
     createdAt: existing?.createdAt,
   })
 }
@@ -802,9 +856,40 @@ async function configureCustomInstructions(options: SetupOptions = {}): Promise<
   return next
 }
 
+async function configureApprovalPolicy(options: SetupOptions = {}): Promise<TurboFluxConfig> {
+  const config = await loadConfig()
+  const profile = loadProfile()
+  let approvalPolicy: ApprovalPolicy
+  if (options.approvalPolicy) {
+    const normalized = options.approvalPolicy.trim().toLowerCase()
+    if (!['ask', 'agent', 'full', 'request', 'auto'].includes(normalized)) {
+      throw new Error('Approval policy must be ask, agent, or full.')
+    }
+    approvalPolicy = normalizeApprovalPolicy(normalized)
+  } else if (options.yes) {
+    approvalPolicy = config.approvalPolicy
+  } else {
+    const labels: Record<ApprovalPolicy, { zh: string; en: string }> = {
+      ask: { zh: '请求批准 - 修改文件、执行命令和外部操作前询问', en: 'Request approval - ask before changes, commands, and external actions' },
+      agent: { zh: '替我审批 - 低风险工作区操作自动继续，检测到风险时询问', en: 'Approve low risk - continue routine workspace actions and ask on risk' },
+      full: { zh: '完全访问权限 - 不限制本地和网络访问，灾难性命令仍会阻止', en: 'Full access - unrestricted local and network access; catastrophic commands stay blocked' },
+    }
+    approvalPolicy = await promptSelect('审批策略', (['ask', 'agent', 'full'] as ApprovalPolicy[]).map(policy => ({
+      name: zh(profile, labels[policy].zh, labels[policy].en),
+      value: policy,
+    })), config.approvalPolicy)
+  }
+
+  const next = { ...config, approvalPolicy }
+  saveConfig(next)
+  console.log(chalk.green(`审批策略：${APPROVAL_POLICY_LABELS[approvalPolicy]}`))
+  return next
+}
+
 async function runFullInitialization(options: SetupOptions = {}): Promise<void> {
   let profile = await configureLanguage(options)
   await configureApi(options)
+  await configureApprovalPolicy(options)
   await configureFastContextModel()
   profile = await configurePersona(options)
   if (!options.yes) {
@@ -849,10 +934,11 @@ async function promptMainAction(profile: TurboFluxProfile): Promise<SetupAction>
   console.log('  4. 语言配置')
   console.log('  5. 人设 / 输出风格')
   console.log('  6. 全局自定义指令')
-  console.log('  7. 查看当前配置')
-  console.log('  8. 重置本机配置')
+  console.log('  7. 审批策略')
+  console.log('  8. 查看当前配置')
+  console.log('  9. 重置本机配置')
   console.log('  Q. 退出')
-  const choice = await promptChoice('输入选项', ['1', '2', '3', '4', '5', '6', '7', '8', 'q'])
+  const choice = await promptChoice('输入选项', ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'q'])
   switch (choice) {
     case '1': return 'init'
     case '2': return 'api'
@@ -860,8 +946,9 @@ async function promptMainAction(profile: TurboFluxProfile): Promise<SetupAction>
     case '4': return 'language'
     case '5': return 'persona'
     case '6': return 'custom'
-    case '7': return 'show'
-    case '8': return 'reset'
+    case '7': return 'approval'
+    case '8': return 'show'
+    case '9': return 'reset'
     case 'q': return 'exit'
     default: return 'menu'
   }
@@ -896,6 +983,9 @@ async function runMenu(options: SetupOptions = {}): Promise<void> {
       case 'custom':
         profile = await configureCustomInstructions()
         break
+      case 'approval':
+        await configureApprovalPolicy()
+        break
       case 'show':
         await showCurrentConfiguration()
         break
@@ -922,6 +1012,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
     if (hasApiOptions(options)) await configureApi(options)
     if (hasPersonaOptions(options)) await configurePersona(options)
     if (options.customInstructions !== undefined) await configureCustomInstructions(options)
+    if (options.approvalPolicy !== undefined) await configureApprovalPolicy(options)
     console.log('')
     await showCurrentConfiguration()
     return
@@ -947,6 +1038,9 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
         return
       case 'custom':
         await configureCustomInstructions(options)
+        return
+      case 'approval':
+        await configureApprovalPolicy(options)
         return
       case 'show':
         await showCurrentConfiguration()

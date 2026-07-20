@@ -1,19 +1,23 @@
-import 'dotenv/config'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { once } from 'node:events'
 import { ADMIN_HTML } from './adminPage'
 import { getSupportedModelSpec, SUPPORTED_MODEL_SPECS } from '../core/modelRegistry'
+import { writeFileAtomicSync } from '../core/fileIO'
+import { configureNetworkProxy } from '../core/networkProxy'
+import { createTurboFluxRequestHeaders } from '../core/clientIdentity'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 8787
 const DEFAULT_UPSTREAM_BASE_URL = 'https://api.example.com/v1'
 const DEFAULT_MODEL = 'gpt-5.5'
-const DEFAULT_CONTEXT_WINDOW = 1_000_000
+const DEFAULT_CONTEXT_WINDOW = 200_000
 const DEFAULT_MAX_TOKENS = 16_384
 const MAX_BODY_BYTES = 20 * 1024 * 1024
 const MAX_LOG_ENTRIES = 200
+const UPSTREAM_TIMEOUT_MS = 5 * 60 * 1000
 
 export interface ProxyModelConfig {
   id: string
@@ -31,6 +35,11 @@ interface PersistedProxyConfig {
   authToken?: string
   corsOrigin?: string
   updatedAt?: string
+}
+
+interface PersistedProxyCredentials {
+  upstreamApiKey?: string
+  authToken?: string
 }
 
 export interface ProxyConfig {
@@ -163,27 +172,42 @@ function readPersistedConfig(configPath: string): PersistedProxyConfig {
   }
 }
 
+function credentialsPath(configPath: string): string {
+  return join(dirname(configPath), 'server-credentials.json')
+}
+
+function readPersistedCredentials(configPath: string): PersistedProxyCredentials {
+  const filePath = credentialsPath(configPath)
+  if (!existsSync(filePath)) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf-8'))
+    return parsed && typeof parsed === 'object' ? parsed as PersistedProxyCredentials : {}
+  } catch {
+    return {}
+  }
+}
+
 function writePersistedConfig(config: ProxyConfig): void {
   const persisted: PersistedProxyConfig = {
     upstreamBaseUrl: config.upstreamBaseUrl,
-    upstreamApiKey: config.upstreamApiKey,
     defaultModel: config.defaultModel,
     models: config.models,
-    authToken: config.authToken,
     corsOrigin: config.corsOrigin,
     updatedAt: new Date().toISOString(),
   }
   const dir = dirname(config.configPath)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(config.configPath, JSON.stringify(persisted, null, 2), 'utf-8')
-  if (process.platform !== 'win32') {
-    try { chmodSync(config.configPath, 0o600) } catch {}
-  }
+  writeFileAtomicSync(config.configPath, JSON.stringify(persisted, null, 2), 0o600)
+  writeFileAtomicSync(credentialsPath(config.configPath), JSON.stringify({
+    upstreamApiKey: config.upstreamApiKey,
+    authToken: config.authToken,
+  }, null, 2), 0o600)
 }
 
 function loadConfig(): ProxyConfig {
   const configPath = getConfigPath()
   const persisted = readPersistedConfig(configPath)
+  const credentials = readPersistedCredentials(configPath)
   const requestedDefaultModel = persisted.defaultModel ?? env('TURBOFLUX_FREE_MODEL') ?? DEFAULT_MODEL
   const defaultModel = getSupportedModelSpec(requestedDefaultModel)?.id ?? DEFAULT_MODEL
   const upstreamBaseUrl = normalizeUpstreamBaseUrl(
@@ -197,10 +221,10 @@ function loadConfig(): ProxyConfig {
     port: parsePort(env('TURBOFLUX_SERVER_PORT')),
     configPath,
     upstreamBaseUrl,
-    upstreamApiKey: persisted.upstreamApiKey ?? env('TURBOFLUX_FREE_MODEL_API_KEY'),
+    upstreamApiKey: credentials.upstreamApiKey ?? persisted.upstreamApiKey ?? env('TURBOFLUX_FREE_MODEL_API_KEY'),
     defaultModel,
     models: normalizeModels(persisted.models, defaultModel),
-    authToken: persisted.authToken ?? env('TURBOFLUX_PROXY_AUTH_TOKEN'),
+    authToken: credentials.authToken ?? persisted.authToken ?? env('TURBOFLUX_PROXY_AUTH_TOKEN'),
     corsOrigin: persisted.corsOrigin ?? env('TURBOFLUX_CORS_ORIGIN') ?? 'http://127.0.0.1',
     updatedAt: persisted.updatedAt,
   }
@@ -391,34 +415,46 @@ async function proxyOpenAiCompatibleRequest(req: IncomingMessage, res: ServerRes
   const upstreamUrl = upstreamTarget(config, url.pathname, url.search)
   addLog('info', 'proxy', `${req.method} ${url.pathname} -> ${upstreamUrl}`)
 
-  const upstreamResponse = await fetch(upstreamUrl, {
-    method: req.method,
-    headers: {
-      'Authorization': `Bearer ${config.upstreamApiKey}`,
-      'Content-Type': req.headers['content-type'] ?? 'application/json',
-    },
-    body: body.length > 0 ? body.toString('utf-8') : undefined,
-  })
+  const controller = new AbortController()
+  const abortUpstream = () => {
+    if (!res.writableEnded) controller.abort()
+  }
+  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS)
+  res.once('close', abortUpstream)
+  try {
+    const upstreamResponse = await fetch(upstreamUrl, {
+      method: req.method,
+      headers: createTurboFluxRequestHeaders({
+        'Authorization': `Bearer ${config.upstreamApiKey}`,
+        'Content-Type': req.headers['content-type'] ?? 'application/json',
+      }),
+      body: body.length > 0 ? body.toString('utf-8') : undefined,
+      signal: controller.signal,
+    })
 
-  setCorsHeaders(res, config)
-  res.statusCode = upstreamResponse.status
-  const contentType = upstreamResponse.headers.get('content-type')
-  if (contentType) res.setHeader('Content-Type', contentType)
-  const cacheControl = upstreamResponse.headers.get('cache-control')
-  if (cacheControl) res.setHeader('Cache-Control', cacheControl)
+    setCorsHeaders(res, config)
+    res.statusCode = upstreamResponse.status
+    const contentType = upstreamResponse.headers.get('content-type')
+    if (contentType) res.setHeader('Content-Type', contentType)
+    const cacheControl = upstreamResponse.headers.get('cache-control')
+    if (cacheControl) res.setHeader('Cache-Control', cacheControl)
 
-  const reader = upstreamResponse.body?.getReader()
-  if (!reader) {
+    const reader = upstreamResponse.body?.getReader()
+    if (!reader) {
+      res.end()
+      return
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!res.write(Buffer.from(value))) await once(res, 'drain')
+    }
     res.end()
-    return
+  } finally {
+    clearTimeout(timer)
+    res.removeListener('close', abortUpstream)
   }
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    res.write(Buffer.from(value))
-  }
-  res.end()
 }
 
 async function testUpstream(config: ProxyConfig): Promise<{ ok: boolean; message: string; status?: number }> {
@@ -426,16 +462,23 @@ async function testUpstream(config: ProxyConfig): Promise<{ ok: boolean; message
     return { ok: false, message: 'Upstream API key is not configured' }
   }
 
-  const response = await fetch(`${config.upstreamBaseUrl}/models`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${config.upstreamApiKey}` },
-  })
-  const text = await response.text()
-  if (!response.ok) {
-    const clipped = text.slice(0, 180).replace(/\s+/g, ' ')
-    return { ok: false, status: response.status, message: `Upstream returned HTTP ${response.status}: ${clipped || response.statusText}` }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 15_000)
+  try {
+    const response = await fetch(`${config.upstreamBaseUrl}/models`, {
+      method: 'GET',
+      headers: createTurboFluxRequestHeaders({ Authorization: `Bearer ${config.upstreamApiKey}` }),
+      signal: controller.signal,
+    })
+    const text = await response.text()
+    if (!response.ok) {
+      const clipped = text.slice(0, 180).replace(/\s+/g, ' ')
+      return { ok: false, status: response.status, message: `Upstream returned HTTP ${response.status}: ${clipped || response.statusText}` }
+    }
+    return { ok: true, status: response.status, message: 'Upstream connection is healthy' }
+  } finally {
+    clearTimeout(timer)
   }
-  return { ok: true, status: response.status, message: 'Upstream connection is healthy' }
 }
 
 async function handleAdminApi(req: IncomingMessage, res: ServerResponse, config: ProxyConfig, url: URL): Promise<ProxyConfig> {
@@ -535,6 +578,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, config: 
 }
 
 export function createTurboFluxServer(initialConfig = loadConfig()): Server {
+  configureNetworkProxy()
   let config = initialConfig
   assertSafeExposure(config)
   addLog('info', 'server', `Config loaded from ${config.configPath}`)
@@ -544,6 +588,7 @@ export function createTurboFluxServer(initialConfig = loadConfig()): Server {
       .then(nextConfig => { config = nextConfig })
       .catch(error => {
         addLog('error', 'server', error instanceof Error ? error.message : String(error))
+        if (res.destroyed || res.writableEnded) return
         sendJson(res, 500, {
           error: {
             message: error instanceof Error ? error.message : String(error),

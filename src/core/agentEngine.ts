@@ -1,5 +1,6 @@
 ﻿import type {
   AgentMode,
+  AgentTool,
   AgentSession,
   AgentTurn,
   AgentConfig,
@@ -9,8 +10,6 @@
   TaskPriority,
   TaskStatus,
   TaskNode,
-  ThinkingMode,
-  ResolvedThinkingMode,
   TokenUsage,
   AnthropicThinkingBlock,
 } from '../shared/agentTypes'
@@ -25,18 +24,34 @@ import { canComputeDiff, computeHunks, summarizeHunks } from './diffCompute'
 import { ContextManager, extractStructuredSummary, formatSummaryAsContext } from './contextManager'
 import { autoCompactThreshold, blockingContextLimit, recapThreshold, resolveContextPolicyProfile } from './contextPolicy'
 import { countMessagesTokens, countTurnishTokens } from './tokenCounter'
-import { resolveReasoningParam } from './modelRegistry'
+import { resolveNativeReasoningRequest } from './modelRegistry'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import type { FastContextScanEvent, FastContextScanResult } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
+import type { RuntimeTask } from '../shared/runtimeTaskTypes'
 import { runFastContextSubagent } from './fastContextSubagent'
-import { isMcpTool, parseMcpToolName, executeMcpTool, getMcpAgentTools } from './mcp/toolBridge'
+import { isMcpTool, parseMcpToolName, executeMcpTool, getMcpAgentTools, validateMcpToolArgs } from './mcp/toolBridge'
 import type { McpClient } from './mcp/client'
 import type { SubAgentEvent, SubAgentEvidence } from '../shared/subAgentTypes'
 import type { CodeMapNode, CodeSearchHit, CodeSymbolKind } from '../shared/codeIndexTypes'
 import { resolvePath, toWorkspaceRelative } from './pathUtils'
 import { normalizeBaseUrl } from './normalizeBaseUrl'
+import { createTurboFluxRequestHeaders } from './clientIdentity'
+import {
+  ModelProtocolRequestError,
+  buildModelProtocolUrl,
+  formatProtocolAttempt,
+  formatProtocolFailure,
+  planModelProtocols,
+  protocolLabel,
+  shouldFallbackProtocol,
+  toProtocolAttempt,
+  toResponsesInput,
+  toResponsesTools,
+  type ModelProtocol,
+  type ModelProtocolAttempt,
+} from './modelProtocol'
 import {
   formatCodeMap,
 } from './toolDispatcher'
@@ -44,8 +59,11 @@ import { getSubAgentDefinition, runSubAgent, loadDynamicAgents, getAvailableAgen
 import type { ToolExecutor, WebSearchResult } from '../tools/executor'
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
 import type { TreeNode } from '../shared/types'
-import { parseTextToolCalls } from '../shared/toolCallMarkup'
+import { parseTextToolCalls, stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import { detectGitRepo, fetchGitInfo, formatGitStatusForPrompt, gitCommitCheckpoint, gitResetToCommit } from './gitService'
+import { hashText } from './fileIO'
+import { RuntimeTaskManager } from './runtime/runtimeTaskManager'
+import { SubAgentTaskManager, type SubAgentTaskSnapshot } from './runtime/subAgentTaskManager'
 
 type TaskSystemCreationEvent = {
   status: 'planning' | 'creating' | 'completed' | 'error'
@@ -56,6 +74,84 @@ type TaskSystemCreationEvent = {
   startedAt?: number
   updatedAt: number
   error?: string
+}
+
+export function splitTurnsForCompaction(turns: AgentTurn[], keepRecent: number): { oldTurns: AgentTurn[]; recentTurns: AgentTurn[] } {
+  let splitIndex = Math.max(0, turns.length - Math.max(1, keepRecent))
+  while (splitIndex > 0 && turns[splitIndex]?.role === 'tool_result') {
+    splitIndex -= 1
+  }
+  return {
+    oldTurns: turns.slice(0, splitIndex),
+    recentTurns: turns.slice(splitIndex),
+  }
+}
+
+const CANCELLED_TOOL_RESULT_TEXT = 'Cancelled before the tool completed.'
+
+function contentBlocks(message: Record<string, unknown>): Array<Record<string, unknown>> {
+  if (Array.isArray(message.content)) {
+    return message.content.filter(block => block && typeof block === 'object') as Array<Record<string, unknown>>
+  }
+  if (typeof message.content === 'string' && message.content) {
+    return [{ type: 'text', text: message.content }]
+  }
+  return []
+}
+
+export function normalizeAnthropicToolMessages(
+  messages: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const normalized: Array<Record<string, unknown>> = []
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    const blocks = contentBlocks(message)
+    const toolUseIds = message.role === 'assistant'
+      ? blocks
+          .filter(block => block.type === 'tool_use' && typeof block.id === 'string')
+          .map(block => block.id as string)
+      : []
+
+    if (toolUseIds.length === 0) {
+      if (message.role === 'user' && blocks.some(block => block.type === 'tool_result')) {
+        const nonToolBlocks = blocks.filter(block => block.type !== 'tool_result')
+        if (nonToolBlocks.length > 0) normalized.push({ ...message, content: nonToolBlocks })
+      } else {
+        normalized.push(message)
+      }
+      continue
+    }
+
+    normalized.push(message)
+    const expectedIds = new Set(toolUseIds)
+    const resultsById = new Map<string, Record<string, unknown>>()
+    const trailingUserBlocks: Array<Record<string, unknown>> = []
+    let nextIndex = index + 1
+
+    while (nextIndex < messages.length && messages[nextIndex]?.role === 'user') {
+      for (const block of contentBlocks(messages[nextIndex])) {
+        const resultId = typeof block.tool_use_id === 'string' ? block.tool_use_id : ''
+        if (block.type === 'tool_result' && expectedIds.has(resultId)) {
+          if (!resultsById.has(resultId)) resultsById.set(resultId, block)
+        } else if (block.type !== 'tool_result') {
+          trailingUserBlocks.push(block)
+        }
+      }
+      nextIndex += 1
+    }
+
+    const resultBlocks = toolUseIds.map(toolUseId => resultsById.get(toolUseId) ?? {
+      type: 'tool_result',
+      tool_use_id: toolUseId,
+      content: CANCELLED_TOOL_RESULT_TEXT,
+      is_error: true,
+    })
+    normalized.push({ role: 'user', content: [...resultBlocks, ...trailingUserBlocks] })
+    index = nextIndex - 1
+  }
+
+  return normalized
 }
 
 type PromptModuleSnapshot = {
@@ -76,15 +172,17 @@ export type AgentEventType =
   | { type: 'session:complete'; session: AgentSession }
   | { type: 'error'; error: string }
   | { type: 'notification'; message: string; level: 'info' | 'success' | 'warning' | 'error' }
+  | { type: 'model:protocol'; phase: 'attempt' | 'fallback' | 'success'; protocol: ModelProtocol; url: string; message?: string }
   | { type: 'stream:delta'; text: string }
   | { type: 'stream:thinking_delta'; text: string }
   | { type: 'stream:tool_call_delta'; toolCallId: string; toolName: string; partialJson: string }
   | { type: 'stream:start' }
-  | { type: 'stream:end' }
+  | { type: 'stream:end'; interrupted?: boolean }
   | { type: 'stream:usage'; usage: TokenUsage }
-  | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string }
+  | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string; requestId?: string; toolName?: string; path?: string }
   | { type: 'active:task'; context: import('./taskManager').ActiveTaskContext | null }
   | { type: 'terminal:sessions'; sessions: TerminalSessionInfo[] }
+  | { type: 'runtime-task:finished'; task: RuntimeTask }
   | {
     type: 'task:system'
     context: import('./taskManager').ActiveTaskContext | null
@@ -102,14 +200,8 @@ export type AgentEventType =
 
 export type AgentEventListener = (event: AgentEventType) => void
 
-function shouldOmitSamplingTemperature(model: string, provider: APIConfig['provider']): boolean {
-  const reasoningParam = resolveProviderReasoningParam(provider, model, 'standard')
-  return reasoningParam?.kind === 'anthropic-adaptive'
-}
-
-function resolveProviderReasoningParam(provider: APIConfig['provider'], model: string, mode: ResolvedThinkingMode) {
-  if (provider === 'custom' || provider === 'openrouter') return null
-  return resolveReasoningParam(model, mode)
+function shouldOmitSamplingTemperature(config: APIConfig): boolean {
+  return resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)?.omitTemperature === true
 }
 
 function extractUnsupportedRequestParam(error?: string): string | null {
@@ -117,23 +209,39 @@ function extractUnsupportedRequestParam(error?: string): string | null {
   const quoted = error.match(/Unsupported parameter:\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
   if (quoted?.[1]) return quoted[1]
   const named = error.match(/(?:unknown|unrecognized|unsupported|invalid)\s+(?:parameter|field|key|argument)\s*[:=]?\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
-  return named?.[1] || null
+  if (named?.[1]) return named[1]
+  if (!/(?:extra inputs?|extra fields?|not permitted|not allowed|unsupported|unrecognized)/i.test(error)) return null
+  const knownOptionalParams = [
+    'cache_control', 'anthropic-beta', 'output_config', 'thinking', 'reasoning_effort',
+    'reasoning', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
+    'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store',
+  ]
+  return knownOptionalParams.find(param => error.toLowerCase().includes(param.toLowerCase())) || null
 }
 
 function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param: string): boolean {
-  const aliases = new Set<string>([param])
-  if (param === 'max_output_tokens' || param === 'max_completion_tokens' || param === 'max_tokens') {
+  const rootParam = param.split('.')[0]
+  const removable = new Set([
+    'temperature', 'max_output_tokens', 'max_completion_tokens', 'max_tokens',
+    'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls',
+    'thinking', 'reasoning', 'reasoning_effort', 'output_config',
+    'prompt_cache_key', 'prompt_cache_retention', 'store',
+  ])
+  if (!removable.has(rootParam)) return false
+  const aliases = new Set<string>([rootParam])
+  if (rootParam === 'max_output_tokens' || rootParam === 'max_completion_tokens' || rootParam === 'max_tokens') {
     aliases.add('max_output_tokens')
     aliases.add('max_completion_tokens')
     aliases.add('max_tokens')
   }
-  if (param === 'tools' || param === 'tool_choice' || param === 'parallel_tool_calls') {
+  if (rootParam === 'tools' || rootParam === 'tool_choice' || rootParam === 'parallel_tool_calls') {
     aliases.add('tools')
     aliases.add('tool_choice')
     aliases.add('parallel_tool_calls')
   }
-  if (param === 'thinking' || param === 'reasoning_effort' || param === 'output_config') {
+  if (rootParam === 'thinking' || rootParam === 'reasoning' || rootParam === 'reasoning_effort' || rootParam === 'output_config') {
     aliases.add('thinking')
+    aliases.add('reasoning')
     aliases.add('reasoning_effort')
     aliases.add('output_config')
   }
@@ -146,6 +254,45 @@ function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param
     }
   }
   return removed
+}
+
+function removeAnthropicCompatibleRequestParam(
+  body: Record<string, unknown>,
+  headers: Record<string, string>,
+  param: string,
+): boolean {
+  const pathParts = param.split('.')
+  const rootParam = pathParts[0]
+  const nestedParam = pathParts[pathParts.length - 1]
+  if (rootParam === 'cache_control' || nestedParam === 'cache_control') {
+    let removed = false
+    const strip = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(strip)
+      if (!value || typeof value !== 'object') return value
+      const output: Record<string, unknown> = {}
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        if (key === 'cache_control') {
+          removed = true
+          continue
+        }
+        output[key] = strip(child)
+      }
+      return output
+    }
+    for (const key of ['system', 'messages', 'tools']) {
+      if (body[key] !== undefined) body[key] = strip(body[key])
+    }
+    return removed
+  }
+  if (rootParam === 'anthropic-beta' || rootParam === 'anthropic_beta') {
+    if (headers['anthropic-beta'] === undefined) return false
+    delete headers['anthropic-beta']
+    return true
+  }
+  const removable = new Set(['temperature', 'thinking', 'output_config', 'tool_choice'])
+  if (!removable.has(rootParam) || !Object.prototype.hasOwnProperty.call(body, rootParam)) return false
+  delete body[rootParam]
+  return true
 }
 
 function stableHash(value: unknown): string {
@@ -204,6 +351,28 @@ export function appendRuntimeContextToLatestUserMessage(
   return false
 }
 
+function hasCompleteToolPayloads(calls: Array<{ name: string; argumentsJson: string }>): boolean {
+  if (calls.length === 0) return false
+  return calls.every(call => {
+    if (!call.name.trim()) return false
+    try {
+      JSON.parse(call.argumentsJson || '{}')
+      return true
+    } catch {
+      return false
+    }
+  })
+}
+
+type FastContextBackgroundStatus = 'started' | 'running' | 'busy' | 'unavailable'
+
+interface FastContextBackgroundStart {
+  status: FastContextBackgroundStatus
+  objective: string
+  promise: Promise<FastContextScanResult | null> | null
+  taskId?: string
+}
+
 export class AgentEngine {
   private session: AgentSession
   private taskManager: TaskManager
@@ -225,9 +394,13 @@ export class AgentEngine {
   private fastContextObjective: string | null = null
   private fastContextPack: string | null = null
   private fastContextRunPromise: Promise<FastContextScanResult | null> | null = null
+  private fastContextRunObjective: string | null = null
+  private fastContextAbortController: AbortController | null = null
+  private fastContextRuntimeTaskId: string | null = null
+  private fastContextGeneration = 0
   private standaloneFastContextRunPromise: Promise<FastContextScanResult | null> | null = null
   private standaloneFastContextAbortController: AbortController | null = null
-  private readCache: Map<string, { content: string; timestamp: number }> = new Map()
+  private standaloneFastContextRuntimeTaskId: string | null = null
   // Registry of background PTY sessions the agent has spawned via
   // run_command(run_in_background=true). Tracks the command + start time so
   // list_terminals / read_terminal can label them. Foreground commands use
@@ -289,8 +462,6 @@ export class AgentEngine {
   private currentRunExplorePacks: Set<string> = new Set()
   private conclusionGuardAttempts: number = 0
   private disabledToolNames: Set<string> = new Set()
-  private thinkingMode: ThinkingMode = 'auto'
-  private resolvedThinkingMode: ResolvedThinkingMode = 'off'
   private pendingAssistantMessageId: string | null = null
   // Snapshot of the chat message id for the assistant turn that just finished
   // streaming. Used to attach an auto/explicit checkpoint produced AFTER that
@@ -301,21 +472,31 @@ export class AgentEngine {
   private currentRunPromise: Promise<AgentTurn[]> | null = null
   private forceContextCompactionBeforeNextCall = false
   private contextLimitRetryInProgress = false
-  private readonly READ_CACHE_MAX_SIZE = 64
-  private readonly READ_CACHE_TTL_MS = 5 * 60 * 1000
 
   private toolExecutor: ToolExecutor
   private stateProvider: AgentStateProvider
+  private subAgentTaskManager: SubAgentTaskManager
   private mcpClient: McpClient | null = null
 
   setMcpClient(client: McpClient): void {
     this.mcpClient = client
   }
 
-  constructor(private config: AgentConfig, toolExecutor: ToolExecutor, stateProvider: AgentStateProvider) {
+  constructor(
+    private config: AgentConfig,
+    toolExecutor: ToolExecutor,
+    stateProvider: AgentStateProvider,
+    subAgentTaskManager?: SubAgentTaskManager,
+  ) {
     this.toolExecutor = toolExecutor
     this.stateProvider = stateProvider
-    this.permissions.setApprovalPolicy(config.approvalPolicy || 'auto')
+    this.subAgentTaskManager = subAgentTaskManager || new SubAgentTaskManager({
+      workspacePath: config.workspacePath || '',
+      runtimeTaskManager: new RuntimeTaskManager({ defaultOwnerSessionId: config.conversationId }),
+      ownerSessionId: config.conversationId,
+      storageDir: false,
+    })
+    this.permissions.setApprovalPolicy(config.approvalPolicy || 'agent')
     const now = Date.now()
     this.session = {
       id: generateSessionId(),
@@ -354,10 +535,13 @@ export class AgentEngine {
   destroy(): void {
     this.unsubscribeTaskManager?.()
     this.abortController?.abort()
+    this.fastContextAbortController?.abort()
     this.standaloneFastContextAbortController?.abort()
     this.abortController = null
+    this.fastContextAbortController = null
     this.standaloneFastContextAbortController = null
     this.currentStreamId = null
+    this.subAgentTaskManager.destroy()
     this.listeners.clear()
   }
 
@@ -394,18 +578,86 @@ export class AgentEngine {
   }
 
   async runFastContextObjective(objective: string): Promise<FastContextScanResult | null> {
+    const run = this.startFastContextBackground(objective)
+    return run.promise
+  }
+
+  private startFastContextBackground(
+    objective: string,
+    tuning?: { maxTurns?: number; maxParallel?: number },
+  ): FastContextBackgroundStart {
     const nextObjective = objective.trim()
-    if (!nextObjective) return null
-    if (this.fastContextRunPromise && this.fastContextObjective === nextObjective) {
-      return this.fastContextRunPromise
+    if (!nextObjective || !this.config.workspacePath) {
+      return { status: 'unavailable', objective: nextObjective, promise: null }
     }
+    if (this.fastContextRunPromise) {
+      return {
+        status: this.fastContextRunObjective === nextObjective ? 'running' : 'busy',
+        objective: this.fastContextRunObjective || nextObjective,
+        promise: this.fastContextRunPromise,
+        taskId: this.fastContextRuntimeTaskId || undefined,
+      }
+    }
+
     this.setFastContextObjective(nextObjective)
-    const promise = this.maybeRunFastContextScan()
-    this.fastContextRunPromise = promise
-    void promise.finally(() => {
-      if (this.fastContextRunPromise === promise) this.fastContextRunPromise = null
+    this.fastContextRunObjective = nextObjective
+    const controller = new AbortController()
+    const parentSignal = this.abortController?.signal
+    const abortFromParent = () => controller.abort()
+    if (parentSignal?.aborted) controller.abort()
+    else parentSignal?.addEventListener('abort', abortFromParent, { once: true })
+    this.fastContextAbortController = controller
+
+    const generation = ++this.fastContextGeneration
+    const started = this.subAgentTaskManager.startTask<FastContextScanResult | null>({
+      kind: 'fast_context',
+      agentType: 'fast_context',
+      label: 'FastContext',
+      objective: nextObjective,
+      workspacePath: this.config.workspacePath,
+      ownerSessionId: this.config.conversationId,
+      controller,
+      run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
+        signal,
+        injectPack: true,
+        maxTurns: tuning?.maxTurns,
+        maxParallel: tuning?.maxParallel,
+        generation,
+        agentId: taskId,
+        recordEvent: event => recordEvent(event),
+      }),
+      isSuccess: result => result !== null,
+      getError: () => 'FastContext scan did not complete',
     })
-    return promise
+    const promise = started.promise
+    this.fastContextRunPromise = promise
+    this.fastContextRuntimeTaskId = started.task.id
+    void promise.finally(() => {
+      parentSignal?.removeEventListener('abort', abortFromParent)
+      if (this.fastContextRunPromise === promise) {
+        this.fastContextRunPromise = null
+        this.fastContextRunObjective = null
+        this.fastContextRuntimeTaskId = null
+      }
+      if (this.fastContextAbortController === controller) {
+        this.fastContextAbortController = null
+      }
+    })
+    return { status: 'started', objective: nextObjective, promise, taskId: started.task.id }
+  }
+
+  private clearFastContextBackground(): void {
+    this.fastContextGeneration += 1
+    if (this.fastContextRuntimeTaskId) {
+      void this.subAgentTaskManager.stopTask(this.fastContextRuntimeTaskId, 'FastContext background scan cleared').catch(() => {})
+    }
+    this.fastContextAbortController?.abort()
+    this.fastContextAbortController = null
+    this.fastContextRunPromise = null
+    this.fastContextRunObjective = null
+    this.fastContextRuntimeTaskId = null
+    this.fastContextObjective = null
+    this.fastContextPack = null
   }
 
   isRunning(): boolean {
@@ -425,23 +677,34 @@ export class AgentEngine {
     if (this.standaloneFastContextRunPromise) return this.standaloneFastContextRunPromise
     const controller = new AbortController()
     this.standaloneFastContextAbortController = controller
-    const promise = this.runFastContextScan(nextObjective, {
-      signal: controller.signal,
-      injectPack: false,
+    const started = this.subAgentTaskManager.startTask<FastContextScanResult | null>({
+      kind: 'fast_context',
+      agentType: 'fast_context',
+      label: 'FastContext',
+      objective: nextObjective,
+      workspacePath: this.config.workspacePath || '',
+      ownerSessionId: this.config.conversationId,
+      controller,
+      run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
+        signal,
+        injectPack: false,
+        agentId: taskId,
+        recordEvent: event => recordEvent(event),
+      }),
+      isSuccess: result => result !== null,
+      getError: () => 'FastContext scan did not complete',
     })
+    const promise = started.promise
+    this.standaloneFastContextRuntimeTaskId = started.task.id
     this.standaloneFastContextRunPromise = promise
     void promise.finally(() => {
       if (this.standaloneFastContextRunPromise === promise) {
         this.standaloneFastContextRunPromise = null
         this.standaloneFastContextAbortController = null
+        this.standaloneFastContextRuntimeTaskId = null
       }
     })
     return promise
-  }
-
-  setThinkingMode(mode: ThinkingMode): void {
-    this.thinkingMode = mode
-    this.config.thinkingMode = mode
   }
 
   setContextPolicy(mode: ContextPolicyMode): void {
@@ -449,12 +712,13 @@ export class AgentEngine {
     this.compressionPreparedTurnCount = 0
   }
 
-  setResolvedThinkingMode(mode: ResolvedThinkingMode): void {
-    this.resolvedThinkingMode = mode
+  setApprovalPolicy(policy: NonNullable<AgentConfig['approvalPolicy']>): void {
+    this.config.approvalPolicy = policy
+    this.permissions.setApprovalPolicy(policy)
   }
 
-  getThinkingMode(): ThinkingMode {
-    return this.thinkingMode
+  getApprovalPolicy(): NonNullable<AgentConfig['approvalPolicy']> {
+    return this.permissions.getApprovalPolicy()
   }
 
   isGitEnabled(): boolean {
@@ -473,7 +737,7 @@ export class AgentEngine {
     if (!this.config.workspacePath || this.gitDetected) return this.gitEnabled
     this.gitDetected = true
     const isRepo = await detectGitRepo(this.config.workspacePath, this.toolExecutor)
-    if (isRepo && this.config.gitEnabled !== false) {
+    if (isRepo && this.config.gitEnabled === true) {
       this.setGitEnabled(true)
     }
     return this.gitEnabled
@@ -494,8 +758,7 @@ export class AgentEngine {
     const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
     if (nonSystemTurns.length <= keepRecent) return
 
-    const recentTurns = nonSystemTurns.slice(-keepRecent)
-    const oldTurns = nonSystemTurns.slice(0, -keepRecent)
+    const { oldTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
     if (oldTurns.length === 0) return
 
     const firstVisibleOldTurn = oldTurns.find(turn => turn.role === 'user' || turn.role === 'assistant')
@@ -532,6 +795,7 @@ export class AgentEngine {
         originalCharCount,
         isValid: true,
         createdAt: Date.now(),
+        coveredTurnIds: oldTurns.map(turn => turn.id),
       }
       this.stateProvider.addContextSegment(segment)
       this.emit({ type: 'context:segment_created', segment })
@@ -575,6 +839,23 @@ export class AgentEngine {
 
   setContextReservoir(entries: ContextReservoirEntry[]): void {
     this.stateProvider.setContextReservoir(entries)
+  }
+
+  getFullConversationTurns(): AgentTurn[] {
+    const systemTurns = this.session.turns.filter(turn => turn.role === 'system')
+    const liveTurns = this.session.turns.filter(turn => turn.role !== 'system')
+    const orderedIds: string[] = []
+    const turnsById = new Map<string, AgentTurn>()
+    const addTurn = (turn: AgentTurn) => {
+      if (!turnsById.has(turn.id)) orderedIds.push(turn.id)
+      turnsById.set(turn.id, turn)
+    }
+    this.stateProvider.getContextReservoir()
+      .slice()
+      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+      .forEach(entry => entry.turns.forEach(addTurn))
+    liveTurns.forEach(addTurn)
+    return [...systemTurns, ...orderedIds.map(id => turnsById.get(id)!).filter(Boolean)]
   }
 
   resetSession(): void {
@@ -672,8 +953,8 @@ export class AgentEngine {
       checkpointMessage?: string
       checkpointId?: string
       checkpointLabel?: string
-      thinkingMode?: ThinkingMode
-      resolvedThinkingMode?: ResolvedThinkingMode
+      reasoningEnabled?: boolean
+      reasoningEffort?: NonNullable<AgentTurn['metadata']>['reasoningEffort']
       thinking?: NonNullable<AgentTurn['metadata']>['thinking']
       rawReasoningPayload?: NonNullable<AgentTurn['metadata']>['rawReasoningPayload']
       attachments?: NonNullable<AgentTurn['metadata']>['attachments']
@@ -705,7 +986,6 @@ export class AgentEngine {
     this.session.turns = this.session.turns.filter(t => t.role === 'system')
     this.taskManager.clear()
     this.toolCallTaskMap.clear()
-    this.readCache.clear()
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
     this.currentRunSuccessfulReadFiles.clear()
@@ -779,8 +1059,8 @@ export class AgentEngine {
         if (typeof meta?.tokens === 'number') turnMetadata.tokens = { input: meta.tokens, output: 0 }
         else if (meta?.tokens) turnMetadata.tokens = meta.tokens
         if (meta?.duration) turnMetadata.duration = meta.duration
-        if (meta?.thinkingMode) turnMetadata.thinkingMode = meta.thinkingMode
-        if (meta?.resolvedThinkingMode) turnMetadata.resolvedThinkingMode = meta.resolvedThinkingMode
+        if (typeof meta?.reasoningEnabled === 'boolean') turnMetadata.reasoningEnabled = meta.reasoningEnabled
+        if (meta?.reasoningEffort) turnMetadata.reasoningEffort = meta.reasoningEffort
         if (meta?.thinking) turnMetadata.thinking = { ...meta.thinking, isStreaming: false }
         if (meta?.rawReasoningPayload) {
           turnMetadata.rawReasoningPayload = {
@@ -988,9 +1268,20 @@ export class AgentEngine {
     return () => this.listeners.delete(listener)
   }
 
+  publishRuntimeTaskFinished(task: RuntimeTask): void {
+    this.emit({ type: 'runtime-task:finished', task })
+  }
+
   abort(): void {
     this.abortController?.abort()
+    this.fastContextAbortController?.abort()
     this.standaloneFastContextAbortController?.abort()
+    if (this.fastContextRuntimeTaskId) {
+      void this.subAgentTaskManager.stopTask(this.fastContextRuntimeTaskId, 'Parent agent aborted').catch(() => {})
+    }
+    if (this.standaloneFastContextRuntimeTaskId) {
+      void this.subAgentTaskManager.stopTask(this.standaloneFastContextRuntimeTaskId, 'FastContext command aborted').catch(() => {})
+    }
     // Per-conv stream abort: only cancel THIS engine's HTTP stream in the
     // main process, not every active stream across all conversations.
     if (this.currentStreamId !== null) {
@@ -1080,7 +1371,7 @@ export class AgentEngine {
     const activeConfig = this.stateProvider.getActiveConfig()
     const activeModel = this.stateProvider.getActiveModel()
     return {
-      contextWindow: activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 1_000_000,
+      contextWindow: activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 200_000,
       maxOutputTokens: this.config.maxTokens || activeModel?.maxTokens || activeConfig?.maxTokens || 4096,
       model: activeModel?.id || activeConfig?.defaultModel,
       provider: activeModel?.provider || activeConfig?.provider,
@@ -1140,8 +1431,7 @@ export class AgentEngine {
     const keepRecent = resolveContextPolicyProfile(this.config.contextPolicy).recapKeepRecentTurns
     if (nonSystemTurns.length <= keepRecent + 4) return
 
-    const recapTurns = nonSystemTurns.slice(0, -keepRecent)
-    const recentTurns = nonSystemTurns.slice(-keepRecent)
+    const { oldTurns: recapTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
     const firstVisibleTurn = recapTurns.find(turn => turn.role === 'user' || turn.role === 'assistant')
     const lastVisibleTurn = [...recapTurns].reverse().find(turn => turn.role === 'user' || turn.role === 'assistant')
     if (!firstVisibleTurn || !lastVisibleTurn) return
@@ -1175,6 +1465,7 @@ export class AgentEngine {
       originalCharCount: recapTurns.reduce((sum, turn) => sum + this.countTurnChars(turn), 0),
       isValid: true,
       createdAt: Date.now(),
+      coveredTurnIds: recapTurns.map(turn => turn.id),
     }
     this.stateProvider.addContextSegment(segment)
     this.emit({ type: 'context:segment_created', segment })
@@ -1202,7 +1493,6 @@ export class AgentEngine {
     await this.detectAndEnableGit()
     this.abortController = new AbortController()
     this.runtimeAppendSystemPrompt = null
-    this.readCache.clear()
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
     this.currentRunSuccessfulReadFiles.clear()
@@ -1245,7 +1535,7 @@ export class AgentEngine {
     }
 
     if (this.fastContextObjective && !this.fastContextPack) {
-      await this.runFastContextObjective(this.fastContextObjective)
+      this.startFastContextBackground(this.fastContextObjective)
     }
 
     const effectiveMaxTurns = this.config.maxTurns || 30
@@ -1402,11 +1692,11 @@ export class AgentEngine {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error'
         this.emit({ type: 'error', error: errorMsg })
       }
+      this.clearFastContextBackground()
       throw error
     }
 
-    this.readCache.clear()
-
+    this.clearFastContextBackground()
     return newTurns
     })()
     this.currentRunPromise = runPromise
@@ -1445,8 +1735,7 @@ export class AgentEngine {
     // from arxiv:2508.21433 — empirically optimal for SWE-bench agents).
     const keepRecent = 10
     const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
-    const recentTurns = nonSystemTurns.slice(-keepRecent)
-    const oldTurns = nonSystemTurns.slice(0, -keepRecent)
+    const { oldTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
 
     if (oldTurns.length === 0) return
 
@@ -1499,6 +1788,7 @@ export class AgentEngine {
       originalCharCount,
       isValid: true,
       createdAt: Date.now(),
+      coveredTurnIds: oldTurns.map(turn => turn.id),
     }
     this.stateProvider.addContextSegment(segment)
     this.emit({ type: 'context:segment_created', segment })
@@ -1627,11 +1917,18 @@ ${recentContext}`
       ? `${activeConfig.baseUrl.replace(/\/$/, '')}/messages`
       : `${normalizeBaseUrl(activeConfig.baseUrl)}/chat/completions`
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${activeConfig.apiKey}`,
-      ...activeConfig.customHeaders,
-    }
+    const headers: Record<string, string> = createTurboFluxRequestHeaders(provider === 'anthropic'
+      ? {
+          'Content-Type': 'application/json',
+          'x-api-key': activeConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          ...activeConfig.customHeaders,
+        }
+      : {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${activeConfig.apiKey}`,
+          ...activeConfig.customHeaders,
+        })
 
     if (activeConfig.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://turboflux.dev'
@@ -1652,7 +1949,9 @@ ${recentContext}`
           messages: [{ role: 'system', content: 'You are a context compression assistant. Generate concise, structured continuation summaries.' }, ...messages],
         })
 
-    const result = await this.toolExecutor.sendMessage(url, headers, body)
+    const result = await this.toolExecutor.sendMessage(url, headers, body, {
+      signal: this.abortController?.signal,
+    })
 
     if (!result.success || !result.data) {
       throw new Error(result.error || 'Summary generation failed')
@@ -1800,12 +2099,6 @@ Before retrying:
 </tool_retry_hint>`
   }
 
-  private invalidateReadCache(filePath: string): void {
-    for (const key of this.readCache.keys()) {
-      if (key.startsWith(filePath)) this.readCache.delete(key)
-    }
-  }
-
   private async capturePreimage(filePath: string): Promise<void> {
     if (this.filePreimages.has(filePath)) return
     try {
@@ -1828,36 +2121,39 @@ Before retrying:
     this.codemapCacheKey = null
   }
 
-  private async maybeRunFastContextScan(userMessage = ''): Promise<FastContextScanResult | null> {
-    if (!this.config.workspacePath || !this.fastContextObjective) return null
-    if (this.abortController?.signal.aborted) return null
-
-    const objective = this.fastContextObjective || userMessage
-    return this.runFastContextScan(objective, {
-      signal: this.abortController?.signal,
-      injectPack: true,
-    })
-  }
-
-  private async runFastContextScan(objective: string, options: { signal?: AbortSignal; injectPack: boolean }): Promise<FastContextScanResult | null> {
+  private async runFastContextScan(objective: string, options: {
+    signal?: AbortSignal
+    injectPack: boolean
+    maxTurns?: number
+    maxParallel?: number
+    generation?: number
+    agentId?: string
+    recordEvent?: (event: FastContextScanEvent) => void
+  }): Promise<FastContextScanResult | null> {
     if (!this.config.workspacePath) return null
     if (options.signal?.aborted) return null
 
-    const onEvent = (event: FastContextScanEvent) => this.emit({ type: 'fast_context:event', event })
-
-    // Build (or reuse) a stable workspace skeleton primer. This is
-    // deliberately objective-AGNOSTIC so repeated Fast Context calls can
-    // reuse the same compact repository map without bloating the request.
-    const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
-    const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
-    const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
+    const isCurrent = () => options.generation === undefined || options.generation === this.fastContextGeneration
+    const emitIfCurrent = (event: AgentEventType) => {
+      if (isCurrent()) this.emit(event)
+    }
+    const onEvent = (event: FastContextScanEvent) => {
+      options.recordEvent?.(event)
+      emitIfCurrent({ type: 'fast_context:event', event })
+    }
 
     // FastContext is intentionally a subagent-only path. Ordinary model
     // turns stay steady and targeted; this mode is the explicit fast lane.
-    const agentId = `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+    const agentId = options.agentId || `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     const startedAt = Date.now()
     try {
-      this.emit({
+      // Build (or reuse) a stable workspace skeleton primer. This is
+      // deliberately objective-agnostic so repeated scans reuse the prefix.
+      const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
+      const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
+      const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
+
+      emitIfCurrent({
         type: 'subagent:start',
         agentId,
         agentType: 'fast_context',
@@ -1865,46 +2161,54 @@ Before retrying:
         objective,
         runKind: 'fast_context',
       })
-      this.emit({
-        type: 'fast_context:event',
-        event: { type: 'insight', text: `Building FastContext code map with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' },
-      })
+      onEvent({ type: 'insight', text: `Building FastContext code map with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' })
       const result = await runFastContextSubagent({
         workspacePath: this.config.workspacePath,
         objective,
         toolExecutor: this.toolExecutor,
         apiKey: fastContextConfig?.apiKey || '',
         baseUrl: fastContextConfig?.baseUrl || 'https://api.deepseek.com',
+        provider: fastContextConfig?.provider,
+        customHeaders: fastContextConfig?.customHeaders,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
         codemap: skeleton,
+        maxTurns: options.maxTurns,
+        maxParallel: options.maxParallel,
         abortSignal: options.signal,
         onEvent,
       })
-      if (options.injectPack) {
+      if (options.injectPack && !options.signal?.aborted && isCurrent()) {
         this.fastContextPack = result.filesScanned > 0 && result.hits.length > 0 ? result.evidencePack : null
       }
-      this.emit({ type: 'fast_context:complete', result })
-      this.emit({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: true, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
+      emitIfCurrent({ type: 'fast_context:complete', result })
+      emitIfCurrent({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: true, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
       return result
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      this.emit({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: false, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
-      this.emit({
-        type: 'fast_context:event',
-        event: {
-          type: 'phase',
-          phase: 'error',
-          insight: `FastContext code map failed: ${message.slice(0, 120)}`,
-        },
+      const failedResult: FastContextScanResult = {
+        objective,
+        evidencePack: '',
+        filesScanned: 0,
+        hits: [],
+        elapsedMs: Date.now() - startedAt,
+        truncated: true,
+      }
+      emitIfCurrent({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: false, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
+      if (options.signal?.aborted) {
+        emitIfCurrent({ type: 'fast_context:complete', result: failedResult })
+        return null
+      }
+      onEvent({
+        type: 'phase',
+        phase: 'error',
+        insight: `FastContext code map failed: ${message.slice(0, 120)}`,
       })
-      this.emit({
-        type: 'fast_context:event',
-        event: {
-          type: 'insight',
-          text: 'FastContext did not run. Use targeted read/search tools or retry after fixing the model connection.',
-          tone: 'warning',
-        },
+      onEvent({
+        type: 'insight',
+        text: 'FastContext did not run. Use targeted read/search tools or retry after fixing the model connection.',
+        tone: 'warning',
       })
+      emitIfCurrent({ type: 'fast_context:complete', result: failedResult })
     }
     return null
   }
@@ -1931,10 +2235,19 @@ Before retrying:
     // Long-conversation persona drift reminder — empty string when below threshold.
     const voiceReminderContext: string | null = null
     const strategyContext = this.turnStrategyPlanner.buildStrategyContext(turnStrategy)
+    const fastContextPackForTurn = this.fastContextPack
     const dynamicRuntimeContext = [
+      this.config.workspacePath
+        ? this.wrapRuntimeContextSection('current_workspace', [
+            `The active workspace is exactly: ${this.config.workspacePath}`,
+            'Historical references to other projects are context only, not the current workspace.',
+            'Do not claim a file, directory, or project was opened, inspected, or selected unless a tool result in this conversation proves it.',
+            'Resolve relative filesystem paths against this active workspace.',
+          ].join('\n'))
+        : null,
       this.config.appendSystemPrompt,
       strategyContext,
-      this.fastContextPack,
+      fastContextPackForTurn,
       this.runtimeAppendSystemPrompt,
       voiceReminderContext,
       this.cachedGitStatus ? this.wrapRuntimeContextSection('git_status', this.cachedGitStatus) : null,
@@ -1946,7 +2259,7 @@ Before retrying:
     // after that the model has already seen the evidence and subsequent turns
     // should rely on the conversation history instead. Keeping it in every
     // turn wastes tokens proportional to pack size × number of turns.
-    if (this.fastContextPack) {
+    if (fastContextPackForTurn && this.fastContextPack === fastContextPackForTurn) {
       this.fastContextPack = null
       this.fastContextObjective = null
     }
@@ -1956,35 +2269,80 @@ Before retrying:
       workspaceName: this.config.workspaceName,
       systemPromptOverride: this.config.systemPromptOverride,
       profileSystemPrompt: this.config.profileSystemPrompt,
-      thinkingMode: this.resolvedThinkingMode,
       enabledSkills: this.config.enabledSkills,
       provider: activeConfig.provider,
       modelId: activeConfig.defaultModel,
       shell: this.config.shell,
     })
 
-    const provider = activeConfig.provider === 'anthropic' ? 'anthropic' : 'openai'
-    const messages = this.buildApiMessages(systemPrompt, provider)
-    this.injectAppendIntoMessages(messages, dynamicRuntimeContext || '', provider)
-    this.injectPreservedFilesIntoMessages(messages, provider)
-    this.enforceFinalMessageBudget(messages, provider, activeConfig, activeModel)
-
     const startTime = Date.now()
+    const protocolCandidates = planModelProtocols(activeConfig.provider, activeConfig.defaultModel)
+    const preservedFiles = this.preservedFiles.map(file => ({ ...file }))
+    const messagesByProvider = new Map<'openai' | 'anthropic', Array<Record<string, unknown>>>()
+    const messagesFor = (provider: 'openai' | 'anthropic') => {
+      const cached = messagesByProvider.get(provider)
+      if (cached) return cached
+      const messages = this.buildApiMessages(systemPrompt, provider)
+      this.injectAppendIntoMessages(messages, dynamicRuntimeContext || '', provider)
+      this.injectPreservedFilesIntoMessages(messages, provider, preservedFiles, false)
+      this.enforceFinalMessageBudget(messages, provider, activeConfig, activeModel)
+      messagesByProvider.set(provider, messages)
+      return messages
+    }
+    const attempts: ModelProtocolAttempt[] = []
+    if (preservedFiles.length > 0) this.preservedFiles = []
 
     try {
-      if (provider === 'anthropic') {
-        const effectiveSystemPrompt = messages.find(m => m.role === 'system' && typeof m.content === 'string')?.content as string | undefined
-        return await this.callAnthropicAPI(activeConfig, activeModel, effectiveSystemPrompt || systemPrompt, messages, startTime, turnStrategy)
-      } else {
-        return await this.callOpenAICompatibleAPI(activeConfig, activeModel, messages, startTime, turnStrategy)
+      for (let index = 0; index < protocolCandidates.length; index += 1) {
+        const protocol = protocolCandidates[index]
+        const url = buildModelProtocolUrl(activeConfig.baseUrl, protocol)
+        this.emit({ type: 'model:protocol', phase: 'attempt', protocol, url })
+        try {
+          let turn: AgentTurn
+          if (protocol === 'anthropic_messages') {
+            const messages = messagesFor('anthropic')
+            const effectiveSystemPrompt = messages.find(m => m.role === 'system' && typeof m.content === 'string')?.content as string | undefined
+            turn = await this.callAnthropicAPI(activeConfig, activeModel, effectiveSystemPrompt || systemPrompt, messages, startTime, turnStrategy)
+          } else if (protocol === 'openai_responses') {
+            turn = await this.callOpenAIResponsesAPI(activeConfig, activeModel, messagesFor('openai'), startTime, turnStrategy)
+          } else {
+            turn = await this.callOpenAICompatibleAPI(activeConfig, activeModel, messagesFor('openai'), startTime, turnStrategy)
+          }
+          this.emit({ type: 'model:protocol', phase: 'success', protocol, url })
+          return turn
+        } catch (error) {
+          if ((error as { aborted?: boolean })?.aborted === true || this.abortController?.signal.aborted) {
+            throw error
+          }
+          const protocolError = error instanceof ModelProtocolRequestError
+            ? error
+            : new ModelProtocolRequestError(error instanceof Error ? error.message : String(error), {
+              protocol,
+              url,
+              kind: 'internal',
+            })
+          const attempt = toProtocolAttempt(protocolError)
+          attempts.push(attempt)
+          const nextProtocol = protocolCandidates[index + 1]
+          if (!nextProtocol || !shouldFallbackProtocol(protocolError)) {
+            throw new Error(formatProtocolFailure(attempts))
+          }
+          this.emit({ type: 'stream:end' })
+          this.emit({
+            type: 'model:protocol',
+            phase: 'fallback',
+            protocol: nextProtocol,
+            url: buildModelProtocolUrl(activeConfig.baseUrl, nextProtocol),
+            message: `${formatProtocolAttempt(attempt)}; retrying with ${protocolLabel(nextProtocol)}`,
+          })
+        }
       }
+      throw new Error(formatProtocolFailure(attempts))
     } catch (error) {
       const errAborted = (error as { aborted?: boolean })?.aborted === true
         || this.abortController?.signal.aborted === true
       if (errAborted) {
-        // Surface as an empty assistant turn; outer loop will break on the
-        // next abort check without polluting the conversation with an error.
-        return this.createAssistantTurn('', undefined, { mode: this.config.mode })
+        throw error
       }
       const errorMsg = error instanceof Error ? error.message : 'API call failed'
       if (this.isContextLimitError(errorMsg) && !this.contextLimitRetryInProgress) {
@@ -2011,7 +2369,7 @@ Before retrying:
     startTime: number,
     turnStrategy?: TurnStrategy | null,
   ): Promise<AgentTurn> {
-    const url = `${config.baseUrl.replace(/\/+$/, '')}/messages`
+    const url = buildModelProtocolUrl(config.baseUrl, 'anthropic_messages')
     // Bug 3 fix: token-efficient-tools-2025-02-19 is a Claude 3.7 Sonnet
     // beta. Sonnet 3.5 / Sonnet 4 / Opus 4 / Haiku-3 reject the header on
     // some baseUrl proxies and the request 4xx's. Only opt in for models
@@ -2021,15 +2379,16 @@ Before retrying:
     const supportsTokenEfficientTools = (
       modelId.includes('claude-3-7') || modelId.includes('claude-3.7')
     )
-    const headers: Record<string, string> = {
+    const headers: Record<string, string> = createTurboFluxRequestHeaders({
       'Content-Type': 'application/json',
       'x-api-key': config.apiKey,
       'anthropic-version': '2023-06-01',
+      ...(config.provider === 'anthropic' ? {} : { 'Authorization': `Bearer ${config.apiKey}` }),
       ...(supportsTokenEfficientTools
         ? { 'anthropic-beta': 'token-efficient-tools-2025-02-19' }
         : {}),
       ...config.customHeaders,
-    }
+    })
 
     // Tool visibility is mode/policy based. Turn strategy may influence
     // context hints, but never hides tools from the model.
@@ -2041,14 +2400,13 @@ Before retrying:
     if (this.mcpClient) {
       const mcpTools = getMcpAgentTools(this.mcpClient)
       for (const tool of mcpTools.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (this.config.mode === 'plan' && !tool.isReadOnly) continue
         anthropicTools.push({
           name: tool.name,
           description: tool.description,
-          input_schema: {
+          input_schema: tool.inputSchema || {
             type: 'object',
-            properties: Object.fromEntries(
-              tool.parameters.map(p => [p.name, { type: p.type, description: p.description }])
-            ),
+            properties: Object.fromEntries(tool.parameters.map(p => [p.name, { type: p.type, description: p.description }])),
             required: tool.parameters.filter(p => p.required).map(p => p.name),
           },
         })
@@ -2070,7 +2428,9 @@ Before retrying:
     const maxTokens = this.config.maxTokens || config.maxTokens || 0
     const anthropicMaxTokens = maxTokens > 0 ? maxTokens : (model?.maxTokens || 8192)
     const temperature = this.config.temperature ?? config.temperature ?? 0.7
-    const requestMessages = this.withAnthropicMessageCacheControl(messages.filter(m => m.role !== 'system'))
+    const requestMessages = this.withAnthropicMessageCacheControl(
+      normalizeAnthropicToolMessages(messages.filter(m => m.role !== 'system')),
+    )
     const requestBody: Record<string, unknown> = {
       model: config.defaultModel,
       max_tokens: anthropicMaxTokens,
@@ -2081,26 +2441,22 @@ Before retrying:
       messages: requestMessages,
       stream: true,
     }
-    const reasoningParam = resolveReasoningParam(config.defaultModel, this.resolvedThinkingMode)
-    if (reasoningParam?.kind === 'anthropic-adaptive') {
-      if (reasoningParam.thinking === 'disabled') {
-        requestBody.thinking = { type: 'disabled' }
-      } else {
-        requestBody.thinking = { type: 'adaptive' }
-        requestBody.output_config = { effort: reasoningParam.effort ?? 'high' }
-        if (!headers['anthropic-beta']) {
-          headers['anthropic-beta'] = 'effort-2025-11-24'
-        } else if (!headers['anthropic-beta'].includes('effort-2025-11-24')) {
-          headers['anthropic-beta'] = `${headers['anthropic-beta']},effort-2025-11-24`
-        }
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
+    if (reasoningRequest?.thinking) {
+      const thinking = { ...reasoningRequest.thinking }
+      if (thinking.budget_tokens && thinking.budget_tokens >= anthropicMaxTokens) {
+        thinking.budget_tokens = Math.max(1_024, anthropicMaxTokens - 1)
       }
+      requestBody.thinking = thinking
     }
+    if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
+    if (reasoningRequest?.omitTemperature) delete requestBody.temperature
     if (cachedTools.length > 0) {
       requestBody.tools = cachedTools
       requestBody.tool_choice = { type: 'auto' }
     }
     this.emitPromptModuleSnapshot(systemPrompt, anthropicTools, requestMessages)
-    const body = JSON.stringify(requestBody)
+    let serializedBody = JSON.stringify(requestBody)
 
     // Record prompt state for cache-break detection.
     this.cacheMonitor.recordPromptState({
@@ -2140,6 +2496,7 @@ Before retrying:
     // panel so users can see real cache savings, not just billed totals.
     let cacheReadTokens = 0
     let cacheCreationTokens = 0
+    let sawMessageStop = false
     // Mint the streamId BEFORE the request goes out so abort() (which
     // can fire from another tick the moment the user clicks "stop")
     // sees a non-null id that matches the one the main process will use.
@@ -2149,8 +2506,10 @@ Before retrying:
     // 5-min timeout. Pre-allocating threads the same id through both.
     const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
     this.currentStreamId = streamId
+    let receivedStreamData = false
 
-    const result = await this.toolExecutor.streamMessage(url, headers, body, (line: string) => {
+    const handleStreamLine = (line: string) => {
+      receivedStreamData = true
       if (!line.startsWith('data:')) return
       const jsonStr = line.slice(5).trim()
       if (jsonStr === '[DONE]') return
@@ -2219,6 +2578,8 @@ Before retrying:
               inputJson: '',
             })
           }
+        } else if (eventType === 'message_stop') {
+          sawMessageStop = true
         } else if (eventType === 'message_delta') {
           if (event.delta?.signature) {
             for (let index = rawReasoningBlocks.length - 1; index >= 0; index -= 1) {
@@ -2254,17 +2615,63 @@ Before retrying:
       } catch {
         // Malformed JSON chunk, skip
       }
+    }
+    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+      streamId,
+      signal: this.abortController?.signal,
     })
+    for (let retry = 0; !result.success && retry < 4; retry += 1) {
+      if (this.abortController?.signal.aborted || receivedStreamData) break
+      if (result.status !== 400 && result.status !== 422) break
+      const unsupportedParam = extractUnsupportedRequestParam(result.error)
+      if (!unsupportedParam || !removeAnthropicCompatibleRequestParam(requestBody, headers, unsupportedParam)) break
+      this.emit({
+        type: 'notification',
+        level: 'warning',
+        message: `Messages endpoint rejected "${unsupportedParam}"; retrying without that optional feature.`,
+      })
+      serializedBody = JSON.stringify(requestBody)
+      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+        streamId,
+        signal: this.abortController?.signal,
+      })
+    }
+    this.currentStreamId = null
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
-        // User-initiated stop. Don't propagate as a model error; let the outer
-        // run-loop notice abortController.signal.aborted and break cleanly.
+        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
         const err = new Error('aborted') as Error & { aborted?: boolean }
         err.aborted = true
         throw err
       }
-      throw new Error(result.error || 'Anthropic request failed')
+      throw new ModelProtocolRequestError(result.error || 'Anthropic request failed', {
+        protocol: 'anthropic_messages',
+        url,
+        status: result.status,
+        kind: result.status ? 'http' : 'network',
+        receivedStreamData,
+      })
+    }
+    if (!sawMessageStop) {
+      const parsedTextTools = parseTextToolCalls(textContent)
+      const hasVisibleText = Boolean(stripTextToolCallMarkup(textContent, { stripIncomplete: true }))
+      const completeToolPayloads = hasCompleteToolPayloads(
+        [...toolCallMap.values()].map(block => ({ name: block.name, argumentsJson: block.inputJson })),
+      )
+      if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
+        throw new ModelProtocolRequestError('Anthropic stream ended before message_stop', {
+          protocol: 'anthropic_messages',
+          url,
+          kind: 'response_shape',
+          receivedStreamData,
+        })
+      }
+      if (!completeToolPayloads) toolCallMap.clear()
+      if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
+        textContent = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+      }
     }
 
     // Assemble final tool calls from accumulated data
@@ -2312,8 +2719,8 @@ Before retrying:
       tokens,
       duration: Date.now() - startTime,
       mode: this.config.mode,
-      thinkingMode: this.thinkingMode,
-      resolvedThinkingMode: this.resolvedThinkingMode,
+      reasoningEnabled: reasoningRequest?.enabled,
+      reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
       thinking: { content: reasoningContent, source: 'provider' },
       rawReasoningPayload: rawReasoningBlocks.length > 0
         ? { provider: 'anthropic', blocks: rawReasoningBlocks }
@@ -2330,6 +2737,33 @@ Before retrying:
     }
   }
 
+  private buildOpenAITools(config: APIConfig): object[] {
+    const openaiTools = toolsToOpenAIFormat(this.config.mode, {
+      disabledTools: [],
+      strict: config.provider === 'openai',
+    })
+
+    if (this.mcpClient) {
+      const mcpTools = getMcpAgentTools(this.mcpClient)
+      for (const tool of mcpTools.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (this.config.mode === 'plan' && !tool.isReadOnly) continue
+        openaiTools.push({
+          type: 'function',
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.inputSchema || {
+              type: 'object',
+              properties: Object.fromEntries(tool.parameters.map(p => [p.name, { type: p.type, description: p.description }])),
+              required: tool.parameters.filter(p => p.required).map(p => p.name),
+            },
+          },
+        })
+      }
+    }
+    return openaiTools
+  }
+
   private async callOpenAICompatibleAPI(
     config: APIConfig,
     model: APIModel | null,
@@ -2337,12 +2771,12 @@ Before retrying:
     startTime: number,
     turnStrategy?: TurnStrategy | null,
   ): Promise<AgentTurn> {
-    const url = `${normalizeBaseUrl(config.baseUrl)}/chat/completions`
-    const headers: Record<string, string> = {
+    const url = buildModelProtocolUrl(config.baseUrl, 'openai_chat')
+    const headers: Record<string, string> = createTurboFluxRequestHeaders({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
       ...config.customHeaders,
-    }
+    })
 
     if (config.provider === 'openrouter') {
       headers['HTTP-Referer'] = 'https://turboflux.dev'
@@ -2353,27 +2787,7 @@ Before retrying:
     // context hints, but never hides tools from the model. This keeps the
     // static system/tool prefix stable and avoids intent misclassification
     // turning an agentic request into a no-tool chat response.
-    const openaiTools = toolsToOpenAIFormat(this.config.mode, {
-      disabledTools: [],
-    })
-
-    if (this.mcpClient) {
-      const mcpTools = getMcpAgentTools(this.mcpClient)
-      for (const tool of mcpTools.sort((a, b) => a.name.localeCompare(b.name))) {
-        openaiTools.push({
-          type: 'function',
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: {
-              type: 'object',
-              properties: Object.fromEntries(tool.parameters.map(p => [p.name, { type: p.type, description: p.description }])),
-              required: tool.parameters.filter(p => p.required).map(p => p.name),
-            },
-          },
-        })
-      }
-    }
+    const openaiTools = this.buildOpenAITools(config)
 
     const requestMessages = config.provider === 'openrouter'
       ? this.withOpenRouterCacheControl(messages)
@@ -2385,34 +2799,17 @@ Before retrying:
       messages: requestMessages,
       stream: true,
     }
-    if (!shouldOmitSamplingTemperature(config.defaultModel, config.provider)) {
+    if (!shouldOmitSamplingTemperature(config)) {
       body.temperature = this.config.temperature ?? config.temperature ?? 0.7
     }
     if (maxTokens > 0) {
       body.max_tokens = maxTokens
     }
-    const reasoningParam = resolveProviderReasoningParam(config.provider, config.defaultModel, this.resolvedThinkingMode)
-    if (reasoningParam?.kind === 'openai-chat') {
-      body.reasoning_effort = reasoningParam.effort
-    } else if (reasoningParam?.kind === 'deepseek-chat') {
-      body.thinking = reasoningParam.thinking === 'disabled'
-        ? { type: 'disabled' }
-        : { type: 'enabled', effort: reasoningParam.effort ?? 'high' }
-      if (reasoningParam.effort) {
-        body.reasoning_effort = reasoningParam.effort
-      }
-      if (reasoningParam.thinking === 'enabled') {
-        delete body.temperature
-      }
-    } else if (reasoningParam?.kind === 'anthropic-adaptive') {
-      body.thinking = reasoningParam.thinking === 'disabled'
-        ? { type: 'disabled' }
-        : { type: 'adaptive' }
-      if (reasoningParam.thinking === 'adaptive') {
-        body.output_config = { effort: reasoningParam.effort ?? 'high' }
-        delete body.temperature
-      }
-    }
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
+    if (reasoningRequest?.thinking) body.thinking = reasoningRequest.thinking
+    if (reasoningRequest?.reasoningEffort) body.reasoning_effort = reasoningRequest.reasoningEffort
+    if (reasoningRequest?.outputConfig) body.output_config = reasoningRequest.outputConfig
+    if (reasoningRequest?.omitTemperature) delete body.temperature
     // OpenAI streaming spec: usage is NOT sent unless we opt in via
     // stream_options.include_usage. Without this, mimo / Kimi / DeepSeek
     // / OpenRouter / Qwen all return zero token counts, the per-call
@@ -2478,17 +2875,23 @@ Before retrying:
     // computes "new tokens" as inputTokens - cacheReadTokens for clarity.
     let cacheReadTokens = 0
     let cacheMissTokens: number | null = null
+    let sawTerminalEvent = false
     // Same pre-allocation pattern as the Anthropic path — the previous
     // `Date.now()` was a no-op for abort because preload re-rolled its
     // own id when sending the request. Now we own the id and forward it
     // through streamMessage so streamAbort hits the right controller.
     const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
     this.currentStreamId = streamId
+    let receivedStreamData = false
 
     const handleStreamLine = (line: string) => {
+      receivedStreamData = true
       if (!line.startsWith('data:')) return
       const jsonStr = line.slice(5).trim()
-      if (jsonStr === '[DONE]') return
+      if (jsonStr === '[DONE]') {
+        sawTerminalEvent = true
+        return
+      }
 
       try {
         const chunk = JSON.parse(jsonStr)
@@ -2518,6 +2921,9 @@ Before retrying:
 
         const choice = chunk.choices?.[0]
         if (!choice) return
+        if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+          sawTerminalEvent = true
+        }
 
         const delta = choice.delta
         if (!delta) return
@@ -2565,7 +2971,10 @@ Before retrying:
     }
 
     let serializedBody = JSON.stringify(body)
-    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine)
+    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+      streamId,
+      signal: this.abortController?.signal,
+    })
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted) break
       if (result.status !== 400) break
@@ -2577,16 +2986,47 @@ Before retrying:
         message: `Provider rejected "${unsupportedParam}"; retrying without that request parameter.`,
       })
       serializedBody = JSON.stringify(body)
-      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine)
+      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+        streamId,
+        signal: this.abortController?.signal,
+      })
     }
+    this.currentStreamId = null
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
+        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
         const err = new Error('aborted') as Error & { aborted?: boolean }
         err.aborted = true
         throw err
       }
-      throw new Error(result.error || 'Model request failed')
+      throw new ModelProtocolRequestError(result.error || 'Model request failed', {
+        protocol: 'openai_chat',
+        url,
+        status: result.status,
+        kind: result.status ? 'http' : 'network',
+        receivedStreamData,
+      })
+    }
+    if (!sawTerminalEvent) {
+      const parsedTextTools = parseTextToolCalls(textContent)
+      const hasVisibleText = Boolean(stripTextToolCallMarkup(textContent, { stripIncomplete: true }))
+      const completeToolPayloads = hasCompleteToolPayloads(
+        [...toolCallMap.values()].map(entry => ({ name: entry.name, argumentsJson: entry.argumentsJson })),
+      )
+      if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
+        throw new ModelProtocolRequestError('Model stream ended before a terminal event', {
+          protocol: 'openai_chat',
+          url,
+          kind: 'response_shape',
+          receivedStreamData,
+        })
+      }
+      if (!completeToolPayloads) toolCallMap.clear()
+      if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
+        textContent = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+      }
     }
 
     // Assemble final tool calls
@@ -2644,13 +3084,333 @@ Before retrying:
       tokens,
       duration: Date.now() - startTime,
       mode: this.config.mode,
-      thinkingMode: this.thinkingMode,
-      resolvedThinkingMode: this.resolvedThinkingMode,
+      reasoningEnabled: reasoningRequest?.enabled,
+      reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
       thinking: { content: reasoningContent, source: 'provider' },
       // Store reasoning_content so it can be passed back in subsequent turns.
       // OpenAI-compatible providers (e.g. mimo, DeepSeek-R1) require the
       // reasoning_content from the previous assistant message to be echoed
       // back verbatim, otherwise they return a 400 "Param Incorrect" error.
+      rawReasoningPayload: reasoningContent
+        ? { provider: 'openai-compatible', blocks: [], reasoningContent }
+        : undefined,
+    })
+  }
+
+  private async callOpenAIResponsesAPI(
+    config: APIConfig,
+    model: APIModel | null,
+    messages: Array<Record<string, unknown>>,
+    startTime: number,
+    turnStrategy?: TurnStrategy | null,
+  ): Promise<AgentTurn> {
+    const protocol: ModelProtocol = 'openai_responses'
+    const url = buildModelProtocolUrl(config.baseUrl, protocol)
+    const headers: Record<string, string> = createTurboFluxRequestHeaders({
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`,
+      ...config.customHeaders,
+    })
+    if (config.provider === 'openrouter') {
+      headers['HTTP-Referer'] = 'https://turboflux.dev'
+      headers['X-Title'] = 'Turboflux'
+    }
+
+    const chatTools = this.buildOpenAITools(config)
+    const responseTools = toResponsesTools(chatTools)
+    const instructions = messages
+      .filter(message => message.role === 'system' || message.role === 'developer')
+      .map(message => typeof message.content === 'string' ? message.content : '')
+      .filter(Boolean)
+      .join('\n\n')
+    const input = toResponsesInput(messages)
+    const maxTokens = this.config.maxTokens || config.maxTokens || 0
+    const body: Record<string, unknown> = {
+      model: config.defaultModel,
+      instructions,
+      input,
+      stream: true,
+      store: false,
+    }
+    if (!shouldOmitSamplingTemperature(config)) {
+      body.temperature = this.config.temperature ?? config.temperature ?? 0.7
+    }
+    if (maxTokens > 0) body.max_output_tokens = maxTokens
+    const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
+    const reasoningEffort = reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort
+    if (reasoningEffort) body.reasoning = { effort: reasoningEffort }
+    if (reasoningRequest?.omitTemperature) delete body.temperature
+    if (responseTools.length > 0) {
+      body.tools = responseTools
+      body.tool_choice = 'auto'
+      body.parallel_tool_calls = true
+    }
+    if (config.provider === 'openai') {
+      body.prompt_cache_key = this.buildPromptCacheKey(config.defaultModel, responseTools)
+      if (/gpt-5\.5/i.test(config.defaultModel)) body.prompt_cache_retention = '24h'
+    }
+
+    this.emitPromptModuleSnapshot(instructions, responseTools, input)
+    this.cacheMonitor.recordPromptState({
+      systemPrompt: instructions,
+      toolCount: responseTools.length,
+      toolNames: responseTools.map(tool => typeof tool.name === 'string' ? tool.name : 'unknown'),
+      toolSchemas: responseTools,
+      model: config.defaultModel,
+      provider: config.provider,
+      strategy: turnStrategy?.intent,
+      cacheControl: 'responses-auto-prefix',
+      extraBodyParams: {
+        protocol,
+        max_output_tokens: body.max_output_tokens ?? null,
+        temperature: body.temperature ?? null,
+        reasoning: body.reasoning ?? null,
+        tool_choice: body.tool_choice ?? null,
+        parallel_tool_calls: body.parallel_tool_calls ?? null,
+        prompt_cache_key: body.prompt_cache_key ?? null,
+        prompt_cache_retention: body.prompt_cache_retention ?? null,
+      },
+    })
+
+    this.emit({ type: 'stream:start' })
+    let textContent = ''
+    let reasoningContent = ''
+    let inputTokens = 0
+    let outputTokens = 0
+    let cacheReadTokens = 0
+    let sawTerminalEvent = false
+    let receivedStreamData = false
+    let streamFailure = ''
+    const toolCallMap = new Map<string, { id: string; name: string; argumentsJson: string }>()
+    const toolCallAliases = new Map<string, string>()
+    const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
+    this.currentStreamId = streamId
+
+    const ensureToolCall = (item: Record<string, any>, outputIndex?: number) => {
+      const id = typeof item.call_id === 'string' && item.call_id
+        ? item.call_id
+        : typeof item.id === 'string' && item.id
+          ? item.id
+          : `call_${outputIndex ?? toolCallMap.size}`
+      let entry = toolCallMap.get(id)
+      if (!entry) {
+        entry = {
+          id,
+          name: typeof item.name === 'string' ? item.name : '',
+          argumentsJson: typeof item.arguments === 'string' ? item.arguments : '',
+        }
+        toolCallMap.set(id, entry)
+      } else {
+        if (typeof item.name === 'string' && item.name) entry.name = item.name
+        if (typeof item.arguments === 'string' && item.arguments) entry.argumentsJson = item.arguments
+      }
+      if (typeof item.id === 'string') toolCallAliases.set(item.id, id)
+      if (typeof item.call_id === 'string') toolCallAliases.set(item.call_id, id)
+      if (typeof outputIndex === 'number') toolCallAliases.set(`idx-${outputIndex}`, id)
+      return entry
+    }
+
+    const updateUsage = (usage: Record<string, any> | undefined) => {
+      if (!usage) return
+      inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : inputTokens
+      outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : outputTokens
+      const cached = usage.input_tokens_details?.cached_tokens
+      if (typeof cached === 'number') cacheReadTokens = cached
+      this.emit({
+        type: 'stream:usage',
+        usage: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' },
+      })
+    }
+
+    const harvestCompletedOutput = (response: Record<string, any> | undefined) => {
+      updateUsage(response?.usage)
+      if (!Array.isArray(response?.output)) return
+      for (const item of response.output) {
+        if (!item || typeof item !== 'object') continue
+        if (item.type === 'function_call') {
+          ensureToolCall(item)
+          continue
+        }
+        if (item.type !== 'message' || textContent) continue
+        const completedText = Array.isArray(item.content)
+          ? item.content.filter((part: any) => part?.type === 'output_text' && typeof part.text === 'string').map((part: any) => part.text).join('')
+          : ''
+        if (completedText) {
+          textContent += completedText
+          this.emit({ type: 'stream:delta', text: completedText })
+        }
+      }
+    }
+
+    const handleStreamLine = (line: string) => {
+      receivedStreamData = true
+      if (!line.startsWith('data:')) return
+      const jsonText = line.slice(5).trim()
+      if (!jsonText || jsonText === '[DONE]') return
+      try {
+        const event = JSON.parse(jsonText) as Record<string, any>
+        const eventType = event.type
+        if (eventType === 'response.output_text.delta' || eventType === 'response.refusal.delta') {
+          if (typeof event.delta === 'string' && event.delta) {
+            textContent += event.delta
+            this.emit({ type: 'stream:delta', text: event.delta })
+          }
+        } else if (eventType === 'response.reasoning_summary_text.delta' || eventType === 'response.reasoning_text.delta') {
+          if (typeof event.delta === 'string' && event.delta) {
+            reasoningContent += event.delta
+            this.emit({ type: 'stream:thinking_delta', text: event.delta })
+          }
+        } else if (eventType === 'response.output_item.added' || eventType === 'response.output_item.done') {
+          if (event.item?.type === 'function_call') ensureToolCall(event.item, event.output_index)
+        } else if (eventType === 'response.function_call_arguments.delta' || eventType === 'response.function_call_arguments.done') {
+          const alias = typeof event.item_id === 'string'
+            ? event.item_id
+            : typeof event.call_id === 'string'
+              ? event.call_id
+              : `idx-${event.output_index ?? 0}`
+          const canonicalId = toolCallAliases.get(alias) || alias
+          let entry = toolCallMap.get(canonicalId)
+          if (!entry) {
+            entry = ensureToolCall({ call_id: canonicalId, name: event.name || '' }, event.output_index)
+          }
+          if (eventType.endsWith('.done') && typeof event.arguments === 'string') {
+            entry.argumentsJson = event.arguments
+          } else if (typeof event.delta === 'string') {
+            entry.argumentsJson += event.delta
+          }
+          this.emit({
+            type: 'stream:tool_call_delta',
+            toolCallId: entry.id,
+            toolName: entry.name,
+            partialJson: entry.argumentsJson,
+          })
+        } else if (eventType === 'response.completed') {
+          sawTerminalEvent = true
+          harvestCompletedOutput(event.response)
+        } else if (eventType === 'response.incomplete' || eventType === 'response.failed') {
+          sawTerminalEvent = true
+          harvestCompletedOutput(event.response)
+          streamFailure = event.response?.error?.message
+            || event.response?.incomplete_details?.reason
+            || `${eventType}: provider did not complete the response`
+        } else if (eventType === 'error') {
+          sawTerminalEvent = true
+          streamFailure = event.error?.message || event.message || 'Responses stream returned an error event'
+        }
+      } catch {
+        // Ignore malformed SSE data while preserving the no-cross-protocol-after-bytes invariant.
+      }
+    }
+
+    let serializedBody = JSON.stringify(body)
+    let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+      streamId,
+      signal: this.abortController?.signal,
+    })
+    for (let retry = 0; !result.success && retry < 4; retry += 1) {
+      if (this.abortController?.signal.aborted || result.status !== 400 || receivedStreamData) break
+      const unsupportedParam = extractUnsupportedRequestParam(result.error)
+      if (!unsupportedParam || !removeOpenAICompatibleRequestParam(body, unsupportedParam)) break
+      this.emit({
+        type: 'notification',
+        level: 'warning',
+        message: `Responses endpoint rejected "${unsupportedParam}"; retrying without that request parameter.`,
+      })
+      serializedBody = JSON.stringify(body)
+      result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+        streamId,
+        signal: this.abortController?.signal,
+      })
+    }
+    this.currentStreamId = null
+
+    if (!result.success) {
+      if (this.abortController?.signal.aborted) {
+        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
+        const aborted = new Error('aborted') as Error & { aborted?: boolean }
+        aborted.aborted = true
+        throw aborted
+      }
+      throw new ModelProtocolRequestError(result.error || 'Responses request failed', {
+        protocol,
+        url,
+        status: result.status,
+        kind: result.status ? 'http' : 'network',
+        receivedStreamData,
+      })
+    }
+    if (streamFailure) {
+      throw new ModelProtocolRequestError(streamFailure, {
+        protocol,
+        url,
+        kind: 'stream',
+        receivedStreamData,
+      })
+    }
+    if (!sawTerminalEvent) {
+      const parsedTextTools = parseTextToolCalls(textContent)
+      const hasVisibleText = Boolean(stripTextToolCallMarkup(textContent, { stripIncomplete: true }))
+      const completeToolPayloads = hasCompleteToolPayloads([...toolCallMap.values()].map(entry => ({
+        name: entry.name,
+        argumentsJson: entry.argumentsJson,
+      })))
+      if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
+        throw new ModelProtocolRequestError('Responses stream ended before a terminal event', {
+          protocol,
+          url,
+          kind: 'response_shape',
+          receivedStreamData,
+        })
+      }
+      if (!completeToolPayloads) toolCallMap.clear()
+      if (parsedTextTools.containsToolMarkup && parsedTextTools.toolCalls.length === 0) {
+        textContent = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+      }
+    }
+
+    const toolCalls: ToolCall[] = []
+    for (const entry of toolCallMap.values()) {
+      let parsedArguments: Record<string, unknown> = {}
+      try {
+        parsedArguments = JSON.parse(entry.argumentsJson || '{}')
+      } catch {
+        parsedArguments = {}
+      }
+      toolCalls.push({ id: entry.id, name: entry.name, arguments: parsedArguments })
+    }
+    const textToolCalls = parseTextToolCalls(textContent)
+    if (textToolCalls.containsToolMarkup) {
+      textContent = textToolCalls.cleanedText
+      if (toolCalls.length === 0 && textToolCalls.toolCalls.length > 0) toolCalls.push(...textToolCalls.toolCalls)
+    }
+
+    const tokens = { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' as const }
+    this.session.totalTokens.input += tokens.input
+    this.session.totalTokens.output += tokens.output
+    this.contextManager.updateTokenCounting(tokens.input, tokens.output)
+    if (inputTokens > 0 || outputTokens > 0) {
+      this.stateProvider.recordTokenUsage({
+        provider: config.provider,
+        model: config.defaultModel,
+        inputTokens: Math.max(0, inputTokens - cacheReadTokens),
+        outputTokens,
+        cached: cacheReadTokens,
+        totalInputTokens: inputTokens,
+      })
+    }
+    const cacheDiagnosis = this.cacheMonitor.checkCacheBreak(cacheReadTokens, 0)
+    if (cacheDiagnosis.broken) this.emit({ type: 'cache:diagnostic', result: cacheDiagnosis })
+    this.emit({ type: 'stream:end' })
+
+    return this.createAssistantTurn(textContent, toolCalls, {
+      model: model?.name,
+      tokens,
+      duration: Date.now() - startTime,
+      mode: this.config.mode,
+      reasoningEnabled: reasoningRequest?.enabled,
+      reasoningEffort,
+      thinking: { content: reasoningContent, source: 'provider' },
       rawReasoningPayload: reasoningContent
         ? { provider: 'openai-compatible', blocks: [], reasoningContent }
         : undefined,
@@ -2770,8 +3530,10 @@ Before retrying:
   private injectPreservedFilesIntoMessages(
     messages: Array<Record<string, unknown>>,
     provider: 'openai' | 'anthropic',
+    sourceFiles: Array<{ path: string; content: string }> = this.preservedFiles,
+    consume = true,
   ): void {
-    if (this.preservedFiles.length === 0) return
+    if (sourceFiles.length === 0) return
 
     // Dedup: skip files already present in recent session turns.
     const recentReadPaths = new Set<string>()
@@ -2785,9 +3547,9 @@ Before retrying:
       }
     }
 
-    const filesToInject = this.preservedFiles.filter(f => !recentReadPaths.has(f.path))
+    const filesToInject = sourceFiles.filter(f => !recentReadPaths.has(f.path))
     if (filesToInject.length === 0) {
-      this.preservedFiles = []
+      if (consume) this.preservedFiles = []
       return
     }
 
@@ -2801,14 +3563,14 @@ Before retrying:
     parts.push('</recent_files>')
     const block = parts.join('\n\n')
     this.appendTextAtConversationTail(messages, block, provider)
-    this.preservedFiles = []
+    if (consume) this.preservedFiles = []
   }
 
   private buildApiMessages(systemPrompt: string, provider: 'openai' | 'anthropic'): Array<Record<string, unknown>> {
     const activeConfig = this.stateProvider.getActiveConfig()
     const activeModel = this.stateProvider.getActiveModel()
     const maxOutputTokens = this.config.maxTokens || activeModel?.maxTokens || 4096
-    const contextWindow = activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 1_000_000
+    const contextWindow = activeModel?.contextWindow || activeConfig?.contextWindow || this.config.contextWindow || 200_000
     const policyProfile = resolveContextPolicyProfile(this.config.contextPolicy)
     const candidateTurns = this.buildContextCandidateTurns(contextWindow, maxOutputTokens)
 
@@ -2884,7 +3646,7 @@ Before retrying:
     config: APIConfig,
     model: APIModel | null,
   ): void {
-    const contextWindow = model?.contextWindow || config.contextWindow || this.config.contextWindow || 1_000_000
+    const contextWindow = model?.contextWindow || config.contextWindow || this.config.contextWindow || 200_000
     const maxOutputTokens = this.config.maxTokens || model?.maxTokens || config.maxTokens || 4096
     const limit = blockingContextLimit(contextWindow, maxOutputTokens)
     const counterOptions = { provider: config.provider || provider, model: model?.id || config.defaultModel }
@@ -3305,7 +4067,7 @@ Before retrying:
 
   private buildEvidencePolicyContext(strategy?: TurnStrategy | null, phase: 'pre' | 'retry' = 'pre'): string | null {
     if (!strategy?.requiresEvidence) return null
-    const maxAttempts = this.resolvedThinkingMode === 'max' ? 2 : 1
+    const maxAttempts = 1
     if (phase === 'retry' && this.conclusionGuardAttempts >= maxAttempts) return null
 
     const hasSearchEvidence = this.currentRunSuccessfulSearches.size > 0
@@ -3361,6 +4123,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       this.currentRunSuccessfulSearches.add(`${name}:${query}`)
     }
     if (name === 'explore_code') {
+      if (/FastContext background scan (?:started|is already)/i.test(output)) return
       if (/no concrete candidates found|did not return high-signal files/i.test(output)) return
       const objective = (args.objective || '') as string
       this.currentRunExplorePacks.add(objective || 'explore_code')
@@ -3443,6 +4206,24 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         }
       }
     }
+
+    const completedIds = new Set(allResults.map(result => result.toolCallId))
+    for (const toolCall of toolCalls) {
+      if (completedIds.has(toolCall.id)) continue
+      this.linkToolCallToActiveTask(toolCall)
+      this.emit({ type: 'tool:call', toolCall })
+      const result: ToolResult = {
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        output: CANCELLED_TOOL_RESULT_TEXT,
+        isError: true,
+        errorKind: 'abort',
+      }
+      allResults.push(result)
+      this.emit({ type: 'tool:result', toolResult: result })
+      this.updateTaskToolCallStatus(toolCall.id, 'cancelled', result.output)
+    }
+    if (completedIds.size !== allResults.length) this.emitActiveTaskContext()
 
     // Auto-create checkpoint if there are file modifications without explicit checkpoint
     // This ensures code changes are always recoverable even if AI forgets to checkpoint
@@ -3607,7 +4388,11 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private isWriteToolCall(toolCall: ToolCall): boolean {
-    return ['write_file', 'replace_file', 'edit_file', 'multi_edit', 'delete_file', 'create_checkpoint', 'run_command'].includes(toolCall.name)
+    return this.resolveToolDefinition(toolCall.name)?.isReadOnly === false
+  }
+
+  private resolveToolDefinition(name: string): AgentTool | undefined {
+    return getToolByName(name) || (this.mcpClient ? getMcpAgentTools(this.mcpClient).find(tool => tool.name === name) : undefined)
   }
 
   private isReadAfterWriteSensitiveToolCall(toolCall: ToolCall): boolean {
@@ -3619,7 +4404,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     let hasSeenWrite = false
 
     for (const tc of toolCalls) {
-      const tool = getToolByName(tc.name)
+      const tool = this.resolveToolDefinition(tc.name)
       const isReadAfterWrite = hasSeenWrite && this.isReadAfterWriteSensitiveToolCall(tc)
       const isSafe = (tool?.isConcurrencySafe ?? false) && !isReadAfterWrite
 
@@ -3638,7 +4423,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private async executeSingleTool(toolCall: ToolCall): Promise<ToolResult> {
-    const tool = getToolByName(toolCall.name)
+    const tool = this.resolveToolDefinition(toolCall.name)
 
     if (!tool) {
       return {
@@ -3646,6 +4431,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         name: toolCall.name,
         output: `Error: unknown tool "${toolCall.name}"`,
         isError: true,
+      }
+    }
+
+    if (this.config.mode === 'plan' && !tool.isReadOnly) {
+      return {
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        output: `Error: plan mode is read-only; switch to vibe mode before using "${toolCall.name}".`,
+        isError: true,
+        errorKind: 'permission',
       }
     }
 
@@ -3668,7 +4463,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     }
 
     // Validate tool arguments
-    const validation = validateToolArgs(toolCall.name, toolCall.arguments)
+    const validation = isMcpTool(toolCall.name) && tool.inputSchema
+      ? validateMcpToolArgs(tool.inputSchema, toolCall.arguments)
+      : validateToolArgs(toolCall.name, toolCall.arguments)
     if (!validation.valid) {
       return {
         toolCallId: toolCall.id,
@@ -3684,7 +4481,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     this.recordToolUsage(toolCall.name, toolCall.arguments)
 
     try {
-      const output = await this.dispatchTool(toolCall.name, toolCall.arguments)
+      const executionArgs = toolCall.name === 'run_command'
+        ? { ...toolCall.arguments, approved: true }
+        : toolCall.arguments
+      const output = await this.dispatchTool(toolCall.name, executionArgs)
 
       // Layer 0: Large result truncation.
       // When a tool returns a very large output, keep only a short preview
@@ -3851,6 +4651,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       : undefined
     this.emit({
       type: 'ask:user',
+      requestId: toolCall.id,
+      toolName: toolCall.name,
+      path: this.extractToolCallPath(toolCall),
       question: command
         ? `允许执行这个命令吗？`
         : `允许执行 ${toolCall.name} 吗？`,
@@ -3899,6 +4702,107 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     return JSON.stringify(toolCall.arguments).slice(0, 200)
   }
 
+  private emitSubAgentProgress(agentType: string, label: string, event: SubAgentEvent): void {
+    if (event.type === 'turn_start') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'phase', phase: 'scanning', wave: event.turn, maxWaves: event.maxTurns, insight: `${label} turn ${event.turn}` },
+      })
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'worker', id: `spawn-${agentType}-${event.turn}`, label: `${label} turn ${event.turn}`, status: 'running' },
+      })
+    } else if (event.type === 'model_wait') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: `${label} model pending (${Math.floor(event.elapsedMs / 1000)}s)`, tone: 'info' },
+      })
+    } else if (event.type === 'model_retry') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: `${label} retrying model request: ${event.reason}`, tone: 'warning' },
+      })
+    } else if (event.type === 'tool_call') {
+      const argSummary = (() => { try { return JSON.stringify(event.args).slice(0, 120) } catch { return '' } })()
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'file', path: `${event.tool}(${argSummary})`, status: 'discovered', workerId: `spawn-${agentType}-${event.turn}`, reason: event.tool },
+      })
+    } else if (event.type === 'tool_result') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: event.summary, tone: event.ok ? 'info' : 'warning' },
+      })
+    } else if (event.type === 'evidence') {
+      this.emit({
+        type: 'fast_context:event',
+        event: {
+          type: 'hit',
+          hit: {
+            path: event.evidence.path,
+            line: event.evidence.startLine,
+            startLine: event.evidence.startLine,
+            endLine: event.evidence.endLine,
+            preview: event.evidence.preview,
+            reason: event.evidence.reason,
+          },
+        },
+      })
+    } else if (event.type === 'turn_complete') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'worker', id: `spawn-${agentType}-${event.turn}`, label: `${label} turn ${event.turn}`, status: 'completed' },
+      })
+    } else if (event.type === 'error') {
+      this.emit({
+        type: 'fast_context:event',
+        event: { type: 'insight', text: `${label} error: ${event.message}`, tone: 'warning' },
+      })
+    }
+  }
+
+  private formatSubAgentTask(task: SubAgentTaskSnapshot): string {
+    const runtime = task.runtimeTask
+    const lines = [
+      `Agent ID: ${task.id}`,
+      `Type: ${task.agentType}`,
+      `Status: ${runtime.status}`,
+      `Objective: ${task.objective}`,
+      `Started: ${new Date(task.startedAt).toISOString()}`,
+    ]
+    if (runtime.endedAt) lines.push(`Ended: ${new Date(runtime.endedAt).toISOString()}`)
+    if (runtime.error) lines.push(`Error: ${runtime.error}`)
+    if (task.transcriptPath) lines.push(`Transcript: ${task.transcriptPath}`)
+
+    if (task.result && task.kind === 'fast_context') {
+      const result = task.result as Partial<FastContextScanResult>
+      lines.push('', result.evidencePack?.trim() || `FastContext scanned ${result.filesScanned || 0} file(s).`)
+    } else if (task.result) {
+      const result = task.result as {
+        ok?: boolean
+        turns?: number
+        elapsedMs?: number
+        finalText?: string
+        evidence?: SubAgentEvidence[]
+        error?: string
+      }
+      lines.push('', `<subagent_report type="${task.agentType}" turns="${result.turns || 0}" elapsed_ms="${result.elapsedMs || 0}">`)
+      lines.push('', 'final_report:', result.finalText || result.error || '(empty)', '')
+      const evidence = result.evidence || []
+      if (evidence.length > 0) {
+        lines.push('evidence (top 12):')
+        for (const item of evidence.slice(0, 12)) {
+          const preview = item.preview.split('\n').slice(0, 3).map(line => `    ${line.replace(/\s+/g, ' ').trim().slice(0, 200)}`).join('\n')
+          lines.push(`  - ${item.path}:L${item.startLine}-${item.endLine} · ${item.reason}`)
+          if (preview) lines.push(preview)
+        }
+        if (evidence.length > 12) lines.push(`  (... ${evidence.length - 12} more evidence range(s))`)
+      }
+      lines.push('', '</subagent_report>')
+    }
+    return lines.join('\n')
+  }
+
   private async dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
     const workspace = this.stateProvider.getWorkspace()
     const basePath = workspace?.path || ''
@@ -3918,11 +4822,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? args.with_line_numbers === true
           : args.with_line_numbers !== false
 
-        const cacheKey = `${filePath}:${isFullRead ? 'full' : offset ?? 0}:${isFullRead ? 'full' : limit ?? 0}:${withLineNumbers ? 'n' : 'r'}`
-        const cached = this.readCache.get(cacheKey)
-        if (cached && (Date.now() - cached.timestamp) < this.READ_CACHE_TTL_MS) {
-          return cached.content
-        }
         const result = await this.toolExecutor.readFile(filePath)
         if (!result.success) {
           const relPath = this.toWorkspaceRelative(basePath, filePath)
@@ -3945,14 +4844,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? slice.map(formatLine).join('\n')
           : slice.join('\n')
 
-        if (this.readCache.has(cacheKey)) {
-          this.readCache.delete(cacheKey)
-        } else if (this.readCache.size >= this.READ_CACHE_MAX_SIZE) {
-          const oldestKey = this.readCache.keys().next().value
-          if (oldestKey) this.readCache.delete(oldestKey)
-        }
-        this.readCache.set(cacheKey, { content, timestamp: Date.now() })
-
         // If there is more content, hint continuation. Default read_file is
         // intentionally sliced so the model does not pull a huge file into
         // context when it only needs a local region.
@@ -3973,10 +4864,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.writeFile(filePath, args.content as string, {
           source: 'ai',
           label: 'AI write_file',
+          expectNotExists: true,
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File written: ${args.path}` : `Error: ${result.error}`
@@ -3992,10 +4883,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.writeFile(filePath, args.content as string, {
           source: 'ai',
           label: 'AI replace_file',
+          expectedHash: hashText(existing.data || ''),
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File replaced: ${args.path}` : `Error: ${result.error}`
@@ -4019,10 +4910,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const writeResult = await this.toolExecutor.writeFile(filePath, content, {
           source: 'ai',
           label: 'AI edit_file',
+          expectedHash: hashText(readResult.data || ''),
         })
         if (writeResult.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return writeResult.success
@@ -4064,10 +4955,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const writeResult = await this.toolExecutor.writeFile(filePath, content, {
           source: 'ai',
           label: 'AI multi_edit',
+          expectedHash: hashText(readResult.data || ''),
         })
         if (writeResult.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return writeResult.success
@@ -4183,47 +5074,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           : ''
         const maxTurns = thoroughness === 'quick' ? 2 : thoroughness === 'very_thorough' ? 5 : 3
         const maxParallel = thoroughness === 'quick' ? 4 : 6
-        const onEvent = (event: FastContextScanEvent) => this.emit({ type: 'fast_context:event', event })
-        const skeleton = await this.maybeBuildWorkspaceSkeleton(basePath)
-        const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
-        const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
-
-        this.emit({
-          type: 'fast_context:event',
-          event: {
-            type: 'phase',
-            phase: 'mapping',
-            wave: 1,
-            maxWaves: maxTurns,
-            insight: `Explore(${objective.slice(0, 90)})`,
-          },
-        })
-
-        const result = await runFastContextSubagent({
-          workspacePath: basePath,
-          objective: `${objective}\n\nThoroughness: ${thoroughness}${context}`,
-          toolExecutor: this.toolExecutor,
-          apiKey: fastContextConfig?.apiKey || '',
-          baseUrl: fastContextConfig?.baseUrl || 'https://api.deepseek.com',
-          model: fastContextModel?.id || fastContextConfig?.defaultModel,
-          codemap: skeleton,
-          maxTurns,
-          maxParallel,
-          abortSignal: this.abortController?.signal,
-          onEvent,
-        })
-
-        this.emit({ type: 'fast_context:complete', result })
-        if (result.hits.length === 0 || result.filesScanned === 0) {
-          return `Explore did not return high-signal files for: ${objective}\nUse targeted search_content/search_files/search_symbols with alternative names.`
+        const scanObjective = `${objective}\n\nThoroughness: ${thoroughness}${context}`
+        const background = this.startFastContextBackground(scanObjective, { maxTurns, maxParallel })
+        if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
+        if (background.status === 'busy') {
+          return `FastContext background scan is already working on: ${background.objective}\nAgent ID: ${background.taskId || 'unavailable'}\nContinue now with targeted search/read tools; do not wait or call explore_code again.`
         }
-        return [
-          `<explore_code_result thoroughness="${thoroughness}" files="${result.filesScanned}" hits="${result.hits.length}" elapsed_ms="${result.elapsedMs}">`,
-          result.evidencePack,
-          '',
-          'next_step: read_file the most relevant candidate ranges before detailed claims or edits.',
-          '</explore_code_result>',
-        ].join('\n')
+        if (background.status === 'running') {
+          return `FastContext background scan is already running for this objective. Agent ID: ${background.taskId || 'unavailable'}. Continue now with targeted search/read tools; evidence will be injected automatically when ready.`
+        }
+        return `FastContext background scan started. Agent ID: ${background.taskId}. Continue now with targeted search_content/search_symbols/get_codemap and read_file calls; do not wait. Ranked evidence will be injected automatically on a later model turn.`
       }
 
       case 'list_memories': {
@@ -4307,6 +5167,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           if (!sessionId) {
             return `Error: failed to spawn agent terminal${ptyResult?.error ? ` — ${ptyResult.error}` : ''}`
           }
+          const terminalLogPath = ptyResult.data?.session?.logPath
           const writeResult = await this.toolExecutor.ptyWrite?.(sessionId, `${command}\n`)
           if (!writeResult?.success) {
             await this.toolExecutor.ptyKill?.(sessionId)
@@ -4315,15 +5176,28 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           }
           this.agentBackgroundSessions.set(sessionId, { command, startedAt: Date.now() })
           await this.emitTerminalSessions()
-          return `Background command started in agent terminal ${sessionId}\nCommand: ${command}\nUse read_terminal(session_id="${sessionId}") to view output, kill_terminal to stop.`
+          return `Background command started in agent terminal ${sessionId}\nCommand: ${command}${terminalLogPath ? `\nLog: ${terminalLogPath}` : ''}\nUse read_terminal(session_id="${sessionId}") to view output, write_terminal to send stdin, or kill_terminal to stop.`
         }
 
         // Foreground: exec-based path for one-shot commands
         const foregroundCommand = args.command as string
         try {
           const result = await this.toolExecutor.runCommand(foregroundCommand, cwd, env, timeout, approved)
-          if (!result.success) return `Error (code ${result.data?.exitCode}):\n${result.data?.stderr || 'Unknown error'}`
-          return `Command executed successfully:\n${result.data?.stdout || 'No output'}`
+          const commandOutput = result.data
+          const outputSections: string[] = []
+          if (commandOutput?.stdout) outputSections.push(`stdout:\n${commandOutput.stdout}`)
+          if (commandOutput?.stderr) outputSections.push(`stderr:\n${commandOutput.stderr}`)
+          if (commandOutput?.truncated) outputSections.push('[command output truncated]')
+          if (commandOutput?.logPath) outputSections.push(`log: ${commandOutput.logPath}`)
+          const formattedOutput = outputSections.join('\n\n') || 'No output'
+          const statusDetails = [
+            `code ${commandOutput?.exitCode ?? 'unknown'}`,
+            commandOutput?.timedOut ? 'timed out' : '',
+          ].filter(Boolean).join(', ')
+          if (!result.success) {
+            return `Error (${statusDetails})${result.error ? `: ${result.error}` : ''}\n${formattedOutput}`
+          }
+          return `Command executed successfully (${statusDetails}):\n${formattedOutput}`
         } catch (e) {
           return `Error executing command: ${e instanceof Error ? e.message : String(e)}`
         }
@@ -4337,7 +5211,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.ptyGetBuffer?.(sessionId)
         if (!result?.success) return `Error: ${result?.error || 'failed to read terminal buffer'}`
         await this.emitTerminalSessions()
-        const session = result.session as { status: string; exitCode?: number; cwd: string } | undefined
+        const session = result.session as { status: string; exitCode?: number; cwd: string; logPath?: string } | undefined
         const allChunks = (result.chunks || []) as Array<{ seq: number; data: string }>
         // Filter by since_seq so polling loops only see new output. Each
         // chunk carries a monotonic seq from terminalManager.
@@ -4356,12 +5230,23 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? ` • since_seq=${sinceSeq} • new_chunks=${chunks.length}`
           : ''
         const statusLine = session
-          ? `[session ${sessionId} • status=${session.status}${typeof session.exitCode === 'number' ? ` • exit=${session.exitCode}` : ''} • cwd=${session.cwd} • last_seq=${lastSeq}${sinceNotice}]`
+          ? `[session ${sessionId} • status=${session.status}${typeof session.exitCode === 'number' ? ` • exit=${session.exitCode}` : ''} • cwd=${session.cwd}${session.logPath ? ` • log=${session.logPath}` : ''} • last_seq=${lastSeq}${sinceNotice}]`
           : `[session ${sessionId} • last_seq=${lastSeq}${sinceNotice}]`
         const body = chunks.length === 0 && sinceSeq > 0
           ? '[no new output since last read]'
           : `${truncatedNotice}${tailed.join('\n')}`
         return `${statusLine}\n${body}`
+      }
+
+      case 'write_terminal': {
+        const sessionId = args.session_id as string
+        const data = args.data as string
+        if (!sessionId) return `Error: session_id is required`
+        if (typeof data !== 'string' || data.length === 0) return `Error: data is required`
+        const result = await this.toolExecutor.ptyWrite?.(sessionId, data)
+        if (!result?.success) return `Error: ${result?.error || 'failed to write terminal stdin'}`
+        await this.emitTerminalSessions()
+        return `Wrote ${Buffer.byteLength(data)} byte(s) to terminal ${sessionId}.`
       }
 
       case 'kill_terminal': {
@@ -4399,29 +5284,32 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       case 'list_terminals': {
         const result = await this.toolExecutor.ptyList?.()
         if (!result?.success) return `Error: ${result?.error || 'failed to list terminals'}`
-        const rawSessions = (result.sessions || []) as Array<{ isAgentSession?: boolean; id: string; status: string; exitCode?: number; cwd: string }>
+        const rawSessions = (result.sessions || []) as Array<{ isAgentSession?: boolean; id: string; status: string; exitCode?: number; cwd: string; logPath?: string }>
         const sessions = rawSessions.filter(s => s.isAgentSession || this.agentBackgroundSessions.has(s.id))
         await this.emitTerminalSessions()
         if (sessions.length === 0) return 'No agent terminal sessions active.'
-        const lines = sessions.map((s: { id: string; status: string; exitCode?: number; cwd: string }) => {
+        const lines = sessions.map((s: { id: string; status: string; exitCode?: number; cwd: string; logPath?: string }) => {
           const meta = this.agentBackgroundSessions.get(s.id)
           const cmd = meta ? ` • last: ${meta.command}` : ''
           const exit = typeof s.exitCode === 'number' ? ` • exit=${s.exitCode}` : ''
-          return `- ${s.id} • ${s.status}${exit} • cwd=${s.cwd}${cmd}`
+          const log = s.logPath ? ` • log=${s.logPath}` : ''
+          return `- ${s.id} • ${s.status}${exit} • cwd=${s.cwd}${log}${cmd}`
         })
         return `${sessions.length} agent terminal session(s):\n${lines.join('\n')}`
       }
 
       case 'delete_file': {
         const filePath = this.resolvePath(basePath, args.path as string)
+        const existing = await this.toolExecutor.readFile(filePath)
+        if (!existing.success) return `Error: unable to read file before deletion - ${existing.error}`
         await this.capturePreimage(filePath)
         const result = await this.toolExecutor.deleteFile(filePath, {
           source: 'ai',
           label: 'AI delete_file',
+          expectedHash: hashText(existing.data || ''),
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateReadCache(filePath)
           this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File deleted: ${args.path}` : `Error: ${result.error}`
@@ -4654,9 +5542,13 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           return `Error: no workspace selected`
         }
         const checkpointMessage = args.message as string
+        const filePaths = Array.from(this.touchedFilePaths)
+        if (filePaths.length === 0) {
+          return `No AI-touched files to checkpoint`
+        }
 
         if (this.gitEnabled) {
-          const gitResult = await gitCommitCheckpoint(basePath, checkpointMessage, this.toolExecutor)
+          const gitResult = await gitCommitCheckpoint(basePath, checkpointMessage, filePaths, this.toolExecutor)
           if (!gitResult.ok) return `Error: git checkpoint failed — ${gitResult.error}`
           if (gitResult.nothingToCommit) return `Checkpoint skipped — nothing to commit`
           this.pendingCheckpoint = { hash: gitResult.hash || 'HEAD', message: checkpointMessage }
@@ -4666,10 +5558,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           return `Git checkpoint: ${gitResult.hash} — ${checkpointMessage}`
         }
 
-        const filePaths = Array.from(this.touchedFilePaths)
-        if (filePaths.length === 0) {
-          return `No AI-touched files to checkpoint`
-        }
         const preimages = this.filePreimages.size > 0 ? Object.fromEntries(this.filePreimages) : undefined
         const result = await this.toolExecutor.checkpointCreate?.(basePath, checkpointMessage, filePaths, 'explicit', preimages)
         if (!result?.success) {
@@ -4681,6 +5569,35 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         this.touchedFilePaths.clear()
         this.filePreimages.clear()
         return `Checkpoint created: ${cpResult.shortId} - ${checkpointMessage}`
+      }
+
+      case 'list_checkpoints': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await this.toolExecutor.checkpointList?.(basePath, args.limit as number | undefined)
+        if (!result?.success) return `Error: ${result?.error || 'unable to list checkpoints'}`
+        const checkpoints = result.data || []
+        if (checkpoints.length === 0) return 'No local history checkpoints.'
+        return checkpoints.map((checkpoint: any) =>
+          `- ${checkpoint.id} • ${checkpoint.label} • ${checkpoint.fileCount} file(s) • ${new Date(checkpoint.timestamp).toISOString()}`
+        ).join('\n')
+      }
+
+      case 'restore_checkpoint': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await this.toolExecutor.checkpointRestore?.(basePath, args.checkpoint_id as string)
+        if (!result?.success) return `Error: ${result?.error || 'checkpoint restore failed'}`
+        this.codemapSummary = null
+        this.codemapCacheKey = null
+        const restored = result.data?.restoredFiles || []
+        const safety = result.data?.safetyCheckpointId ? `\nSafety checkpoint: ${result.data.safetyCheckpointId}` : ''
+        return `Restored ${restored.length} file(s) from checkpoint.${safety}`
+      }
+
+      case 'prune_checkpoints': {
+        if (!basePath) return 'Error: no workspace selected'
+        const keepCount = typeof args.keep_count === 'number' ? args.keep_count : 50
+        const result = await this.toolExecutor.checkpointPrune?.(basePath, keepCount)
+        return result?.success ? `Kept the newest ${keepCount} checkpoint(s).` : `Error: ${result?.error || 'checkpoint prune failed'}`
       }
 
       case 'generate_change_summary': {
@@ -4697,6 +5614,52 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         return output
       }
 
+      case 'list_agents': {
+        const tasks = this.subAgentTaskManager.listTasks()
+        if (tasks.length === 0) return 'No subagent tasks found.'
+        return tasks.map(task => {
+          const elapsedMs = (task.runtimeTask.endedAt || Date.now()) - task.startedAt
+          return `[${task.runtimeTask.status}] ${task.id} · ${task.agentType} · ${elapsedMs}ms\n  ${task.objective}`
+        }).join('\n')
+      }
+
+      case 'read_agent': {
+        const agentId = String(args.agent_id || '').trim()
+        if (!agentId) return 'Error: agent_id is required'
+        const task = this.subAgentTaskManager.getTask(agentId)
+        if (!task) return `Error: unknown agent_id "${agentId}".`
+        const transcript = this.subAgentTaskManager.readTranscript(agentId, {
+          offset: typeof args.offset === 'number' ? args.offset : undefined,
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
+        })
+        const lines = [this.formatSubAgentTask(task)]
+        if (transcript.records.length > 0) {
+          lines.push('', `Transcript records ${transcript.offset}-${transcript.nextOffset - 1} of ${transcript.total}:`)
+          transcript.records.forEach((record, index) => {
+            let detail: string
+            if (record.type === 'start') detail = `${record.task.agentType} started`
+            else if (record.type === 'event') {
+              try { detail = JSON.stringify(record.event).slice(0, 1200) } catch { detail = '[unserializable event]' }
+            } else if (record.type === 'result') detail = `result ${record.status}${record.error ? `: ${record.error}` : ''}`
+            else detail = `${record.status}${record.error ? `: ${record.error}` : ''}`
+            lines.push(`${transcript.offset + index}: ${record.type} · ${detail}`)
+          })
+          if (transcript.nextOffset < transcript.total) lines.push(`Next offset: ${transcript.nextOffset}`)
+        }
+        return lines.join('\n')
+      }
+
+      case 'cancel_agent': {
+        const agentId = String(args.agent_id || '').trim()
+        if (!agentId) return 'Error: agent_id is required'
+        try {
+          const task = await this.subAgentTaskManager.stopTask(agentId)
+          return `Subagent ${agentId} is ${task.status}.`
+        } catch (error) {
+          return `Error: ${error instanceof Error ? error.message : String(error)}`
+        }
+      }
+
       case 'spawn_agent': {
         const agentType = String(args.agent_type || '').trim()
         const objective = String(args.objective || '').trim()
@@ -4706,124 +5669,83 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const def = getSubAgentDefinition(agentType)
         if (!def) return `Error: unknown agent_type "${agentType}". Available: ${getAvailableAgentTypes().join(', ')}.`
         if (def.id === 'fast_context') {
-          // LLM explicitly requested a fast_context scan — run it directly.
           if (!this.config.workspacePath) return 'Error: no workspace path set'
           const objective = (args.objective as string | undefined) || 'Locate relevant files for the current task'
-          const scanResult = await this.runFastContextScan(objective, {
-            signal: this.abortController?.signal,
-            injectPack: false,
-          })
-          return scanResult?.evidencePack || 'Fast Context subagent did not return high-signal files. Continue with normal targeted read/search tools.'
+          const background = this.startFastContextBackground(objective)
+          if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
+          if (background.status === 'busy') {
+            return `FastContext is already running on: ${background.objective}. Agent ID: ${background.taskId || 'unavailable'}. Continue with normal targeted read/search tools.`
+          }
+          if (background.status === 'running') {
+            return `FastContext is already running for this objective. Agent ID: ${background.taskId || 'unavailable'}. Continue with normal targeted read/search tools.`
+          }
+          return `FastContext subagent started in the background. Agent ID: ${background.taskId}. Continue with normal targeted read/search tools; use read_agent for persisted progress/results.`
         }
         if (!this.config.workspacePath) {
           return 'Error: no workspace open; cannot spawn subagent.'
         }
         const startedAt = Date.now()
-        const agentId = `sa-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+        const enrichedObjective = extraContext ? `${objective}\n\nAdditional context from parent agent:\n${extraContext}` : objective
+        const started = this.subAgentTaskManager.startTask<Awaited<ReturnType<typeof runSubAgent>>>({
+          kind: 'agent',
+          agentType: def.id,
+          label: def.label,
+          objective,
+          workspacePath: this.config.workspacePath,
+          ownerSessionId: this.config.conversationId,
+          run: async ({ signal, recordEvent }) => {
+            const onSubEvent = (event: SubAgentEvent) => {
+              recordEvent(event)
+              this.emitSubAgentProgress(def.id, def.label, event)
+            }
+            const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath!)
+            const activeConfig = this.stateProvider.getActiveConfig()
+            const activeModel = this.stateProvider.getActiveModel()
+            return runSubAgent({
+              definition: def,
+              objective: enrichedObjective,
+              workspacePath: this.config.workspacePath!,
+              toolExecutor: this.toolExecutor,
+              apiKey: activeConfig?.apiKey || '',
+              baseUrl: activeConfig?.baseUrl || 'https://api.deepseek.com',
+              provider: activeConfig?.provider,
+              customHeaders: activeConfig?.customHeaders,
+              model: activeModel?.id || activeConfig?.defaultModel,
+              codemap: skeleton,
+              abortSignal: signal,
+              onEvent: onSubEvent,
+            })
+          },
+          isSuccess: result => result.ok,
+          getError: result => result.error || 'Subagent failed',
+        })
         this.emit({
           type: 'subagent:start',
-          agentId,
+          agentId: started.task.id,
           agentType: def.id,
           label: def.label,
           objective,
           runKind: 'spawn_agent',
         })
-        const evidence: SubAgentEvidence[] = []
-        const onSubEvent = (event: SubAgentEvent) => {
-          // Surface progress through the same fast_context event channel so
-          // the existing UI banner can render the spawned agent's tool calls
-          // without a separate component.
-          if (event.type === 'turn_start') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'phase', phase: 'scanning', wave: event.turn, maxWaves: event.maxTurns, insight: `${def.label} turn ${event.turn}` },
-            })
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'worker', id: `spawn-${def.id}-${event.turn}`, label: `${def.label} turn ${event.turn}`, status: 'running' },
-            })
-          } else if (event.type === 'tool_call') {
-            const argSummary = (() => { try { return JSON.stringify(event.args).slice(0, 120) } catch { return '' } })()
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'file', path: `${event.tool}(${argSummary})`, status: 'discovered', workerId: `spawn-${def.id}-${event.turn}`, reason: event.tool },
-            })
-          } else if (event.type === 'tool_result') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'insight', text: event.summary, tone: event.ok ? 'info' : 'warning' },
-            })
-          } else if (event.type === 'evidence') {
-            evidence.push(event.evidence)
-            this.emit({
-              type: 'fast_context:event',
-              event: {
-                type: 'hit',
-                hit: {
-                  path: event.evidence.path,
-                  line: event.evidence.startLine,
-                  startLine: event.evidence.startLine,
-                  endLine: event.evidence.endLine,
-                  preview: event.evidence.preview,
-                  reason: event.evidence.reason,
-                },
-              },
-            })
-          } else if (event.type === 'turn_complete') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'worker', id: `spawn-${def.id}-${event.turn}`, label: `${def.label} turn ${event.turn}`, status: 'completed' },
-            })
-          } else if (event.type === 'error') {
-            this.emit({
-              type: 'fast_context:event',
-              event: { type: 'insight', text: `${def.label} error: ${event.message}`, tone: 'warning' },
-            })
-          }
-        }
-        const enrichedObjective = extraContext ? `${objective}\n\nAdditional context from parent agent:\n${extraContext}` : objective
-        const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
-        try {
-          const result = await runSubAgent({
-            definition: def,
-            objective: enrichedObjective,
-            workspacePath: this.config.workspacePath,
-            toolExecutor: this.toolExecutor,
-            apiKey: this.stateProvider.getActiveConfig()?.apiKey || '',
-            baseUrl: this.stateProvider.getActiveConfig()?.baseUrl || 'https://api.deepseek.com',
-            codemap: skeleton,
-            abortSignal: this.abortController?.signal,
-            onEvent: onSubEvent,
-          })
-          if (!result.ok) {
-            this.emit({ type: 'subagent:end', agentId, agentType: def.id, ok: false, elapsedMs: Date.now() - startedAt, runKind: 'spawn_agent' })
-            return `Subagent ${def.label} failed: ${result.error || 'unknown error'} (after ${result.turns} turn(s), ${Date.now() - startedAt}ms).`
-          }
-          const lines: string[] = [
-            `<subagent_report type="${def.id}" turns="${result.turns}" elapsed_ms="${result.elapsedMs}" files="${evidence.length}">`,
-            '',
-            'final_report:',
-            result.finalText || '(empty)',
-            '',
-          ]
-          if (evidence.length > 0) {
-            lines.push('evidence (top 12):')
-            for (const ev of evidence.slice(0, 12)) {
-              const preview = ev.preview.split('\n').slice(0, 3).map(l => `    ${l.replace(/\s+/g, ' ').trim().slice(0, 200)}`).join('\n')
-              lines.push(`  - ${ev.path}:L${ev.startLine}-${ev.endLine} · ${ev.reason}`)
-              if (preview) lines.push(preview)
-            }
-            if (evidence.length > 12) {
-              lines.push(`  (... ${evidence.length - 12} more file(s) examined but not echoed back)`)
-            }
-          }
-          lines.push('', '</subagent_report>')
-          this.emit({ type: 'subagent:end', agentId, agentType: def.id, ok: true, elapsedMs: Date.now() - startedAt, runKind: 'spawn_agent' })
-          return lines.join('\n')
-        } catch (error) {
-          this.emit({ type: 'subagent:end', agentId, agentType: def.id, ok: false, elapsedMs: Date.now() - startedAt, runKind: 'spawn_agent' })
-          return `Subagent ${def.label} threw: ${error instanceof Error ? error.message : String(error)}`
-        }
+        void started.promise.then(
+          result => this.emit({
+            type: 'subagent:end',
+            agentId: started.task.id,
+            agentType: def.id,
+            ok: result.ok,
+            elapsedMs: Date.now() - startedAt,
+            runKind: 'spawn_agent',
+          }),
+          () => this.emit({
+            type: 'subagent:end',
+            agentId: started.task.id,
+            agentType: def.id,
+            ok: false,
+            elapsedMs: Date.now() - startedAt,
+            runKind: 'spawn_agent',
+          }),
+        )
+        return `Subagent ${def.label} started in the background. Agent ID: ${started.task.id}. Use read_agent to inspect progress/results, list_agents to list tasks, or cancel_agent to stop it.`
       }
 
       case 'use_skill': {
@@ -4977,6 +5899,18 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       toolCalls,
       metadata: finalMetadata,
     }
+  }
+
+  private finishInterruptedStream(textContent: string, model: APIModel | null, startTime: number): AgentTurn | null {
+    const visibleText = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
+    this.emit({ type: 'stream:end', interrupted: true })
+    if (!visibleText) return null
+    return this.createAssistantTurn(visibleText, undefined, {
+      model: model?.name,
+      duration: Date.now() - startTime,
+      mode: this.config.mode,
+      interrupted: true,
+    })
   }
 
   private createToolResultTurn(results: ToolResult[]): AgentTurn {

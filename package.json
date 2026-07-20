@@ -16,7 +16,8 @@
     "start": "tsx src/cli/index.ts",
     "build": "tsc",
     "type-check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "benchmark:fast-context": "tsx scripts/retrieval-benchmark.ts"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
@@ -40,6 +41,7 @@
     "react": "^19.2.6",
     "string-width": "^8.2.1",
     "strip-ansi": "^7.2.0",
-    "tsx": "^4.22.2"
+    "tsx": "^4.22.2",
+    "undici": "^7.28.0"
   }
 }

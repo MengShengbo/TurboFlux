@@ -1,11 +1,11 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from 'fs'
-import { join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
+import { appendFileSync, readFileSync, existsSync, mkdirSync, rmSync, readdirSync, realpathSync, statSync, writeFileSync } from 'fs'
+import { basename, join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { homedir } from 'os'
 import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
-import type { ToolExecutor, Result, SearchContentHit, CommandOutput, CheckpointResult, WebSearchResult } from '../../tools/executor'
+import type { ToolExecutor, Result, SearchContentHit, CommandOutput, CheckpointResult, RequestOptions, WebSearchResult } from '../../tools/executor'
 import type { TreeNode } from '../../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../../shared/memoryTypes'
@@ -13,12 +13,16 @@ import type { SandboxPolicy } from '../../shared/agentTypes'
 import type { TerminalOutputChunk, TerminalSessionInfo } from '../../shared/terminalTypes'
 import { MemoryService } from '../../tools/memory/service'
 import { LocalHistoryService } from '../../tools/localHistory/service'
+import { hashText, writeFileAtomicSync } from '../fileIO'
+import { RuntimeTaskManager } from './runtimeTaskManager'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
 
 export interface NodeToolExecutorOptions {
   sandboxPolicy?: SandboxPolicy
+  runtimeTaskManager?: RuntimeTaskManager
+  ownerSessionId?: string
 }
 
 interface BackgroundTerminalSession {
@@ -26,10 +30,20 @@ interface BackgroundTerminalSession {
   proc: ChildProcessWithoutNullStreams
   chunks: TerminalOutputChunk[]
   nextSeq: number
+  bufferChars: number
+  runtimeTaskId: string
+  logPath: string
+  outputBytes: number
+  logError?: string
 }
 
 const MAX_TERMINAL_CHUNKS = 500
+const MAX_TERMINAL_BUFFER_CHARS = 1_000_000
+const MAX_COMMAND_OUTPUT_CHARS = 2_000_000
+const COMMAND_TERMINATION_GRACE_MS = 2000
+const RUNTIME_LOG_DIRECTORY = join('.turboflux', 'runtime-logs')
 const TERMINAL_KILL_TIMEOUT_MS = 5000
+const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 const WEB_SEARCH_TIMEOUT_MS = 8000
 const WEB_SEARCH_USER_AGENT = 'TurboFlux/0.1 (+https://github.com/MengShengbo/TurboFluxCli)'
 const DEFAULT_TERMINAL_SHELL = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
@@ -38,19 +52,49 @@ const DEFAULT_TERMINAL_SHELL_ARGS = process.platform === 'win32'
   : []
 const DEFAULT_TERMINAL_SHELL_ID = process.platform === 'win32' ? 'powershell' : 'bash'
 const DEFAULT_TERMINAL_SHELL_LABEL = process.platform === 'win32' ? 'PowerShell' : 'Bash'
+const SENSITIVE_ENV_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)/i
+const CODE_SEARCH_SKIPPED_DIRS = new Set([
+  '.git', '.hg', '.svn', '.claude', '.turboflux', '.vscode', '.cache', '.next', '.turbo',
+  'node_modules', 'vendor', 'dist', 'dist-desktop', 'build', 'out', 'coverage', 'target', 'tmp', 'temp',
+])
+const CODE_SEARCH_EXCLUDE_GLOBS = Array.from(CODE_SEARCH_SKIPPED_DIRS, directory => `**/${directory}/**`)
 
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
   private localHistoryService: LocalHistoryService
   private workspaceRoot: string
+  private workspaceRealRoot: string
   private sandboxPolicy: SandboxPolicy
   private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
+  private activeStreams: Map<number, AbortController> = new Map()
+  private runtimeTaskManager: RuntimeTaskManager
 
   constructor(private workspacePath: string, options: NodeToolExecutorOptions = {}) {
     this.memoryService = new MemoryService()
     this.localHistoryService = new LocalHistoryService(join(homedir(), '.turboflux', 'checkpoints'))
     this.workspaceRoot = resolveNativePath(workspacePath)
+    this.workspaceRealRoot = existsSync(this.workspaceRoot) ? realpathSync.native(this.workspaceRoot) : this.workspaceRoot
     this.sandboxPolicy = options.sandboxPolicy || 'workspace'
+    this.runtimeTaskManager = options.runtimeTaskManager || new RuntimeTaskManager({
+      defaultOwnerSessionId: options.ownerSessionId,
+    })
+  }
+
+  getRuntimeTaskManager(): RuntimeTaskManager {
+    return this.runtimeTaskManager
+  }
+
+  private createRuntimeTaskLog(taskId: string): string {
+    const directory = this.ensureWithinWorkspace(join(this.workspaceRoot, RUNTIME_LOG_DIRECTORY))
+    mkdirSync(directory, { recursive: true })
+    const logPath = this.ensureWithinWorkspace(join(directory, `${taskId}.jsonl`))
+    writeFileSync(logPath, '', { encoding: 'utf-8', mode: 0o600 })
+    return logPath
+  }
+
+  private appendRuntimeTaskLog(logPath: string, channel: 'stdout' | 'stderr', data: Buffer | string): void {
+    const record = JSON.stringify({ timestamp: Date.now(), channel, data: data.toString() })
+    appendFileSync(logPath, `${record}\n`, { encoding: 'utf-8', mode: 0o600 })
   }
 
   async readFile(path: string): Promise<Result<string>> {
@@ -64,24 +108,41 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async writeFile(path: string, content: string, _metadata?: Record<string, unknown>): Promise<Result<void>> {
+  async writeFile(path: string, content: string, metadata?: Record<string, unknown>): Promise<Result<void>> {
     try {
       this.ensureWritable()
       const safePath = this.ensureAllowedPath(path)
       const dir = dirname(safePath)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      writeFileSync(safePath, content, 'utf-8')
+      if (metadata?.expectNotExists === true && existsSync(safePath)) {
+        return { success: false, error: `Write conflict: file already exists: ${path}` }
+      }
+      if (typeof metadata?.expectedHash === 'string') {
+        if (!existsSync(safePath)) return { success: false, error: `Write conflict: file was deleted: ${path}` }
+        const actualHash = hashText(readFileSync(safePath, 'utf-8'))
+        if (actualHash !== metadata.expectedHash) {
+          return { success: false, error: `Write conflict: file changed since it was read: ${path}` }
+        }
+      }
+      writeFileAtomicSync(safePath, content)
       return { success: true }
     } catch (e) {
       return { success: false, error: String(e) }
     }
   }
 
-  async deleteFile(path: string, options?: { recursive?: boolean }): Promise<Result<void>> {
+  async deleteFile(path: string, options?: { recursive?: boolean; expectedHash?: string }): Promise<Result<void>> {
     try {
       this.ensureWritable()
       const safePath = this.ensureAllowedPath(path)
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
+      const expectedHash = options?.expectedHash
+      if (typeof expectedHash === 'string') {
+        const actualHash = hashText(readFileSync(safePath, 'utf-8'))
+        if (actualHash !== expectedHash) {
+          return { success: false, error: `Delete conflict: file changed since it was read: ${path}` }
+        }
+      }
       rmSync(safePath, { recursive: options?.recursive, force: true })
       return { success: true }
     } catch (e) {
@@ -99,11 +160,51 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   async searchFiles(pattern: string, basePath: string): Promise<Result<{ matches: string[]; truncated?: boolean }>> {
+    let safeBasePath: string
     try {
-      const matches = this.globSync(pattern, this.ensureAllowedPath(basePath))
-      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
+      safeBasePath = this.ensureAllowedPath(basePath)
     } catch (e) {
       return { success: false, error: String(e) }
+    }
+
+    const normalizedPattern = String(pattern || '').trim().replace(/\\/g, '/')
+    if (!normalizedPattern) return { success: false, error: 'File search pattern is required' }
+
+    try {
+      const args = [
+        '--files',
+        '--hidden',
+        `--glob=${normalizedPattern}`,
+        ...CODE_SEARCH_EXCLUDE_GLOBS.map(pattern => `--glob=!${pattern}`),
+        '--glob=!**/.env',
+        '--glob=!**/.env.local',
+        '--glob=!**/.env.*.local',
+        '.',
+      ]
+      const { stdout } = await execFileAsync('rg', args, {
+        cwd: safeBasePath,
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024,
+      })
+      const matches = stdout
+        .split(/\r?\n/)
+        .map(path => path.trim())
+        .filter(Boolean)
+        .map(path => resolveNativePath(safeBasePath, path))
+        .sort((left, right) => {
+          const leftRelative = relative(safeBasePath, left).replace(/\\/g, '/')
+          const rightRelative = relative(safeBasePath, right).replace(/\\/g, '/')
+          const depthDelta = leftRelative.split('/').length - rightRelative.split('/').length
+          return depthDelta || leftRelative.localeCompare(rightRelative)
+        })
+      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
+    } catch (e: any) {
+      if (e.code === 1 || e.exitCode === 1) return { success: true, data: { matches: [] } }
+      if (e.code !== 'ENOENT') {
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+      const matches = this.globSync(normalizedPattern, safeBasePath)
+      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
     }
   }
 
@@ -116,39 +217,36 @@ export class NodeToolExecutor implements ToolExecutor {
     }
 
     try {
-      const args = caseInsensitive ? ['-rni', '--no-heading', '--max-count=50'] : ['-rn', '--no-heading', '--max-count=50']
+      const args = [
+        '--line-number',
+        '--no-heading',
+        '--hidden',
+        '--max-count=50',
+        ...CODE_SEARCH_EXCLUDE_GLOBS.map(pattern => `--glob=!${pattern}`),
+        '--glob=!.env',
+        '--glob=!.env.local',
+        '--glob=!.env.*.local',
+      ]
+      if (caseInsensitive) args.push('--ignore-case')
       if (filePattern) {
-        args.push(`--include=${filePattern}`)
+        args.push(`--glob=${filePattern}`)
       }
-      args.push(pattern, safeBasePath)
-      const { stdout } = await execFileAsync('rg', args, { timeout: 10000, maxBuffer: 1024 * 1024 })
+      args.push('--', pattern, '.')
+      const { stdout } = await execFileAsync('rg', args, { cwd: safeBasePath, timeout: 10000, maxBuffer: 1024 * 1024 })
       const output = stdout.trim()
       if (!output) return { success: true, data: [] }
       const results: SearchContentHit[] = output.split('\n').slice(0, 50).map(line => {
         const match = line.match(/^(.+?):(\d+):(.*)$/)
         if (!match) return { file: '', line: 0, text: line }
-        return { file: match[1], line: parseInt(match[2]), text: match[3] }
+        return { file: resolveNativePath(safeBasePath, match[1]), line: parseInt(match[2]), text: match[3] }
       }).filter(r => r.file)
       return { success: true, data: results }
     } catch (e: any) {
-      if (e.code === 'ENOENT' || e.exitCode === 1) return { success: true, data: [] }
-      // Fallback to findstr on Windows if rg not available
-      try {
-        const args = ['/s', '/n']
-        if (caseInsensitive) args.push('/i')
-        args.push(pattern, join(safeBasePath, filePattern || '*'))
-        const { stdout } = await execFileAsync('findstr', args, { timeout: 10000, maxBuffer: 1024 * 1024 })
-        const output = stdout.trim()
-        if (!output) return { success: true, data: [] }
-        const results: SearchContentHit[] = output.split('\n').slice(0, 50).map(line => {
-          const match = line.match(/^(.+?):(\d+):(.*)$/)
-          if (!match) return { file: '', line: 0, text: line }
-          return { file: match[1], line: parseInt(match[2]), text: match[3] }
-        }).filter(r => r.file)
-        return { success: true, data: results }
-      } catch {
-        return { success: true, data: [] }
+      if (e.code === 1 || e.exitCode === 1) return { success: true, data: [] }
+      if (e.code === 'ENOENT') {
+        return { success: true, data: this.searchContentFallback(pattern, safeBasePath, filePattern, caseInsensitive) }
       }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
@@ -208,16 +306,28 @@ export class NodeToolExecutor implements ToolExecutor {
         `(export\\s+default\\s+)?(function|class)\\s+\\w*${this.escapeRegex(query.query)}\\w*`,
       ]
       const results: CodeSearchHit[] = []
+      let ripgrepUnavailable = false
       for (const pattern of patterns) {
-        const args = ['-rn', '--no-heading', '--max-count=20', pattern, safeWorkspacePath, '--glob=*.{ts,tsx,js,jsx,py,rs,go,java}', '--glob=!node_modules', '--glob=!dist', '--glob=!.git']
+        const args = [
+          '--line-number',
+          '--no-heading',
+          '--hidden',
+          '--ignore-case',
+          '--max-count=20',
+          '--glob=*.{ts,tsx,js,jsx,py,rs,go,java}',
+          ...CODE_SEARCH_EXCLUDE_GLOBS.map(exclude => `--glob=!${exclude}`),
+          '--',
+          pattern,
+          '.',
+        ]
         try {
-          const { stdout } = await execFileAsync('rg', args, { timeout: 8000, maxBuffer: 512 * 1024 })
+          const { stdout } = await execFileAsync('rg', args, { cwd: safeWorkspacePath, timeout: 8000, maxBuffer: 512 * 1024 })
           const output = stdout.trim()
           if (!output) continue
           for (const line of output.split('\n').slice(0, query.limit || 10)) {
             const match = line.match(/^(.+?):(\d+):(.*)$/)
             if (!match) continue
-            const filePath = match[1]
+            const filePath = resolveNativePath(safeWorkspacePath, match[1])
             const lineNum = parseInt(match[2])
             const text = match[3].trim()
             const symbolMatch = text.match(/(?:export\s+)?(?:default\s+)?(?:function|const|let|var|class|interface|type|enum)\s+(\w+)/)
@@ -236,13 +346,27 @@ export class NodeToolExecutor implements ToolExecutor {
             })
           }
         } catch (e: any) {
-          if (e.exitCode === 1) continue
+          if (e.code === 1 || e.exitCode === 1) continue
+          if (e.code === 'ENOENT') {
+            ripgrepUnavailable = true
+            break
+          }
+          return { success: false, error: e instanceof Error ? e.message : String(e), data: [] }
         }
         if (results.length >= (query.limit || 10)) break
       }
-      return { success: true, data: results.slice(0, query.limit || 10) }
+      const limit = query.limit || 10
+      const fallback = ripgrepUnavailable
+        ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit)
+        : []
+      return {
+        success: true,
+        data: results.length > 0
+          ? results.slice(0, limit)
+          : fallback,
+      }
     } catch (e) {
-      return { success: true, data: [] }
+      return { success: false, error: e instanceof Error ? e.message : String(e), data: [] }
     }
   }
 
@@ -328,7 +452,7 @@ export class NodeToolExecutor implements ToolExecutor {
     const children: CodeMapNode[] = []
     try {
       const entries = readdirSync(absPath, { withFileTypes: true })
-        .filter(e => !e.name.startsWith('.'))
+        .filter(e => !this.shouldSkipEntry(e.name))
         .sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1))
 
       for (const entry of entries.slice(0, Math.max(1, maxChildrenPerPath))) {
@@ -364,7 +488,7 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async memoryQuery(query: { query: string; workspacePath: string; kind?: MemoryKind; scope?: MemoryScope; limit?: number }): Promise<Result<{ items: Array<{ id: string; content: string; kind: string; score: number }> }>> {
+  async memoryQuery(query: { query?: string; workspacePath: string; kind?: MemoryKind; scope?: MemoryScope; limit?: number }): Promise<Result<{ items: Array<{ id: string; text: string; content: string; kind: string; confidence: string; source: string; tags: string[]; score: number }> }>> {
     try {
       const safeWorkspacePath = this.ensureAllowedPath(query.workspacePath)
       const memories = await this.memoryService.query({
@@ -376,8 +500,12 @@ export class NodeToolExecutor implements ToolExecutor {
       })
       const items = memories.map(m => ({
         id: m.id,
+        text: m.text,
         content: m.text,
         kind: m.kind,
+        confidence: m.confidence,
+        source: m.source,
+        tags: m.tags,
         score: 1,
       }))
       return { success: true, data: { items } }
@@ -437,45 +565,237 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, _approved?: boolean): Promise<Result<CommandOutput>> {
-    return new Promise((resolve) => {
-      let safeCwd: string
-      try {
-        const validation = this.validateCommandSync(command, cwd)
-        if (!validation.success) {
-          resolve({ success: false, error: validation.error, data: { stdout: '', stderr: validation.error || '', exitCode: 1 } })
-          return
-        }
-        safeCwd = validation.cwd
-      } catch (error) {
-        resolve({ success: false, error: error instanceof Error ? error.message : String(error) })
-        return
+  async runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, approved?: boolean): Promise<Result<CommandOutput>> {
+    let safeCwd: string
+    try {
+      const validation = this.validateCommandSync(command, cwd)
+      if (!validation.success) {
+        return { success: false, error: validation.error, data: { stdout: '', stderr: validation.error || '', exitCode: 1 } }
       }
-      const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
-      const shellArgs = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
+      if (this.sandboxPolicy === 'workspace' && approved !== true) {
+        const error = 'Workspace command execution requires an explicit permission decision'
+        return { success: false, error, data: { stdout: '', stderr: error, exitCode: 1 } }
+      }
+      safeCwd = validation.cwd
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
+    const shellArgs = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
+    const runtimeTask = this.runtimeTaskManager.createTask({
+      kind: 'shell',
+      command,
+      cwd: safeCwd,
+      interactive: false,
+    })
+    let logPath: string | undefined
+    try {
+      logPath = this.createRuntimeTaskLog(runtimeTask.id)
       const proc = spawn(shell, shellArgs, {
         cwd: safeCwd,
-        env: { ...process.env, ...env },
-        timeout: timeout || 30000,
+        env: this.buildChildEnvironment(env),
+        detached: process.platform !== 'win32',
+        windowsHide: true,
       })
+      this.runtimeTaskManager.setControl(runtimeTask.id, {
+        stop: () => this.stopProcessAndWait(proc),
+      })
+      this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
+      return this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.runtimeTaskManager.failTask(runtimeTask.id, message, { logPath, outputBytes: 0 })
+      return { success: false, error: message, data: { stdout: '', stderr: message, exitCode: 1, logPath, outputBytes: 0 } }
+    }
+  }
 
+  async runProcess(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number): Promise<Result<CommandOutput>> {
+    let runtimeTaskId: string | undefined
+    let logPath: string | undefined
+    try {
+      const safeCwd = this.ensureAllowedPath(cwd)
+      const runtimeTask = this.runtimeTaskManager.createTask({
+        kind: 'shell',
+        command: [command, ...args].join(' '),
+        cwd: safeCwd,
+        interactive: false,
+        metadata: { executable: command, args: [...args] },
+      })
+      runtimeTaskId = runtimeTask.id
+      logPath = this.createRuntimeTaskLog(runtimeTask.id)
+      const proc = spawn(command, args, {
+        cwd: safeCwd,
+        env: this.buildChildEnvironment(env),
+        detached: process.platform !== 'win32',
+        windowsHide: true,
+      })
+      this.runtimeTaskManager.setControl(runtimeTask.id, {
+        stop: () => this.stopProcessAndWait(proc),
+      })
+      this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
+      return await this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (runtimeTaskId) this.runtimeTaskManager.failTask(runtimeTaskId, message, { logPath, outputBytes: 0 })
+      return { success: false, error: message, data: { stdout: '', stderr: message, exitCode: 1, logPath, outputBytes: 0 } }
+    }
+  }
+
+  private collectProcess(proc: ChildProcessWithoutNullStreams, timeout: number, runtimeTaskId?: string, logPath?: string): Promise<Result<CommandOutput>> {
+    return new Promise(resolve => {
       let stdout = ''
       let stderr = ''
+      let truncated = false
+      let timedOut = false
+      let settled = false
+      let outputBytes = 0
+      let logError: string | undefined
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+      let terminationGraceTimer: ReturnType<typeof setTimeout> | undefined
 
-      proc.stdout.on('data', (data) => { stdout += data.toString() })
-      proc.stderr.on('data', (data) => { stderr += data.toString() })
+      const append = (current: string, value: Buffer | string): string => {
+        if (current.length >= MAX_COMMAND_OUTPUT_CHARS) {
+          truncated = true
+          return current
+        }
+        const text = value.toString()
+        const remaining = MAX_COMMAND_OUTPUT_CHARS - current.length
+        if (text.length > remaining) truncated = true
+        return current + text.slice(0, remaining)
+      }
+      const finish = (result: Result<CommandOutput>) => {
+        if (settled) return
+        settled = true
+        if (timeoutTimer) clearTimeout(timeoutTimer)
+        if (terminationGraceTimer) clearTimeout(terminationGraceTimer)
+        proc.stdout.off('data', onStdout)
+        proc.stderr.off('data', onStderr)
+        proc.off('error', onError)
+        proc.off('close', onClose)
+        const finalizedResult: Result<CommandOutput> = result.data
+          ? { ...result, data: { ...result.data, logPath, outputBytes } }
+          : result
+        if (runtimeTaskId) this.finishProcessRuntimeTask(runtimeTaskId, finalizedResult, logError)
+        resolve(finalizedResult)
+      }
+      const recordOutput = (channel: 'stdout' | 'stderr', data: Buffer | string) => {
+        outputBytes += Buffer.byteLength(data)
+        if (!logPath || logError) return
+        try {
+          this.appendRuntimeTaskLog(logPath, channel, data)
+        } catch (error) {
+          logError = error instanceof Error ? error.message : String(error)
+        }
+      }
+      const onStdout = (data: Buffer | string) => {
+        recordOutput('stdout', data)
+        stdout = append(stdout, data)
+      }
+      const onStderr = (data: Buffer | string) => {
+        recordOutput('stderr', data)
+        stderr = append(stderr, data)
+      }
+      const onError = (error: Error) => {
+        recordOutput('stderr', error.message)
+        finish({ success: false, error: error.message, data: { stdout, stderr, exitCode: 1, timedOut, truncated } })
+      }
+      const onClose = (code: number | null) => {
+        const exitCode = code ?? 1
+        const success = exitCode === 0 && !timedOut
+        const error = timedOut
+          ? `Command timed out after ${timeout}ms`
+          : success ? undefined : `Command exited with code ${exitCode}`
+        finish({ success, error, data: { stdout, stderr, exitCode, timedOut, truncated } })
+      }
 
-      proc.on('close', (code) => {
-        resolve({
-          success: true,
-          data: { stdout, stderr, exitCode: code ?? 1 },
-        })
-      })
-
-      proc.on('error', (err) => {
-        resolve({ success: false, error: err.message })
-      })
+      proc.stdout.on('data', onStdout)
+      proc.stderr.on('data', onStderr)
+      proc.on('error', onError)
+      proc.on('close', onClose)
+      timeoutTimer = setTimeout(() => {
+        timedOut = true
+        try {
+          this.terminateProcessTree(proc)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          finish({
+            success: false,
+            error: `Command timed out after ${timeout}ms; process termination failed: ${message}`,
+            data: { stdout, stderr, exitCode: 1, timedOut, truncated },
+          })
+          return
+        }
+        if (settled) return
+        terminationGraceTimer = setTimeout(() => {
+          finish({
+            success: false,
+            error: `Command timed out after ${timeout}ms; process did not exit within the ${COMMAND_TERMINATION_GRACE_MS}ms termination grace period`,
+            data: { stdout, stderr, exitCode: 1, timedOut, truncated },
+          })
+        }, COMMAND_TERMINATION_GRACE_MS)
+      }, Math.max(1, timeout))
     })
+  }
+
+  private terminateProcessTree(proc: ChildProcessWithoutNullStreams): void {
+    if (!proc.pid) return
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      killer.unref()
+      return
+    }
+    try {
+      process.kill(-proc.pid, 'SIGTERM')
+    } catch {
+      proc.kill('SIGTERM')
+    }
+  }
+
+  private stopProcessAndWait(proc: ChildProcessWithoutNullStreams): Promise<void> {
+    if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        proc.off('close', onClose)
+        proc.off('error', onError)
+        if (error) reject(error)
+        else resolve()
+      }
+      const onClose = () => finish()
+      const onError = (error: Error) => finish(error)
+      const timer = setTimeout(() => {
+        finish(new Error(`Process did not exit within ${COMMAND_TERMINATION_GRACE_MS}ms`))
+      }, COMMAND_TERMINATION_GRACE_MS)
+      proc.once('close', onClose)
+      proc.once('error', onError)
+      try {
+        this.terminateProcessTree(proc)
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+  }
+
+  private finishProcessRuntimeTask(taskId: string, result: Result<CommandOutput>, logError?: string): void {
+    const output = result.data
+    const patch = {
+      exitCode: output?.exitCode ?? 1,
+      outputBytes: output?.outputBytes || 0,
+      logPath: output?.logPath,
+      metadata: {
+        timedOut: output?.timedOut === true,
+        truncated: output?.truncated === true,
+        ...(logError ? { logError } : {}),
+      },
+    }
+    if (result.success) {
+      this.runtimeTaskManager.completeTask(taskId, patch)
+      return
+    }
+    this.runtimeTaskManager.failTask(taskId, result.error || `Process exited with code ${patch.exitCode}`, patch)
   }
 
   async validateCommand(command: string, cwd: string): Promise<Result<void>> {
@@ -496,6 +816,8 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   async ptyCreate(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session: TerminalSessionInfo }>> {
+    let runtimeTaskId: string | undefined
+    let proc: ChildProcessWithoutNullStreams | undefined
     try {
       const safeCwd = this.ensureAllowedPath(options?.cwd || this.workspaceRoot)
       const shell = options?.shell || DEFAULT_TERMINAL_SHELL
@@ -504,9 +826,18 @@ export class NodeToolExecutor implements ToolExecutor {
       const shellLabel = options?.shell ? shell : DEFAULT_TERMINAL_SHELL_LABEL
       const now = Date.now()
       const sessionId = `term_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-      const proc = spawn(shell, shellArgs, {
+      const runtimeTask = this.runtimeTaskManager.createTask({
+        kind: 'terminal',
+        command: shell,
         cwd: safeCwd,
-        env: { ...process.env, ...options?.env },
+        interactive: true,
+        metadata: { sessionId, shellId },
+      })
+      runtimeTaskId = runtimeTask.id
+      const logPath = this.createRuntimeTaskLog(runtimeTask.id)
+      proc = spawn(shell, shellArgs, {
+        cwd: safeCwd,
+        env: this.buildChildEnvironment(options?.env),
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
@@ -522,47 +853,110 @@ export class NodeToolExecutor implements ToolExecutor {
         updatedAt: now,
         isAgentSession: true,
         title: shell,
+        runtimeTaskId: runtimeTask.id,
+        logPath,
       }
       const session: BackgroundTerminalSession = {
         info,
         proc,
         chunks: [],
         nextSeq: 1,
+        bufferChars: 0,
+        runtimeTaskId: runtimeTask.id,
+        logPath,
+        outputBytes: 0,
       }
       this.backgroundTerminals.set(sessionId, session)
+      this.runtimeTaskManager.setControl(runtimeTask.id, {
+        stop: async () => {
+          const result = await this.ptyKill(sessionId)
+          if (!result.success) throw new Error(result.error || `Failed to stop terminal ${sessionId}`)
+        },
+        write: async data => {
+          const result = await this.ptyWrite(sessionId, data)
+          if (!result.success) throw new Error(result.error || `Failed to write terminal ${sessionId}`)
+        },
+      })
+      this.runtimeTaskManager.markRunning(runtimeTask.id, {
+        pid: proc.pid,
+        logPath,
+        outputBytes: 0,
+        outputOffset: 0,
+      })
 
-      const append = (data: Buffer | string) => {
+      const append = (channel: 'stdout' | 'stderr', data: Buffer | string) => {
         const text = data.toString()
         if (!text) return
+        session.outputBytes += Buffer.byteLength(data)
+        if (!session.logError) {
+          try {
+            this.appendRuntimeTaskLog(session.logPath, channel, data)
+          } catch (error) {
+            session.logError = error instanceof Error ? error.message : String(error)
+          }
+        }
         session.chunks.push({
           seq: session.nextSeq++,
           data: text,
           timestamp: Date.now(),
         })
+        session.bufferChars += text.length
         if (session.chunks.length > MAX_TERMINAL_CHUNKS) {
-          session.chunks.splice(0, session.chunks.length - MAX_TERMINAL_CHUNKS)
+          const removed = session.chunks.splice(0, session.chunks.length - MAX_TERMINAL_CHUNKS)
+          session.bufferChars -= removed.reduce((sum, chunk) => sum + chunk.data.length, 0)
+        }
+        while (session.bufferChars > MAX_TERMINAL_BUFFER_CHARS && session.chunks.length > 1) {
+          const removed = session.chunks.shift()
+          if (removed) session.bufferChars -= removed.data.length
         }
         session.info.updatedAt = Date.now()
+        this.runtimeTaskManager.updateTask(session.runtimeTaskId, {
+          outputBytes: session.outputBytes,
+          metadata: session.logError ? { logError: session.logError } : undefined,
+        })
       }
 
-      proc.stdout.on('data', append)
-      proc.stderr.on('data', append)
+      proc.stdout.on('data', data => append('stdout', data))
+      proc.stderr.on('data', data => append('stderr', data))
       proc.on('error', (err) => {
         session.info.status = 'error'
         session.info.error = err.message
         session.info.updatedAt = Date.now()
-        append(`\n[terminal error] ${err.message}\n`)
+        append('stderr', `\n[terminal error] ${err.message}\n`)
+        this.runtimeTaskManager.failTask(session.runtimeTaskId, err.message, {
+          outputBytes: session.outputBytes,
+          logPath: session.logPath,
+          metadata: session.logError ? { logError: session.logError } : undefined,
+        })
       })
       proc.on('close', (code, signal) => {
         session.info.status = 'exited'
         session.info.exitCode = code
         session.info.exitSignal = signal ?? null
         session.info.updatedAt = Date.now()
+        const patch = {
+          exitCode: code,
+          outputBytes: session.outputBytes,
+          logPath: session.logPath,
+          metadata: {
+            exitSignal: signal ?? null,
+            ...(session.logError ? { logError: session.logError } : {}),
+          },
+        }
+        if (code === 0) this.runtimeTaskManager.completeTask(session.runtimeTaskId, patch)
+        else this.runtimeTaskManager.failTask(
+          session.runtimeTaskId,
+          signal ? `Terminal exited with signal ${signal}` : `Terminal exited with code ${code ?? 1}`,
+          patch,
+        )
       })
 
       return { success: true, data: { sessionId, session: info }, session, sessionId }
     } catch (e) {
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+      const message = e instanceof Error ? e.message : String(e)
+      if (proc) this.terminateProcessTree(proc)
+      if (runtimeTaskId) this.runtimeTaskManager.failTask(runtimeTaskId, message)
+      return { success: false, error: message }
     }
   }
 
@@ -575,7 +969,10 @@ export class NodeToolExecutor implements ToolExecutor {
       session.proc.stdin.write(data)
       session.info.updatedAt = Date.now()
       const firstLine = data.split(/\r?\n/).find(line => line.trim())
-      if (firstLine) session.info.title = firstLine.trim()
+      if (firstLine) {
+        session.info.title = firstLine.trim()
+        this.runtimeTaskManager.updateTask(session.runtimeTaskId, { command: firstLine.trim() })
+      }
       return { success: true }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -600,9 +997,13 @@ export class NodeToolExecutor implements ToolExecutor {
 
     try {
       if (process.platform === 'win32') {
-        session.proc.kill('SIGINT')
+        await this.killTerminalProcessTree(session)
       } else {
-        session.proc.stdin.write('\x03')
+        try {
+          process.kill(-session.info.pid, 'SIGINT')
+        } catch {
+          session.proc.kill('SIGINT')
+        }
       }
       session.info.updatedAt = Date.now()
       return { success: true }
@@ -617,6 +1018,7 @@ export class NodeToolExecutor implements ToolExecutor {
 
     try {
       if (session.info.status === 'running') {
+        this.runtimeTaskManager.markStopping(session.runtimeTaskId)
         const closed = this.waitForTerminalClose(session, TERMINAL_KILL_TIMEOUT_MS)
         if (!session.proc.stdin.destroyed) {
           session.proc.stdin.end()
@@ -627,13 +1029,25 @@ export class NodeToolExecutor implements ToolExecutor {
         }
         const didClose = await closed
         if (!didClose && session.info.status === 'running') {
+          this.runtimeTaskManager.updateTask(session.runtimeTaskId, {
+            error: `Terminal did not exit within ${TERMINAL_KILL_TIMEOUT_MS}ms`,
+          })
           return { success: false, error: `Terminal ${sessionId} did not exit within ${TERMINAL_KILL_TIMEOUT_MS}ms` }
         }
       }
       session.info.status = 'exited'
       session.info.updatedAt = Date.now()
+      this.runtimeTaskManager.markStopped(session.runtimeTaskId, 'Terminal stopped', {
+        exitCode: session.info.exitCode,
+        outputBytes: session.outputBytes,
+        logPath: session.logPath,
+        metadata: session.logError ? { logError: session.logError } : undefined,
+      })
       return { success: true }
     } catch (e) {
+      this.runtimeTaskManager.updateTask(session.runtimeTaskId, {
+        error: e instanceof Error ? e.message : String(e),
+      })
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
@@ -716,6 +1130,7 @@ export class NodeToolExecutor implements ToolExecutor {
       if (!result.success || !result.checkpointId) {
         return { success: false, error: result.error || 'Checkpoint was not created' }
       }
+      await this.localHistoryService.pruneOldCheckpoints(safeWorkspacePath, 50)
       return {
         success: true,
         data: {
@@ -733,85 +1148,179 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async sendMessage(url: string, headers: Record<string, string>, body: string): Promise<Result<string>> {
-    for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
-      try {
-        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body })
-        const text = await response.text()
-        if (!response.ok) {
-          const error = this.formatHttpError(url, response.status, text)
-          if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
-            await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
-            continue
-          }
-          return { success: false, error }
-        }
-        return { success: true, data: text }
-      } catch (e) {
-        if (attempt < STREAM_RETRY_DELAYS_MS.length) {
-          await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
-          continue
-        }
-        return { success: false, error: this.formatNetworkError(url, e) }
-      }
+  async checkpointList(workspacePath: string, limit = 20): Promise<Result<any[]>> {
+    try {
+      const safeWorkspacePath = this.ensureAllowedPath(workspacePath)
+      const result = await this.localHistoryService.listCheckpoints(safeWorkspacePath, Math.max(1, Math.min(100, limit)))
+      return result.success
+        ? { success: true, data: result.checkpoints || [] }
+        : { success: false, error: result.error || 'Unable to list checkpoints' }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
-    return { success: false, error: 'Request failed' }
   }
 
-  async streamMessage(url: string, headers: Record<string, string>, body: string, onLine: (line: string) => void): Promise<Result<string>> {
-    for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
-      let emittedAnyLine = false
-      try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...headers },
-          body,
-        })
-        if (!response.ok) {
+  async checkpointRestore(workspacePath: string, checkpointId: string): Promise<Result<{ restoredFiles: string[]; conflictedFiles?: string[]; safetyCheckpointId?: string }>> {
+    try {
+      this.ensureWritable()
+      if (!/^[a-z0-9_-]{6,128}$/i.test(checkpointId)) return { success: false, error: 'Invalid checkpoint id' }
+      const safeWorkspacePath = this.ensureAllowedPath(workspacePath)
+      const result = await this.localHistoryService.restoreCheckpoint(safeWorkspacePath, checkpointId, 'code_only')
+      if (!result.success) return { success: false, error: result.error || 'Checkpoint restore failed', data: { restoredFiles: result.restoredFiles || [], conflictedFiles: result.conflictedFiles, safetyCheckpointId: result.safetyCheckpointId } }
+      return { success: true, data: { restoredFiles: result.restoredFiles || [], conflictedFiles: result.conflictedFiles, safetyCheckpointId: result.safetyCheckpointId } }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async checkpointPrune(workspacePath: string, keepCount = 50): Promise<Result<void>> {
+    try {
+      this.ensureWritable()
+      const safeWorkspacePath = this.ensureAllowedPath(workspacePath)
+      await this.localHistoryService.pruneOldCheckpoints(safeWorkspacePath, Math.max(1, Math.min(200, keepCount)))
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async sendMessage(url: string, headers: Record<string, string>, body: string, options: RequestOptions = {}): Promise<Result<string>> {
+    const request = this.createRequestController(options)
+    try {
+      for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body,
+            signal: request.controller.signal,
+          })
           const text = await response.text()
-          const error = this.formatHttpError(url, response.status, text)
-          if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
+          if (!response.ok) {
+            const error = this.formatHttpError(url, response.status, text)
+            if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
+              await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+              continue
+            }
+            return { success: false, error, status: response.status }
+          }
+          return { success: true, data: text }
+        } catch (error) {
+          if (request.controller.signal.aborted || this.isAbortError(error)) {
+            return { success: false, error: 'Request aborted' }
+          }
+          if (attempt < STREAM_RETRY_DELAYS_MS.length) {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
             continue
           }
-          return { success: false, error, status: response.status }
+          return { success: false, error: this.formatNetworkError(url, error) }
         }
-        const reader = response.body?.getReader()
-        if (!reader) return { success: false, error: 'No response body' }
+      }
+      return { success: false, error: 'Request failed' }
+    } finally {
+      request.cleanup()
+    }
+  }
 
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let fullResponse = ''
+  async streamMessage(
+    url: string,
+    headers: Record<string, string>,
+    body: string,
+    onLine: (line: string) => void,
+    options: RequestOptions = {},
+  ): Promise<Result<string>> {
+    const request = this.createRequestController(options)
+    if (options.streamId !== undefined) {
+      this.activeStreams.get(options.streamId)?.abort()
+      this.activeStreams.set(options.streamId, request.controller)
+    }
+    try {
+      for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
+        let emittedAnyLine = false
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body,
+            signal: request.controller.signal,
+          })
+          if (!response.ok) {
+            const text = await response.text()
+            const error = this.formatHttpError(url, response.status, text)
+            if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
+              await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+              continue
+            }
+            return { success: false, error, status: response.status }
+          }
+          const reader = response.body?.getReader()
+          if (!reader) return { success: false, error: 'No response body' }
 
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
-          for (const line of lines) {
-            if (line.trim()) {
-              emittedAnyLine = true
-              onLine(line)
-              fullResponse += line + '\n'
+          const decoder = new TextDecoder()
+          let buffer = ''
+          let fullResponse = ''
+
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+            for (const line of lines) {
+              if (line.trim()) {
+                emittedAnyLine = true
+                onLine(line)
+                fullResponse += line + '\n'
+              }
             }
           }
+          if (buffer.trim()) {
+            emittedAnyLine = true
+            onLine(buffer)
+            fullResponse += buffer
+          }
+          return { success: true, data: fullResponse }
+        } catch (error) {
+          if (request.controller.signal.aborted || this.isAbortError(error)) {
+            return { success: false, error: 'Request aborted' }
+          }
+          if (!emittedAnyLine && attempt < STREAM_RETRY_DELAYS_MS.length) {
+            await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+            continue
+          }
+          return { success: false, error: this.formatNetworkError(url, error) }
         }
-        if (buffer.trim()) {
-          emittedAnyLine = true
-          onLine(buffer)
-          fullResponse += buffer
-        }
-        return { success: true, data: fullResponse }
-      } catch (e) {
-        if (!emittedAnyLine && attempt < STREAM_RETRY_DELAYS_MS.length) {
-          await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
-          continue
-        }
-        return { success: false, error: this.formatNetworkError(url, e) }
       }
+      return { success: false, error: 'Stream request failed' }
+    } finally {
+      if (options.streamId !== undefined && this.activeStreams.get(options.streamId) === request.controller) {
+        this.activeStreams.delete(options.streamId)
+      }
+      request.cleanup()
     }
-    return { success: false, error: 'Stream request failed' }
+  }
+
+  async streamAbort(streamId: number): Promise<void> {
+    this.activeStreams.get(streamId)?.abort()
+  }
+
+  private createRequestController(options: RequestOptions): { controller: AbortController; cleanup: () => void } {
+    const controller = new AbortController()
+    const abortFromParent = () => controller.abort()
+    if (options.signal?.aborted) controller.abort()
+    else options.signal?.addEventListener('abort', abortFromParent, { once: true })
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs || MODEL_REQUEST_TIMEOUT_MS)
+    return {
+      controller,
+      cleanup: () => {
+        clearTimeout(timer)
+        options.signal?.removeEventListener('abort', abortFromParent)
+      },
+    }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError'
   }
 
   private async searchDuckDuckGoInstant(query: string, limit: number, region: string): Promise<WebSearchResult[]> {
@@ -1061,11 +1570,26 @@ export class NodeToolExecutor implements ToolExecutor {
 
   private ensureWithinWorkspace(path: string): string {
     const resolvedPath = this.resolveAgainstWorkspace(path)
-    const relativePath = relative(this.workspaceRoot, resolvedPath)
+    const canonicalPath = this.resolveRealPath(resolvedPath)
+    const relativePath = relative(this.workspaceRealRoot, canonicalPath)
     if (relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))) {
       return resolvedPath
     }
     throw new Error(`Path outside workspace: ${path}`)
+  }
+
+  private resolveRealPath(path: string): string {
+    if (existsSync(path)) return realpathSync.native(path)
+    const missingParts: string[] = []
+    let current = path
+    while (!existsSync(current)) {
+      const parent = dirname(current)
+      if (parent === current) break
+      missingParts.unshift(basename(current))
+      current = parent
+    }
+    const existingParent = existsSync(current) ? realpathSync.native(current) : current
+    return resolveNativePath(existingParent, ...missingParts)
   }
 
   private resolveAgainstWorkspace(path: string): string {
@@ -1150,7 +1674,7 @@ export class NodeToolExecutor implements ToolExecutor {
     try {
       const entries = readdirSync(dirPath, { withFileTypes: true })
       for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        if (this.shouldSkipEntry(entry.name)) continue
         const fullPath = join(dirPath, entry.name)
         if (entry.isDirectory()) {
           node.children!.push(this.buildTree(fullPath, maxDepth, depth + 1))
@@ -1174,12 +1698,62 @@ export class NodeToolExecutor implements ToolExecutor {
     return results
   }
 
+  private searchContentFallback(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean): SearchContentHit[] {
+    const matcher = new RegExp(pattern, caseInsensitive ? 'i' : '')
+    const fileMatcher = filePattern ? this.globToRegex(filePattern) : null
+    const results: SearchContentHit[] = []
+    this.walkDir(basePath, filePath => {
+      if (results.length >= 50) return
+      const rel = relative(basePath, filePath).replace(/\\/g, '/')
+      if (fileMatcher && !fileMatcher.test(filePattern?.includes('/') ? rel : filePath.split(/[\\/]/).pop() || rel)) return
+      try {
+        const lines = readFileSync(filePath, 'utf-8').split(/\r?\n/)
+        for (let index = 0; index < lines.length && results.length < 50; index += 1) {
+          if (matcher.test(lines[index])) results.push({ file: filePath, line: index + 1, text: lines[index] })
+          matcher.lastIndex = 0
+        }
+      } catch {}
+    })
+    return results
+  }
+
+  private searchCodeSymbolsFallback(query: string, basePath: string, limit: number): CodeSearchHit[] {
+    const results: CodeSearchHit[] = []
+    const queryLower = query.toLowerCase()
+    const declaration = /(?:export\s+)?(?:default\s+)?(?:function|const|let|var|class|interface|type|enum)\s+(\w+)/
+    this.walkDir(basePath, filePath => {
+      if (results.length >= limit || !/\.(?:ts|tsx|js|jsx|py|rs|go|java)$/i.test(filePath)) return
+      try {
+        const lines = readFileSync(filePath, 'utf-8').split(/\r?\n/)
+        for (let index = 0; index < lines.length && results.length < limit; index += 1) {
+          const match = lines[index].match(declaration)
+          if (!match || !match[1].toLowerCase().includes(queryLower)) continue
+          const text = lines[index].trim()
+          results.push({
+            id: `sym_${index + 1}_${filePath.slice(-20)}`,
+            path: relative(basePath, filePath).replace(/\\/g, '/'),
+            title: match[1],
+            subtitle: text.slice(0, 120),
+            line: index + 1,
+            startLine: index + 1,
+            endLine: index + 6,
+            score: 1,
+            source: 'symbol',
+            symbolKind: this.inferSymbolKind(text) as CodeSearchHit['symbolKind'],
+            preview: text,
+          })
+        }
+      } catch {}
+    })
+    return results
+  }
+
   private walkDir(dir: string, callback: (path: string) => void, depth = 0): void {
     if (depth > 10) return
     try {
       const entries = readdirSync(dir, { withFileTypes: true })
       for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        if (this.shouldSkipEntry(entry.name)) continue
         const fullPath = join(dir, entry.name)
         if (entry.isDirectory()) {
           this.walkDir(fullPath, callback, depth + 1)
@@ -1191,13 +1765,55 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private globToRegex(pattern: string): RegExp {
-    const escaped = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*\*/g, '{{GLOBSTAR}}')
-      .replace(/\*/g, '[^/]*')
-      .replace(/\?/g, '[^/]')
-      .replace(/\{\{GLOBSTAR\}\}/g, '.*')
-    return new RegExp(`^${escaped}$`, 'i')
+    const alternatives = this.expandGlobBraces(pattern.replace(/\\/g, '/'))
+      .map(alternative => {
+        let regex = ''
+        for (let index = 0; index < alternative.length; index += 1) {
+          const character = alternative[index]
+          if (character === '*' && alternative[index + 1] === '*') {
+            if (alternative[index + 2] === '/') {
+              regex += '(?:.*/)?'
+              index += 2
+            } else {
+              regex += '.*'
+              index += 1
+            }
+          } else if (character === '*') {
+            regex += '[^/]*'
+          } else if (character === '?') {
+            regex += '[^/]'
+          } else {
+            regex += character.replace(/[.+^$()|[\]{}\\]/g, '\\$&')
+          }
+        }
+        return regex
+      })
+    return new RegExp(`^(?:${alternatives.join('|')})$`, 'i')
+  }
+
+  private expandGlobBraces(pattern: string): string[] {
+    const open = pattern.indexOf('{')
+    if (open < 0) return [pattern]
+    const close = pattern.indexOf('}', open + 1)
+    if (close < 0) return [pattern]
+    const choices = pattern.slice(open + 1, close).split(',').filter(Boolean)
+    if (choices.length < 2) return [pattern]
+    const prefix = pattern.slice(0, open)
+    const suffix = pattern.slice(close + 1)
+    return choices.flatMap(choice => this.expandGlobBraces(`${prefix}${choice}${suffix}`))
+  }
+
+  private shouldSkipEntry(name: string): boolean {
+    if (CODE_SEARCH_SKIPPED_DIRS.has(name.toLowerCase())) return true
+    return name === '.env' || name === '.env.local' || /^\.env\..+\.local$/i.test(name)
+  }
+
+  private buildChildEnvironment(overrides?: Record<string, string>): NodeJS.ProcessEnv {
+    const environment: NodeJS.ProcessEnv = {}
+    for (const [name, value] of Object.entries(process.env)) {
+      if (!SENSITIVE_ENV_NAME.test(name)) environment[name] = value
+    }
+    return { ...environment, ...overrides }
   }
 
   private delay(ms: number): Promise<void> {
@@ -1210,7 +1826,45 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private formatNetworkError(url: string, error: unknown): string {
-    const message = error instanceof Error ? error.message : String(error)
-    return message
+    const parts: string[] = []
+    const seen = new Set<unknown>()
+    let current: unknown = error
+    for (let depth = 0; current !== undefined && current !== null && depth < 5; depth += 1) {
+      if (seen.has(current)) break
+      seen.add(current)
+      if (current instanceof Error) {
+        const record = current as Error & {
+          code?: unknown
+          errno?: unknown
+          syscall?: unknown
+          address?: unknown
+          port?: unknown
+          cause?: unknown
+        }
+        const metadata = [
+          record.code ? `code=${String(record.code)}` : '',
+          record.errno ? `errno=${String(record.errno)}` : '',
+          record.syscall ? `syscall=${String(record.syscall)}` : '',
+          record.address ? `address=${String(record.address)}` : '',
+          record.port ? `port=${String(record.port)}` : '',
+        ].filter(Boolean)
+        parts.push(`${record.message || record.name}${metadata.length > 0 ? ` (${metadata.join(', ')})` : ''}`)
+        current = record.cause
+        continue
+      }
+      if (typeof current === 'object') {
+        const record = current as Record<string, unknown>
+        const metadata = ['code', 'errno', 'syscall', 'address', 'port']
+          .filter(key => record[key] !== undefined)
+          .map(key => `${key}=${String(record[key])}`)
+        const message = typeof record.message === 'string' ? record.message : String(current)
+        parts.push(`${message}${metadata.length > 0 ? ` (${metadata.join(', ')})` : ''}`)
+        current = record.cause
+        continue
+      }
+      parts.push(String(current))
+      break
+    }
+    return `Network request to ${url} failed: ${parts.filter(Boolean).join(' <- caused by: ') || 'unknown network error'}`
   }
 }

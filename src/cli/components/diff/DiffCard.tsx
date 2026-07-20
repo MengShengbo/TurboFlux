@@ -46,7 +46,7 @@ export function DiffCard({
         <Text bold>{filename}</Text>
         <Text color={theme.inactive}> {opLabel}</Text>
         {(added > 0 || removed > 0) && (
-          <Text> <Text color="green">+{added}</Text> <Text color="red">-{removed}</Text></Text>
+          <Text> <Text color={theme.diffAddedWord}>+{added}</Text> <Text color={theme.diffRemovedWord}>-{removed}</Text></Text>
         )}
         {totalLines && !added && !removed && <Text color={theme.inactive}> ({totalLines} lines)</Text>}
       </Box>

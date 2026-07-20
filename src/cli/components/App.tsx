@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { render, Box, Static, Text, useInput, useApp } from 'ink'
-import { ThemeProvider } from '../theme/index'
+import { render, Box, Static, Text, useInput, useApp, useBoxMetrics, type DOMElement } from 'ink'
+import { ThemeProvider, useTheme } from '../theme/index'
 import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
 import type { ToolStatus } from './tools/ToolCallTree'
@@ -9,20 +9,24 @@ import { FastContextBanner } from './tools/FastContextBanner'
 import { ConversationHistory, type ConversationEntry } from './ConversationHistory'
 import { RewindSelector } from './input/RewindSelector'
 import { ModelPicker } from './input/ModelPicker'
+import { EffortPicker, type EffortSelection } from './input/EffortPicker'
 import { PermissionDialog, type PermissionDecision } from './permissions/PermissionDialog'
 import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
-import type { AgentAttachment, AgentTurn, ChangeSummary, ThinkingMode, TokenUsage } from '../../shared/agentTypes'
+import type { AgentAttachment, AgentTurn, ApprovalPolicy, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
+import type { ContextReservoirEntry, ContextSegment } from '../../state/types'
 import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
 import { formatMarkdown } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
 import type { ActiveTaskContext } from '../../core/taskManager'
-import { applyPreset, getModelPresets, saveConfig, type ModelPreset, type TurboFluxConfig } from '../../core/config'
+import { applyPreset, saveConfig, setConfigValue, type ModelPreset, type TurboFluxConfig } from '../../core/config'
+import { discoverModelPresets, readCachedModelDiscovery } from '../../core/modelDiscovery'
+import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
 import { commandRegistry } from '../commands/index'
 import type { CommandContext } from '../commands/types'
 import { ConversationManager } from '../conversations/manager'
@@ -30,11 +34,23 @@ import type { MascotMood } from './header/Mascot'
 import { stripTextToolCallMarkup } from '../../shared/toolCallMarkup'
 import { useTerminalSize } from '../hooks/useTerminalSize'
 import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
-import { getSafeViewportWidth } from '../terminalLayout'
+import { getSafeFrameWidth, getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
-import { ThinkingModeRail } from './tools/ThinkingModeRail'
+import { resolveCockpitLayout, TaskRail, WorkRail } from './layout/CockpitRails'
+import { getStartupAnimationFrame, shouldAnimateStartup, STARTUP_ANIMATION_MS } from './layout/StartupAnimation'
+import { appendFastContextUiEvents, createFastContextUiSummary, reduceFastContextUiSummary } from './layout/fastContextUi'
+import { shouldUseCompactWordmark } from '../brand'
+import { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, parseTerminalMouseWheel, shouldEnableMouseTracking } from '../terminalMouse'
 import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
+import {
+  DEFAULT_MOUSE_WHEEL_ROWS,
+  TranscriptViewport,
+  clampTranscriptScroll,
+  getTranscriptPageRows,
+  revealTranscriptRange,
+  type TranscriptViewportMetrics,
+} from './TranscriptViewport'
 
 interface AppProps {
   workspacePath: string
@@ -43,6 +59,9 @@ interface AppProps {
   singleShot?: string
   verbose: boolean
   noFlicker: boolean
+  approvalPolicy?: ApprovalPolicy
+  mcpServers?: string[]
+  startupAnimation?: boolean
 }
 
 type StaticTranscriptItem =
@@ -52,13 +71,6 @@ type StaticTranscriptItem =
 type QueuedPrompt = {
   prompt: string
   attachments?: AgentAttachment[]
-}
-
-const THINKING_MODE_ORDER: ThinkingMode[] = ['auto', 'off', 'standard', 'max']
-
-export function getNextThinkingMode(mode: ThinkingMode): ThinkingMode {
-  const index = THINKING_MODE_ORDER.indexOf(mode)
-  return THINKING_MODE_ORDER[(index + 1) % THINKING_MODE_ORDER.length] ?? THINKING_MODE_ORDER[0]
 }
 
 function isMessageRole(role: string): role is Message['role'] {
@@ -126,6 +138,7 @@ function formatTaskToolName(name: string): string {
     case 'multi_edit': return 'multi-edit'
     case 'run_command': return 'shell'
     case 'read_terminal': return 'read terminal'
+    case 'write_terminal': return 'write terminal'
     case 'list_terminals': return 'list terminals'
     case 'kill_terminal': return 'stop terminal'
     default: return name
@@ -135,7 +148,7 @@ function formatTaskToolName(name: string): string {
 function serializeToolArgsForUi(args: Record<string, unknown> | undefined): string | undefined {
   if (!args) return undefined
   const clone: Record<string, unknown> = { ...args }
-  for (const key of ['content', 'old_content', 'new_content', 'old_string', 'new_string']) {
+  for (const key of ['content', 'data', 'old_content', 'new_content', 'old_string', 'new_string']) {
     if (typeof clone[key] === 'string') {
       clone[key] = `<${(clone[key] as string).length} chars>`
     }
@@ -153,7 +166,7 @@ function serializeToolArgsForUi(args: Record<string, unknown> | undefined): stri
   return JSON.stringify(clone)
 }
 
-function turnsToMessages(turns: AgentTurn[]): Message[] {
+export function turnsToMessages(turns: AgentTurn[]): Message[] {
   const resultByToolCallId = new Map<string, NonNullable<AgentTurn['toolResults']>[number]>()
   for (const turn of turns) {
     if (turn.role !== 'tool_result' || !turn.toolResults) continue
@@ -184,6 +197,7 @@ function turnsToMessages(turns: AgentTurn[]): Message[] {
       content: turn.content,
       tools: tools && tools.length > 0 ? tools : undefined,
       changes: changes && changes.length > 0 ? changes : undefined,
+      interrupted: turn.metadata?.interrupted === true,
     }]
   })
 }
@@ -205,107 +219,13 @@ function isFalsyEnv(value: string | undefined): boolean {
 export function shouldUseNoFlicker(
   interactive: boolean,
   singleShot?: string,
-  requested = false,
+  requested = true,
 ): boolean {
   if (!interactive || singleShot) return false
   const forced = normalizeEnvFlag(process.env.TURBOFLUX_NO_FLICKER)
   if (isFalsyEnv(forced)) return false
   if (isTruthyEnv(forced)) return true
   return requested
-}
-
-function estimateWrappedRows(text: string, columns: number): number {
-  const width = Math.max(20, columns - 8)
-  const lines = text.split(/\r?\n/)
-  return lines.reduce((rows, line) => rows + Math.max(1, Math.ceil(Math.max(1, line.length) / width)), 0)
-}
-
-function estimateMessageRows(message: Message, columns: number, diffMaxRows: number): number {
-  let rows = 2 + estimateWrappedRows(message.content || ' ', columns)
-  if (message.tools?.length) rows += Math.min(8, message.tools.length * 2)
-  if (message.changes?.length) {
-    rows += message.changes.reduce((sum, change) => {
-      const hasSnapshots = change.before !== undefined && change.after !== undefined
-      return sum + 1 + (hasSnapshots ? Math.max(1, diffMaxRows) : 1)
-    }, 0)
-  }
-  return rows
-}
-
-export function clipTextToRows(text: string, maxRows: number, columns: number): string {
-  const width = Math.max(20, columns - 8)
-  const lines = text.split(/\r?\n/)
-  const kept: string[] = []
-  let rows = 0
-  let clipped = false
-
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i] ?? ''
-    const cost = Math.max(1, Math.ceil(Math.max(1, line.length) / width))
-    if (kept.length > 0 && rows + cost > maxRows) {
-      clipped = true
-      break
-    }
-    if (kept.length === 0 && cost > maxRows) {
-      kept.unshift(line.slice(Math.max(0, line.length - width * maxRows)))
-      rows = maxRows
-      clipped = true
-      break
-    }
-    kept.unshift(line)
-    rows += cost
-    if (rows >= maxRows) break
-  }
-
-  if (!clipped && kept.length === lines.length) return text
-  return `[... clipped for screen ...]\n${kept.join('\n')}`
-}
-
-export function buildTranscriptSlice(
-  messages: Message[],
-  rowBudget: number,
-  columns: number,
-  offsetFromBottom: number,
-  diffMaxRows = MAX_INLINE_DIFF_RENDER_ROWS,
-): { messages: Message[]; start: number; end: number } {
-  if (messages.length === 0) return { messages: [], start: 0, end: 0 }
-
-  const end = Math.max(1, messages.length - offsetFromBottom)
-  const output: Message[] = []
-  let rows = 0
-  let start = end
-
-  for (let i = end - 1; i >= 0; i--) {
-    const message = messages[i]!
-    const cost = estimateMessageRows(message, columns, diffMaxRows)
-    if (output.length > 0 && rows + cost > rowBudget) break
-
-    if (rows + cost > rowBudget) {
-      output.unshift({
-        ...message,
-        tools: undefined,
-        changes: undefined,
-        content: clipTextToRows(message.content, Math.max(1, rowBudget - 2), columns),
-      })
-      start = i
-      break
-    }
-
-    output.unshift(message)
-    rows += cost
-    start = i
-  }
-
-  return { messages: output, start, end }
-}
-
-export function getNextTranscriptOffsetAfterAppend(
-  currentOffset: number,
-  appendedCount: number,
-  stickToLatest: boolean,
-): number {
-  if (stickToLatest) return 0
-  return Math.max(0, currentOffset + appendedCount)
 }
 
 export function sliceTurnsBeforeNthUserTurn(turns: AgentTurn[], userTurnOrdinal: number): AgentTurn[] {
@@ -346,11 +266,81 @@ function estimateOutputTokensForDisplay(text: string): number {
   return Math.max(1, Math.ceil(trimmed.length / 4))
 }
 
-function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker }: AppProps) {
+function CockpitRoot({ width, height, children }: { width: number; height: number; children: React.ReactNode }) {
+  const theme = useTheme()
+  return (
+    <Box
+      flexDirection="column"
+      paddingX={1}
+      width={width}
+      height={height}
+      overflow="hidden"
+      backgroundColor={theme.background}
+    >
+      {children}
+    </Box>
+  )
+}
+
+function SessionPane({ running, visible, children }: { running: boolean; visible: boolean; children: React.ReactNode }) {
+  const theme = useTheme()
+  return (
+    <Box
+      flexDirection="column"
+      flexBasis={0}
+      flexGrow={1}
+      flexShrink={1}
+      minHeight={0}
+      minWidth={0}
+      backgroundColor={theme.background}
+      overflow="hidden"
+    >
+      <Box flexShrink={0} paddingX={1} backgroundColor={theme.panelRaised} justifyContent="space-between">
+        <Text color={theme.brand} bold>{visible ? 'SESSION' : ' '}</Text>
+        <Text color={running ? theme.brandShimmer : theme.success} bold>{visible ? running ? '● RUNNING' : '● READY' : ' '}</Text>
+      </Box>
+      <Box
+        flexDirection="column"
+        flexBasis={0}
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={0}
+        paddingX={1}
+        overflow="hidden"
+      >
+        {children}
+      </Box>
+    </Box>
+  )
+}
+
+function PromptPlaceholder() {
+  const theme = useTheme()
+  const { columns } = useTerminalSize()
+  return (
+    <Box
+      height={3}
+      width={getSafeFrameWidth(columns, 3)}
+      backgroundColor={theme.promptBackground}
+    />
+  )
+}
+
+function StatusPlaceholder() {
+  const theme = useTheme()
+  const { columns } = useTerminalSize()
+  return <Box height={1} width={getSafeFrameWidth(columns, 3)} backgroundColor={theme.panelRaised} />
+}
+
+function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation = true }: AppProps) {
   const { exit } = useApp()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const terminal = useTerminalSize()
   const noFlickerActive = noFlicker && isInteractive && !singleShot
+  const startupAnimationEnabled = shouldAnimateStartup(isInteractive, singleShot, startupAnimation && noFlickerActive)
+  const startupStartedAtRef = useRef(Date.now())
+  const [startupElapsed, setStartupElapsed] = useState(startupAnimationEnabled ? 0 : STARTUP_ANIMATION_MS)
+  const startupFrame = getStartupAnimationFrame(startupElapsed)
   const [config, setConfig] = useState(initialConfig)
   const [messages, setMessages] = useState<Message[]>([])
   const [staticTranscriptRevision, setStaticTranscriptRevision] = useState(0)
@@ -364,35 +354,54 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [mood, setMood] = useState<MascotMood>('idle')
   const [tokenUsage, setTokenUsage] = useState<TokenUsage>({ source: 'unknown' })
   const [currentMode, setCurrentMode] = useState<'vibe' | 'plan'>('vibe')
-  const [thinkingMode, setThinkingMode] = useState<ThinkingMode>('auto')
-  const [thinkingModeNotice, setThinkingModeNotice] = useState<{ mode: ThinkingMode; changedAt: number } | null>(null)
   const [gitEnabled, setGitEnabled] = useState(false)
   const [modelPresets, setModelPresets] = useState<ModelPreset[]>([])
+  const [modelDiscoveryStatus, setModelDiscoveryStatus] = useState({
+    isRefreshing: false,
+    stale: false,
+    error: undefined as string | undefined,
+  })
+  const modelDiscoveryRequestRef = useRef(0)
   const [lastActivity, setLastActivity] = useState<number>(Date.now())
   const [convListRevision, setConvListRevision] = useState(0)
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
+  const [fcSummary, setFcSummary] = useState(createFastContextUiSummary)
   const [fcActive, setFcActive] = useState(false)
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
+  const [activeObjective, setActiveObjective] = useState<{ prompt: string; startedAt: number } | null>(null)
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
   const [changeSummaries, setChangeSummaries] = useState<ChangeSummary[]>([])
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([])
   const [interruptHint, setInterruptHint] = useState<string | null>(null)
   const [exitHint, setExitHint] = useState<string | null>(null)
   const [pendingAsk, setPendingAsk] = useState<{
+    id: string
     question: string
     options?: string[]
     reason?: string
     command?: string
+    toolName?: string
+    path?: string
   } | null>(null)
   const [askInput, setAskInput] = useState('')
   const { active: activeOverlay, push, pop } = useOverlayStack()
   const { cursor, enter, navigatePrev, navigateNext, clear } = useMessageCursor(messages)
   const [cursorMode, setCursorMode] = useState(false)
-  const [transcriptOffset, setTranscriptOffset] = useState(0)
-  const transcriptOffsetRef = useRef(0)
+  const [scrollRowsFromBottom, setScrollRowsFromBottom] = useState(0)
+  const [transcriptMetrics, setTranscriptMetrics] = useState<TranscriptViewportMetrics>({
+    contentRows: 0,
+    viewportRows: 1,
+    maxScrollRows: 0,
+  })
+  const transcriptMetricsRef = useRef(transcriptMetrics)
+  const selectedMessageRef = useRef<DOMElement>(null)
+  const selectedMessageMetrics = useBoxMetrics(selectedMessageRef)
   const messageIdRef = useRef(0)
   const streamBufferRef = useRef('')
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fcEventBufferRef = useRef<FastContextScanEvent[]>([])
+  const fcFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fcActiveRef = useRef(false)
   const inputRef = useRef('')
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
   const isRunningRef = useRef(false)
@@ -422,17 +431,45 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     workspaceName,
     config: initialConfig,
     conversationPrefix: 'cli',
+    approvalPolicy,
+    connectMcp: Boolean(mcpServers?.length),
+    mcpServers,
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
   const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath))
 
-  useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
-  useEffect(() => { queuedPromptsRef.current = queuedPrompts }, [queuedPrompts])
+  useEffect(() => {
+    if (!startupAnimationEnabled) {
+      setStartupElapsed(STARTUP_ANIMATION_MS)
+      return
+    }
+
+    startupStartedAtRef.current = Date.now()
+    setStartupElapsed(0)
+    const timer = setInterval(() => {
+      const elapsed = Date.now() - startupStartedAtRef.current
+      setStartupElapsed(Math.min(STARTUP_ANIMATION_MS, elapsed))
+      if (elapsed >= STARTUP_ANIMATION_MS) clearInterval(timer)
+    }, 40)
+
+    return () => clearInterval(timer)
+  }, [startupAnimationEnabled])
+
+  const skipStartupAnimation = useCallback(() => {
+    setStartupElapsed(STARTUP_ANIMATION_MS)
+  }, [])
 
   useEffect(() => {
-    setThinkingMode(engine.getThinkingMode())
-  }, [engine])
+    if (!shouldEnableMouseTracking(isInteractive, noFlickerActive)) return
+    process.stdout.write(ENABLE_MOUSE_TRACKING)
+    return () => {
+      process.stdout.write(DISABLE_MOUSE_TRACKING)
+    }
+  }, [isInteractive, noFlickerActive])
+
+  useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
+  useEffect(() => { queuedPromptsRef.current = queuedPrompts }, [queuedPrompts])
 
   const persistConfig = useCallback((nextConfig: TurboFluxConfig) => {
     stateProvider.updateConfig(nextConfig)
@@ -448,15 +485,47 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
   }, [])
 
+  const flushFastContextUi = useCallback(() => {
+    if (fcFlushTimerRef.current) {
+      clearTimeout(fcFlushTimerRef.current)
+      fcFlushTimerRef.current = null
+    }
+    const events = fcEventBufferRef.current
+    if (events.length === 0) return
+    fcEventBufferRef.current = []
+    setFcEvents(current => appendFastContextUiEvents(current, events))
+    setFcSummary(current => reduceFastContextUiSummary(current, events))
+    setLastActivity(Date.now())
+  }, [])
+
+  const queueFastContextUiEvent = useCallback((event: FastContextScanEvent) => {
+    fcEventBufferRef.current.push(event)
+    if (!fcFlushTimerRef.current) {
+      fcFlushTimerRef.current = setTimeout(flushFastContextUi, 80)
+    }
+  }, [flushFastContextUi])
+
+  const discardFastContextUiBuffer = useCallback(() => {
+    if (fcFlushTimerRef.current) {
+      clearTimeout(fcFlushTimerRef.current)
+      fcFlushTimerRef.current = null
+    }
+    fcEventBufferRef.current = []
+  }, [])
+
+  const resetFastContextUi = useCallback(() => {
+    discardFastContextUiBuffer()
+    fcActiveRef.current = false
+    setFcEvents([])
+    setFcSummary(createFastContextUiSummary())
+    setFcActive(false)
+  }, [discardFastContextUiBuffer])
+
   const appendMessages = useCallback((nextMessages: Message[], options?: { forceLatest?: boolean }) => {
     if (nextMessages.length === 0) return
 
     setMessages(msgs => [...msgs, ...nextMessages])
-
-    if (!noFlickerActive) return
-
-    const stickToLatest = options?.forceLatest === true || transcriptOffsetRef.current === 0
-    setTranscriptOffset(offset => getNextTranscriptOffsetAfterAppend(offset, nextMessages.length, stickToLatest))
+    if (noFlickerActive && options?.forceLatest === true) setScrollRowsFromBottom(0)
   }, [noFlickerActive])
 
   const replaceMessages = useCallback((nextMessages: React.SetStateAction<Message[]>) => {
@@ -464,19 +533,24 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setMessages(nextMessages)
   }, [])
 
-  const restoreCliStateFromTurns = useCallback((turns: AgentTurn[], nextInput = '', contextSegments = stateProvider.getContextSegments()) => {
-    engine.restoreFromTurns(turns)
+  const restoreCliStateFromTurns = useCallback((
+    activeTurns: AgentTurn[],
+    nextInput = '',
+    contextSegments: ContextSegment[] = [],
+    contextReservoir: ContextReservoirEntry[] = [],
+    transcriptTurns: AgentTurn[] = activeTurns,
+  ) => {
+    engine.restoreFromTurns(activeTurns)
     engine.setContextSegments(contextSegments)
-    replaceMessages(turnsToMessages(turns))
+    engine.setContextReservoir(contextReservoir)
+    replaceMessages(turnsToMessages(transcriptTurns))
     inputRef.current = nextInput
     setInput(nextInput)
     draftAttachmentsRef.current = []
     setDraftAttachments([])
-    setTranscriptOffset(0)
+    setScrollRowsFromBottom(0)
     setTokenUsage(engine.getContextUsage())
     setGitEnabled(engine.isGitEnabled())
-    setThinkingMode(engine.getThinkingMode())
-    setThinkingModeNotice(null)
     setCurrentTools([])
     setStreamingToolDraft(null)
     setChangeSummaries([])
@@ -484,9 +558,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     streamBufferRef.current = ''
     clearStreamFlushTimer()
     setStreamText('')
-    setFcEvents([])
+    resetFastContextUi()
     setFcActive(false)
     setActiveTask(null)
+    setActiveObjective(null)
     setTerminalSessions([])
     setPendingAsk(null)
     setAskInput('')
@@ -500,7 +575,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     clear()
     setIsRunning(false)
     setMood('idle')
-  }, [engine, stateProvider, clearStreamFlushTimer, clear, replaceMessages])
+  }, [engine, stateProvider, clearStreamFlushTimer, clear, replaceMessages, resetFastContextUi])
 
   const getRewindContextSegments = useCallback((turns: AgentTurn[]) => {
     const boundaryTime = turns.reduce((max, turn) => Math.max(max, turn.timestamp), 0)
@@ -524,20 +599,28 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     convManager.updateConfig(config)
   }, [stateProvider, convManager, config])
 
+  const loadModelPresets = useCallback(async (targetConfig: TurboFluxConfig, force = false) => {
+    const requestId = ++modelDiscoveryRequestRef.current
+    setModelDiscoveryStatus(current => ({ ...current, isRefreshing: true, error: force ? undefined : current.error }))
+    const result = await discoverModelPresets(targetConfig, { force })
+    if (requestId !== modelDiscoveryRequestRef.current) return
+    setModelPresets(result.models)
+    setModelDiscoveryStatus({ isRefreshing: false, stale: result.stale, error: result.error })
+  }, [])
+
   useEffect(() => {
-    let cancelled = false
-    getModelPresets(config.baseUrl)
-      .then(presets => {
-        if (!cancelled) setModelPresets(presets)
-      })
-      .catch(() => {
-        if (!cancelled) setModelPresets([])
-      })
-    return () => { cancelled = true }
-  }, [config.baseUrl])
+    const cached = readCachedModelDiscovery(config, true)
+    if (cached) {
+      setModelPresets(cached.models)
+      setModelDiscoveryStatus({ isRefreshing: cached.stale, stale: cached.stale, error: undefined })
+    }
+    void loadModelPresets(config)
+    return () => { modelDiscoveryRequestRef.current += 1 }
+  }, [config.activeApiConfigId, config.apiKey, config.baseUrl, config.provider, loadModelPresets])
 
   useEffect(() => {
     const unsub = engine.subscribe((event: AgentEventType) => {
+      convManager.recordEvent(event)
       switch (event.type) {
         case 'stream:start':
           setIsRunning(true)
@@ -572,17 +655,25 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           const changesSnapshot = changeSummariesRef.current
           const visibleText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
           if (visibleText || toolsSnapshot.length > 0 || changesSnapshot.length > 0) {
-            appendMessages([{ id: genMsgId(), role: 'assistant', content: visibleText, tools: [...toolsSnapshot], changes: [...changesSnapshot] }])
+            appendMessages([{
+              id: genMsgId(),
+              role: 'assistant',
+              content: visibleText,
+              tools: [...toolsSnapshot],
+              changes: [...changesSnapshot],
+              interrupted: event.interrupted === true,
+            }])
           }
           setStreamText('')
           setCurrentTurnOutputTokens(0)
           setCurrentTools([])
           setChangeSummaries([])
+          setStreamingToolDraft(null)
           setIsRunning(false)
-          setMood('happy')
+          setMood(event.interrupted ? 'idle' : 'happy')
           setTokenUsage(engine.getContextUsage())
           convManager.scheduleSave()
-          setTimeout(() => setMood('idle'), 3000)
+          if (!event.interrupted) setTimeout(() => setMood('idle'), 3000)
           break
         }
         case 'session:complete':
@@ -631,11 +722,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           setLastActivity(Date.now())
           break
         case 'fast_context:event':
-          setFcEvents(prev => [...prev, event.event])
-          setFcActive(true)
-          setLastActivity(Date.now())
+          queueFastContextUiEvent(event.event)
+          if (!fcActiveRef.current) {
+            fcActiveRef.current = true
+            setFcActive(true)
+          }
           break
         case 'fast_context:complete':
+          flushFastContextUi()
+          fcActiveRef.current = false
           setFcActive(false)
           break
         case 'active:task':
@@ -644,12 +739,31 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'terminal:sessions':
           setTerminalSessions(event.sessions)
           break
+        case 'runtime-task:finished': {
+          const sessionId = event.task.metadata?.sessionId
+          if (event.task.kind === 'terminal' && typeof sessionId === 'string') {
+            setTerminalSessions(current => current.map(session => session.id === sessionId
+              ? {
+                  ...session,
+                  status: event.task.status === 'failed' ? 'error' : 'exited',
+                  exitCode: event.task.exitCode,
+                  error: event.task.error,
+                  updatedAt: event.task.updatedAt,
+                }
+              : session))
+          }
+          setLastActivity(Date.now())
+          break
+        }
         case 'ask:user':
           setPendingAsk({
+            id: event.requestId || `ask-${Date.now()}`,
             question: event.question,
             options: event.options,
             reason: event.reason,
             command: event.command,
+            toolName: event.toolName,
+            path: event.path,
           })
           setAskInput('')
           setMood('thinking')
@@ -657,6 +771,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'context:segment_created':
           convManager.scheduleSave()
           setLastActivity(Date.now())
+          break
+        case 'model:protocol':
+          if (event.phase === 'fallback') {
+            appendMessages([{
+              id: genMsgId(),
+              role: 'system',
+              content: `Protocol fallback: ${event.message || 'request format mismatch'} → ${event.url}`,
+            }], { forceLatest: true })
+          }
           break
         case 'error':
           streamBufferRef.current = ''
@@ -676,11 +799,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     })
     return () => {
       clearStreamFlushTimer()
+      discardFastContextUiBuffer()
       unsub()
       convManager.destroy()
       runtime.destroy().catch(() => {})
     }
-  }, [engine, runtime, clearStreamFlushTimer, appendMessages])
+  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer])
 
   const getConversationEntries = useCallback((): ConversationEntry[] => {
     const convs = convManager.list()
@@ -700,54 +824,61 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const transcriptRowBudget = useMemo(() => {
     if (!noFlickerActive) return Number.MAX_SAFE_INTEGER
-    const headerRows = terminal.columns < 60 ? 17 : 14
-    const bottomRows = pendingAsk ? 8 : 3
+    const headerRows = (shouldUseCompactWordmark(terminal.columns, terminal.rows) ? 5 : 9) + (config.apiKey ? 0 : 1)
+    const bottomRows = 5
     return Math.max(4, terminal.rows - headerRows - bottomRows)
-  }, [noFlickerActive, terminal.rows, terminal.columns, pendingAsk])
-  const maxTranscriptOffset = Math.max(0, messages.length - 1)
-  const normalizedTranscriptOffset = noFlickerActive
-    ? Math.min(transcriptOffset, maxTranscriptOffset)
+  }, [noFlickerActive, terminal.rows, terminal.columns, config.apiKey])
+  const normalizedScrollRows = noFlickerActive
+    ? clampTranscriptScroll(scrollRowsFromBottom, transcriptMetrics.maxScrollRows)
     : 0
-  transcriptOffsetRef.current = normalizedTranscriptOffset
-  const transcriptSlice = useMemo(() => {
-    if (!noFlickerActive) return { messages, start: 0, end: messages.length }
-    return buildTranscriptSlice(messages, transcriptRowBudget, terminal.columns, normalizedTranscriptOffset, 0)
-  }, [noFlickerActive, messages, transcriptRowBudget, terminal.columns, normalizedTranscriptOffset])
-  const transcriptEnd = transcriptSlice.end
-  const transcriptStart = transcriptSlice.start
-  const visibleMessages = transcriptSlice.messages
-  const selectedMessageIndex = cursorMode ? cursor?.index : undefined
-  const visibleSelectedIndex = selectedMessageIndex !== undefined &&
-    selectedMessageIndex >= transcriptStart &&
-    selectedMessageIndex < transcriptEnd
-      ? selectedMessageIndex - transcriptStart
-      : undefined
-  const hiddenBefore = transcriptStart
-  const hiddenAfter = messages.length - transcriptEnd
-  const pageStep = Math.max(1, Math.floor(Math.max(visibleMessages.length, 4) / 2))
-  const isViewingHistory = normalizedTranscriptOffset > 0
+  const pageStep = getTranscriptPageRows(
+    transcriptMetrics.viewportRows > 1 ? transcriptMetrics.viewportRows : transcriptRowBudget,
+  )
+  const isViewingHistory = normalizedScrollRows > 0
+  const selectedMessageId = cursorMode && cursor ? messages[cursor.index]?.id : undefined
+  const cockpit = resolveCockpitLayout(terminal.columns)
+
+  const handleTranscriptMetrics = useCallback((metrics: TranscriptViewportMetrics) => {
+    transcriptMetricsRef.current = metrics
+    setTranscriptMetrics(previous => {
+      if (previous.contentRows === metrics.contentRows &&
+        previous.viewportRows === metrics.viewportRows &&
+        previous.maxScrollRows === metrics.maxScrollRows) {
+        return previous
+      }
+      return metrics
+    })
+  }, [])
+
+  const scrollTranscriptBy = useCallback((delta: number) => {
+    setScrollRowsFromBottom(rows => clampTranscriptScroll(
+      rows + delta,
+      transcriptMetricsRef.current.maxScrollRows,
+    ))
+  }, [])
 
   useEffect(() => {
-    setTranscriptOffset(offset => Math.min(offset, maxTranscriptOffset))
-  }, [maxTranscriptOffset])
+    setScrollRowsFromBottom(rows => clampTranscriptScroll(rows, transcriptMetrics.maxScrollRows))
+  }, [transcriptMetrics.maxScrollRows])
 
   useEffect(() => {
-    if (!noFlickerActive || !cursorMode || !cursor) return
-    if (cursor.index < transcriptStart) {
-      setTranscriptOffset(Math.max(0, messages.length - cursor.index - 1))
-      return
-    }
-
-    if (cursor.index >= transcriptEnd) {
-      setTranscriptOffset(Math.max(0, messages.length - cursor.index - 1))
-    }
+    if (!noFlickerActive || !cursorMode || !cursor || !selectedMessageMetrics.hasMeasured) return
+    setScrollRowsFromBottom(rows => revealTranscriptRange(
+      rows,
+      transcriptMetrics.maxScrollRows,
+      transcriptMetrics.viewportRows,
+      selectedMessageMetrics.top,
+      selectedMessageMetrics.height,
+    ))
   }, [
     noFlickerActive,
     cursorMode,
     cursor?.index,
-    messages.length,
-    transcriptStart,
-    transcriptEnd,
+    selectedMessageMetrics.hasMeasured,
+    selectedMessageMetrics.top,
+    selectedMessageMetrics.height,
+    transcriptMetrics.maxScrollRows,
+    transcriptMetrics.viewportRows,
   ])
 
   const runNextQueuedPrompt = useCallback(() => {
@@ -769,12 +900,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
 
     const userMessageId = genMsgId()
+    setActiveObjective({ prompt, startedAt: Date.now() })
     activePromptRef.current = { prompt, attachments, messageId: userMessageId, responseStarted: false, priorTurns: [...engine.getSession().turns] }
     abortingRef.current = false
     abortRestoredPromptRef.current = false
     appendMessages([{ id: userMessageId, role: 'user', content: prompt }])
     if (!config.apiKey) {
       activePromptRef.current = null
+      setActiveObjective(null)
       appendMessages([{ id: genMsgId(), role: 'system', content: 'No model provider is configured yet. Exit and run `turboflux setup`, or set `/config apiKey <key>` manually.' }])
       if (singleShot) exit()
       return
@@ -787,7 +920,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setStreamText('')
     setCurrentTools([])
     setStreamingToolDraft(null)
-    setFcEvents([])
+    resetFastContextUi()
     setFcActive(false)
     setActiveTask(null)
     setChangeSummaries([])
@@ -808,22 +941,39 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         }
       }
     } catch (e: any) {
+      const bufferedStreamText = streamBufferRef.current
+      const visibleInterruptedText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
+      const toolsSnapshot = currentToolsRef.current
+      const changesSnapshot = changeSummariesRef.current
+      const interrupted = abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))
       streamBufferRef.current = ''
       clearStreamFlushTimer()
       setStreamText('')
       setStreamingToolDraft(null)
       if (abortRestoredPromptRef.current) {
         // The prompt is already back in the editor; avoid adding a synthetic transcript row.
-      } else if (abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))) {
+      } else if (interrupted && (visibleInterruptedText || toolsSnapshot.length > 0 || changesSnapshot.length > 0)) {
+        appendMessages([{
+          id: genMsgId(),
+          role: 'assistant',
+          content: visibleInterruptedText,
+          tools: [...toolsSnapshot],
+          changes: [...changesSnapshot],
+          interrupted: true,
+        }])
+      } else if (interrupted) {
         appendMessages([{ id: genMsgId(), role: 'system', content: 'Interrupted.' }])
       } else {
         appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${e.message}` }])
       }
+      setCurrentTools([])
+      setChangeSummaries([])
       setIsRunning(false)
       setMood(abortingRef.current ? 'idle' : 'error')
       if (!abortingRef.current) setTimeout(() => setMood('idle'), 4000)
     } finally {
       activePromptRef.current = null
+      setActiveObjective(null)
       abortingRef.current = false
       abortRestoredPromptRef.current = false
       isRunningRef.current = false
@@ -831,7 +981,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       setTimeout(runNextQueuedPrompt, 0)
     }
     if (singleShot) exit()
-  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId])
+  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, resetFastContextUi])
 
   useEffect(() => {
     runPromptRef.current = runPrompt
@@ -849,17 +999,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setLastActivity(Date.now())
   }, [appendMessages, engine, genMsgId])
 
-  const isPermissionAsk = pendingAsk?.options?.includes('allow-once') ?? false
-
-  const switchThinkingMode = useCallback((mode: ThinkingMode, showNotice = true) => {
-    engine.setThinkingMode(mode)
-    setThinkingMode(mode)
-    if (showNotice) setThinkingModeNotice({ mode, changedAt: Date.now() })
+  const submitPermissionDecision = useCallback((requestId: string, decision: PermissionDecision) => {
+    engine.submitAskUserResponse(decision)
+    setPendingAsk(current => current?.id === requestId ? null : current)
+    setAskInput('')
+    setIsRunning(true)
+    setMood('thinking')
+    setLastActivity(Date.now())
   }, [engine])
 
-  const cycleThinkingMode = useCallback(() => {
-    switchThinkingMode(getNextThinkingMode(engine.getThinkingMode()))
-  }, [engine, switchThinkingMode])
+  const isPermissionAsk = pendingAsk?.options?.includes('allow-once') ?? false
 
   const attachClipboardImage = useCallback((options?: { silentNoImage?: boolean }) => {
     const nextIndex = draftAttachmentsRef.current.length + 1
@@ -917,6 +1066,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const activePrompt = activePromptRef.current
       abortingRef.current = true
       engine.abort()
+      setPendingAsk(null)
+      setAskInput('')
       queuedPromptsRef.current = []
       setQueuedPrompts([])
       setInterruptHint('Interrupted current agent run.')
@@ -981,6 +1132,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         push('modelPicker')
         return
       }
+      if (trimmed === '/effort') {
+        const capability = getModelReasoningCapabilities(config.model, config.provider, config.modelCapabilities)
+        const adjustable = capability && capability.control !== 'fixed'
+          && (capability.efforts.length > 0 || capability.supportsToggle || capability.control === 'budget')
+        if (adjustable) {
+          push('effortPicker')
+          return
+        }
+      }
       if (trimmed === '/resume') {
         push('history')
         return
@@ -1001,11 +1161,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const result = commandRegistry.execute(trimmed, ctx)
       setTokenUsage(engine.getContextUsage())
       setGitEnabled(engine.isGitEnabled())
-      const nextThinkingMode = engine.getThinkingMode()
-      if (nextThinkingMode !== thinkingMode) {
-        setThinkingMode(nextThinkingMode)
-        setThinkingModeNotice({ mode: nextThinkingMode, changedAt: Date.now() })
-      }
       switch (result.type) {
         case 'text':
           appendMessages([{ id: genMsgId(), role: 'system', content: result.text! }])
@@ -1023,27 +1178,63 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
     }
     runPrompt(resolved.prompt, resolved.attachments)
-  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, thinkingMode, workspacePath])
+  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, workspacePath])
 
   useInput((ch, key) => {
+    if (!startupFrame.complete) {
+      skipStartupAnimation()
+      return
+    }
     if (key.ctrl && ch === 'c') {
       handleInterrupt()
       return
     }
     if (activeOverlay !== null) return // overlays handle their own keys
 
-    if ((key.meta && ch.toLowerCase() === 't') || (key.shift && key.tab)) {
-      cycleThinkingMode()
-      return
+    if (noFlickerActive && !cursorMode && !pendingAsk) {
+      const mouseEvents = parseTerminalMouseWheel(ch)
+      if (mouseEvents.length > 0) {
+        const compactHeader = shouldUseCompactWordmark(terminal.columns, terminal.rows)
+        const transcriptTop = compactHeader ? 5 : 9
+        const transcriptBottom = terminal.rows - 5
+        const transcriptLeft = cockpit.showWorkRail ? cockpit.workWidth + 1 : 1
+        const transcriptRight = terminal.columns - (cockpit.showTaskRail ? cockpit.taskWidth : 0) - 1
+        const delta = mouseEvents.reduce((total, event) => {
+          const insideTranscript = event.x >= transcriptLeft
+            && event.x <= transcriptRight
+            && event.y >= transcriptTop
+            && event.y <= transcriptBottom
+          if (!insideTranscript) return total
+          return total + (event.direction === 'up' ? DEFAULT_MOUSE_WHEEL_ROWS : -DEFAULT_MOUSE_WHEEL_ROWS)
+        }, 0)
+        if (delta !== 0) scrollTranscriptBy(delta)
+        return
+      }
     }
 
     if (noFlickerActive && !cursorMode) {
       if (key.pageUp || (key.ctrl && key.upArrow)) {
-        setTranscriptOffset(offset => Math.min(maxTranscriptOffset, offset + pageStep))
+        scrollTranscriptBy(pageStep)
         return
       }
       if (key.pageDown || (key.ctrl && key.downArrow)) {
-        setTranscriptOffset(offset => Math.max(0, offset - pageStep))
+        scrollTranscriptBy(-pageStep)
+        return
+      }
+      if (key.shift && key.upArrow) {
+        scrollTranscriptBy(1)
+        return
+      }
+      if (key.shift && key.downArrow) {
+        scrollTranscriptBy(-1)
+        return
+      }
+      if (key.ctrl && ch.toLowerCase() === 'u') {
+        scrollTranscriptBy(pageStep)
+        return
+      }
+      if (key.ctrl && ch.toLowerCase() === 'd') {
+        scrollTranscriptBy(-pageStep)
         return
       }
     }
@@ -1070,22 +1261,20 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, { isActive: isInteractive })
 
   const visibleStreamText = stripTextToolCallMarkup(streamText, { stripIncomplete: true })
-  const streamTextForDisplay = noFlickerActive
-    ? clipTextToRows(visibleStreamText, Math.max(2, Math.floor(transcriptRowBudget / 2)), terminal.columns)
-    : visibleStreamText
+  const streamTextForDisplay = visibleStreamText
 
   const runningNode = isRunning ? (
     <Box flexDirection="column" marginBottom={1}>
-      {(fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} isActive={fcActive} />}
-      {activeTask && <TaskProgressLine task={activeTask} />}
+      {!noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} summary={fcSummary} isActive={fcActive} />}
+      {!noFlickerActive && activeTask && <TaskProgressLine task={activeTask} />}
       <ActiveWorkPanel
-        tools={currentTools}
-        draft={streamingToolDraft}
+        tools={noFlickerActive ? [] : currentTools}
+        draft={noFlickerActive ? null : streamingToolDraft}
         streamText={streamTextForDisplay}
         outputTokens={currentTurnOutputTokens}
         lastActivity={lastActivity}
         verbose={verbose}
-        idleLabel={!visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
+        idleLabel={!noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
       />
     </Box>
   ) : null
@@ -1094,10 +1283,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <Box flexDirection="column" marginBottom={1}>
       {isPermissionAsk ? (
         <PermissionDialog
-          toolName={pendingAsk.command ? 'run_command' : 'tool'}
+          key={pendingAsk.id}
+          toolName={pendingAsk.toolName || (pendingAsk.command ? 'run_command' : 'tool')}
           description={pendingAsk.reason || pendingAsk.question}
           command={pendingAsk.command}
-          onDecision={(decision: PermissionDecision) => submitAskResponse(decision)}
+          path={pendingAsk.path}
+          onDecision={(decision: PermissionDecision) => submitPermissionDecision(pendingAsk.id, decision)}
         />
       ) : (
         <Box flexDirection="column" borderStyle="round" paddingX={1} marginY={1}>
@@ -1121,12 +1312,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     const targetMessage = messages[messageIndex]
     if (!targetMessage || targetMessage.role !== 'user') return
 
-    const currentTurns = engine.getSession().turns
+    const currentTurns = engine.getFullConversationTurns()
     const engineUserOrdinal = getEngineUserOrdinalForUiMessage(messages, currentTurns, messageIndex)
     const truncatedTurns = sliceTurnsBeforeNthUserTurn(currentTurns, engineUserOrdinal)
 
     pop()
-    restoreCliStateFromTurns(truncatedTurns, targetMessage.content, getRewindContextSegments(truncatedTurns))
+    restoreCliStateFromTurns(truncatedTurns, targetMessage.content, getRewindContextSegments(truncatedTurns), [], truncatedTurns)
     convManager.scheduleSave()
   }, [messages, engine, pop, restoreCliStateFromTurns, getRewindContextSegments, convManager])
 
@@ -1138,7 +1329,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         pop()
         const conv = convManager.switchTo(id)
         if (conv) {
-          restoreCliStateFromTurns(conv.turns, '', conv.contextSegments ?? [])
+          restoreCliStateFromTurns(
+            conv.activeTurns ?? conv.turns,
+            '',
+            conv.contextSegments ?? [],
+            conv.contextReservoir ?? [],
+            conv.turns,
+          )
         }
       }}
       onDelete={(id) => {
@@ -1161,6 +1358,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <ModelPicker
       currentModel={config.model}
       models={modelPresets}
+      isRefreshing={modelDiscoveryStatus.isRefreshing}
+      stale={modelDiscoveryStatus.stale}
+      error={modelDiscoveryStatus.error}
+      onRefresh={() => { void loadModelPresets(config, true) }}
       onSelect={(preset) => {
         pop()
         const newConfig = applyPreset(config, preset)
@@ -1171,7 +1372,38 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     />
   ) : null
 
-  const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay
+  const effortCapability = getModelReasoningCapabilities(config.model, config.provider, config.modelCapabilities)
+  const effortOverlay = activeOverlay === 'effortPicker' && effortCapability ? (
+    <EffortPicker
+      model={config.model}
+      capability={effortCapability}
+      current={config.reasoning}
+      onSelect={(selection: EffortSelection) => {
+        pop()
+        let newConfig = config
+        if (selection.type === 'effort') {
+          newConfig = setConfigValue(newConfig, 'reasoningEnabled', 'on')
+          newConfig = setConfigValue(newConfig, 'reasoningEffort', selection.effort)
+        } else if (selection.type === 'toggle') {
+          newConfig = setConfigValue(newConfig, 'reasoningEnabled', selection.enabled ? 'on' : 'off')
+        } else {
+          newConfig = setConfigValue(newConfig, 'reasoningEnabled', 'on')
+          newConfig = setConfigValue(newConfig, 'reasoningBudgetTokens', String(selection.budgetTokens))
+        }
+        persistConfig(newConfig)
+        const value = formatNativeReasoningSetting(
+          newConfig.model,
+          newConfig.reasoning,
+          newConfig.provider,
+          newConfig.modelCapabilities,
+        )
+        appendMessages([{ id: genMsgId(), role: 'system', content: `Reasoning effort set to ${value || 'provider default'}` }])
+      }}
+      onCancel={() => pop()}
+    />
+  ) : null
+
+  const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay ?? effortOverlay
   const showPrompt = !singleShot && activeOverlay === null && !cursorMode && !pendingAsk
   const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
@@ -1183,12 +1415,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     <Box flexDirection="column" marginBottom={1}>
       <Text dimColor>{`Selected message ${cursor!.index + 1}/${messages.length}`}</Text>
       <MessageList
-        messages={[{
-          ...cursorPreviewMessage,
-          content: clipTextToRows(cursorPreviewMessage.content, 8, terminal.columns),
-          tools: undefined,
-          changes: undefined,
-        }]}
+        messages={[cursorPreviewMessage]}
         verbose={verbose}
         diffMaxRows={0}
         selectedIndex={0}
@@ -1217,62 +1444,113 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       />
     </Box>
   ) : null
-  const transcriptHint = noFlickerActive && activeOverlay === null && (hiddenBefore > 0 || hiddenAfter > 0) ? (
+  const transcriptHint = noFlickerActive && activeOverlay === null && isViewingHistory ? (
     <Box flexShrink={0}>
       <Text dimColor>
-        {hiddenAfter > 0
-          ? `History view - ${hiddenBefore} earlier, ${hiddenAfter} newer - PgDn for latest`
-          : `${hiddenBefore} earlier messages hidden - PgUp/PgDn or Ctrl+Up/Down to scroll`}
+        {`HISTORY  ${normalizedScrollRows} rows below  PgDn: latest`}
       </Text>
     </Box>
   ) : null
-  const dynamicMessages = visibleMessages
-  const hasTranscriptContent = dynamicMessages.length > 0 || Boolean(runningNode) || Boolean(transcriptHint) // kept for potential diagnostics
   const transcriptNode = (
-    <>
+    <Box
+      flexDirection="column"
+      flexBasis={0}
+      flexGrow={1}
+      flexShrink={1}
+      minHeight={0}
+      overflow="hidden"
+    >
       {transcriptHint}
-      <MessageList
-        messages={dynamicMessages}
-        verbose={verbose}
-        diffMaxRows={noFlickerActive ? 0 : MAX_INLINE_DIFF_RENDER_ROWS}
-        selectedIndex={visibleSelectedIndex}
-      />
-      {runningNode}
-    </>
+      <TranscriptViewport
+        scrollRowsFromBottom={normalizedScrollRows}
+        onScrollRowsChange={setScrollRowsFromBottom}
+        onMetricsChange={handleTranscriptMetrics}
+      >
+        <MessageList
+          messages={messages}
+          verbose={verbose}
+          diffMaxRows={0}
+          selectedMessageId={selectedMessageId}
+          selectedMessageRef={cursorMode ? selectedMessageRef : undefined}
+        />
+        {runningNode}
+      </TranscriptViewport>
+    </Box>
   )
   const staticTranscriptItems = useMemo<StaticTranscriptItem[]>(() => [
     { kind: 'header', id: 'startup-header' },
     ...messages.map(message => ({ kind: 'message' as const, id: message.id, message })),
   ], [messages])
+  const mcpCount = mcpClient.getAllConnections().filter(connection => connection.status === 'connected').length
+  const activeTerminalCount = terminalSessions.filter(session => session.status === 'running' || session.status === 'starting').length
 
   if (noFlickerActive) {
     return (
       <ThemeProvider>
-        <Box flexDirection="column" paddingX={1} width={getSafeViewportWidth(terminal.columns)} height={terminal.rows} overflow="hidden">
+        <CockpitRoot width={getSafeViewportWidth(terminal.columns)} height={terminal.rows}>
           <Box flexShrink={0}>
             <Header
-              workspaceName={workspaceName}
-              model={config.model}
+              workspacePath={workspacePath}
               mood={mood}
               hasApiKey={!!config.apiKey}
+              logoReveal={startupFrame.logoReveal}
+              showVersion={startupFrame.showVersion}
+              showWorkspace={startupFrame.showWorkspace}
             />
           </Box>
 
-          <Box flexDirection="column" flexGrow={1} overflow="hidden">
-            <Box flexDirection="column" flexShrink={1} overflow="hidden">
-              {overlayNode ?? transcriptNode}
+          <Box flexDirection="column" flexBasis={0} flexGrow={1} minHeight={0} overflow="hidden">
+            <Box flexDirection="row" flexBasis={0} flexShrink={1} flexGrow={1} minHeight={0} overflow="hidden">
+              {cockpit.showWorkRail && (
+                <WorkRail
+                  width={cockpit.workWidth}
+                  isRunning={isRunning}
+                  tools={currentTools}
+                  draft={streamingToolDraft}
+                  fastContextSummary={fcSummary}
+                  fastContextActive={fcActive}
+                  terminals={terminalSessions}
+                  mcpCount={mcpCount}
+                  visible={startupFrame.showRails}
+                />
+              )}
+              <SessionPane running={isRunning} visible={startupFrame.showSession}>
+                {overlayNode ?? (
+                  <Box flexDirection="column" flexBasis={0} flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+                    {transcriptNode}
+                    {pendingAskNode}
+                  </Box>
+                )}
+              </SessionPane>
+              {cockpit.showTaskRail && (
+                <TaskRail
+                  width={cockpit.taskWidth}
+                  task={activeTask}
+                  objective={activeObjective?.prompt}
+                  objectiveStartedAt={activeObjective?.startedAt}
+                  isRunning={isRunning}
+                  visible={startupFrame.showRails}
+                />
+              )}
             </Box>
             <Box flexDirection="column" flexShrink={0}>
-              {pendingAskNode}
               {cursorHint}
-              {promptNode}
-              <TerminalSessionsFooter sessions={terminalSessions} />
-              <ThinkingModeRail notice={thinkingModeNotice} onDone={() => setThinkingModeNotice(null)} />
-              <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} thinkingMode={thinkingMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
-              <AgentActivityLine active={isRunning} />
+              <AgentActivityLine active={isRunning || startupFrame.shimmerActive} persistent />
+              {startupFrame.showPrompt ? promptNode : showPrompt ? <PromptPlaceholder /> : null}
+              {startupFrame.showStatus ? (
+                <StatusLine
+                  config={config}
+                  tokenUsage={tokenUsage}
+                  mode={currentMode}
+                  viewingHistory={isViewingHistory}
+                  gitEnabled={gitEnabled}
+                  mcpCount={mcpCount}
+                  terminalCount={activeTerminalCount}
+                />
+              ) : <StatusPlaceholder />}
             </Box>
           </Box>
-        </Box>
+        </CockpitRoot>
       </ThemeProvider>
     )
   }
@@ -1285,8 +1563,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             ? (
               <Box key={item.id} flexDirection="column" paddingX={1}>
                 <Header
-                  workspaceName={workspaceName}
-                  model={config.model}
+                  workspacePath={workspacePath}
                   mood="idle"
                   hasApiKey={!!config.apiKey}
                 />
@@ -1319,15 +1596,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {/* Model picker overlay */}
         {modelOverlay}
 
+        {/* Effort picker overlay */}
+        {effortOverlay}
+
         {/* Input area */}
         {cursorHint}
         {cursorPreviewNode}
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
-        <ThinkingModeRail notice={thinkingModeNotice} onDone={() => setThinkingModeNotice(null)} />
-
         {/* Status line at bottom */}
-        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} thinkingMode={thinkingMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
+        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
         <AgentActivityLine active={isRunning} />
       </Box>
     </ThemeProvider>
@@ -1340,6 +1618,9 @@ export function startInkApp(options: {
   singleShot?: string
   verbose: boolean
   noFlicker?: boolean
+  approvalPolicy?: ApprovalPolicy
+  mcpServers?: string[]
+  startupAnimation?: boolean
 }) {
   const workspaceName = options.workspacePath.split(/[\\/]/).pop() || 'workspace'
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -1352,6 +1633,9 @@ export function startInkApp(options: {
       singleShot={options.singleShot}
       verbose={options.verbose}
       noFlicker={noFlicker}
+      approvalPolicy={options.approvalPolicy}
+      mcpServers={options.mcpServers}
+      startupAnimation={options.startupAnimation}
     />,
     {
       maxFps: noFlicker ? 24 : 18,

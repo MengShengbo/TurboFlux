@@ -21,6 +21,7 @@ const DENY_COMMAND_PATTERNS: CommandPattern[] = [
 
 const ASK_COMMAND_PATTERNS: CommandPattern[] = [
   { pattern: /\bgit\s+push\s+.*--force/, verdict: 'ask', reason: 'High-risk: force push may overwrite remote history' },
+  { pattern: /\bgit\s+push\b/, verdict: 'ask', reason: 'External action: pushes local changes to a remote repository' },
   { pattern: /\bgit\s+reset\s+--hard/, verdict: 'ask', reason: 'High-risk: discards uncommitted changes' },
   { pattern: /\bgit\s+clean\s+-[a-z]*f/, verdict: 'ask', reason: 'High-risk: removes untracked files' },
   { pattern: /\bchmod\s+-R\s+777/, verdict: 'ask', reason: 'High-risk: world-writable permissions' },
@@ -29,7 +30,16 @@ const ASK_COMMAND_PATTERNS: CommandPattern[] = [
   { pattern: /\bTRUNCATE\s+TABLE/i, verdict: 'ask', reason: 'High-risk: truncates table data' },
   { pattern: /\bnpm\s+publish\b/, verdict: 'ask', reason: 'High-risk: publishes package to registry' },
   { pattern: /\bRemove-Item\s+.*-Recurse/i, verdict: 'ask', reason: 'High-risk: recursive deletion (PowerShell)' },
+  { pattern: /\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b/i, verdict: 'ask', reason: 'External action: sends a request over the network' },
+  { pattern: /\b(?:ssh|scp|sftp|rsync)\b/i, verdict: 'ask', reason: 'External action: connects to a remote system' },
 ]
+
+const SESSION_GRANT_GROUPS = new Map<string, string>([
+  ['write_file', 'file-write'],
+  ['replace_file', 'file-write'],
+  ['edit_file', 'file-write'],
+  ['multi_edit', 'file-write'],
+])
 
 // ─── Permission Pipeline ────────────────────────────────────────────────────
 
@@ -37,10 +47,14 @@ export class PermissionPipeline {
   private rules: PermissionRule[] = []
   private sessionGrants = new Map<string, number>()
 
-  constructor(private approvalPolicy: ApprovalPolicy = 'auto') {}
+  constructor(private approvalPolicy: ApprovalPolicy = 'agent') {}
 
   setApprovalPolicy(policy: ApprovalPolicy): void {
     this.approvalPolicy = policy
+  }
+
+  getApprovalPolicy(): ApprovalPolicy {
+    return this.approvalPolicy
   }
 
   check(toolName: string, args: Record<string, unknown>): PermissionCheckResult {
@@ -51,6 +65,10 @@ export class PermissionPipeline {
 
     if (this.hasSessionGrant(toolName, args)) {
       return { verdict: 'allow', reason: 'Previously approved this session' }
+    }
+
+    if (toolName.includes('__') && this.approvalPolicy !== 'full') {
+      return { verdict: 'ask', reason: 'MCP tools require explicit approval before sharing data or taking action' }
     }
 
     if (toolName === 'run_command') {
@@ -65,14 +83,19 @@ export class PermissionPipeline {
       }
     }
 
-    if (this.approvalPolicy === 'request' && this.requiresApproval(toolName)) {
-      return { verdict: 'ask', reason: 'Approval policy: request before write or execution tools' }
+    if (this.approvalPolicy === 'ask' && this.requiresApproval(toolName)) {
+      return { verdict: 'ask', reason: 'Request approval mode: confirm file changes, commands, and external actions' }
     }
 
     return { verdict: 'allow' }
   }
 
   grantSession(toolName: string, argsFingerprint: string): void {
+    const group = SESSION_GRANT_GROUPS.get(toolName)
+    if (group) {
+      this.sessionGrants.set(`group:${group}`, Date.now())
+      return
+    }
     this.sessionGrants.set(`${toolName}:${argsFingerprint}`, Date.now())
   }
 
@@ -120,6 +143,7 @@ export class PermissionPipeline {
   }
 
   private requiresApproval(toolName: string): boolean {
+    if (toolName.includes('__')) return true
     return [
       'write_file',
       'replace_file',
@@ -129,17 +153,17 @@ export class PermissionPipeline {
       'remember',
       'forget',
       'run_command',
+      'write_terminal',
       'kill_terminal',
-      'create_task',
-      'create_tasks',
-      'update_task',
-      'add_task_dependency',
-      'remove_task_dependency',
-      'create_checkpoint',
+      'cancel_agent',
+      'restore_checkpoint',
+      'prune_checkpoints',
     ].includes(toolName)
   }
 
   private hasSessionGrant(toolName: string, args: Record<string, unknown>): boolean {
+    const group = SESSION_GRANT_GROUPS.get(toolName)
+    if (group && this.sessionGrants.has(`group:${group}`)) return true
     const fingerprint = this.computeFingerprint(toolName, args)
     return this.sessionGrants.has(`${toolName}:${fingerprint}`)
   }

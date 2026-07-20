@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/assets/turboflux-mark.svg" width="112" alt="TurboFlux logo" />
-</p>
-
 <h1 align="center">TurboFlux CLI</h1>
 
 <p align="center">TurboFlux CLI 是一个开源的终端 AI Coding Agent。</p>
@@ -47,13 +43,14 @@ npm install -g .
 turboflux setup
 ```
 
-TurboFlux 支持 OpenAI、Anthropic、OpenRouter、DeepSeek 和自定义 OpenAI-compatible API。配置保存在本机 `~/.turboflux/`。
+TurboFlux 支持 OpenAI、Anthropic、DeepSeek、Kimi、GLM、OpenRouter 和自定义 OpenAI-compatible API。配置保存在 `~/.turboflux/config.json`，API Key 单独保存在 `~/.turboflux/credentials.json`。
 
 ```bash
 turboflux setup api          # API 与模型
 turboflux setup fastcontext  # FastContext 单独使用的模型
 turboflux setup language     # 界面与输出语言
 turboflux setup persona      # 输出风格
+turboflux setup approval     # 工具审批策略
 turboflux setup show         # 查看当前配置
 ```
 
@@ -68,20 +65,27 @@ turboflux /path/to/project
 
 # 执行一次任务后退出
 turboflux /path/to/project --command "检查登录流程并修复问题"
+
+# 临时调整本次会话的审批策略
+turboflux /path/to/project --approval-policy agent
 ```
 
 TurboFlux 可以搜索和阅读代码、编辑文件、运行命令、启动后台终端、查看 diff、管理任务，并在完成后继续验证结果。
 
 会话会自动保存。使用 `/resume` 恢复历史会话，或在输入框中连续按两次 `Esc` 回到之前的某条消息。
 
+`/model` 会读取当前 API Key 可用的模型，并显示上下文、输出上限和主要能力；无法取得模型上限时使用 200K 默认上下文，仍可通过 `/config contextWindow` 自定义。
+
 ## Agents
 
 TurboFlux 有两种工作模式：
 
 - **vibe**：默认模式，直接完成检索、修改和验证。
-- **plan**：先分析并给出计划，确认后执行。
+- **plan**：只读分析并制定计划；切换到 `/vibe` 后执行修改。
 
-在会话中使用 `/vibe` 和 `/plan` 切换，也可以用 `/thinking` 调整模型的推理强度。
+在会话中使用 `/vibe` 和 `/plan` 切换。输入 `/effort` 可直接选择当前模型原生支持的推理档位，也可以使用 `/effort high` 等命令快速调整。
+
+审批策略分为 `ask`（写文件和执行命令前询问）、`agent`（低风险操作自动继续，检测到风险时询问）和 `full`（完全访问；灾难性命令仍会阻止）。
 
 内置子代理：
 
@@ -132,7 +136,8 @@ TurboFlux 会根据模型返回的 token 用量管理长会话：
 | `/model` | 选择或切换模型 |
 | `/plan` | 切换到计划模式 |
 | `/vibe` | 切换到自主执行模式 |
-| `/thinking` | 设置推理模式 |
+| `/effort` | 调整当前模型的原生推理强度 |
+| `/approval` | 设置工具审批策略 |
 | `/context` | 查看上下文用量 |
 | `/compact` | 压缩当前会话 |
 | `/resume` | 恢复历史会话 |
@@ -141,7 +146,7 @@ TurboFlux 会根据模型返回的 token 用量管理长会话：
 | `/skills` | 查看已加载的 Skills |
 
 > [!NOTE]
-> Git 仓库会默认启用 Git 集成。显式 checkpoint 会执行 `git add -A` 和 `git commit`，但不会 push；使用 `/git off` 可以关闭当前会话的 Git 集成。
+> 文件修改默认保存到本地历史，不创建 Git 提交。在 Git 仓库中使用 `/git on` 后，checkpoint 才会提交本轮 Agent 触碰的文件；不会自动 push。
 
 ## Skills 与 MCP
 
@@ -171,6 +176,13 @@ MCP 配置支持项目级和全局级文件：
     }
   }
 }
+```
+
+MCP 默认不启动，需要在启动 TurboFlux 时显式指定：
+
+```bash
+turboflux . --mcp all
+turboflux . --mcp server-name
 ```
 
 ## 开发

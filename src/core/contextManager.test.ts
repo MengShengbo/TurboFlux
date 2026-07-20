@@ -53,7 +53,8 @@ describe('ContextManager', () => {
       expect(Array.isArray(content)).toBe(true)
       expect(content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('[Image #1]') })
       expect(content[0]?.text).toContain('<attachments>')
-      expect(content[0]?.text).toContain(imagePath)
+      expect(content[0]?.text).not.toContain(imagePath)
+      expect(content[0]?.text).toContain('local_path_redacted="true"')
       expect(content[1]).toMatchObject({ type: 'image_url' })
       expect(content[1]?.image_url.url).toMatch(/^data:image\/png;base64,/)
     } finally {
@@ -90,7 +91,8 @@ describe('ContextManager', () => {
       expect(Array.isArray(content)).toBe(true)
       expect(content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('[Image #1]') })
       expect(content[0]?.text).toContain('<attachments>')
-      expect(content[0]?.text).toContain(imagePath)
+      expect(content[0]?.text).not.toContain(imagePath)
+      expect(content[0]?.text).toContain('local_path_redacted="true"')
       expect(content[1]).toMatchObject({
         type: 'image',
         source: { type: 'base64', media_type: 'image/png' },

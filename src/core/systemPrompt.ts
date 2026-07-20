@@ -1,4 +1,4 @@
-import type { AgentMode, ResolvedThinkingMode } from '../shared/agentTypes'
+import type { AgentMode } from '../shared/agentTypes'
 import {
   buildVoiceSection,
   buildVoiceAdapterSection,
@@ -30,7 +30,6 @@ interface SystemPromptOptions {
   codemapSummary?: string
   workspaceMemory?: string
   gitStatus?: string
-  thinkingMode?: ResolvedThinkingMode
   enabledSkills?: Array<{
     id: string
     name: string
@@ -107,7 +106,7 @@ No write operations before approval.
 - Start narrow when anchors are clear; broaden when first-pass searches miss. Empty search results are not proof the code does not exist.
 - Respect user-specified depth. For "quick", "brief", or "rough" requests, use the smallest useful evidence set and state limits. For "deep", "thorough", or implementation work, expand step by step as needed.
 - Explore code like Claude Code: for simple directed searches, use search_content/search_files/search_symbols directly; for open-ended feature/page/component/style/text/entry-point questions or broad bug localization, use explore_code. Do not ask the user for a path until the targeted tools or explore_code failed.
-- FastContext is the fast lane behind explore_code. Let the task shape decide: use explore_code when a request is likely spread across multiple files, the workspace area is unfamiliar, or targeted searches fail to reveal a trustworthy entry point. Use spawn_agent only for deeper specialized investigation after a code map exists.
+- FastContext is the fast lane behind explore_code. Let the task shape decide: use explore_code when a request is likely spread across multiple files, the workspace area is unfamiliar, or targeted searches fail to reveal a trustworthy entry point. Use spawn_agent only for deeper specialized investigation after a code map exists. It returns a background agent ID immediately; continue useful work, then use read_agent for progress/results or cancel_agent when the task is no longer needed.
 - Use web_search when the answer depends on current or external information, public documentation, recent products/news, library behavior not present in the repo, or an error message that needs outside context. Prefer official/source domains when the user asks for authoritative facts.
 - Do not use ask_user to request paths until you have tried the appropriate search/codemap tools and can explain exactly what failed.
 - Never describe code you have not read. Filenames and directory structure are not evidence.
@@ -162,19 +161,17 @@ function buildEnvironmentSection(options: SystemPromptOptions): string {
   const date = SESSION_START_DATE
   const shell = options.shell || 'powershell'
   const workspace = options.workspacePath
-    ? `<workspace path="${options.workspacePath}" name="${options.workspaceName ?? ''}" />`
+    ? `<workspace path="${options.workspacePath}" name="${options.workspaceName ?? ''}">
+This path is the authoritative current workspace. Historical mentions of other projects do not change it.
+Never claim a file, directory, or project was opened or inspected without supporting tool output in the conversation.
+Resolve relative filesystem paths from this workspace.
+</workspace>`
     : '<workspace>None</workspace>'
   return `<environment>
 <date>${date}</date>
 <shell>${shell}</shell>
 ${workspace}
 </environment>`
-}
-
-function buildThinkingSection(thinkingMode: ResolvedThinkingMode): string {
-  if (thinkingMode === 'off') return ''
-  if (thinkingMode === 'max') return '<thinking_mode>Deep: competing hypotheses, evidence verification, critical review.</thinking_mode>'
-  return '<thinking_mode>Standard: problem modeling, evidence-first retrieval, verify before concluding.</thinking_mode>'
 }
 
 function buildSkillsSection(
@@ -243,10 +240,6 @@ export function buildSystemPrompt(mode: AgentMode, options: SystemPromptOptions 
 
   if (options.profileSystemPrompt) {
     dynamicSections.push(options.profileSystemPrompt)
-  }
-
-  if (options.thinkingMode && options.thinkingMode !== 'off') {
-    dynamicSections.push(buildThinkingSection(options.thinkingMode))
   }
 
   if (options.enabledSkills && options.enabledSkills.length > 0) {

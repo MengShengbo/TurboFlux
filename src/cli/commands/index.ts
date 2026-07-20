@@ -1,8 +1,10 @@
 import type { Command, CommandContext } from './types'
 import { commandRegistry } from './registry'
-import { type TurboFluxConfig, getPresetByIdOrModelFrom, applyPreset, setConfigValue } from '../../core/config'
+import { type TurboFluxConfig, getPresetByIdOrModelFrom, applyPreset, redactConfig, setConfigValue } from '../../core/config'
 import { existsSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
+import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
+import { APPROVAL_POLICY_LABELS, normalizeApprovalPolicy, type ReasoningEffort } from '../../shared/agentTypes'
 
 // /exit
 commandRegistry.register({
@@ -51,7 +53,7 @@ commandRegistry.register({
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
-      const safe = { ...ctx.config, apiKey: ctx.config.apiKey ? '***' : '(not set)' }
+      const safe = redactConfig(ctx.config)
       return 'Current config:\n' + Object.entries(safe).map(([k, v]) => `  ${k}: ${v}`).join('\n')
     }
     const parts = args.split(/\s+/)
@@ -100,8 +102,8 @@ commandRegistry.register({
 // /model
 commandRegistry.register({
   name: 'model',
-  description: 'Switch model (flash/pro or custom model name)',
-  argumentHint: '[flash|pro|model-name]',
+  description: 'Discover and switch models available to the active API',
+  argumentHint: '[model-name]',
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
@@ -109,7 +111,7 @@ commandRegistry.register({
         const active = ctx.config.model === p.model ? ' *' : ''
         return `  ${p.id.padEnd(8)} ${p.name.padEnd(20)} ${p.description}${active}`
       })
-      return `Current: ${ctx.config.model}\n\nAvailable presets:\n${presetLines.join('\n')}\n\nUsage: /model <flash|pro|custom-model-name>`
+      return `Current: ${ctx.config.model}\n\nAvailable models:\n${presetLines.join('\n')}\n\nUsage: /model <model-name>`
     }
     const input = args.trim()
     const preset = getPresetByIdOrModelFrom(ctx.modelPresets, input)
@@ -118,7 +120,7 @@ commandRegistry.register({
       ctx.setConfig(updated)
       return `Switched to ${preset.name} (${preset.model})`
     }
-    const updated = { ...ctx.config, model: input }
+    const updated = setConfigValue(ctx.config, 'model', input)
     ctx.setConfig(updated)
     return `Model switched to: ${input}`
   },
@@ -221,20 +223,67 @@ commandRegistry.register({
   },
 })
 
-// /thinking
+// /effort
 commandRegistry.register({
-  name: 'thinking',
-  description: 'Set thinking mode',
-  argumentHint: '[auto|off|standard|max]',
+  name: 'effort',
+  description: 'Adjust the active model native reasoning effort',
+  argumentHint: '[level]',
   type: 'local',
   execute: (args, ctx) => {
-    const modes = ['auto', 'off', 'standard', 'max'] as const
-    const mode = args.trim() as typeof modes[number]
-    if (!modes.includes(mode)) {
-      return `Usage: /thinking <${modes.join('|')}>\nCurrent: ${ctx.engine.getThinkingMode()}`
+    const capability = getModelReasoningCapabilities(ctx.config.model, ctx.config.provider, ctx.config.modelCapabilities)
+    if (!capability) return `${ctx.config.model || 'This model'} does not expose adjustable reasoning.`
+
+    const input = args.trim().toLowerCase()
+    const current = formatNativeReasoningSetting(ctx.config.model, ctx.config.reasoning, ctx.config.provider, ctx.config.modelCapabilities)
+    if (!input) {
+      const available = [
+        capability.efforts.length > 0 ? capability.efforts.join('/') : null,
+        capability.supportsToggle ? 'on/off' : null,
+        capability.control === 'budget' ? '<token budget>' : null,
+      ].filter(Boolean).join(', ')
+      return `Effort: ${current || 'provider default'}\nAvailable: ${available || 'fixed by model'}`
     }
-    ctx.engine.setThinkingMode(mode)
-    return
+
+    let next: TurboFluxConfig
+    if (input === 'on' || input === 'off') {
+      if (!capability.supportsToggle) return 'This model keeps reasoning enabled and does not expose a toggle.'
+      next = setConfigValue(ctx.config, 'reasoningEnabled', input)
+    } else if (capability.efforts.includes(input as ReasoningEffort)) {
+      next = setConfigValue(ctx.config, 'reasoningEffort', input)
+    } else if (capability.control === 'budget' && /^\d+$/.test(input)) {
+      next = setConfigValue(ctx.config, 'reasoningBudgetTokens', input)
+    } else {
+      const available = capability.control === 'budget'
+        ? 'on, off, or a token budget such as 8192'
+        : [...capability.efforts, ...(capability.supportsToggle ? ['on', 'off'] : [])].join(', ') || 'fixed by model'
+      return `Available: ${available}`
+    }
+    ctx.setConfig(next)
+    return `Effort set to ${formatNativeReasoningSetting(next.model, next.reasoning, next.provider, next.modelCapabilities)}.`
+  },
+})
+
+// /approval
+commandRegistry.register({
+  name: 'approval',
+  description: 'Set approval policy',
+  argumentHint: '[ask|agent|full]',
+  type: 'local',
+  execute: (args, ctx) => {
+    const input = args.trim().toLowerCase()
+    if (!input) {
+      return `Approval policy: ${APPROVAL_POLICY_LABELS[ctx.config.approvalPolicy]} (${ctx.config.approvalPolicy})`
+    }
+    if (!['ask', 'agent', 'full', 'request', 'auto'].includes(input)) {
+      return 'Usage: /approval <ask|agent|full>'
+    }
+    const policy = normalizeApprovalPolicy(input, ctx.config.approvalPolicy)
+    const next = setConfigValue(ctx.config, 'approvalPolicy', policy)
+    ctx.setConfig(next)
+    ctx.engine.setApprovalPolicy(policy)
+    return policy === 'full'
+      ? 'Full access selected. Restart TurboFlux to apply the unrestricted filesystem sandbox.'
+      : `Approval policy set to ${APPROVAL_POLICY_LABELS[policy]}.`
   },
 })
 
