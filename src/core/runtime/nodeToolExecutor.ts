@@ -1,11 +1,23 @@
-import { appendFileSync, readFileSync, existsSync, mkdirSync, rmSync, readdirSync, realpathSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, createReadStream, readFileSync, existsSync, mkdirSync, rmSync, readdirSync, realpathSync, statSync, writeFileSync } from 'fs'
 import { basename, join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { homedir } from 'os'
 import { promisify } from 'util'
+import { createInterface } from 'readline'
 
 const execFileAsync = promisify(execFile)
-import type { ToolExecutor, Result, SearchContentHit, CommandOutput, CheckpointResult, RequestOptions, WebSearchResult } from '../../tools/executor'
+import type {
+  ToolExecutor,
+  Result,
+  SearchContentHit,
+  SearchContentOptions,
+  SearchContentPage,
+  FileRangeResult,
+  CommandOutput,
+  CheckpointResult,
+  RequestOptions,
+  WebSearchResult,
+} from '../../tools/executor'
 import type { TreeNode } from '../../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../../shared/memoryTypes'
@@ -58,6 +70,10 @@ const CODE_SEARCH_SKIPPED_DIRS = new Set([
   'node_modules', 'vendor', 'dist', 'dist-desktop', 'build', 'out', 'coverage', 'target', 'tmp', 'temp',
 ])
 const CODE_SEARCH_EXCLUDE_GLOBS = Array.from(CODE_SEARCH_SKIPPED_DIRS, directory => `**/${directory}/**`)
+const DEFAULT_SEARCH_LIMIT = 50
+const MAX_SEARCH_LIMIT = 500
+const DEFAULT_READ_RANGE_LINES = 180
+const DEFAULT_READ_RANGE_BYTES = 256 * 1024
 
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
@@ -105,6 +121,69 @@ export class NodeToolExecutor implements ToolExecutor {
       return { success: true, data: content }
     } catch (e) {
       return { success: false, error: String(e) }
+    }
+  }
+
+  async readFileRange(path: string, offset = 0, limit = DEFAULT_READ_RANGE_LINES, maxBytes = DEFAULT_READ_RANGE_BYTES): Promise<Result<FileRangeResult>> {
+    let stream: ReturnType<typeof createReadStream> | undefined
+    let reader: ReturnType<typeof createInterface> | undefined
+    try {
+      const safePath = this.ensureAllowedPath(path)
+      if (!existsSync(safePath)) return { success: false, error: 'File not found' }
+      if (!statSync(safePath).isFile()) return { success: false, error: 'Path is not a file' }
+
+      const normalizedOffset = Math.max(0, Math.floor(offset))
+      const normalizedLimit = Math.max(1, Math.min(2_000, Math.floor(limit)))
+      const normalizedMaxBytes = Math.max(4_096, Math.min(2 * 1024 * 1024, Math.floor(maxBytes)))
+      const lines: string[] = []
+      let lineIndex = 0
+      let bytesRead = 0
+      let truncated = false
+
+      stream = createReadStream(safePath, { encoding: 'utf-8' })
+      reader = createInterface({ input: stream, crlfDelay: Infinity })
+      for await (const rawLine of reader) {
+        if (lineIndex < normalizedOffset) {
+          lineIndex += 1
+          continue
+        }
+        if (lines.length >= normalizedLimit) {
+          truncated = true
+          break
+        }
+        const remainingBytes = normalizedMaxBytes - bytesRead
+        if (remainingBytes <= 0) {
+          truncated = true
+          break
+        }
+        const rawBytes = Buffer.byteLength(rawLine, 'utf-8')
+        const line = rawBytes > remainingBytes
+          ? Buffer.from(rawLine, 'utf-8').subarray(0, remainingBytes).toString('utf-8')
+          : rawLine
+        lines.push(line)
+        bytesRead += Buffer.byteLength(line, 'utf-8') + 1
+        lineIndex += 1
+        if (rawBytes > remainingBytes) {
+          truncated = true
+          break
+        }
+      }
+
+      return {
+        success: true,
+        data: {
+          content: lines.join('\n'),
+          startLine: normalizedOffset + 1,
+          endLine: normalizedOffset + lines.length,
+          truncated,
+          bytesRead,
+        },
+      }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    } finally {
+      reader?.close()
+      stream?.destroy()
     }
   }
 
@@ -209,44 +288,114 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   async searchContent(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean): Promise<Result<SearchContentHit[]>> {
+    const result = await this.searchContentPage(pattern, basePath, filePattern, caseInsensitive)
+    return result.success
+      ? { success: true, data: result.data?.hits || [] }
+      : { success: false, error: result.error, data: [] }
+  }
+
+  async searchContentPage(
+    pattern: string,
+    basePath: string,
+    filePattern?: string,
+    caseInsensitive?: boolean,
+    options: SearchContentOptions = {},
+  ): Promise<Result<SearchContentPage>> {
     let safeBasePath: string
     try {
       safeBasePath = this.ensureAllowedPath(basePath)
     } catch (e) {
-      return { success: false, error: String(e) }
+      return { success: false, error: String(e), data: { hits: [], totalMatches: 0, offset: 0, limit: DEFAULT_SEARCH_LIMIT, truncated: false } }
     }
+
+    const offset = Math.max(0, Math.floor(options.offset || 0))
+    const limit = Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.floor(options.limit || DEFAULT_SEARCH_LIMIT)))
+    const contextBefore = Math.max(0, Math.min(20, Math.floor(options.contextBefore || 0)))
+    const contextAfter = Math.max(0, Math.min(20, Math.floor(options.contextAfter || 0)))
+    const maxColumns = Math.max(120, Math.min(2_000, Math.floor(options.maxColumns || 500)))
 
     try {
       const args = [
-        '--line-number',
-        '--no-heading',
+        '--json',
         '--hidden',
-        '--max-count=50',
+        `--max-columns=${maxColumns}`,
+        '--max-columns-preview',
         ...CODE_SEARCH_EXCLUDE_GLOBS.map(pattern => `--glob=!${pattern}`),
         '--glob=!.env',
         '--glob=!.env.local',
         '--glob=!.env.*.local',
       ]
       if (caseInsensitive) args.push('--ignore-case')
+      if (options.multiline) args.push('-U', '--multiline-dotall')
+      if (contextBefore > 0) args.push('-B', String(contextBefore))
+      if (contextAfter > 0) args.push('-A', String(contextAfter))
+      if (options.fileType) args.push('--type', options.fileType)
       if (filePattern) {
         args.push(`--glob=${filePattern}`)
       }
       args.push('--', pattern, '.')
-      const { stdout } = await execFileAsync('rg', args, { cwd: safeBasePath, timeout: 10000, maxBuffer: 1024 * 1024 })
+      const { stdout } = await execFileAsync('rg', args, { cwd: safeBasePath, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 })
       const output = stdout.trim()
-      if (!output) return { success: true, data: [] }
-      const results: SearchContentHit[] = output.split('\n').slice(0, 50).map(line => {
-        const match = line.match(/^(.+?):(\d+):(.*)$/)
-        if (!match) return { file: '', line: 0, text: line }
-        return { file: resolveNativePath(safeBasePath, match[1]), line: parseInt(match[2]), text: match[3] }
-      }).filter(r => r.file)
-      return { success: true, data: results }
-    } catch (e: any) {
-      if (e.code === 1 || e.exitCode === 1) return { success: true, data: [] }
-      if (e.code === 'ENOENT') {
-        return { success: true, data: this.searchContentFallback(pattern, safeBasePath, filePattern, caseInsensitive) }
+      if (!output) return { success: true, data: { hits: [], totalMatches: 0, offset, limit, truncated: false } }
+
+      const events: Array<{ type: 'match' | 'context'; file: string; line: number; text: string }> = []
+      for (const line of output.split(/\r?\n/)) {
+        try {
+          const event = JSON.parse(line) as Record<string, any>
+          if (event.type !== 'match' && event.type !== 'context') continue
+          const relativePath = event.data?.path?.text
+          const lineNumber = Number(event.data?.line_number)
+          const text = String(event.data?.lines?.text || '').replace(/\r?\n$/, '')
+          if (!relativePath || !Number.isFinite(lineNumber)) continue
+          events.push({
+            type: event.type,
+            file: resolveNativePath(safeBasePath, relativePath),
+            line: lineNumber,
+            text,
+          })
+        } catch {}
       }
-      return { success: false, error: e instanceof Error ? e.message : String(e) }
+
+      const matches = events.filter(event => event.type === 'match')
+      const selected = matches.slice(offset, offset + limit)
+      const hits = selected.map(match => {
+        const context = events
+          .filter(event => event.type === 'context' && event.file === match.file && event.line >= match.line - contextBefore && event.line <= match.line + contextAfter)
+          .map(event => `${event.line}: ${event.text}`)
+          .join('\n')
+        return {
+          file: match.file,
+          line: match.line,
+          text: match.text,
+          ...(context ? { context } : {}),
+        }
+      })
+      return {
+        success: true,
+        data: {
+          hits,
+          totalMatches: matches.length,
+          offset,
+          limit,
+          truncated: matches.length > offset + limit,
+        },
+      }
+    } catch (e: any) {
+      if (e.code === 1 || e.exitCode === 1) return { success: true, data: { hits: [], totalMatches: 0, offset, limit, truncated: false } }
+      if (e.code === 'ENOENT') {
+        const matches = this.searchContentFallback(pattern, safeBasePath, filePattern, caseInsensitive)
+        return {
+          success: true,
+          data: {
+            hits: matches.slice(offset, offset + limit),
+            totalMatches: matches.length,
+            offset,
+            limit,
+            truncated: matches.length > offset + limit,
+          },
+        }
+      }
+      return { success: false, error: e instanceof Error ? e.message : String(e), data: { hits: [], totalMatches: 0, offset, limit, truncated: false } }
     }
   }
 
@@ -300,10 +449,18 @@ export class NodeToolExecutor implements ToolExecutor {
 
   async searchCodeSymbols(query: { query: string; workspacePath: string; kind?: string; limit?: number }): Promise<Result<CodeSearchHit[]>> {
     try {
-      const safeWorkspacePath = this.ensureAllowedPath(query.workspacePath)
+      const safeRootPath = this.ensureAllowedPath(query.workspacePath)
+      const requestedPath = typeof (query as any).path === 'string' && (query as any).path.trim()
+        ? resolveNativePath(safeRootPath, (query as any).path)
+        : safeRootPath
+      const safeWorkspacePath = this.ensureAllowedPath(requestedPath)
+      const escapedQuery = this.escapeRegex(query.query)
       const patterns = [
-        `(export\\s+)?(function|const|let|var|class|interface|type|enum)\\s+\\w*${this.escapeRegex(query.query)}\\w*`,
-        `(export\\s+default\\s+)?(function|class)\\s+\\w*${this.escapeRegex(query.query)}\\w*`,
+        `(?:function|class|interface|type|enum|const|let|var)\\s+\\w*${escapedQuery}\\w*`,
+        `(?:async\\s+)?def\\s+\\w*${escapedQuery}\\w*`,
+        `(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+\\w*${escapedQuery}\\w*`,
+        `func\\s+(?:\\([^)]*\\)\\s*)?\\w*${escapedQuery}\\w*`,
+        `(?:class|interface|record|struct|enum|trait|protocol|object)\\s+\\w*${escapedQuery}\\w*`,
       ]
       const results: CodeSearchHit[] = []
       let ripgrepUnavailable = false
@@ -313,8 +470,10 @@ export class NodeToolExecutor implements ToolExecutor {
           '--no-heading',
           '--hidden',
           '--ignore-case',
-          '--max-count=20',
-          '--glob=*.{ts,tsx,js,jsx,py,rs,go,java}',
+          '--max-count=80',
+          '--max-columns=500',
+          '--max-columns-preview',
+          '--glob=*.{ts,tsx,js,jsx,mjs,cjs,py,pyi,rs,go,java,kt,kts,cs,c,cc,cpp,cxx,h,hpp,swift,scala,rb,php}',
           ...CODE_SEARCH_EXCLUDE_GLOBS.map(exclude => `--glob=!${exclude}`),
           '--',
           pattern,
@@ -330,18 +489,32 @@ export class NodeToolExecutor implements ToolExecutor {
             const filePath = resolveNativePath(safeWorkspacePath, match[1])
             const lineNum = parseInt(match[2])
             const text = match[3].trim()
-            const symbolMatch = text.match(/(?:export\s+)?(?:default\s+)?(?:function|const|let|var|class|interface|type|enum)\s+(\w+)/)
+            const declaration = this.extractSymbolDeclaration(text)
+            if (!declaration) continue
+            const requestedKinds = Array.isArray((query as any).kinds)
+              ? (query as any).kinds.map((kind: unknown) => String(kind))
+              : query.kind ? [query.kind] : []
+            if (requestedKinds.length > 0 && !requestedKinds.includes(declaration.kind)) continue
+            const queryLower = query.query.toLowerCase()
+            const symbolLower = declaration.name.toLowerCase()
+            const score = symbolLower === queryLower
+              ? 1
+              : symbolLower.startsWith(queryLower)
+                ? 0.9
+                : symbolLower.includes(queryLower)
+                  ? 0.75
+                  : 0.5
             results.push({
               id: `sym_${lineNum}_${filePath.slice(-20)}`,
-              path: relative(safeWorkspacePath, filePath).replace(/\\/g, '/'),
-              title: symbolMatch?.[1] || text.slice(0, 60),
+              path: relative(safeRootPath, filePath).replace(/\\/g, '/'),
+              title: declaration.name,
               subtitle: text.slice(0, 120),
               line: lineNum,
               startLine: lineNum,
               endLine: lineNum + 5,
-              score: 1.0,
+              score,
               source: 'symbol',
-              symbolKind: this.inferSymbolKind(text) as CodeSearchHit['symbolKind'],
+              symbolKind: declaration.kind as CodeSearchHit['symbolKind'],
               preview: text,
             })
           }
@@ -357,12 +530,15 @@ export class NodeToolExecutor implements ToolExecutor {
       }
       const limit = query.limit || 10
       const fallback = ripgrepUnavailable
-        ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit)
+        ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit, safeRootPath)
         : []
       return {
         success: true,
         data: results.length > 0
-          ? results.slice(0, limit)
+          ? results
+              .filter((hit, index, all) => all.findIndex(other => other.path === hit.path && other.line === hit.line && other.title === hit.title) === index)
+              .sort((left, right) => (right.score || 0) - (left.score || 0) || left.path.localeCompare(right.path) || (left.line || 0) - (right.line || 0))
+              .slice(0, limit)
           : fallback,
       }
     } catch (e) {
@@ -377,6 +553,26 @@ export class NodeToolExecutor implements ToolExecutor {
     if (/\benum\b/.test(text)) return 'enum'
     if (/\bfunction\b/.test(text)) return 'function'
     return 'constant'
+  }
+
+  private extractSymbolDeclaration(text: string): { name: string; kind: string } | null {
+    const patterns: Array<{ regex: RegExp; kind: string }> = [
+      { regex: /\b(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/, kind: 'function' },
+      { regex: /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)/, kind: 'function' },
+      { regex: /\b(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)/, kind: 'function' },
+      { regex: /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)/, kind: 'function' },
+      { regex: /\bclass\s+([A-Za-z_$][\w$]*)/, kind: 'class' },
+      { regex: /\binterface\s+([A-Za-z_$][\w$]*)/, kind: 'interface' },
+      { regex: /\b(?:type|record|struct)\s+([A-Za-z_$][\w$]*)/, kind: 'type' },
+      { regex: /\b(?:enum)\s+([A-Za-z_$][\w$]*)/, kind: 'enum' },
+      { regex: /\b(?:trait|protocol)\s+([A-Za-z_$][\w$]*)/, kind: 'interface' },
+      { regex: /\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)/, kind: 'constant' },
+    ]
+    for (const pattern of patterns) {
+      const match = text.match(pattern.regex)
+      if (match?.[1]) return { name: match[1], kind: pattern.kind }
+    }
+    return null
   }
 
   private escapeRegex(s: string): string {
@@ -1717,29 +1913,28 @@ export class NodeToolExecutor implements ToolExecutor {
     return results
   }
 
-  private searchCodeSymbolsFallback(query: string, basePath: string, limit: number): CodeSearchHit[] {
+  private searchCodeSymbolsFallback(query: string, basePath: string, limit: number, workspacePath = basePath): CodeSearchHit[] {
     const results: CodeSearchHit[] = []
     const queryLower = query.toLowerCase()
-    const declaration = /(?:export\s+)?(?:default\s+)?(?:function|const|let|var|class|interface|type|enum)\s+(\w+)/
     this.walkDir(basePath, filePath => {
-      if (results.length >= limit || !/\.(?:ts|tsx|js|jsx|py|rs|go|java)$/i.test(filePath)) return
+      if (results.length >= limit || !/\.(?:ts|tsx|js|jsx|mjs|cjs|py|pyi|rs|go|java|kt|kts|cs|c|cc|cpp|cxx|h|hpp|swift|scala|rb|php)$/i.test(filePath)) return
       try {
         const lines = readFileSync(filePath, 'utf-8').split(/\r?\n/)
         for (let index = 0; index < lines.length && results.length < limit; index += 1) {
-          const match = lines[index].match(declaration)
-          if (!match || !match[1].toLowerCase().includes(queryLower)) continue
+          const declaration = this.extractSymbolDeclaration(lines[index])
+          if (!declaration || !declaration.name.toLowerCase().includes(queryLower)) continue
           const text = lines[index].trim()
           results.push({
             id: `sym_${index + 1}_${filePath.slice(-20)}`,
-            path: relative(basePath, filePath).replace(/\\/g, '/'),
-            title: match[1],
+            path: relative(workspacePath, filePath).replace(/\\/g, '/'),
+            title: declaration.name,
             subtitle: text.slice(0, 120),
             line: index + 1,
             startLine: index + 1,
             endLine: index + 6,
             score: 1,
             source: 'symbol',
-            symbolKind: this.inferSymbolKind(text) as CodeSearchHit['symbolKind'],
+            symbolKind: declaration.kind as CodeSearchHit['symbolKind'],
             preview: text,
           })
         }

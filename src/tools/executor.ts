@@ -19,6 +19,32 @@ export interface SearchContentHit {
   context?: string
 }
 
+export interface SearchContentOptions {
+  offset?: number
+  limit?: number
+  contextBefore?: number
+  contextAfter?: number
+  multiline?: boolean
+  fileType?: string
+  maxColumns?: number
+}
+
+export interface SearchContentPage {
+  hits: SearchContentHit[]
+  totalMatches: number
+  offset: number
+  limit: number
+  truncated: boolean
+}
+
+export interface FileRangeResult {
+  content: string
+  startLine: number
+  endLine: number
+  truncated: boolean
+  bytesRead: number
+}
+
 export interface WebSearchResult {
   title: string
   url: string
@@ -52,6 +78,7 @@ export interface CheckpointResult {
 export interface ToolExecutor {
   // File operations
   readFile(path: string): Promise<Result<string>>
+  readFileRange?(path: string, offset?: number, limit?: number, maxBytes?: number): Promise<Result<FileRangeResult>>
   writeFile(path: string, content: string, metadata?: Record<string, unknown>): Promise<Result<void>>
   deleteFile(path: string, options?: Record<string, any>): Promise<Result<void>>
   listTree(path: string): Promise<Result<TreeNode>>
@@ -59,6 +86,7 @@ export interface ToolExecutor {
   // Search operations
   searchFiles(pattern: string, basePath: string): Promise<Result<{ matches: string[]; truncated?: boolean }>>
   searchContent(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean): Promise<Result<SearchContentHit[]>>
+  searchContentPage?(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean, options?: SearchContentOptions): Promise<Result<SearchContentPage>>
   webSearch?(query: Record<string, any>): Promise<Result<{ results: WebSearchResult[]; provider: string; query: string }>>
 
   // Code lookup operations

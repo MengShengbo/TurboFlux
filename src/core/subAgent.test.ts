@@ -128,7 +128,10 @@ describe('runSubAgent', () => {
       requestCount += 1
       if (requestCount === 1) {
         return new Response(JSON.stringify({
-          content: [{ type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.ts' } }],
+          content: [
+            { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: 'a.ts' } },
+            { type: 'tool_use', id: 'toolu_2', name: 'read_file', input: { path: 'b.ts' } },
+          ],
         }), { status: 200 })
       }
       return new Response(JSON.stringify({ content: [{ type: 'text', text: 'finished' }] }), { status: 200 })
@@ -169,6 +172,8 @@ describe('runSubAgent', () => {
       expect(new Headers(requests[0].init?.headers).get('x-api-key')).toBe('anthropic-key')
       const secondBody = JSON.parse(String(requests[1].init?.body))
       expect(JSON.stringify(secondBody.messages)).toContain('tool_result')
+      const toolResultMessage = secondBody.messages.find((message: any) => message.role === 'user' && Array.isArray(message.content) && message.content.some((block: any) => block.type === 'tool_result'))
+      expect(toolResultMessage.content).toHaveLength(2)
       expect(secondBody.model).toBe('claude-test')
     } finally {
       globalThis.fetch = originalFetch
@@ -645,6 +650,124 @@ describe('runSubAgent', () => {
         ok: false,
         summary: expect.stringContaining('rg unavailable'),
       }))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('retries without an optional request parameter rejected by a compatible provider', async () => {
+    const originalFetch = globalThis.fetch
+    const bodies: Array<Record<string, unknown>> = []
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      if (bodies.length === 1) {
+        return new Response(JSON.stringify({ error: { message: '`temperature` is deprecated for this model.' } }), { status: 400 })
+      }
+      return new Response(JSON.stringify('input' in bodies.at(-1)!
+        ? { output: [{ type: 'message', content: [{ type: 'output_text', text: 'finished' }] }] }
+        : { choices: [{ message: { content: 'finished' } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'explorer',
+          label: 'Explorer',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'test',
+          maxTurns: 1,
+          maxParallel: 1,
+          temperature: 0,
+        },
+        objective: 'find entry',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        provider: 'openai',
+        model: 'test-model',
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'finished' })
+      expect(bodies).toHaveLength(2)
+      expect(bodies[0]).toHaveProperty('temperature')
+      expect(bodies[1]).not.toHaveProperty('temperature')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('forces strict FastContext to search, read, and return a grounded execution flow', async () => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'src/core.ts looks relevant' } }] }), { status: 200 })
+      }
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'search-1',
+          function: { name: 'search_content', arguments: JSON.stringify({ pattern: 'startRuntime' }) },
+        }] } }] }), { status: 200 })
+      }
+      if (requestCount === 3) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'read-1',
+          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 20 }) },
+        }] } }] }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: [
+        'RANKED_CODE_MAP',
+        '1. src/core.ts L1-L3 role=execution-core confidence=high why=read and confirmed',
+        'EXECUTION_FLOW',
+        'caller -> startRuntime',
+        'SEARCHES_TRIED',
+        'startRuntime',
+        'UNCERTAINTY',
+        'none',
+      ].join('\n') } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      searchContent: async () => ({ success: true, data: [{ file: 'C:/repo/src/core.ts', line: 1, text: 'export function startRuntime() {' }] }),
+      readFile: async () => ({ success: true, data: 'export function startRuntime() {\n  return true\n}' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'fast_context',
+          label: 'FastContext',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'test',
+          maxTurns: 4,
+          maxParallel: 2,
+        },
+        objective: 'trace runtime lifecycle',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        requireGroundedReport: true,
+      })
+
+      expect(result).toMatchObject({ ok: true, turns: 4, finalText: expect.stringContaining('EXECUTION_FLOW') })
+      expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'src/core.ts', reason: 'file read' })]))
     } finally {
       globalThis.fetch = originalFetch
     }

@@ -289,6 +289,71 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(symbols.data?.some(hit => /FluxHidden|FluxShadow/.test(hit.title))).toBe(false)
   }))
 
+  it('reads bounded line ranges and reports continuation without loading the full file result', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'large.txt')
+    writeFileSync(filePath, Array.from({ length: 500 }, (_, index) => `line-${index + 1}`).join('\n'), 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.readFileRange(filePath, 199, 5)
+
+    expect(result).toMatchObject({
+      success: true,
+      data: {
+        startLine: 200,
+        endLine: 204,
+        truncated: true,
+      },
+    })
+    expect(result.data?.content).toBe('line-200\nline-201\nline-202\nline-203\nline-204')
+  }))
+
+  it('paginates content search and returns context windows', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'events.ts')
+    writeFileSync(filePath, [
+      'before zero',
+      'needle zero',
+      'after zero',
+      'before one',
+      'needle one',
+      'after one',
+      'before two',
+      'needle two',
+      'after two',
+      'before three',
+      'needle three',
+      'after three',
+    ].join('\n'), 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.searchContentPage('needle', workspace, '*.ts', false, {
+      offset: 1,
+      limit: 2,
+      contextBefore: 1,
+      contextAfter: 1,
+    })
+
+    expect(result).toMatchObject({
+      success: true,
+      data: { totalMatches: 4, offset: 1, limit: 2, truncated: true },
+    })
+    expect(result.data?.hits.map(hit => hit.text)).toEqual(['needle one', 'needle two'])
+    expect(result.data?.hits[0]?.context).toContain('4: before one')
+    expect(result.data?.hits[0]?.context).toContain('6: after one')
+  }))
+
+  it('finds symbols across Python, Rust, and Go declaration syntax', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'src'), { recursive: true })
+    writeFileSync(join(workspace, 'src', 'worker.py'), 'async def flux_worker():\n    return True\n', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'worker.rs'), 'pub async fn flux_runner() {}\n', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'worker.go'), 'func FluxGateway() {}\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.searchCodeSymbols({ query: 'flux', workspacePath: workspace, limit: 10 })
+
+    expect(result.success).toBe(true)
+    expect(result.data?.map(hit => hit.title)).toEqual(expect.arrayContaining(['flux_worker', 'flux_runner', 'FluxGateway']))
+  }))
+
   it('creates local history checkpoints for workspace files', async () => withWorkspace(async ({ workspace }) => {
     const filePath = join(workspace, 'inside.txt')
     writeFileSync(filePath, 'after', 'utf-8')

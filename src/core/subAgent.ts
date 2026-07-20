@@ -1,8 +1,11 @@
 import { isAbsolute, join, relative } from 'path'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
+import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
+import type { ModelCapabilities } from './config'
 import { createTurboFluxRequestHeaders } from './clientIdentity'
+import { resolveNativeReasoningRequest } from './modelRegistry'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
 import type { SkillRuntime } from './skills/runtime'
 import type { LoadedSkill } from './skills/loader'
@@ -166,7 +169,7 @@ const DEFINITIONS: Record<string, SubAgentDefinition> = {
     description: 'Fast issue-localization code map for large repositories. Use when you need ranked candidate files, roles, and evidence before deciding what to read.',
     driver: 'main-model',
     systemPrompt: FAST_CONTEXT_SYSTEM_PROMPT(),
-    maxTurns: 3,
+    maxTurns: 8,
     maxParallel: 6,
     temperature: 0,
     thinking: 'disabled',
@@ -218,7 +221,7 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
 }
 
 function FAST_CONTEXT_SYSTEM_PROMPT(): string {
-  return `You are FastContext, a read-only code exploration subagent for large repositories. Local code does not decide meaning; you do. Your job is to plan searches, run tools in parallel, read high-signal slices, and return a compact ranked code map grounded in files and line ranges.
+  return `You are FastContext, a read-only code intelligence subagent for large repositories. Deterministic retrieval gives you recall, but you own semantic understanding. Your job is to rewrite the objective into independent search hypotheses, challenge the prefetched candidates, trace the real execution path, and return a compact ranked code map grounded in files and line ranges.
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
@@ -228,17 +231,21 @@ Tools:
 - read_file(path, offset?, limit?)
 
 Strategy:
-1. Plan semantically from the objective. Infer likely visible text, symbols, routes, components, style classes, file globs, and aliases. Do not rely on fixed trigger words.
-2. Run independent searches in parallel. Use search_symbols for code names, search_content for visible text/literals, search_files for likely filenames, and get_codemap for unfamiliar areas.
-3. Read the top candidate slices after search. A filename, codemap node, or search hit is not proof; confirm role and exact line ranges with read_file.
-4. Rank candidates yourself from the evidence you read. Prefer true entry points, implementations, style/source files, schemas/config, tests, and suspected root causes over incidental references.
-5. Return a concise final report that starts with exactly "RANKED_CODE_MAP". Include 3-7 ranked candidates with path, line range, role, confidence, and why. Then list "SEARCHES_TRIED" and "UNCERTAINTY".
+1. Rewrite the objective into at least three hypotheses: exact identifiers/text, likely ownership modules, and runtime/call-chain behavior. Search more than one naming convention.
+2. Run independent searches in parallel. Use search_symbols for declarations, search_content for literals and references, search_files for naming hypotheses, and get_codemap only as orientation.
+3. Treat deterministic prefetch as untrusted leads. You MUST run your own search wave and MUST read the strongest source slices yourself.
+4. Trace relationships, not just mentions: entry/caller -> implementation -> state or persistence -> tests/error path. For lifecycle questions, identify the true execution core and at least one caller.
+5. As soon as a search reveals the probable execution core, read that implementation before spending more turns on peripheral files. A search-confirmed core is not enough when it can still be read.
+6. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
+7. Return a concise final report that starts with exactly "RANKED_CODE_MAP". Include 3-7 ranked candidates with path, line range, role, confidence, and why. Then list "EXECUTION_FLOW", "SEARCHES_TRIED", and "UNCERTAINTY".
 
 Rules:
 - Never describe files you have not read.
+- Every ranked candidate must be supported by a read_file result from this run.
 - Prioritize source, entry, schema/config, and failing-path files over README-style context.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Avoid dumping many related files. Five strong candidates beat twenty weak ones.
+- Use search_content pagination and context windows when a broad query is truncated or crowded.
 - If the objective contains Chinese or mixed UI text, search both exact text and nearby component/style naming guesses.
 - Your final report is the ranking authority. Local scoring is only a fallback if your report is missing or unusable.
 - Do NOT expose hidden reasoning. Call tools and return concise, evidence-backed findings.`
@@ -253,12 +260,15 @@ export interface RunSubAgentOptions {
   baseUrl: string
   provider?: string
   customHeaders?: Record<string, string>
+  reasoning?: NativeReasoningConfig
+  modelCapabilities?: ModelCapabilities
   model?: string
   codemap?: string | null
   abortSignal?: AbortSignal
   requestTimeoutMs?: number
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
+  requireGroundedReport?: boolean
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -280,6 +290,7 @@ interface ToolCallRequest {
 type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
 
 const TRANSIENT_HTTP_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504])
+const TRANSIENT_RETRY_DELAYS_MS = [300, 900, 1_800]
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
@@ -294,6 +305,64 @@ const TRANSIENT_NETWORK_CODES = new Set([
   'UND_ERR_BODY_TIMEOUT',
   'UND_ERR_SOCKET',
 ])
+
+function extractUnsupportedRequestParam(error?: string): string | null {
+  if (!error) return null
+  const quoted = error.match(/Unsupported parameter:\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
+  if (quoted?.[1]) return quoted[1]
+  const deprecated = error.match(/["'`]?([A-Za-z0-9_.-]+)["'`]?\s+is\s+deprecated\b/i)
+  if (deprecated?.[1]) return deprecated[1]
+  const named = error.match(/(?:unknown|unrecognized|unsupported|invalid)\s+(?:parameter|field|key|argument)\s*[:=]?\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
+  if (named?.[1]) return named[1]
+  if (!/(?:extra inputs?|extra fields?|not permitted|not allowed|unsupported|unrecognized|deprecated)/i.test(error)) return null
+  const knownOptionalParams = [
+    'cache_control', 'anthropic-beta', 'output_config', 'thinking', 'reasoning_effort',
+    'reasoning', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
+    'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store',
+  ]
+  return knownOptionalParams.find(param => error.toLowerCase().includes(param.toLowerCase())) || null
+}
+
+function removeCompatibleRequestParam(
+  protocol: ModelProtocol,
+  body: Record<string, unknown>,
+  headers: Record<string, string>,
+  param: string,
+): boolean {
+  const rootParam = param.split('.')[0]
+  if (rootParam === 'anthropic-beta' || rootParam === 'anthropic_beta') {
+    if (headers['anthropic-beta'] === undefined) return false
+    delete headers['anthropic-beta']
+    return true
+  }
+  const aliases = new Set<string>([rootParam])
+  if (['max_output_tokens', 'max_completion_tokens', 'max_tokens'].includes(rootParam)) {
+    aliases.add('max_output_tokens')
+    aliases.add('max_completion_tokens')
+    aliases.add('max_tokens')
+  }
+  if (['thinking', 'reasoning', 'reasoning_effort', 'output_config'].includes(rootParam)) {
+    aliases.add('thinking')
+    aliases.add('reasoning')
+    aliases.add('reasoning_effort')
+    aliases.add('output_config')
+  }
+  const removable = protocol === 'anthropic_messages'
+    ? new Set(['temperature', 'thinking', 'output_config', 'tool_choice'])
+    : new Set([
+        'temperature', 'max_output_tokens', 'max_completion_tokens', 'max_tokens',
+        'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls',
+        'thinking', 'reasoning', 'reasoning_effort', 'output_config',
+        'prompt_cache_key', 'prompt_cache_retention', 'store',
+      ])
+  let removed = false
+  for (const key of aliases) {
+    if (!removable.has(key) || !Object.prototype.hasOwnProperty.call(body, key)) continue
+    delete body[key]
+    removed = true
+  }
+  return removed
+}
 
 async function fetchWithTimeout(url: string, init: RequestInit, parentSignal?: AbortSignal, timeoutMs = 120_000): Promise<Response> {
   const controller = new AbortController()
@@ -375,7 +444,7 @@ async function fetchWithTransientRetry(
   const startedAt = Date.now()
   let lastError: unknown
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
     const remainingMs = timeoutMs - (Date.now() - startedAt)
     if (remainingMs < 1) {
       throw lastError || new Error(`Model request timed out after ${timeoutMs}ms`)
@@ -383,9 +452,10 @@ async function fetchWithTransientRetry(
 
     try {
       const response = await fetchWithTimeout(url, init, parentSignal, remainingMs)
-      if (attempt === 1 && TRANSIENT_HTTP_STATUSES.has(response.status)) {
-        const delayMs = Math.min(retryAfterMs(response), Math.max(0, remainingMs - 1))
-        onRetry(2, delayMs, `API ${response.status}`)
+      if (attempt < 4 && TRANSIENT_HTTP_STATUSES.has(response.status)) {
+        const requestedDelay = Math.max(retryAfterMs(response), TRANSIENT_RETRY_DELAYS_MS[attempt - 1] || 1_800)
+        const delayMs = Math.min(requestedDelay, Math.max(0, remainingMs - 1))
+        onRetry(attempt + 1, delayMs, `API ${response.status}`)
         await response.body?.cancel().catch(() => undefined)
         await abortableDelay(delayMs, parentSignal)
         continue
@@ -395,12 +465,12 @@ async function fetchWithTransientRetry(
       lastError = error
       const isAbort = parentSignal?.aborted || (error instanceof Error && error.name === 'AbortError')
       const isTimeout = error instanceof Error && /timed out after \d+ms/i.test(error.message)
-      if (attempt === 2 || isAbort || isTimeout || !isTransientNetworkError(error)) throw error
+      if (attempt === 4 || isAbort || isTimeout || !isTransientNetworkError(error)) throw error
 
       const elapsedMs = Date.now() - startedAt
-      const delayMs = Math.min(200, Math.max(0, timeoutMs - elapsedMs - 1))
+      const delayMs = Math.min(TRANSIENT_RETRY_DELAYS_MS[attempt - 1] || 1_800, Math.max(0, timeoutMs - elapsedMs - 1))
       if (delayMs <= 0) throw error
-      onRetry(2, delayMs, formatSubAgentError(error))
+      onRetry(attempt + 1, delayMs, formatSubAgentError(error))
       await abortableDelay(delayMs, parentSignal)
     }
   }
@@ -409,9 +479,12 @@ async function fetchWithTransientRetry(
 }
 
 function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, unknown>> {
-  return messages.filter(message => message.role !== 'system').map(message => {
+  const source = messages.filter(message => message.role !== 'system')
+  const normalized: Array<Record<string, unknown>> = []
+  for (let index = 0; index < source.length; index += 1) {
+    const message = source[index]
     if (message.role === 'assistant' && message.tool_calls?.length) {
-      return {
+      normalized.push({
         role: 'assistant',
         content: [
           ...(message.content ? [{ type: 'text', text: message.content }] : []),
@@ -422,20 +495,46 @@ function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, 
             input: JSON.parse(toolCall.function.arguments || '{}'),
           })),
         ],
-      }
+      })
+      continue
     }
     if (message.role === 'tool') {
-      return {
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: message.tool_call_id, content: message.content }],
+      const results: Array<Record<string, unknown>> = []
+      let nextIndex = index
+      while (nextIndex < source.length && source[nextIndex].role === 'tool') {
+        const toolMessage = source[nextIndex]
+        results.push({ type: 'tool_result', tool_use_id: toolMessage.tool_call_id, content: toolMessage.content })
+        nextIndex += 1
       }
+      normalized.push({
+        role: 'user',
+        content: results,
+      })
+      index = nextIndex - 1
+      continue
     }
-    return { role: message.role, content: message.content }
-  })
+    normalized.push({ role: message.role, content: message.content })
+  }
+  return normalized
 }
 
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
-  const { definition, objective, workspacePath, toolExecutor, apiKey, baseUrl, provider, customHeaders, model, codemap, abortSignal, onEvent } = options
+  const {
+    definition,
+    objective,
+    workspacePath,
+    toolExecutor,
+    apiKey,
+    baseUrl,
+    provider,
+    customHeaders,
+    model,
+    codemap,
+    abortSignal,
+    onEvent,
+    reasoning,
+    modelCapabilities,
+  } = options
   const requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? 120_000)
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
@@ -472,6 +571,12 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             path: { type: 'string' },
             file_pattern: { type: 'string' },
             case_sensitive: { type: 'boolean' },
+            offset: { type: 'number' },
+            head_limit: { type: 'number' },
+            context_before: { type: 'number' },
+            context_after: { type: 'number' },
+            multiline: { type: 'boolean' },
+            file_type: { type: 'string' },
           },
           required: ['pattern'],
         },
@@ -481,7 +586,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'read_file',
-        description: 'Read a file or a slice of it',
+        description: 'Read a bounded line range without loading the whole file. offset is 1-based.',
         parameters: { type: 'object', properties: { path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' } }, required: ['path'] },
       },
     },
@@ -537,7 +642,12 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
   let searchRecoveryUsed = false
   let readRecoveryUsed = false
+  let reportRecoveryUsed = false
+  let modelSearchCalls = 0
+  let modelReadCalls = 0
   let resolvedProtocol: ModelProtocol | null = null
+  const isFastContextDefinition = definition.id === 'fast_context'
+  const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
 
   const addEvidence = (evidence: SubAgentEvidence): void => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
@@ -547,6 +657,18 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   }
 
   const hasReadEvidence = (): boolean => collectedEvidence.some(evidence => /(?:file read|read confirmation|prefetch read)/i.test(evidence.reason))
+  const hasModelReadEvidence = (): boolean => collectedEvidence.some(evidence => evidence.reason === 'file read')
+  const validateFastContextReport = (text: string): string | null => {
+    const normalized = text.trim()
+    if (!/^RANKED_CODE_MAP\b/m.test(normalized)) return 'final report must start with RANKED_CODE_MAP'
+    if (!/\bEXECUTION_FLOW\b/m.test(normalized)) return 'final report is missing EXECUTION_FLOW'
+    if (!/\bSEARCHES_TRIED\b/m.test(normalized)) return 'final report is missing SEARCHES_TRIED'
+    if (!/\bUNCERTAINTY\b/m.test(normalized)) return 'final report is missing UNCERTAINTY'
+    const readPaths = new Set(collectedEvidence.filter(evidence => evidence.reason === 'file read').map(evidence => evidence.path.replace(/\\/g, '/')))
+    if (readPaths.size === 0) return 'final report has no model-read evidence'
+    if (![...readPaths].some(path => normalized.includes(path))) return 'ranked candidates are not grounded in model-read files'
+    return null
+  }
 
   while (turn < definition.maxTurns) {
     if (abortSignal?.aborted) break
@@ -604,6 +726,21 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                 max_tokens: definition.maxOutputTokens || 4096,
                 stream: false,
               }
+        const reasoningRequest = resolveNativeReasoningRequest(modelId, reasoning, provider, modelCapabilities)
+        const reasoningEffort = reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort
+        if (protocol === 'anthropic_messages') {
+          if (reasoningRequest?.thinking) requestBody.thinking = reasoningRequest.thinking
+          if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
+        } else if (protocol === 'openai_responses') {
+          if (reasoningEffort) requestBody.reasoning = { effort: reasoningEffort }
+          requestBody.parallel_tool_calls = true
+        } else {
+          if (reasoningRequest?.thinking) requestBody.thinking = reasoningRequest.thinking
+          if (reasoningRequest?.reasoningEffort) requestBody.reasoning_effort = reasoningRequest.reasoningEffort
+          if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
+          requestBody.parallel_tool_calls = true
+        }
+        if (reasoningRequest?.omitTemperature) delete requestBody.temperature
         const headers: Record<string, string> = createTurboFluxRequestHeaders(protocol === 'anthropic_messages'
           ? {
               'Content-Type': 'application/json',
@@ -613,16 +750,37 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
               ...customHeaders,
             }
           : { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`, ...customHeaders })
-        const res = await fetchWithTransientRetry(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody),
-        }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
-          emit({ type: 'model_retry', turn, attempt, delayMs, reason })
-        })
+        let res: Response | undefined
+        let errorText = ''
+        for (let compatibilityAttempt = 0; compatibilityAttempt < 4; compatibilityAttempt += 1) {
+          res = await fetchWithTransientRetry(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(requestBody),
+          }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
+            emit({ type: 'model_retry', turn, attempt, delayMs, reason })
+          })
+          if (res.ok) break
+          errorText = await res.text()
+          const unsupportedParam = extractUnsupportedRequestParam(errorText)
+          if (
+            compatibilityAttempt >= 3
+            || (res.status !== 400 && res.status !== 422)
+            || !unsupportedParam
+            || !removeCompatibleRequestParam(protocol, requestBody, headers, unsupportedParam)
+          ) break
+          emit({
+            type: 'model_retry',
+            turn,
+            attempt: compatibilityAttempt + 2,
+            delayMs: 0,
+            reason: `Provider rejected "${unsupportedParam}"; retrying without that optional parameter.`,
+          })
+        }
+        if (!res) throw new Error('Model request returned no response')
 
         if (!res.ok) {
-          const errorText = await res.text()
+          if (!errorText) errorText = await res.text()
           const protocolError = new ModelProtocolRequestError(`HTTP ${res.status}: ${errorText || 'empty response'}`, {
             protocol,
             url,
@@ -703,17 +861,28 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     }
 
     if (responseToolCalls.length === 0) {
-      const isFastContext = definition.id === 'fast_context'
-      if (isFastContext && !hasReadEvidence() && collectedEvidence.length > 0 && !readRecoveryUsed && turn < definition.maxTurns) {
+      if (strictFastContext && modelSearchCalls === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: 'Quality gate: candidate paths are not enough. Use read_file on the strongest candidates, inspect the relevant line ranges, then return the required RANKED_CODE_MAP with grounded evidence.',
+          content: 'The deterministic prefetch is only a lead set. Run your own independent search wave now using alternate identifiers, references, filenames, or runtime terms before ranking anything.',
+        })
+        searchRecoveryUsed = true
+        continue
+      }
+      const missingRequiredRead = strictFastContext
+        ? (!hasModelReadEvidence() || modelReadCalls === 0)
+        : !hasReadEvidence()
+      if (isFastContextDefinition && missingRequiredRead && collectedEvidence.length > 0 && !readRecoveryUsed && turn < definition.maxTurns) {
+        messages.push({ role: 'assistant', content: messageText })
+        messages.push({
+          role: 'user',
+          content: 'Quality gate: candidate paths are not enough, and prefetched snippets are not proof. Use read_file yourself on the strongest runtime candidates, inspect exact line ranges, and trace at least one caller-to-core relationship.',
         })
         readRecoveryUsed = true
         continue
       }
-      if (isFastContext && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
+      if (isFastContextDefinition && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
@@ -721,6 +890,22 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         })
         searchRecoveryUsed = true
         continue
+      }
+      if (strictFastContext) {
+        const reportError = validateFastContextReport(messageText)
+        if (reportError && !reportRecoveryUsed && turn < definition.maxTurns) {
+          messages.push({ role: 'assistant', content: messageText })
+          messages.push({
+            role: 'user',
+            content: `Final report rejected: ${reportError}. Return the required RANKED_CODE_MAP now using only files you personally read. Include EXECUTION_FLOW, SEARCHES_TRIED, and UNCERTAINTY. Do not call more tools unless a missing fact makes the report impossible.`,
+          })
+          reportRecoveryUsed = true
+          continue
+        }
+        if (reportError) {
+          emit({ type: 'error', message: `FastContext final report rejected: ${reportError}` })
+          return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error: reportError }
+        }
       }
       emit({ type: 'final', text: messageText })
       emit({ type: 'turn_complete', turn, calls: 0 })
@@ -733,6 +918,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.function.arguments) } catch {}
       emit({ type: 'tool_call', tool: tc.function.name, args, turn })
+      if (tc.function.name === 'read_file') modelReadCalls += 1
+      else if (['search_content', 'search_files', 'search_symbols', 'get_codemap'].includes(tc.function.name)) modelSearchCalls += 1
       return { tc, args }
     })
     const results = await Promise.all(entries.map(async entry => {
@@ -778,8 +965,15 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
 
     emit({ type: 'turn_complete', turn, calls: results.length })
 
+    if (strictFastContext && turn === definition.maxTurns - 1) {
+      messages.push({
+        role: 'user',
+        content: 'One turn remains. Synthesize the final RANKED_CODE_MAP now. Do not call more tools. Include EXECUTION_FLOW, SEARCHES_TRIED, and UNCERTAINTY, and rank only files you read yourself.',
+      })
+    }
+
     if (
-      definition.id === 'fast_context'
+      isFastContextDefinition
       && results.length > 0
       && results.every(({ result }) => result.ok)
       && results.every(({ result }) => result.evidence.length === 0)
@@ -816,19 +1010,38 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       const basePath = args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath
       const filePattern = typeof args.file_pattern === 'string' ? args.file_pattern : undefined
       const caseInsensitive = args.case_sensitive === true ? false : true
-      const res = await executor.searchContent(pattern, basePath, filePattern, caseInsensitive)
+      const offset = Math.max(0, Math.floor(Number(args.offset) || 0))
+      const headLimit = Math.max(1, Math.min(200, Math.floor(Number(args.head_limit) || 40)))
+      const contextBefore = Math.max(0, Math.min(12, Math.floor(Number(args.context_before) || 0)))
+      const contextAfter = Math.max(0, Math.min(12, Math.floor(Number(args.context_after) || 0)))
+      const usingPagedSearch = typeof executor.searchContentPage === 'function'
+      const res = usingPagedSearch
+        ? await executor.searchContentPage!(pattern, basePath, filePattern, caseInsensitive, {
+            offset,
+            limit: headLimit,
+            contextBefore,
+            contextAfter,
+            multiline: args.multiline === true,
+            fileType: typeof args.file_type === 'string' ? args.file_type : undefined,
+          })
+        : await executor.searchContent(pattern, basePath, filePattern, caseInsensitive)
       if (!res.success) {
         const error = res.error || 'unknown search error'
         return { ok: false, output: `Search failed: ${error}`, summary: `grep "${pattern}" failed: ${error}`, evidence }
       }
-      if (!res.data || res.data.length === 0) {
+      const page = usingPagedSearch
+        ? res.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }>; totalMatches?: number; truncated?: boolean }
+        : { hits: Array.isArray(res.data) ? res.data : [], totalMatches: Array.isArray(res.data) ? res.data.length : 0, truncated: false }
+      const pageHits = page.hits || []
+      if (pageHits.length === 0) {
         return { ok: true, output: 'No matches found.', summary: `grep "${pattern}" → 0 hits`, evidence }
       }
-      const hits = res.data.slice(0, 15)
+      const hits = pageHits.slice(0, headLimit)
       const lines: string[] = []
       for (const hit of hits) {
         const relPath = toWorkspaceRelative(workspacePath, hit.file)
         lines.push(`${relPath}:${hit.line}: ${hit.text}`)
+        if (hit.context) lines.push(hit.context.split('\n').map(line => `  ${line}`).join('\n'))
         evidence.push({
           path: relPath,
           startLine: Math.max(1, hit.line - 2),
@@ -837,6 +1050,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
           reason: `grep: ${pattern}`,
         })
       }
+      if (page.truncated) lines.push(`[More matches available. Continue with offset=${offset + hits.length}.]`)
       return { ok: true, output: lines.join('\n'), summary: `grep "${pattern}" → ${hits.length} hits`, evidence }
     }
 
@@ -847,15 +1061,28 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       }
       const filePath = resolveWorkspacePath(workspacePath, requestedPath)
       const relativePath = toWorkspaceRelative(workspacePath, filePath)
-      const res = await executor.readFile(filePath)
+      const offset = Math.max(0, Math.floor(Number(args.offset) || 1) - 1)
+      const limit = Math.max(1, Math.min(400, Math.floor(Number(args.limit) || 80)))
+      const rangeResult = executor.readFileRange
+        ? await executor.readFileRange(filePath, offset, limit)
+        : null
+      const res = rangeResult || await executor.readFile(filePath)
       if (!res.success || !res.data) {
         const error = res.error || 'file not found'
         return { ok: false, output: `Read failed: ${error}`, summary: `read ${relativePath} failed: ${error}`, evidence }
       }
-      const allLines = res.data.split('\n')
-      const offset = Math.max(0, Math.floor(Number(args.offset) || 1) - 1)
-      const limit = Math.max(1, Math.min(200, Math.floor(Number(args.limit) || 60)))
-      const slice = allLines.slice(offset, offset + limit)
+      const rangeData = rangeResult?.data
+      if (rangeData && !rangeData.content) {
+        return {
+          ok: false,
+          output: `Read failed: ${relativePath} has no content at line ${offset + 1}. Retry with a lower offset or search for the current symbol location.`,
+          summary: `read ${relativePath}:${offset + 1} failed: offset beyond content`,
+          evidence,
+        }
+      }
+      const slice = rangeData
+        ? rangeData.content.split('\n')
+        : String(res.data).split('\n').slice(offset, offset + limit)
       const preview = slice.slice(0, 10).join('\n')
       evidence.push({
         path: relativePath,
@@ -864,7 +1091,9 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         preview,
         reason: 'file read',
       })
-      return { ok: true, output: slice.map((line, index) => `${offset + index + 1} | ${line}`).join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence }
+      const outputLines = slice.map((line, index) => `${offset + index + 1} | ${line}`)
+      if (rangeData?.truncated) outputLines.push(`[More lines available. Continue with offset=${offset + slice.length + 1}.]`)
+      return { ok: true, output: outputLines.join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence }
     }
 
     case 'search_files': {

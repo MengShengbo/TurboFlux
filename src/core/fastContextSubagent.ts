@@ -7,19 +7,21 @@ import type {
   FastContextScanResult,
 } from './fastContextTypes'
 import type { SubAgentEvent, SubAgentEvidence } from '../shared/subAgentTypes'
+import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
+import type { ModelCapabilities } from './config'
 import { runSubAgent } from './subAgent'
 
 const FAST_CONTEXT_DEFINITION = {
   id: 'fast_context',
   label: 'FastContext Code Map',
   description: 'Fast issue-localization code map for large repositories',
-  maxTurns: 3,
+  maxTurns: 8,
   maxParallel: 6,
   driver: 'main-model',
 }
 
-export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 30_000
+export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 90_000
 
 const STOP_WORDS = new Set([
   'the', 'and', 'for', 'with', 'from', 'this', 'that', 'when', 'where', 'what',
@@ -27,7 +29,9 @@ const STOP_WORDS = new Set([
   'bug', 'issue', 'error', 'failed', 'fails', 'wrong', 'about', 'need', 'needs',
   'current', 'now', 'then', 'there', 'here', 'read', 'write', 'edit',
   'locate', 'find', 'identify', 'show', 'implementation', 'implement', 'handling',
-  'support', 'codebase', 'source', 'logic', 'feature', 'behavior',
+  'support', 'codebase', 'source', 'logic', 'feature', 'behavior', 'trace', 'tracing',
+  'start', 'started', 'persist', 'persisted', 'poll', 'polled', 'restore', 'restored',
+  'terminate', 'terminated',
 ])
 
 const PREFETCH_FILE_GLOBS = [
@@ -38,7 +42,7 @@ const FAILURE_QUERY_TERMS = new Set([
   'abort', 'aborted', 'crash', 'crashes', 'deadlock', 'freeze', 'freezes', 'hang', 'hangs',
   'stuck', 'timeout', 'timedout', 'exception', 'panic', 'failure',
 ])
-const ENTRY_QUERY_TERMS = new Set(['bootstrap', 'command', 'entry', 'entrypoint', 'launch', 'startup'])
+const ENTRY_QUERY_TERMS = new Set(['bootstrap', 'entry', 'entrypoint', 'launch', 'startup'])
 
 interface RunParams {
   workspacePath: string
@@ -48,6 +52,8 @@ interface RunParams {
   baseUrl: string
   provider?: string
   customHeaders?: Record<string, string>
+  reasoning?: NativeReasoningConfig
+  modelCapabilities?: ModelCapabilities
   maxTurns?: number
   maxParallel?: number
   model?: string
@@ -74,6 +80,24 @@ interface DeterministicPrefetchResult {
   evidence: SubAgentEvidence[]
   context: string
   errors: string[]
+}
+
+async function settleWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<Array<PromiseSettledResult<T>>> {
+  const results: Array<PromiseSettledResult<T>> = new Array(tasks.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, tasks.length || 1)) }, async () => {
+    while (nextIndex < tasks.length) {
+      const index = nextIndex
+      nextIndex += 1
+      try {
+        results[index] = { status: 'fulfilled', value: await tasks[index]() }
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason }
+      }
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -180,6 +204,20 @@ function dedupeEvidence(evidence: SubAgentEvidence[]): SubAgentEvidence[] {
   })
 }
 
+function takeDiverseContentHits(hits: any[], limit: number, perFileLimit = 3): any[] {
+  const selected: any[] = []
+  const counts = new Map<string, number>()
+  for (const hit of hits) {
+    const file = String(hit?.file || '')
+    const count = counts.get(file) || 0
+    if (!file || count >= perFileLimit) continue
+    selected.push(hit)
+    counts.set(file, count + 1)
+    if (selected.length >= limit) break
+  }
+  return selected
+}
+
 function buildPrefetchContext(evidence: SubAgentEvidence[]): string {
   const confirmed = evidence.filter(item => /prefetch read confirmation/i.test(item.reason)).slice(0, 6)
   const candidates = evidence
@@ -246,6 +284,18 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
       run: () => params.toolExecutor.searchContent(escapeRegExp(token), params.workspacePath, undefined, true),
     })
   }
+  const pairTokens = selectedTokens.filter(token => /^[a-z0-9_$-]+$/i.test(token)).slice(0, 5)
+  for (let index = 0; index < pairTokens.length - 1 && index < 3; index += 1) {
+    const left = pairTokens[index]
+    const right = pairTokens[index + 1]
+    const pattern = `(?:${escapeRegExp(left)}.{0,80}${escapeRegExp(right)}|${escapeRegExp(right)}.{0,80}${escapeRegExp(left)})`
+    tasks.push({
+      label: `content pair ${left}+${right}`,
+      kind: 'content',
+      token: `${left}+${right}`,
+      run: () => params.toolExecutor.searchContent(pattern, params.workspacePath, undefined, true),
+    })
+  }
   for (const token of selectedTokens.filter(value => /^[a-z_$][a-z0-9_$]{2,}$/i.test(value)).slice(0, 4)) {
     tasks.push({
       label: `symbols ${token}`,
@@ -255,7 +305,7 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
     })
   }
 
-  const settled = await Promise.allSettled(tasks.map(task => task.run()))
+  const settled = await settleWithConcurrency(tasks.map(task => task.run), params.maxParallel ?? FAST_CONTEXT_DEFINITION.maxParallel)
   const evidence: SubAgentEvidence[] = []
   const errors: string[] = []
 
@@ -291,7 +341,7 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
 
     if (task.kind === 'content') {
       const hits = Array.isArray(result.data) ? result.data : []
-      for (const hit of hits.slice(0, 12)) {
+      for (const hit of takeDiverseContentHits(hits, 12)) {
         const path = toWorkspaceRelative(params.workspacePath, hit?.file)
         const line = Math.max(1, Number(hit?.line) || 1)
         if (!path) continue
@@ -353,24 +403,28 @@ async function runDeterministicPrefetch(params: RunParams, tokens: string[]): Pr
     if (seenReadTargets.has(candidate.path)) return false
     seenReadTargets.add(candidate.path)
     return true
-  }).slice(0, entryOrStartupQuery ? 5 : 4)
+  }).slice(0, entryOrStartupQuery ? 7 : 6)
   const readResults = await Promise.all(readTargets.map(async candidate => {
     if (params.abortSignal?.aborted) return null
     const filePath = join(params.workspacePath, candidate.path)
-    const result = await params.toolExecutor.readFile(filePath)
-    if (!result.success || typeof result.data !== 'string') {
+    const targetLine = Math.max(1, candidate.hits[0]?.startLine || 1)
+    const offset = Math.max(0, targetLine - 8)
+    const result = params.toolExecutor.readFileRange
+      ? await params.toolExecutor.readFileRange(filePath, offset, 26)
+      : await params.toolExecutor.readFile(filePath)
+    if (!result.success || result.data === undefined) {
       errors.push(`read ${candidate.path}: ${result.error || 'read failed'}`)
       return null
     }
-    const lines = result.data.split(/\r?\n/)
-    const targetLine = Math.max(1, candidate.hits[0]?.startLine || 1)
-    const start = Math.max(0, Math.min(lines.length, targetLine - 8))
-    const end = Math.min(lines.length, Math.max(start + 1, targetLine + 17))
+    const rangeData = params.toolExecutor.readFileRange ? result.data as { content: string; startLine: number; endLine: number } : null
+    const lines = rangeData ? rangeData.content.split(/\r?\n/) : String(result.data).split(/\r?\n/)
+    const start = rangeData ? rangeData.startLine - 1 : Math.max(0, Math.min(lines.length, targetLine - 8))
+    const end = rangeData ? rangeData.endLine : Math.min(lines.length, Math.max(start + 1, targetLine + 17))
     return {
       path: candidate.path,
       startLine: start + 1,
       endLine: end,
-      preview: lines.slice(start, end).join('\n'),
+      preview: rangeData ? rangeData.content : lines.slice(start, end).join('\n'),
       reason: 'prefetch read confirmation',
     } satisfies SubAgentEvidence
   }))
@@ -409,7 +463,7 @@ function inferKind(hit: SubAgentEvidence, tokens: string[]): FastContextEvidence
   const objectiveLooksLikeFailure = tokens.some(token => FAILURE_QUERY_TERMS.has(token))
 
   if (/\b(test|spec|benchmark|fixture)\b|__tests__|\.test\.|\.spec\./.test(path)) return 'test'
-  if (/\b(schema|types?|interface|contract|protocol|ipc|dto)\b/.test(path)) return 'schema'
+  if (/\b(schema|types?|interface|contract|protocol|ipc|dto|registry)\b/.test(path)) return 'schema'
   if (/(\.config\.|config|settings|package\.json|tsconfig|vite|webpack|rollup|eslint|env)/.test(path)) return 'config'
   if (/^bin\/.*\.(?:mjs|cjs|js|ts|py|sh|ps1|cmd|bat)$/.test(path) || /^(index|main|app|server|client|router|routes|cli)\./.test(base) || /\b(routes?|entry|bootstrap)\b/.test(path)) return 'entry'
   if (objectiveLooksLikeFailure && looksLikeFailureSite && objectiveMatches >= 2) return 'root_cause'
@@ -444,16 +498,30 @@ function scoreHit(hit: SubAgentEvidence, kind: FastContextEvidenceKind, tokens: 
   }
   const sourceWeight = reason.includes('file read')
     ? 10
-    : reason.includes('symbol')
+    : reason.includes('read confirmation')
       ? 8
-      : reason.includes('codemap')
-        ? 5
-        : reason.includes('grep') || reason.includes('glob')
-          ? 3
-          : 0
+      : reason.includes('symbol')
+        ? 8
+        : reason.includes('codemap')
+          ? 5
+          : reason.includes('prefetch search')
+            ? reason.includes('+') ? 10 : 5
+            : reason.includes('grep') || reason.includes('glob')
+              ? 3
+              : 0
   const lineSpan = Math.max(1, hit.endLine - hit.startLine + 1)
   const spanPenalty = lineSpan > 90 ? 6 : 0
-  return clamp(kindWeight[kind] + pathMatches * 8 + previewMatches * 4 + sourceWeight - spanPenalty, 20, 98)
+  const genericAnchorPenalty = reason.includes('prefetch glob') && pathMatches === 0 ? 24 : 0
+  const documentationPenalty = /(?:^|\/)(?:docs?|readme)(?:\/|\.|$)/.test(path) && pathMatches === 0 ? 14 : 0
+  const barrelPenalty = /(?:^|\/)(?:index|main)\.[a-z0-9]+$/.test(path) && pathMatches === 0 && reason.includes('prefetch glob') ? 10 : 0
+  const entryIntent = tokens.some(token => ENTRY_QUERY_TERMS.has(token))
+  const entryIntentAdjustment = entryIntent ? (kind === 'entry' ? 18 : -8) : 0
+  return clamp(
+    kindWeight[kind] + pathMatches * 8 + previewMatches * 4 + sourceWeight
+      + entryIntentAdjustment - spanPenalty - genericAnchorPenalty - documentationPenalty - barrelPenalty,
+    20,
+    140,
+  )
 }
 
 function confidenceForScore(score: number): FastContextConfidence {
@@ -514,7 +582,7 @@ export function __testBuildEvidencePack(
   truncated: boolean,
   llmReport?: string,
 ): string {
-  const fallbackRanked = summarizeCandidates(candidates).slice(0, 7)
+  const fallbackRanked = summarizeCandidates(candidates).slice(0, 12)
   const finalReport = trimLlmReport(llmReport)
   const readConfirmedCount = Array.from(candidates.values())
     .flat()
@@ -525,38 +593,47 @@ export function __testBuildEvidencePack(
     `objective: ${objective}`,
     `retrieval: ${turns} turn(s), ${elapsedMs}ms`,
     `quality: ${readConfirmedCount} read-confirmed evidence range(s)`,
-    'authority: llm_subagent_report_first; local evidence ranking is only a fallback/checksum.',
-    'isolation: subagent raw tool history is not injected; only this compact report and fallback evidence enter the main context.',
-    '',
-    'use_policy:',
-    '- Treat this as an issue-localization map, not a complete proof.',
-    '- Prefer the LLM-ranked code map when present; read only the files/ranges needed for the current task.',
-    '- Use fallback evidence only to sanity-check or recover from missing LLM ranking.',
-    truncated ? '- Retrieval was truncated; run targeted search if a candidate looks incomplete.' : '',
-    '',
-  ].filter(Boolean)
+    'isolation: subagent raw tool history is not injected; only this compact result enters the main context.',
+  ]
 
   if (finalReport) {
-    lines.push('llm_ranked_code_map:', finalReport)
+    lines.push(
+      'status: complete',
+      'authority: llm_verified_code_map',
+      '',
+      'use_policy:',
+      '- This report is the semantic retrieval result. Local heuristics were used only to execute fast recall.',
+      '- Read only the files/ranges needed for the current task and verify again before editing.',
+      truncated ? '- Retrieval ended near its budget; investigate any stated uncertainty before editing.' : '',
+      '',
+      'llm_ranked_code_map:',
+      finalReport,
+    )
   } else {
-    lines.push('llm_ranked_code_map:', '- missing; use fallback_candidates below')
-  }
-
-  lines.push('', 'fallback_candidates:')
-
-  if (fallbackRanked.length === 0) {
-    lines.push('- no concrete fallback candidates found')
-  }
-
-  fallbackRanked.forEach((candidate, idx) => {
-    lines.push(`${idx + 1}. ${candidate.path} [${candidate.confidence}] roles=${candidate.kinds.join(',')}`)
-    if (candidate.symbols.length > 0) lines.push(`   symbols: ${candidate.symbols.join(', ')}`)
-    if (candidate.reasons.length > 0) lines.push(`   why: ${candidate.reasons.join('; ')}`)
-    for (const hit of candidate.hits.slice(0, 2)) {
-      const label = hit.kind ? `${hit.kind} ` : ''
-      lines.push(`   evidence: ${label}L${hit.startLine}-${hit.endLine} ${trimText(hit.preview, 140)}`)
+    lines.push(
+      'status: degraded',
+      'authority: none',
+      '',
+      'use_policy:',
+      '- The semantic LLM retrieval stage did not complete. These are local recall leads, not a code map or conclusion.',
+      '- The main agent must run targeted search and read_file before making claims or edits.',
+      '- Do not infer execution flow from ordering below.',
+      '',
+      'local_recall_candidates:',
+    )
+    if (fallbackRanked.length === 0) {
+      lines.push('- no concrete local candidates found')
     }
-  })
+    fallbackRanked.forEach((candidate, idx) => {
+      lines.push(`${idx + 1}. ${candidate.path} [${candidate.confidence}] roles=${candidate.kinds.join(',')}`)
+      if (candidate.symbols.length > 0) lines.push(`   symbols: ${candidate.symbols.join(', ')}`)
+      if (candidate.reasons.length > 0) lines.push(`   why: ${candidate.reasons.join('; ')}`)
+      for (const hit of candidate.hits.slice(0, 2)) {
+        const label = hit.kind ? `${hit.kind} ` : ''
+        lines.push(`   evidence: ${label}L${hit.startLine}-${hit.endLine} ${trimText(hit.preview, 140)}`)
+      }
+    })
+  }
 
   lines.push('', '</fast_context_pack>')
   return lines.join('\n').replace(/\n{3,}/g, '\n\n')
@@ -693,12 +770,15 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     baseUrl: params.baseUrl,
     provider: params.provider,
     customHeaders: params.customHeaders,
+    reasoning: params.reasoning,
+    modelCapabilities: params.modelCapabilities,
     model: params.model,
     codemap: params.codemap,
     abortSignal: params.abortSignal,
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     retrievalContext: prefetch.context,
     initialEvidence: prefetch.evidence,
+    requireGroundedReport: true,
     onEvent: onSubEvent,
   })
 

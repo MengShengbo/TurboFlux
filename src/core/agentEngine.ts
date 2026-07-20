@@ -2170,6 +2170,8 @@ Before retrying:
         baseUrl: fastContextConfig?.baseUrl || 'https://api.deepseek.com',
         provider: fastContextConfig?.provider,
         customHeaders: fastContextConfig?.customHeaders,
+        reasoning: fastContextConfig?.reasoning,
+        modelCapabilities: fastContextConfig?.modelCapabilities,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
         codemap: skeleton,
         maxTurns: options.maxTurns,
@@ -5003,10 +5005,25 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         // Default to case-insensitive (grep -i ergonomics). Models can opt back
         // into case sensitivity when needed.
         const caseSensitive = args.case_sensitive === true
-        const result = await this.toolExecutor.searchContent(args.pattern as string, dirPath, filePattern, !caseSensitive)
+        const result = this.toolExecutor.searchContentPage
+          ? await this.toolExecutor.searchContentPage(args.pattern as string, dirPath, filePattern, !caseSensitive, {
+              offset: args.offset as number | undefined,
+              limit: args.head_limit as number | undefined,
+              contextBefore: args.context_before as number | undefined,
+              contextAfter: args.context_after as number | undefined,
+              multiline: args.multiline === true,
+              fileType: args.file_type as string | undefined,
+            })
+          : await this.toolExecutor.searchContent(args.pattern as string, dirPath, filePattern, !caseSensitive)
         if (!result.success) return `Error: ${result.error}`
-        if (!result.data || result.data.length === 0) return 'No matches found'
-        return this.formatContentSearchResults(result.data)
+        const page = this.toolExecutor.searchContentPage
+          ? result.data as { hits?: import('../tools/executor').SearchContentHit[]; truncated?: boolean; offset?: number; limit?: number; totalMatches?: number }
+          : { hits: Array.isArray(result.data) ? result.data : [], truncated: false, offset: 0, limit: 50, totalMatches: Array.isArray(result.data) ? result.data.length : 0 }
+        if (!page.hits?.length) return 'No matches found'
+        const formatted = this.formatContentSearchResults(page.hits)
+        return page.truncated
+          ? `${formatted}\n\nMore matches available; continue with offset=${Number(page.offset || 0) + page.hits.length}.`
+          : formatted
       }
 
       case 'search_symbols': {
@@ -5072,7 +5089,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const context = typeof args.context === 'string' && args.context.trim()
           ? `\n\nParent context:\n${args.context.trim()}`
           : ''
-        const maxTurns = thoroughness === 'quick' ? 2 : thoroughness === 'very_thorough' ? 5 : 3
+        const maxTurns = thoroughness === 'quick' ? 5 : thoroughness === 'very_thorough' ? 12 : 8
         const maxParallel = thoroughness === 'quick' ? 4 : 6
         const scanObjective = `${objective}\n\nThoroughness: ${thoroughness}${context}`
         const background = this.startFastContextBackground(scanObjective, { maxTurns, maxParallel })

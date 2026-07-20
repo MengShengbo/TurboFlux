@@ -62,11 +62,11 @@ describe('FastContext objective tokenization', () => {
       'RANKED_CODE_MAP\n1. src/llm.ts L20-L40 role=entry confidence=high why=read and confirmed',
     )
 
-    expect(pack).toContain('authority: llm_subagent_report_first')
+    expect(pack).toContain('authority: llm_verified_code_map')
     expect(pack).toContain('llm_ranked_code_map:')
     expect(pack).toContain('src/llm.ts L20-L40')
-    expect(pack).toContain('fallback_candidates:')
-    expect(pack).toContain('src/fallback.ts')
+    expect(pack).not.toContain('local_recall_candidates:')
+    expect(pack).not.toContain('src/fallback.ts')
   })
 
   it('returns read-confirmed deterministic evidence when model ranking is unavailable', async () => {
@@ -109,7 +109,9 @@ describe('FastContext objective tokenization', () => {
     expect(result.hits.some(hit => hit.reason === 'prefetch read confirmation')).toBe(true)
     expect(result.evidencePack).toContain('quality:')
     expect(result.evidencePack).toContain('read-confirmed evidence range')
-    expect(result.evidencePack).toContain('llm_ranked_code_map:\n- missing')
+    expect(result.evidencePack).toContain('status: degraded')
+    expect(result.evidencePack).toContain('authority: none')
+    expect(result.evidencePack).toContain('local_recall_candidates:')
     expect(result.truncated).toBe(true)
   })
 })
