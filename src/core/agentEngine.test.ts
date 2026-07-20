@@ -437,7 +437,7 @@ describe('AgentEngine permission requests', () => {
 })
 
 describe('AgentEngine interrupted streams', () => {
-  function createHarness(provider: 'custom' | 'anthropic', streamLine?: string, abortStream = true) {
+  function createHarness(provider: 'custom' | 'anthropic', streamLine?: string | string[], abortStream = true) {
     const workspace = process.cwd()
     const runtimeConfig = {
       provider,
@@ -452,7 +452,9 @@ describe('AgentEngine interrupted streams', () => {
     const streamAbort = vi.fn(async () => {})
     const executor = {
       streamMessage: vi.fn(async (_url: string, _headers: Record<string, string>, _body: string, onLine: (line: string) => void) => {
-        if (streamLine) onLine(streamLine)
+        if (streamLine) {
+          for (const line of Array.isArray(streamLine) ? streamLine : [streamLine]) onLine(line)
+        }
         if (abortStream) {
           engine.abort()
           return { success: false, error: 'Request aborted' }
@@ -623,6 +625,60 @@ describe('AgentEngine interrupted streams', () => {
 
       expect(turn.content).toBe('Anthropic response without message_stop.')
       expect(events).toContainEqual({ type: 'stream:end' })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('accepts gateway streams with event-only types, initial text, and stop_reason', async () => {
+    const lines = [
+      'event: content_block_start',
+      `data: ${JSON.stringify({ index: 0, content_block: { type: 'text', text: 'Gateway-compatible response.' } })}`,
+      'event: message_delta',
+      `data: ${JSON.stringify({ delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 4 } })}`,
+    ]
+    const { engine, stateProvider, events } = createHarness('anthropic', lines, false)
+    const internal = engine as unknown as {
+      callAnthropicAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        systemPrompt: string,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callAnthropicAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        'system',
+        [{ role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn.content).toBe('Gateway-compatible response.')
+      expect(events).toContainEqual({ type: 'stream:end' })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('promotes reasoning-only provider output to the visible answer', () => {
+    const { engine } = createHarness('custom', undefined, false)
+    const internal = engine as unknown as {
+      createAssistantTurn: (content: string, toolCalls: undefined, metadata: Record<string, unknown>) => AgentTurn
+    }
+
+    try {
+      const turn = internal.createAssistantTurn('', undefined, {
+        thinking: { content: '这是模型返回的唯一可见回答。', source: 'provider', status: 'complete' },
+        rawReasoningPayload: { provider: 'openai-compatible', blocks: [], reasoningContent: '这是模型返回的唯一可见回答。' },
+      })
+
+      expect(turn.content).toBe('这是模型返回的唯一可见回答。')
+      expect(turn.metadata?.thinking).toBeUndefined()
+      expect(turn.metadata?.rawReasoningPayload).toBeUndefined()
     } finally {
       engine.destroy()
     }
@@ -959,6 +1015,41 @@ describe('AgentEngine model protocol compatibility', () => {
         'https://ai.zyyun.xyz/v1/chat/completions',
         'https://ai.zyyun.xyz/v1/responses',
       ])
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
+  it('uses Responses directly for GPT 5 gateways with cache and reasoning usage', async () => {
+    let requestBody: Record<string, any> | undefined
+    const harness = createProtocolHarness('custom', 'gpt-5.6-sol', async (url, _headers, body, onLine) => {
+      expect(url).toBe('https://ai.zyyun.xyz/v1/responses')
+      requestBody = JSON.parse(body)
+      onLine(`data: ${JSON.stringify({ type: 'response.reasoning_summary_text.delta', delta: 'Brief reasoning.' })}`)
+      onLine(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'Visible answer.' })}`)
+      onLine(`data: ${JSON.stringify({
+        type: 'response.completed',
+        response: {
+          usage: {
+            input_tokens: 12_400,
+            output_tokens: 420,
+            input_tokens_details: { cached_tokens: 10_000 },
+            output_tokens_details: { reasoning_tokens: 384 },
+          },
+          output: [],
+        },
+      })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      const turn = await harness.callModel()
+
+      expect(harness.executor.streamMessage).toHaveBeenCalledOnce()
+      expect(requestBody?.prompt_cache_key).toMatch(/^tf:gpt-5\.6-sol:/)
+      expect(turn.content).toBe('Visible answer.')
+      expect(turn.metadata?.thinking?.tokenCount).toBe(384)
+      expect(turn.metadata?.tokens).toMatchObject({ input: 12_400, output: 420, cached: 10_000 })
     } finally {
       harness.engine.destroy()
     }

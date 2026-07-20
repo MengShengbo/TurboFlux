@@ -69,6 +69,28 @@ describe('/fastcontext', () => {
   })
 })
 
+describe('/model', () => {
+  it('mounts a manually supplied model id when discovery is unavailable', () => {
+    let nextConfig: CommandContext['config'] | null = null
+    const ctx = fullContext({
+      config: { ...fullContext().config, model: '' },
+      modelPresets: [],
+      setConfig: config => { nextConfig = config },
+    })
+
+    const result = commandRegistry.execute('/model add claude-sonnet-5', ctx)
+
+    expect(result.text).toBe('Mounted model: claude-sonnet-5')
+    expect(nextConfig?.model).toBe('claude-sonnet-5')
+  })
+
+  it('requires an id after the add subcommand', () => {
+    const result = commandRegistry.execute('/model add', fullContext())
+
+    expect(result.text).toBe('Usage: /model add <model-id>')
+  })
+})
+
 describe('/clear', () => {
   it('starts a new saved conversation before clearing the current session', () => {
     let startedNew = 0

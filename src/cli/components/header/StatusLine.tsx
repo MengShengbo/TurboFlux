@@ -1,5 +1,6 @@
 import React from 'react'
 import { Box, Text } from 'ink'
+import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { getSafeFrameWidth } from '../../terminalLayout'
@@ -46,18 +47,37 @@ export function StatusLine({
   const bar = '#'.repeat(filled) + '-'.repeat(barWidth - filled)
   const barColor = ratio < 0.5 ? theme.success : ratio < 0.8 ? theme.warning : theme.error
 
-  const isWide = columns > 80
   const frameWidth = getSafeFrameWidth(columns, 3)
-
-  const parts: string[] = []
-  if (config.model) parts.push(config.model)
+  const modelPart = config.model || 'no model connection'
   const reasoningSetting = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
-  if (reasoningSetting) parts.push(`reason:${reasoningSetting}`)
-  parts.push(`approval:${config.approvalPolicy}`)
-  parts.push(`git:${gitEnabled ? 'on' : 'off'}`)
-  parts.push(`mcp:${mcpCount > 0 ? mcpCount : 'off'}`)
-  if (terminalCount > 0) parts.push(`term:${terminalCount}`)
-  if (viewingHistory) parts.push('history')
+  const primaryParts = [
+    modelPart,
+    reasoningSetting ? `reason:${reasoningSetting}` : '',
+    `approval:${config.approvalPolicy}`,
+  ].filter(Boolean)
+  const secondaryParts = [
+    `git:${gitEnabled ? 'on' : 'off'}`,
+    `mcp:${mcpCount > 0 ? mcpCount : 'off'}`,
+    terminalCount > 0 ? `term:${terminalCount}` : '',
+    viewingHistory ? 'history' : '',
+  ].filter(Boolean)
+  const contextLabel = `ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : 'unknown'}`
+  const cacheLabel = hasProviderUsage && (tokenUsage.cached ?? 0) > 0
+    ? `cache ${formatTokens(tokenUsage.cached)}`
+    : ''
+  const outputLabel = hasProviderUsage && (tokenUsage.output ?? 0) > 0
+    ? `out ${formatTokens(tokenUsage.output)}`
+    : ''
+  const parts = [
+    ...primaryParts,
+    ...(columns >= 82 ? [contextLabel] : []),
+    ...(columns >= 100 && outputLabel ? [outputLabel] : []),
+    ...(columns >= 100 && cacheLabel ? [cacheLabel] : []),
+    ...(columns >= 112 ? secondaryParts : []),
+  ]
+  const usageWidth = hasProviderUsage && total > 0 ? barWidth + 7 : 0
+  const textWidth = Math.max(12, frameWidth - 9 - usageWidth)
+  const statusText = cliTruncate(parts.join(' | '), textWidth, { position: 'middle' })
 
   return (
     <Box
@@ -67,14 +87,11 @@ export function StatusLine({
       flexDirection="row"
       justifyContent="space-between"
     >
-      <Box flexDirection="row">
+      <Box flexDirection="row" flexGrow={1} minWidth={0}>
         <Text color={mode === 'vibe' ? theme.success : theme.info} bold>{MODE_LABELS[mode]}</Text>
         <Text color={theme.divider}> | </Text>
-        <Text color={theme.statusLine}>
-          {parts.length > 0 ? parts.join(' | ') : 'no model connection'}
-          {isWide && ` | ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : 'unknown'}`}
-          {hasProviderUsage && total > 0 && ' '}
-        </Text>
+        <Text color={theme.statusLine} wrap="truncate-end">{statusText}</Text>
+        {hasProviderUsage && total > 0 && <Text> </Text>}
         {hasProviderUsage && total > 0 && <Text color={barColor}>{bar}</Text>}
         {hasProviderUsage && total > 0 && <Text color={theme.statusLine}> {percentage}%</Text>}
       </Box>

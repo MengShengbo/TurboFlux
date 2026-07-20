@@ -4,6 +4,9 @@ import {
   createThinkingTrace,
   formatTaskProgressLabel,
   formatTaskToolSummary,
+  isThinkingToggleShortcut,
+  resolveAssistantStreamDisplay,
+  selectAutoMountedModel,
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
@@ -72,6 +75,56 @@ describe('task progress labels', () => {
     expect(formatTaskToolSummary(0, 0, 0, 0)).toBe('planning')
     expect(formatTaskToolSummary(2, 4, 1, 0)).toBe('tools 2/4, 1 running')
     expect(formatTaskToolSummary(3, 4, 0, 1)).toBe('tools 3/4, 1 failed')
+  })
+})
+
+describe('automatic model mounting', () => {
+  const model = {
+    id: 'first-model',
+    name: 'First model',
+    model: 'first-model',
+    provider: 'custom' as const,
+    baseUrl: 'https://example.com/v1',
+    contextWindow: 200_000,
+    maxTokens: 16_384,
+    description: 'Discovered model',
+  }
+
+  it('mounts the first model returned by network discovery', () => {
+    expect(selectAutoMountedModel('', 'network', [model])).toBe(model)
+    expect(selectAutoMountedModel('', 'cache', [model])).toBe(model)
+  })
+
+  it('does not replace a manual model or mount fallback guesses', () => {
+    expect(selectAutoMountedModel('manual-model', 'network', [model])).toBeUndefined()
+    expect(selectAutoMountedModel('', 'fallback', [model])).toBeUndefined()
+  })
+})
+
+describe('reasoning visibility shortcut', () => {
+  it('uses the Claude Code compatible Ctrl+O binding', () => {
+    expect(isThinkingToggleShortcut('o', true)).toBe(true)
+    expect(isThinkingToggleShortcut('O', true)).toBe(true)
+    expect(isThinkingToggleShortcut('t', true)).toBe(false)
+    expect(isThinkingToggleShortcut('o', false)).toBe(false)
+  })
+})
+
+describe('stream display classification', () => {
+  it('promotes reasoning-only completed output to the visible answer', () => {
+    expect(resolveAssistantStreamDisplay('', 'Visible provider answer', false, false)).toEqual({
+      visibleText: 'Visible provider answer',
+      thinkingText: '',
+    })
+  })
+
+  it('keeps genuine reasoning separate when text, tools, or interruption exist', () => {
+    expect(resolveAssistantStreamDisplay('Answer', 'Reasoning', false, false)).toEqual({
+      visibleText: 'Answer',
+      thinkingText: 'Reasoning',
+    })
+    expect(resolveAssistantStreamDisplay('', 'Partial reasoning', false, true).thinkingText).toBe('Partial reasoning')
+    expect(resolveAssistantStreamDisplay('', 'Tool reasoning', true, false).thinkingText).toBe('Tool reasoning')
   })
 })
 

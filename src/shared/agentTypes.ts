@@ -128,6 +128,7 @@ export interface AgentAttachment {
 export interface TokenUsage {
   input?: number
   output?: number
+  cached?: number
   total?: number
   source?: 'provider' | 'unknown'
 }

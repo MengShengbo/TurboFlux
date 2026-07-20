@@ -38,8 +38,12 @@ export function AgentActivityLine({ active, persistent = false }: AgentActivityL
   if (!active && !persistent) return null
 
   const width = Math.max(0, columns - 3)
+  const colors = {
+    base: theme.divider,
+    sweep: [theme.divider, theme.subtle, theme.inactive, theme.brandShimmer, theme.text, theme.inactive, theme.subtle],
+  }
   const segments = active
-    ? buildAgentActivityLineFrame(width, frame)
+    ? buildAgentActivityLineFrame(width, frame, colors)
     : [{ text: '─'.repeat(width), color: theme.subtle, bold: false }]
 
   return (
@@ -53,7 +57,11 @@ export function AgentActivityLine({ active, persistent = false }: AgentActivityL
   )
 }
 
-export function buildAgentActivityLineFrame(width: number, frame: number): AgentActivitySegment[] {
+export function buildAgentActivityLineFrame(
+  width: number,
+  frame: number,
+  colors: { base: string; sweep: string[] } = { base: BASE_COLOR, sweep: SWEEP_COLORS },
+): AgentActivitySegment[] {
   const safeWidth = Math.max(0, Math.floor(width))
   if (safeWidth === 0) return []
 
@@ -65,18 +73,18 @@ export function buildAgentActivityLineFrame(width: number, frame: number): Agent
   for (let index = 0; index < safeWidth; index += 1) {
     const distance = head - index
     const sweepIndex = distance >= 0 && distance < shimmerWidth
-      ? Math.min(SWEEP_COLORS.length - 1, Math.floor((distance / shimmerWidth) * SWEEP_COLORS.length))
+      ? Math.min(colors.sweep.length - 1, Math.floor((distance / shimmerWidth) * colors.sweep.length))
       : -1
     const isCore = sweepIndex === 3
     chars.push(sweepIndex >= 0
       ? {
           text: '-',
-          color: SWEEP_COLORS[sweepIndex]!,
+          color: colors.sweep[sweepIndex]!,
           bold: isCore,
         }
       : {
           text: '-',
-          color: BASE_COLOR,
+          color: colors.base,
           bold: false,
         })
   }

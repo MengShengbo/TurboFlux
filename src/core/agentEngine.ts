@@ -53,6 +53,7 @@ import {
   buildModelProtocolUrl,
   formatProtocolAttempt,
   formatProtocolFailure,
+  looksLikeResponsesPreferredModel,
   planModelProtocols,
   protocolLabel,
   shouldFallbackProtocol,
@@ -2489,7 +2490,8 @@ Before retrying:
     // panel so users can see real cache savings, not just billed totals.
     let cacheReadTokens = 0
     let cacheCreationTokens = 0
-    let sawMessageStop = false
+    let sawTerminalEvent = false
+    let pendingSseEventType = ''
     // Mint the streamId BEFORE the request goes out so abort() (which
     // can fire from another tick the moment the user clicks "stop")
     // sees a non-null id that matches the one the main process will use.
@@ -2503,13 +2505,18 @@ Before retrying:
 
     const handleStreamLine = (line: string) => {
       receivedStreamData = true
+      if (line.startsWith('event:')) {
+        pendingSseEventType = line.slice(6).trim()
+        return
+      }
       if (!line.startsWith('data:')) return
       const jsonStr = line.slice(5).trim()
       if (jsonStr === '[DONE]') return
 
       try {
         const event = JSON.parse(jsonStr)
-        const eventType = event.type
+        const eventType = event.type || pendingSseEventType
+        pendingSseEventType = ''
 
         if (eventType === 'content_block_delta') {
           const delta = event.delta
@@ -2564,16 +2571,24 @@ Before retrying:
           } else if (contentBlock?.type === 'redacted_thinking' && typeof contentBlock.data === 'string') {
             rawReasoningBlocks.push({ type: 'redacted_thinking', data: contentBlock.data })
           }
+          if (contentBlock?.type === 'text' && typeof contentBlock.text === 'string' && contentBlock.text) {
+            textContent += contentBlock.text
+            this.emit({ type: 'stream:delta', text: contentBlock.text })
+          }
           if (contentBlock?.type === 'tool_use') {
+            const initialInput = contentBlock.input && typeof contentBlock.input === 'object' && Object.keys(contentBlock.input).length > 0
+              ? JSON.stringify(contentBlock.input)
+              : ''
             toolCallMap.set(`idx-${event.index}`, {
               id: contentBlock.id || `toolu_${event.index}`,
               name: contentBlock.name,
-              inputJson: '',
+              inputJson: initialInput,
             })
           }
         } else if (eventType === 'message_stop') {
-          sawMessageStop = true
+          sawTerminalEvent = true
         } else if (eventType === 'message_delta') {
+          if (event.delta?.stop_reason) sawTerminalEvent = true
           if (event.delta?.signature) {
             for (let index = rawReasoningBlocks.length - 1; index >= 0; index -= 1) {
               const block = rawReasoningBlocks[index]
@@ -2594,7 +2609,7 @@ Before retrying:
               cacheCreationTokens = event.usage.cache_creation_input_tokens
             }
             const liveInput = inputTokens + cacheReadTokens + cacheCreationTokens
-            this.emit({ type: 'stream:usage', usage: { input: liveInput, output: outputTokens, total: liveInput + outputTokens, source: 'provider' } })
+            this.emit({ type: 'stream:usage', usage: { input: liveInput, output: outputTokens, cached: cacheReadTokens, total: liveInput + outputTokens, source: 'provider' } })
           }
         } else if (eventType === 'message_start') {
           if (event.message?.usage) {
@@ -2602,7 +2617,7 @@ Before retrying:
             cacheReadTokens = event.message.usage.cache_read_input_tokens || 0
             cacheCreationTokens = event.message.usage.cache_creation_input_tokens || 0
             const liveInput = inputTokens + cacheReadTokens + cacheCreationTokens
-            this.emit({ type: 'stream:usage', usage: { input: liveInput, output: outputTokens, total: liveInput + outputTokens, source: 'provider' } })
+            this.emit({ type: 'stream:usage', usage: { input: liveInput, output: outputTokens, cached: cacheReadTokens, total: liveInput + outputTokens, source: 'provider' } })
           }
         }
       } catch {
@@ -2655,22 +2670,26 @@ Before retrying:
         err.aborted = true
         throw err
       }
-      throw new ModelProtocolRequestError(result.error || 'Anthropic request failed', {
-        protocol: 'anthropic_messages',
-        url,
-        status: result.status,
-        kind: result.status ? 'http' : 'network',
-        receivedStreamData,
-      })
+      if (!sawTerminalEvent) {
+        const interruptedTurn = this.finishInterruptedStream(textContent, reasoningContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
+        throw new ModelProtocolRequestError(result.error || 'Anthropic request failed', {
+          protocol: 'anthropic_messages',
+          url,
+          status: result.status,
+          kind: result.status ? 'http' : 'network',
+          receivedStreamData,
+        })
+      }
     }
-    if (!sawMessageStop) {
+    if (!sawTerminalEvent) {
       const parsedTextTools = parseTextToolCalls(textContent)
       const hasVisibleText = Boolean(stripTextToolCallMarkup(textContent, { stripIncomplete: true }))
       const completeToolPayloads = hasCompleteToolPayloads(
         [...toolCallMap.values()].map(block => ({ name: block.name, argumentsJson: block.inputJson })),
       )
       if (!hasVisibleText && !completeToolPayloads && parsedTextTools.toolCalls.length === 0) {
-        throw new ModelProtocolRequestError('Anthropic stream ended before message_stop', {
+        throw new ModelProtocolRequestError('Anthropic stream ended before a terminal event', {
           protocol: 'anthropic_messages',
           url,
           kind: 'response_shape',
@@ -2700,10 +2719,10 @@ Before retrying:
     }
 
     const contextInputTokens = inputTokens + cacheReadTokens + cacheCreationTokens
-    const tokens = { input: contextInputTokens, output: outputTokens, total: contextInputTokens + outputTokens, source: 'provider' as const }
+    const tokens = { input: contextInputTokens, output: outputTokens, cached: cacheReadTokens, total: contextInputTokens + outputTokens, source: 'provider' as const }
     this.session.totalTokens.input += tokens.input
     this.session.totalTokens.output += tokens.output
-    this.contextManager.updateTokenCounting(tokens.input, tokens.output)
+    this.contextManager.updateTokenCounting(tokens.input, tokens.output, cacheReadTokens)
 
     if (inputTokens > 0 || outputTokens > 0) {
       this.stateProvider.recordTokenUsage({
@@ -2846,7 +2865,7 @@ Before retrying:
       // loop users see in chat.
       body.parallel_tool_calls = true
     }
-    if (config.provider === 'openai') {
+    if (config.provider === 'openai' || looksLikeResponsesPreferredModel(config.defaultModel)) {
       body.prompt_cache_key = this.buildPromptCacheKey(config.defaultModel, openaiTools)
       if (/gpt-5\.5/i.test(config.defaultModel)) {
         body.prompt_cache_retention = '24h'
@@ -2881,6 +2900,7 @@ Before retrying:
     const toolCallMap = new Map<number, { id: string; name: string; argumentsJson: string }>()
     let inputTokens = 0
     let outputTokens = 0
+    let reasoningTokens = 0
     // Cross-provider cache hit accounting:
     //   - OpenAI:  usage.prompt_tokens_details.cached_tokens (auto-prefix cache)
     //   - DeepSeek: usage.prompt_cache_hit_tokens (disk-backed prefix cache)
@@ -2922,6 +2942,9 @@ Before retrying:
         if (chunk.usage) {
           inputTokens = chunk.usage.prompt_tokens || inputTokens
           outputTokens = chunk.usage.completion_tokens || outputTokens
+          const reportedReasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens
+            ?? chunk.usage.output_tokens_details?.reasoning_tokens
+          if (typeof reportedReasoningTokens === 'number') reasoningTokens = reportedReasoningTokens
           // OpenAI auto-cache hit count.
           const openaiCached = chunk.usage.prompt_tokens_details?.cached_tokens
           if (typeof openaiCached === 'number') cacheReadTokens = openaiCached
@@ -2932,7 +2955,7 @@ Before retrying:
           if (typeof chunk.usage.prompt_cache_miss_tokens === 'number') {
             cacheMissTokens = chunk.usage.prompt_cache_miss_tokens
           }
-          this.emit({ type: 'stream:usage', usage: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' } })
+          this.emit({ type: 'stream:usage', usage: { input: inputTokens, output: outputTokens, cached: cacheReadTokens, total: inputTokens + outputTokens, source: 'provider' } })
         }
 
         const choice = chunk.choices?.[0]
@@ -3033,13 +3056,17 @@ Before retrying:
         err.aborted = true
         throw err
       }
-      throw new ModelProtocolRequestError(result.error || 'Model request failed', {
-        protocol: 'openai_chat',
-        url,
-        status: result.status,
-        kind: result.status ? 'http' : 'network',
-        receivedStreamData,
-      })
+      if (!sawTerminalEvent) {
+        const interruptedTurn = this.finishInterruptedStream(textContent, reasoningContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
+        throw new ModelProtocolRequestError(result.error || 'Model request failed', {
+          protocol: 'openai_chat',
+          url,
+          status: result.status,
+          kind: result.status ? 'http' : 'network',
+          receivedStreamData,
+        })
+      }
     }
     if (!sawTerminalEvent) {
       const parsedTextTools = parseTextToolCalls(textContent)
@@ -3088,10 +3115,10 @@ Before retrying:
       }
     }
 
-    const tokens = { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' as const }
+    const tokens = { input: inputTokens, output: outputTokens, cached: cacheReadTokens, total: inputTokens + outputTokens, source: 'provider' as const }
     this.session.totalTokens.input += tokens.input
     this.session.totalTokens.output += tokens.output
-    this.contextManager.updateTokenCounting(tokens.input, tokens.output)
+    this.contextManager.updateTokenCounting(tokens.input, tokens.output, cacheReadTokens)
 
     if (inputTokens > 0 || outputTokens > 0) {
       this.stateProvider.recordTokenUsage({
@@ -3123,7 +3150,7 @@ Before retrying:
         source: 'provider',
         status: 'complete',
         durationMs: Date.now() - startTime,
-        tokenCount: Math.max(1, Math.ceil(reasoningContent.length / 4)),
+        tokenCount: reasoningTokens || Math.max(1, Math.ceil(reasoningContent.length / 4)),
         effort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
       } : undefined,
       // Store reasoning_content so it can be passed back in subsequent turns.
@@ -3184,7 +3211,7 @@ Before retrying:
       body.tool_choice = 'auto'
       body.parallel_tool_calls = true
     }
-    if (config.provider === 'openai') {
+    if (config.provider === 'openai' || looksLikeResponsesPreferredModel(config.defaultModel)) {
       body.prompt_cache_key = this.buildPromptCacheKey(config.defaultModel, responseTools)
       if (/gpt-5\.5/i.test(config.defaultModel)) body.prompt_cache_retention = '24h'
     }
@@ -3216,6 +3243,7 @@ Before retrying:
     let reasoningContent = ''
     let inputTokens = 0
     let outputTokens = 0
+    let reasoningTokens = 0
     let cacheReadTokens = 0
     let sawTerminalEvent = false
     let receivedStreamData = false
@@ -3253,11 +3281,13 @@ Before retrying:
       if (!usage) return
       inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : inputTokens
       outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : outputTokens
+      const reportedReasoningTokens = usage.output_tokens_details?.reasoning_tokens
+      if (typeof reportedReasoningTokens === 'number') reasoningTokens = reportedReasoningTokens
       const cached = usage.input_tokens_details?.cached_tokens
       if (typeof cached === 'number') cacheReadTokens = cached
       this.emit({
         type: 'stream:usage',
-        usage: { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' },
+        usage: { input: inputTokens, output: outputTokens, cached: cacheReadTokens, total: inputTokens + outputTokens, source: 'provider' },
       })
     }
 
@@ -3387,13 +3417,17 @@ Before retrying:
         aborted.aborted = true
         throw aborted
       }
-      throw new ModelProtocolRequestError(result.error || 'Responses request failed', {
-        protocol,
-        url,
-        status: result.status,
-        kind: result.status ? 'http' : 'network',
-        receivedStreamData,
-      })
+      if (!sawTerminalEvent) {
+        const interruptedTurn = this.finishInterruptedStream(textContent, reasoningContent, model, startTime)
+        if (interruptedTurn) return interruptedTurn
+        throw new ModelProtocolRequestError(result.error || 'Responses request failed', {
+          protocol,
+          url,
+          status: result.status,
+          kind: result.status ? 'http' : 'network',
+          receivedStreamData,
+        })
+      }
     }
     if (streamFailure) {
       throw new ModelProtocolRequestError(streamFailure, {
@@ -3440,10 +3474,10 @@ Before retrying:
       if (toolCalls.length === 0 && textToolCalls.toolCalls.length > 0) toolCalls.push(...textToolCalls.toolCalls)
     }
 
-    const tokens = { input: inputTokens, output: outputTokens, total: inputTokens + outputTokens, source: 'provider' as const }
+    const tokens = { input: inputTokens, output: outputTokens, cached: cacheReadTokens, total: inputTokens + outputTokens, source: 'provider' as const }
     this.session.totalTokens.input += tokens.input
     this.session.totalTokens.output += tokens.output
-    this.contextManager.updateTokenCounting(tokens.input, tokens.output)
+    this.contextManager.updateTokenCounting(tokens.input, tokens.output, cacheReadTokens)
     if (inputTokens > 0 || outputTokens > 0) {
       this.stateProvider.recordTokenUsage({
         provider: config.provider,
@@ -3470,7 +3504,7 @@ Before retrying:
         source: 'provider',
         status: 'complete',
         durationMs: Date.now() - startTime,
-        tokenCount: Math.max(1, Math.ceil(reasoningContent.length / 4)),
+        tokenCount: reasoningTokens || Math.max(1, Math.ceil(reasoningContent.length / 4)),
         effort: reasoningEffort,
       } : undefined,
       rawReasoningPayload: reasoningContent
@@ -3870,17 +3904,6 @@ Before retrying:
       if (turn.role === 'user' && turn.content.trim()) return turn.content.trim()
     }
     return ''
-  }
-
-  private looksLikeVisibleAssistantReport(content: string): boolean {
-    const normalized = content.trim()
-    if (normalized.length < 120) return false
-    const lines = normalized.split(/\r?\n/).filter(line => line.trim().length > 0)
-    const structuredLines = lines.filter(line =>
-      /^\s*(?:#{1,4}\s+|[-*]\s+|\d+\.\s+|[A-Za-z0-9_.-]+[\\/][^\s]+|`[^`]+`)/.test(line)
-    ).length
-    const paragraphCount = lines.filter(line => line.trim().length > 40).length
-    return lines.length >= 4 && structuredLines >= 2 && paragraphCount >= 1
   }
 
   private async maybeFetchCodemapSummary(strategy?: TurnStrategy | null): Promise<void> {
@@ -5962,7 +5985,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
     let finalContent = content
     const thinkingContent = finalMetadata.thinking?.content
-    if (!finalContent.trim() && thinkingContent && this.looksLikeVisibleAssistantReport(thinkingContent)) {
+    if (!finalContent.trim() && thinkingContent?.trim() && (!toolCalls || toolCalls.length === 0)) {
       finalContent = thinkingContent
       finalMetadata = {
         ...finalMetadata,

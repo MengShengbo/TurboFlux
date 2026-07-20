@@ -25,4 +25,23 @@ describe('ThinkingBlock', () => {
     expect(output).toContain('Inspect architecture')
     expect(output).toContain('▾')
   })
+
+  it('keeps folded reasoning compact and bounds the streaming preview', () => {
+    const folded = renderToString(<ThinkingBlock trace={trace} expanded={false} />, { columns: 88 })
+    const longContent = `BEGIN-${'x'.repeat(2200)}-END`
+    const expanded = renderToString(
+      <ThinkingBlock
+        trace={{ ...trace, content: longContent, status: 'streaming' }}
+        expanded
+        streaming
+        lastActivity={Date.now()}
+      />,
+      { columns: 88 },
+    )
+
+    expect(folded).not.toContain('┌')
+    expect(expanded).not.toContain('BEGIN-')
+    expect(expanded).toContain('-END')
+    expect(expanded.length).toBeLessThan(2200)
+  })
 })

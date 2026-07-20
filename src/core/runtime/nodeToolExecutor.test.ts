@@ -484,6 +484,28 @@ it('aborts only the requested streaming response', async () => withWorkspace(asy
   }
 }))
 
+it('does not replay a model request after receiving partial stream bytes', async () => withWorkspace(async ({ workspace }) => {
+  const encoder = new TextEncoder()
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}'))
+      setTimeout(() => controller.error(new Error('socket closed after response bytes')), 0)
+    },
+  }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }))
+  const onLine = vi.fn()
+  const executor = new NodeToolExecutor(workspace)
+
+  try {
+    const result = await executor.streamMessage('https://example.test/v1/chat/completions', {}, '{}', onLine)
+
+    expect(result.success).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(onLine).toHaveBeenCalledWith('data: {"choices":[{"delta":{"content":"hi"}}]}')
+  } finally {
+    fetchMock.mockRestore()
+  }
+}))
+
 it('preserves nested network causes in model request diagnostics', () => {
   const executor = new NodeToolExecutor(process.cwd())
   const cause = Object.assign(new Error('connection timed out'), {

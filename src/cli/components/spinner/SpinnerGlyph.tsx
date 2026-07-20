@@ -13,13 +13,19 @@ export function SpinnerGlyph({ lastActivity, label }: SpinnerGlyphProps) {
   const [frame, setFrame] = useState(0)
   const [stallIntensity, setStallIntensity] = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const lastActivityRef = useRef(lastActivity)
+
+  useEffect(() => {
+    lastActivityRef.current = lastActivity
+    if (lastActivity && Date.now() - lastActivity <= STALL_THRESHOLD_MS) setStallIntensity(0)
+  }, [lastActivity])
 
   useEffect(() => {
     intervalRef.current = setInterval(() => {
       setFrame(f => (f + 1) % SPINNER_CHARS.length)
 
-      if (lastActivity) {
-        const elapsed = Date.now() - lastActivity
+      if (lastActivityRef.current) {
+        const elapsed = Date.now() - lastActivityRef.current
         if (elapsed > STALL_THRESHOLD_MS) {
           const progress = Math.min(1, (elapsed - STALL_THRESHOLD_MS) / STALL_TRANSITION_MS)
           setStallIntensity(progress)
@@ -30,7 +36,7 @@ export function SpinnerGlyph({ lastActivity, label }: SpinnerGlyphProps) {
     }, SPINNER_INTERVAL_MS)
 
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
-  }, [lastActivity])
+  }, [])
 
   const char = SPINNER_CHARS[frame]
   const color = stallIntensity > 0 ? lerpHex(theme.brand, theme.inactive, stallIntensity) : theme.brand

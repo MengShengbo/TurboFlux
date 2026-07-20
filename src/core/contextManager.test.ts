@@ -180,11 +180,12 @@ describe('ContextManager', () => {
 
     expect(manager.getLastProviderUsage()).toEqual({ source: 'unknown' })
 
-    manager.updateTokenCounting(42_000, 500)
+    manager.updateTokenCounting(42_000, 500, 30_000)
 
     expect(manager.getLastProviderUsage()).toEqual({
       input: 42_000,
       output: 500,
+      cached: 30_000,
       total: 42_500,
       source: 'provider',
     })

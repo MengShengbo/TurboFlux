@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
+import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
+import { useTerminalSize } from '../../hooks/useTerminalSize'
 import type { ModelPreset } from '../../../core/config'
 
 interface Props {
@@ -23,7 +25,7 @@ function formatTokens(value?: number): string {
   return String(value)
 }
 
-function capabilitySummary(model: ModelPreset): string {
+export function capabilitySummary(model: ModelPreset): string {
   const values = [
     `ctx ${formatTokens(model.contextWindow)}`,
     `out ${formatTokens(model.maxOutputTokens)}`,
@@ -32,6 +34,10 @@ function capabilitySummary(model: ModelPreset): string {
     model.capabilities?.reasoning ? 'reasoning' : null,
   ].filter(Boolean)
   return values.join('  ')
+}
+
+export function formatModelPickerLine(model: ModelPreset, width: number): string {
+  return cliTruncate(`${model.model}  ${capabilitySummary(model)}`, Math.max(12, width), { position: 'end' })
 }
 
 export function ModelPicker({
@@ -45,6 +51,7 @@ export function ModelPicker({
   onCancel,
 }: Props) {
   const theme = useTheme()
+  const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [query, setQuery] = useState('')
   const filtered = useMemo(() => {
@@ -119,22 +126,11 @@ export function ModelPicker({
           const isSelected = index === selected
           const isCurrent = currentModel === model.model || currentModel === model.id
           return (
-            <Box key={`${model.baseUrl}:${model.model}`} flexDirection="column">
-              <Box>
-                <Box width={2}><Text color={theme.brand} bold={isSelected}>{isSelected ? '> ' : '  '}</Text></Box>
-                <Text color={isSelected ? theme.text : theme.inactive} bold={isSelected} dimColor={!isSelected}>
-                  {model.name}{isCurrent ? <Text color={theme.success}> *</Text> : null}
-                </Text>
-                <Text color={theme.inactive}>  {capabilitySummary(model)}</Text>
-              </Box>
-              {isSelected ? (
-                <Box marginLeft={2} flexDirection="column">
-                  <Text color={theme.inactive} wrap="truncate-end">{model.model}</Text>
-                  <Text color={theme.inactive} wrap="truncate-end">
-                    {model.description}  [{model.metadataSources?.join(' + ') || 'unknown'}]
-                  </Text>
-                </Box>
-              ) : null}
+            <Box key={`${model.baseUrl}:${model.model}`}>
+              <Box width={2}><Text color={theme.brand} bold={isSelected}>{isSelected ? '> ' : '  '}</Text></Box>
+              <Text color={isSelected ? theme.text : theme.inactive} bold={isSelected} dimColor={!isSelected}>
+                {formatModelPickerLine(model, columns - 8)}{isCurrent ? <Text color={theme.success}> *</Text> : null}
+              </Text>
             </Box>
           )
         })}

@@ -1,7 +1,9 @@
 import React, { useCallback, useRef, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import figures from 'figures'
+import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
+import { useTerminalSize } from '../../hooks/useTerminalSize'
 
 export type PermissionDecision = 'allow-once' | 'allow-run' | 'allow-session' | 'deny'
 
@@ -34,6 +36,7 @@ interface PermissionDialogProps {
 
 export function PermissionDialog({ toolName, description, command, path, onDecision }: PermissionDialogProps) {
   const theme = useTheme()
+  const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [selected, setSelected] = useState(0)
   const [decided, setDecided] = useState(false)
@@ -104,15 +107,13 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
           const isSelected = index === selected
           const selectedColor = option.decision === 'deny' ? theme.error : theme.brandShimmer
           return (
-            <Box key={option.decision} flexDirection="column">
-              <Text color={isSelected ? selectedColor : theme.inactive} bold={isSelected}>
-                {isSelected ? `${figures.pointer} ` : '  '}{index + 1}. {option.label}
-              </Text>
-              {isSelected && (
-                <Box paddingLeft={2}>
-                  <Text color={theme.inactive} wrap="truncate-end">{option.description}</Text>
-                </Box>
-              )}
+            <Box key={option.decision}>
+              <Box width={28} flexShrink={0}>
+                <Text color={isSelected ? selectedColor : theme.inactive} bold={isSelected}>
+                  {isSelected ? `${figures.pointer} ` : '  '}{index + 1}. {option.label}
+                </Text>
+              </Box>
+              <Text color={theme.inactive}>{cliTruncate(option.description, Math.max(12, columns - 34), { position: 'end' })}</Text>
             </Box>
           )
         })}

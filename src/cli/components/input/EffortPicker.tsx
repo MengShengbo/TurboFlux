@@ -1,8 +1,10 @@
 import React, { useMemo, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
+import cliTruncate from 'cli-truncate'
 import type { ModelReasoningCapabilities } from '../../../core/modelRegistry'
 import type { NativeReasoningConfig, ReasoningEffort } from '../../../shared/agentTypes'
 import { useTheme } from '../../theme/index'
+import { useTerminalSize } from '../../hooks/useTerminalSize'
 
 export type EffortSelection =
   | { type: 'effort'; effort: ReasoningEffort }
@@ -119,6 +121,7 @@ export function buildEffortOptions(
 
 export function EffortPicker({ model, capability, current, onSelect, onCancel }: Props) {
   const theme = useTheme()
+  const { columns } = useTerminalSize()
   const options = useMemo(() => buildEffortOptions(capability, current), [capability, current])
   const initialIndex = Math.max(0, options.findIndex(option => option.current))
   const [selected, setSelected] = useState(initialIndex)
@@ -146,18 +149,14 @@ export function EffortPicker({ model, capability, current, onSelect, onCancel }:
         {options.map((option, index) => {
           const isSelected = index === selected
           return (
-            <Box key={option.id} flexDirection="column">
-              <Box>
+            <Box key={option.id}>
                 <Box width={2}><Text color={theme.brand} bold={isSelected}>{isSelected ? '> ' : '  '}</Text></Box>
+                <Box width={16} flexShrink={0}>
                 <Text color={isSelected ? theme.text : theme.inactive} bold={isSelected} dimColor={!isSelected}>
                   {option.label}{option.current ? <Text color={theme.success}> *</Text> : null}
                 </Text>
-              </Box>
-              {isSelected ? (
-                <Box marginLeft={2}>
-                  <Text color={theme.inactive} wrap="truncate-end">{option.description}</Text>
                 </Box>
-              ) : null}
+                <Text color={theme.inactive}>{cliTruncate(option.description, Math.max(12, columns - 24), { position: 'end' })}</Text>
             </Box>
           )
         })}

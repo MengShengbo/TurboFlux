@@ -59,7 +59,10 @@ import {
   formatTaskToolName,
   formatTaskToolSummary,
   getEngineUserOrdinalForUiMessage,
+  isThinkingToggleShortcut,
+  resolveAssistantStreamDisplay,
   serializeToolArgsForUi,
+  selectAutoMountedModel,
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
@@ -70,6 +73,9 @@ export {
   formatTaskProgressLabel,
   formatTaskToolSummary,
   getEngineUserOrdinalForUiMessage,
+  isThinkingToggleShortcut,
+  resolveAssistantStreamDisplay,
+  selectAutoMountedModel,
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
@@ -230,6 +236,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([])
   const [interruptHint, setInterruptHint] = useState<string | null>(null)
   const [exitHint, setExitHint] = useState<string | null>(null)
+  const [runControlHint, setRunControlHint] = useState<string | null>(null)
   const [pendingAsk, setPendingAsk] = useState<{
     id: string
     question: string
@@ -257,6 +264,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const streamThinkingBufferRef = useRef('')
   const streamThinkingStartedAtRef = useRef<number | undefined>(undefined)
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastActivityPaintRef = useRef(0)
   const fcEventBufferRef = useRef<FastContextScanEvent[]>([])
   const fcFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcActiveRef = useRef(false)
@@ -270,6 +278,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const runPromptRef = useRef<((prompt: string, attachments?: AgentAttachment[]) => Promise<void>) | null>(null)
   const exitPressRef = useRef(0)
   const lastCtrlCEventAtRef = useRef(0)
+  const runControlHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleInterruptRef = useRef<() => void>(() => {})
   const lastClipboardImageRef = useRef<{ fingerprint: string; at: number } | null>(null)
   const genMsgId = useCallback(() => {
@@ -341,6 +350,21 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       clearTimeout(streamFlushTimerRef.current)
       streamFlushTimerRef.current = null
     }
+  }, [])
+
+  const markActivity = useCallback((timestamp = Date.now()) => {
+    if (timestamp - lastActivityPaintRef.current < 80) return
+    lastActivityPaintRef.current = timestamp
+    setLastActivity(timestamp)
+  }, [])
+
+  const showRunControlHint = useCallback((message: string) => {
+    if (runControlHintTimerRef.current) clearTimeout(runControlHintTimerRef.current)
+    setRunControlHint(message)
+    runControlHintTimerRef.current = setTimeout(() => {
+      runControlHintTimerRef.current = null
+      setRunControlHint(null)
+    }, 1800)
   }, [])
 
   const flushFastContextUi = useCallback(() => {
@@ -432,6 +456,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     abortingRef.current = false
     setInterruptHint(null)
     setExitHint(null)
+    setRunControlHint(null)
     setCursorMode(false)
     clear()
     setIsRunning(false)
@@ -467,7 +492,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (requestId !== modelDiscoveryRequestRef.current) return
     setModelPresets(result.models)
     setModelDiscoveryStatus({ isRefreshing: false, stale: result.stale, error: result.error })
-  }, [])
+    const firstDiscovered = selectAutoMountedModel(targetConfig.model, result.source, result.models)
+    if (!targetConfig.model && firstDiscovered) {
+      persistConfig(applyPreset(targetConfig, firstDiscovered))
+      showRunControlHint(`Mounted ${firstDiscovered.model}`)
+    }
+  }, [persistConfig, showRunControlHint])
 
   useEffect(() => {
     const cached = readCachedModelDiscovery(config, true)
@@ -506,16 +536,23 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             streamFlushTimerRef.current = setTimeout(() => {
               streamFlushTimerRef.current = null
               setStreamText(streamBufferRef.current)
+              setStreamThinkingText(streamThinkingBufferRef.current)
             }, 80)
           }
-          setLastActivity(Date.now())
+          markActivity()
           break
         case 'stream:thinking_delta':
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
           if (!streamThinkingStartedAtRef.current) streamThinkingStartedAtRef.current = Date.now()
           streamThinkingBufferRef.current += event.text
-          setStreamThinkingText(streamThinkingBufferRef.current)
-          setLastActivity(Date.now())
+          if (!streamFlushTimerRef.current) {
+            streamFlushTimerRef.current = setTimeout(() => {
+              streamFlushTimerRef.current = null
+              setStreamText(streamBufferRef.current)
+              setStreamThinkingText(streamThinkingBufferRef.current)
+            }, 80)
+          }
+          markActivity()
           break
         case 'stream:usage':
           setTokenUsage(event.usage)
@@ -533,13 +570,18 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           streamThinkingStartedAtRef.current = undefined
           const toolsSnapshot = currentToolsRef.current
           const changesSnapshot = changeSummariesRef.current
-          const visibleText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
-          const thinking = createThinkingTrace(bufferedThinkingText, thinkingStartedAt, event.interrupted === true)
-          if (visibleText || toolsSnapshot.length > 0 || changesSnapshot.length > 0 || thinking) {
+          const display = resolveAssistantStreamDisplay(
+            stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true }),
+            bufferedThinkingText,
+            toolsSnapshot.length > 0 || changesSnapshot.length > 0,
+            event.interrupted === true,
+          )
+          const thinking = createThinkingTrace(display.thinkingText, thinkingStartedAt, event.interrupted === true)
+          if (display.visibleText || toolsSnapshot.length > 0 || changesSnapshot.length > 0 || thinking) {
             appendMessages([{
               id: genMsgId(),
               role: 'assistant',
-              content: visibleText,
+              content: display.visibleText,
               tools: [...toolsSnapshot],
               changes: [...changesSnapshot],
               interrupted: event.interrupted === true,
@@ -573,7 +615,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             args: serializeToolArgsForUi(event.toolCall.arguments),
             startTime: Date.now(),
           }])
-          setLastActivity(Date.now())
+          markActivity()
           break
         case 'stream:tool_call_delta':
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
@@ -585,7 +627,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             startedAt: prev?.id === event.toolCallId ? prev.startedAt : Date.now(),
             updatedAt: Date.now(),
           }))
-          setLastActivity(Date.now())
+          markActivity()
           break
         case 'tool:result':
           setIsRunning(true)
@@ -602,7 +644,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           if (event.toolResult.changeSummary) {
             setChangeSummaries(prev => [...prev, event.toolResult.changeSummary!])
           }
-          setLastActivity(Date.now())
+          markActivity()
           break
         case 'fast_context:event':
           queueFastContextUiEvent(event.event)
@@ -635,7 +677,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 }
               : session))
           }
-          setLastActivity(Date.now())
+          markActivity()
           break
         }
         case 'ask:user':
@@ -653,7 +695,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'context:segment_created':
           convManager.scheduleSave()
-          setLastActivity(Date.now())
+          markActivity()
+          break
+        case 'notification':
+          if (event.level === 'warning' || event.level === 'error') {
+            appendMessages([{ id: genMsgId(), role: 'system', content: event.message }])
+          } else {
+            showRunControlHint(event.message)
+          }
           break
         case 'model:protocol':
           if (event.phase === 'fallback') {
@@ -686,11 +735,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     return () => {
       clearStreamFlushTimer()
       discardFastContextUiBuffer()
+      if (runControlHintTimerRef.current) clearTimeout(runControlHintTimerRef.current)
       unsub()
       convManager.destroy()
       runtime.destroy().catch(() => {})
     }
-  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer])
+  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer, markActivity, showRunControlHint, genMsgId])
 
   const getConversationEntries = useCallback((): ConversationEntry[] => {
     const convs = convManager.list()
@@ -744,10 +794,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, [])
 
   useEffect(() => {
-    setScrollRowsFromBottom(rows => clampTranscriptScroll(rows, transcriptMetrics.maxScrollRows))
-  }, [transcriptMetrics.maxScrollRows])
-
-  useEffect(() => {
     if (!noFlickerActive || !cursorMode || !cursor || !selectedMessageMetrics.hasMeasured) return
     setScrollRowsFromBottom(rows => revealTranscriptRange(
       rows,
@@ -781,7 +827,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const nextQueue = [...queuedPromptsRef.current, { prompt, attachments }]
       queuedPromptsRef.current = nextQueue
       setQueuedPrompts(nextQueue)
-      appendMessages([{ id: genMsgId(), role: 'system', content: `Queued message #${nextQueue.length}: ${prompt.slice(0, 80)}` }], { forceLatest: true })
+      showRunControlHint(`Queued #${nextQueue.length} for the next turn`)
       return
     }
 
@@ -796,6 +842,18 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       setActiveObjective(null)
       appendMessages([{ id: genMsgId(), role: 'system', content: 'No model provider is configured yet. Exit and run `turboflux setup`, or set `/config apiKey <key>` manually.' }])
       if (singleShot) exit()
+      return
+    }
+    if (!config.model) {
+      activePromptRef.current = null
+      setActiveObjective(null)
+      appendMessages([{
+        id: genMsgId(),
+        role: 'system',
+        content: modelDiscoveryStatus.isRefreshing
+          ? 'Model discovery is still running. Try again shortly, or use `/model add <model-id>`.'
+          : 'No model is mounted. Use `/model` or `/model add <model-id>`.',
+      }])
       return
     }
     setIsRunning(true)
@@ -876,7 +934,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       setTimeout(runNextQueuedPrompt, 0)
     }
     if (singleShot) exit()
-  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, resetFastContextUi])
+  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, resetFastContextUi, showRunControlHint, modelDiscoveryStatus.isRefreshing])
 
   useEffect(() => {
     runPromptRef.current = runPrompt
@@ -1023,7 +1081,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
 
     if (isRunningRef.current) {
-      if (engine.submitSteeringMessage(trimmed)) {
+      if (pendingDraftAttachments.length === 0 && engine.submitSteeringMessage(trimmed)) {
         appendMessages([{ id: genMsgId(), role: 'user', content: trimmed }], { forceLatest: true })
         setLastActivity(Date.now())
         return
@@ -1111,7 +1169,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
     if (activeOverlay !== null) return // overlays handle their own keys
 
-    if (key.ctrl && ch.toLowerCase() === 't') {
+    if (isThinkingToggleShortcut(ch, key.ctrl)) {
       setShowThinking(current => !current)
       return
     }
@@ -1206,6 +1264,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         showThinking={showThinking}
         verbose={verbose}
         idleLabel={!noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
+        availableWidth={noFlickerActive
+          ? terminal.columns - cockpit.workWidth - cockpit.taskWidth - 8
+          : terminal.columns - 4}
       />
     </Box>
   ) : null
@@ -1355,10 +1416,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ) : null
   const promptNode = showPrompt ? (
     <Box flexDirection="column">
-      {(isRunning || queuedPrompts.length > 0 || interruptHint || exitHint) && (
+      {(isRunning || queuedPrompts.length > 0 || interruptHint || exitHint || runControlHint) && (
         <Box paddingLeft={1}>
           <Text dimColor>
-            {interruptHint || exitHint || (isRunning
+            {interruptHint || exitHint || runControlHint || (isRunning
               ? `Enter guide current run · Ctrl/⌘+Enter queue next${queuedPrompts.length > 0 ? ` · ${queuedPrompts.length} queued` : ''}`
               : `${queuedPrompts.length} queued - will run after current agent turn`)}
           </Text>

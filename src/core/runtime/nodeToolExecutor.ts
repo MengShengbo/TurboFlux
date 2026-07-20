@@ -1438,6 +1438,9 @@ export class NodeToolExecutor implements ToolExecutor {
     try {
       for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
         let emittedAnyLine = false
+        let receivedAnyBytes = false
+        let buffer = ''
+        let fullResponse = ''
         try {
           const response = await fetch(url, {
             method: 'POST',
@@ -1458,12 +1461,11 @@ export class NodeToolExecutor implements ToolExecutor {
           if (!reader) return { success: false, error: 'No response body' }
 
           const decoder = new TextDecoder()
-          let buffer = ''
-          let fullResponse = ''
 
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
+            if (value.byteLength > 0) receivedAnyBytes = true
             buffer += decoder.decode(value, { stream: true })
             const lines = buffer.split('\n')
             buffer = lines.pop() || ''
@@ -1485,11 +1487,17 @@ export class NodeToolExecutor implements ToolExecutor {
           if (request.controller.signal.aborted || this.isAbortError(error)) {
             return { success: false, error: 'Request aborted' }
           }
-          if (!emittedAnyLine && attempt < STREAM_RETRY_DELAYS_MS.length) {
+          if (buffer.trim()) {
+            emittedAnyLine = true
+            onLine(buffer)
+            fullResponse += buffer
+            buffer = ''
+          }
+          if (!emittedAnyLine && !receivedAnyBytes && attempt < STREAM_RETRY_DELAYS_MS.length) {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
             continue
           }
-          return { success: false, error: this.formatNetworkError(url, error) }
+          return { success: false, error: this.formatNetworkError(url, error), data: fullResponse }
         }
       }
       return { success: false, error: 'Stream request failed' }

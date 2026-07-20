@@ -1,4 +1,6 @@
 import type { AgentTurn, ThinkingTrace } from '../../shared/agentTypes'
+import type { ModelPreset } from '../../core/config'
+import type { ModelDiscoveryResult } from '../../core/modelDiscovery'
 import type { Message } from './messages/Messages'
 import type { ToolStatus } from './tools/ToolCallTree'
 
@@ -12,6 +14,31 @@ export function formatTaskToolSummary(completed: number, total: number, running:
   if (running > 0) parts.push(`${running} running`)
   if (errored > 0) parts.push(`${errored} failed`)
   return parts.join(', ')
+}
+
+export function selectAutoMountedModel(
+  currentModel: string | undefined,
+  source: ModelDiscoveryResult['source'],
+  models: ModelPreset[],
+): ModelPreset | undefined {
+  if (currentModel?.trim() || source === 'fallback') return undefined
+  return models[0]
+}
+
+export function isThinkingToggleShortcut(input: string, ctrl: boolean): boolean {
+  return ctrl && input.toLowerCase() === 'o'
+}
+
+export function resolveAssistantStreamDisplay(
+  visibleText: string,
+  thinkingText: string,
+  hasToolOutput: boolean,
+  interrupted: boolean,
+): { visibleText: string; thinkingText: string } {
+  if (!interrupted && !hasToolOutput && !visibleText.trim() && thinkingText.trim()) {
+    return { visibleText: thinkingText, thinkingText: '' }
+  }
+  return { visibleText, thinkingText }
 }
 
 export function formatElapsed(ms: number): string {

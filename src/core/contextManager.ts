@@ -805,10 +805,11 @@ export class ContextManager {
    * model didn't produce before), so we accumulate it for cost/session
    * reporting.
    */
-  updateTokenCounting(inputTokens: number, outputTokens: number): void {
+  updateTokenCounting(inputTokens: number, outputTokens: number, cachedTokens = 0): void {
     this.lastProviderUsage = {
       input: inputTokens,
       output: outputTokens,
+      cached: Math.max(0, cachedTokens),
       total: inputTokens + outputTokens,
       source: inputTokens > 0 || outputTokens > 0 ? 'provider' : 'unknown',
     }

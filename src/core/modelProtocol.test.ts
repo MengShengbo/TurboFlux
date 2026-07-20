@@ -3,6 +3,7 @@ import {
   ModelProtocolRequestError,
   buildModelProtocolUrl,
   formatProtocolFailure,
+  looksLikeResponsesPreferredModel,
   planModelProtocols,
   shouldFallbackProtocol,
   toProtocolAttempt,
@@ -20,6 +21,15 @@ describe('model protocol planning', () => {
     expect(planModelProtocols('custom', 'gpt-compatible-model')).toEqual([
       'openai_chat',
       'openai_responses',
+      'anthropic_messages',
+    ])
+  })
+
+  it('prefers Responses for GPT 5 class models on compatible gateways', () => {
+    expect(looksLikeResponsesPreferredModel('gpt-5.6-sol')).toBe(true)
+    expect(planModelProtocols('custom', 'gpt-5.6-sol')).toEqual([
+      'openai_responses',
+      'openai_chat',
       'anthropic_messages',
     ])
   })

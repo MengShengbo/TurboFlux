@@ -145,7 +145,7 @@ describe('API config profiles', () => {
     expect(switched.apiConfigs).toHaveLength(2)
   })
 
-  it('uses a selected API profile for FastContext', () => {
+  it('keeps FastContext on the active main model', () => {
     let config = createEmptyConfig()
     const main = createApiConfigProfile({
       name: 'Main',
@@ -166,7 +166,8 @@ describe('API config profiles', () => {
     config = saveApiConfigProfile(config, fast, false)
     config = setFastContextModelConfig(config, { mode: 'api-config', apiConfigId: fast.id })
 
-    expect(getFastContextApiConfig(config)?.model).toBe('fast-context-model')
+    expect(config.fastContextModel?.mode).toBe('follow-main')
+    expect(getFastContextApiConfig(config)).toBeUndefined()
   })
 
   it('falls back to follow-main when deleting the FastContext profile', () => {

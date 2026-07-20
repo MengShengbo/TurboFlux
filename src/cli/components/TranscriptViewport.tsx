@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from 'react'
+import React, { useLayoutEffect, useMemo, useRef } from 'react'
 import { Box, useBoxMetrics, type DOMElement } from 'ink'
 
 export const DEFAULT_MOUSE_WHEEL_ROWS = 3
@@ -116,7 +116,7 @@ export function TranscriptViewport({
     maxScrollRows: window.maxScrollRows,
   }), [window.contentRows, window.viewportRows, window.maxScrollRows])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     previousMaxScrollRowsRef.current = window.maxScrollRows
     if (window.scrollRowsFromBottom !== scrollRowsFromBottom) {
       onScrollRowsChange(window.scrollRowsFromBottom)

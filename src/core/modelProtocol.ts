@@ -79,11 +79,18 @@ export function planModelProtocols(provider: APIConfig['provider'], model: strin
   if (provider === 'anthropic' || looksLikeClaudeModel(model)) {
     return ['anthropic_messages', 'openai_chat', 'openai_responses']
   }
+  if (provider === 'openai' || looksLikeResponsesPreferredModel(model)) {
+    return ['openai_responses', 'openai_chat', 'anthropic_messages']
+  }
   return ['openai_chat', 'openai_responses', 'anthropic_messages']
 }
 
 export function looksLikeClaudeModel(model: string): boolean {
   return /(?:^|[/_.:-])claude(?:$|[/_.:-])/i.test(model.trim())
+}
+
+export function looksLikeResponsesPreferredModel(model: string): boolean {
+  return /(?:^|[/_.:-])(?:gpt-5(?:$|[/_.:-])|o[1-9](?:$|[/_.:-])|codex(?:$|[/_.:-]))/i.test(model.trim())
 }
 
 export function shouldFallbackProtocol(error: ModelProtocolRequestError): boolean {

@@ -35,6 +35,7 @@ interface ActiveWorkPanelProps {
   showThinking?: boolean
   verbose: boolean
   idleLabel?: string | null
+  availableWidth?: number
 }
 
 interface WorkGroup {
@@ -72,9 +73,11 @@ export function ActiveWorkPanel({
   showThinking = false,
   verbose,
   idleLabel = 'Thinking...',
+  availableWidth,
 }: ActiveWorkPanelProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
+  const panelColumns = Math.max(24, availableWidth ?? columns)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     if (!runState || runState.phase === 'idle' || runState.phase === 'completed') return
@@ -94,12 +97,12 @@ export function ActiveWorkPanel({
 
   if (!hasWork && !streamText && !idleLabel) return null
 
-  const labelWidth = Math.max(24, columns - 14)
+  const labelWidth = Math.max(12, panelColumns - 14)
 
   return (
     <Box flexDirection="column" marginBottom={1}>
       {runState && runState.phase !== 'idle' && (
-        <RunStateLine state={runState} now={now} queuedCount={queuedCount} />
+        <RunStateLine state={runState} now={now} queuedCount={queuedCount} columns={panelColumns} />
       )}
       {thinkingText && (
         <ThinkingBlock
@@ -113,6 +116,7 @@ export function ActiveWorkPanel({
           } as ThinkingTrace}
           expanded={showThinking}
           streaming
+          lastActivity={lastActivity}
         />
       )}
       {primary ? (
@@ -130,7 +134,7 @@ export function ActiveWorkPanel({
       ) : null}
 
       {secondaryGroups.map(group => (
-        <WorkGroupLine key={group.kind} group={group} columns={columns} />
+        <WorkGroupLine key={group.kind} group={group} columns={panelColumns} />
       ))}
 
       {streamText && (
@@ -142,7 +146,7 @@ export function ActiveWorkPanel({
   )
 }
 
-function RunStateLine({ state, now, queuedCount }: { state: AgentRunState; now: number; queuedCount: number }) {
+function RunStateLine({ state, now, queuedCount, columns }: { state: AgentRunState; now: number; queuedCount: number; columns: number }) {
   const theme = useTheme()
   const labels: Record<AgentRunState['phase'], { label: string; color: string }> = {
     idle: { label: 'READY', color: theme.inactive },
@@ -158,11 +162,12 @@ function RunStateLine({ state, now, queuedCount }: { state: AgentRunState; now: 
   const current = labels[state.phase]
   const elapsed = state.startedAt ? formatElapsed(Math.max(0, now - state.startedAt)) : ''
   const detail = state.detail || ''
+  const detailWidth = Math.max(12, columns - 31 - (queuedCount > 0 ? 12 : 0))
   return (
     <Box>
       <Text color={current.color} bold>{`● ${current.label}`}</Text>
       {elapsed && <Text color={theme.inactive}>{`  ${elapsed}`}</Text>}
-      {detail && <Text color={theme.text}>{`  ${cliTruncate(detail, 58, { position: 'end' })}`}</Text>}
+      {detail && <Text color={theme.text}>{`  ${cliTruncate(detail, detailWidth, { position: 'middle' })}`}</Text>}
       {queuedCount > 0 && <Text color={theme.inactive}>{`  · ${queuedCount} queued`}</Text>}
     </Box>
   )

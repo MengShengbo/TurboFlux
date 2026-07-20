@@ -73,28 +73,11 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
   }
 
   getFastContextConfig(): APIConfig | null {
-    const selected = this.getFastContextProfile()
-    if (!selected) return this.getActiveConfig()
-    return this.apiConfigFromProfile(selected)
+    return this.getActiveConfig()
   }
 
   getFastContextModel(): APIModel | null {
-    const selected = this.getFastContextProfile()
-    if (!selected) return this.getActiveModel()
-    return {
-      id: selected.model,
-      name: selected.model,
-      provider: selected.provider,
-      contextWindow: selected.contextWindow,
-      maxTokens: selected.maxTokens,
-    }
-  }
-
-  private getFastContextProfile(): TurboFluxApiConfigProfile | undefined {
-    if (this.config.fastContextModel?.mode !== 'api-config') return undefined
-    const id = this.config.fastContextModel.apiConfigId
-    if (!id) return undefined
-    return this.config.apiConfigs?.find(profile => profile.id === id)
+    return this.getActiveModel()
   }
 
   private apiConfigFromRuntimeConfig(config: AgentRuntimeConfig): APIConfig | null {
@@ -108,20 +91,6 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       maxTokens: config.maxTokens,
       modelCapabilities: config.modelCapabilities,
       reasoning: config.reasoning,
-    }
-  }
-
-  private apiConfigFromProfile(profile: TurboFluxApiConfigProfile): APIConfig | null {
-    if (!profile.apiKey || !profile.baseUrl || !profile.model) return null
-    return {
-      provider: profile.provider,
-      apiKey: profile.apiKey,
-      baseUrl: profile.baseUrl,
-      defaultModel: profile.model,
-      contextWindow: profile.contextWindow,
-      maxTokens: profile.maxTokens,
-      modelCapabilities: profile.modelCapabilities,
-      reasoning: profile.reasoning,
     }
   }
 

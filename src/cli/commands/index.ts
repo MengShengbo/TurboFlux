@@ -91,7 +91,7 @@ commandRegistry.register({
       '  turboflux setup show',
       '',
       'Examples:',
-      '  turboflux setup init --provider openai --api-key <key> --model gpt-5.5 --yes',
+      '  turboflux setup init --provider openai --api-key <key> --yes',
       '  turboflux setup api --provider deepseek --api-key <key>',
       '  turboflux setup language --all-lang zh-CN --yes',
       '  turboflux setup persona --output-style all --default-output-style engineer-professional --yes',
@@ -103,7 +103,7 @@ commandRegistry.register({
 commandRegistry.register({
   name: 'model',
   description: 'Discover and switch models available to the active API',
-  argumentHint: '[model-name]',
+  argumentHint: '[add <model-id>|<model-id>]',
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
@@ -111,9 +111,20 @@ commandRegistry.register({
         const active = ctx.config.model === p.model ? ' *' : ''
         return `  ${p.id.padEnd(8)} ${p.name.padEnd(20)} ${p.description}${active}`
       })
-      return `Current: ${ctx.config.model}\n\nAvailable models:\n${presetLines.join('\n')}\n\nUsage: /model <model-name>`
+      return `Current: ${ctx.config.model || '(none)'}\n\nAvailable models:\n${presetLines.join('\n')}\n\nUsage: /model add <model-id>`
     }
     const input = args.trim()
+    const addMatch = input.match(/^add(?:\s+(.+))?$/i)
+    if (addMatch) {
+      const modelId = addMatch[1]?.trim()
+      if (!modelId) return 'Usage: /model add <model-id>'
+      const preset = getPresetByIdOrModelFrom(ctx.modelPresets, modelId)
+      const updated = preset
+        ? applyPreset(ctx.config, preset)
+        : setConfigValue(ctx.config, 'model', modelId)
+      ctx.setConfig(updated)
+      return `Mounted model: ${updated.model}`
+    }
     const preset = getPresetByIdOrModelFrom(ctx.modelPresets, input)
     if (preset) {
       const updated = applyPreset(ctx.config, preset)

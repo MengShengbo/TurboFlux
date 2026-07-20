@@ -10,9 +10,10 @@ interface ThinkingBlockProps {
   trace: ThinkingTrace
   expanded: boolean
   streaming?: boolean
+  lastActivity?: number
 }
 
-export function ThinkingBlock({ trace, expanded, streaming = false }: ThinkingBlockProps) {
+export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity }: ThinkingBlockProps) {
   const theme = useTheme()
   const [now, setNow] = useState(Date.now())
   const startedAt = trace.startedAt ?? 0
@@ -29,19 +30,37 @@ export function ThinkingBlock({ trace, expanded, streaming = false }: ThinkingBl
   const durationLabel = typeof duration === 'number' ? ` · ${formatDuration(duration)}` : ''
   const tokenLabel = tokenCount > 0 ? ` · ${formatTokenCount(tokenCount)} tokens` : ''
   const effortLabel = trace.effort ? ` · ${trace.effort}` : ''
+  const summary = `${label}${effortLabel}${durationLabel}${tokenLabel}`
+  const displayContent = cliTruncate(
+    trace.content.trim(),
+    streaming ? 1600 : 6000,
+    { position: streaming ? 'start' : 'end' },
+  )
+
+  if (!expanded) {
+    return (
+      <Box>
+        {streaming ? (
+          <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
+        ) : (
+          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▸ ${summary}${trace.status === 'interrupted' ? ' · interrupted' : ''}`}</Text>
+        )}
+      </Box>
+    )
+  }
 
   return (
     <Box flexDirection="column" borderStyle="single" borderColor={streaming ? theme.brand : theme.subtle} paddingX={1} marginBottom={1}>
       <Box>
         {streaming ? (
-          <SpinnerGlyph lastActivity={now} label={`${label}${effortLabel}${durationLabel}${tokenLabel}`} />
+          <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
         ) : (
-          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`${expanded ? '▾' : '▸'} ${label}${effortLabel}${durationLabel}${tokenLabel}${trace.status === 'interrupted' ? ' · interrupted' : ''}`}</Text>
+          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▾ ${summary}${trace.status === 'interrupted' ? ' · interrupted' : ''}`}</Text>
         )}
       </Box>
-      {expanded && trace.content.trim() && (
+      {displayContent && (
         <Box paddingLeft={2} marginTop={1}>
-          <Text color={theme.inactive}>{formatMarkdown(cliTruncate(trace.content.trim(), 6000, { position: 'end' }))}</Text>
+          <Text color={theme.inactive}>{formatMarkdown(displayContent)}</Text>
         </Box>
       )}
     </Box>

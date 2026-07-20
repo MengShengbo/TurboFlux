@@ -169,7 +169,7 @@ TurboFlux 已具备 context segments、reservoir、文件恢复、手动 compact
 - FastContext 可以与主 Agent 并行工作，并只向主上下文注入紧凑证据。
 - context segments 与 reservoir 已形成自己的上下文恢复方式。
 - checkpoint 和本地历史适合高风险编辑恢复。
-- 图片粘贴、多模型供应商和独立 FastContext 模型配置具备产品辨识度。
+- 图片粘贴、多模型供应商和 FastContext 分档检索具备产品辨识度。
 - 自定义 TUI 已能承载 Work、Task、终端和 Agent 活动信息。
 
 ## 实施顺序
