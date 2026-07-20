@@ -1,0 +1,220 @@
+{
+  "schemaVersion": "1.0",
+  "documentType": "controlled-retrieval-comparison",
+  "status": "single-round-experimental",
+  "metadata": {
+    "measuredAt": "2026-07-20T18:06:14.078Z",
+    "rescoredAt": "2026-07-20T18:41:44.686Z",
+    "workspace": "C:\\Users\\Administrator\\Desktop\\TurboFlux-legacy-backup-20260612-045013",
+    "sourceCommit": "629e4c25bc646c98113cddca4c86622a286cffdc",
+    "model": "claude-sonnet-5",
+    "apiProvider": "anthropic",
+    "apiEndpointHost": "ai.zyyun.xyz",
+    "rounds": 1,
+    "tasks": 8,
+    "samples": 16,
+    "timeoutMs": 240000,
+    "ordering": "interleaved AB/BA by case",
+    "nativeReasoning": "disabled for both systems because the configured relay rejects adaptive-thinking request fields"
+  },
+  "systems": {
+    "turboflux": {
+      "product": "TurboFlux CLI",
+      "retrievalEngine": "FastContext",
+      "level": "medium",
+      "version": "0.1.5",
+      "executionModel": "deterministic prefetch plus LLM subagent retrieval and grounded report",
+      "permissions": "read-only"
+    },
+    "claude-code": {
+      "product": "Claude Code",
+      "version": "2.1.177",
+      "retrievalEngine": "built-in Explore agent",
+      "executionModel": "read-only Explore agent with tool-driven search and file reads",
+      "permissions": "bare, safe-mode, plan, read-only benchmark"
+    }
+  },
+  "scoring": {
+    "recallAtK": "hits among the first K ranked files divided by the number of reference files",
+    "mrr": "mean reciprocal rank of the first reference file",
+    "qualityIndex": {
+      "formula": "recallAt10 * 60 + mrr * 25 + citationRate * 10 + executionFlowPresent * 5",
+      "failedRunScore": 0,
+      "weights": {
+        "recallAt10": 0.6,
+        "mrr": 0.25,
+        "citationRate": 0.1,
+        "executionFlowPresent": 0.05
+      }
+    },
+    "groundTruthPolicy": "reference files are manually curated authoritative files; additional valid support files are not penalized"
+  },
+  "aggregate": {
+    "endToEnd": {
+      "turboflux": {
+        "cases": 8,
+        "successes": 8,
+        "successRate": 1.0,
+        "timeoutRate": 0.0,
+        "recallAt5": 0.927,
+        "recallAt10": 0.927,
+        "mrr": 1.0,
+        "top1Rate": 1.0,
+        "citationRate": 0.922,
+        "executionFlowRate": 1.0,
+        "qualityIndex": 94.8,
+        "successfulLatencyP50Ms": 66800,
+        "successfulLatencyP95Ms": 107000
+      },
+      "claudeCode": {
+        "cases": 8,
+        "successes": 6,
+        "successRate": 0.75,
+        "timeoutRate": 0.25,
+        "recallAt5": 0.677,
+        "recallAt10": 0.677,
+        "mrr": 0.75,
+        "top1Rate": 0.75,
+        "citationRate": 0.675,
+        "executionFlowRate": 0.75,
+        "qualityIndex": 69.9,
+        "successfulLatencyP50Ms": 107000,
+        "successfulLatencyP95Ms": 208700
+      }
+    },
+    "successfulOnly": {
+      "turboflux": {
+        "successes": 8,
+        "recallAt10": 0.927,
+        "mrr": 1.0,
+        "citationRate": 0.922,
+        "qualityIndex": 94.8,
+        "averageInputTokens": 1310,
+        "averageOutputTokens": 1645,
+        "averageCacheCreationInputTokens": 866,
+        "averageCacheReadInputTokens": 12330
+      },
+      "claudeCode": {
+        "successes": 6,
+        "recallAt10": 0.903,
+        "mrr": 1.0,
+        "citationRate": 0.9,
+        "qualityIndex": 93.2,
+        "averageInputTokens": 949,
+        "averageOutputTokens": 2429,
+        "averageCacheCreationInputTokens": 482,
+        "averageCacheReadInputTokens": 14122
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "cli-entry",
+      "category": "location",
+      "referenceFiles": ["bin/turboflux.mjs", "src/cli/index.ts", "src/cli/repl.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 63239, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["bin/turboflux.mjs", "src/cli/index.ts", "src/cli/repl.ts", "src/cli/components/app.tsx"]},
+        "claudeCode": {"success": true, "latencyMs": 49120, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["bin/turboflux.mjs", "src/cli/index.ts", "src/cli/repl.ts", "src/cli/components/app.tsx", "src/cli/commands/registry.ts"]}
+      },
+      "interpretation": "Quality tie; Claude Code is faster by about 14.1 seconds."
+    },
+    {
+      "id": "fast-context-scheduling",
+      "category": "workflow",
+      "referenceFiles": ["src/core/agentEngine.ts", "src/core/fastContextSubagent.ts", "src/core/subAgent.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 80549, "recallAt10": 0.667, "mrr": 1.0, "qualityIndex": 73.8, "rankedPaths": ["src/core/fastcontextsubagent.ts", "src/core/agentengine.ts"]},
+        "claudeCode": {"success": false, "timedOut": true, "latencyMs": 240057, "recallAt10": 0.0, "mrr": 0.0, "qualityIndex": 0.0, "rankedPaths": []}
+      },
+      "interpretation": "TurboFlux converged but missed subAgent.ts; Claude Code timed out."
+    },
+    {
+      "id": "transcript-scroll",
+      "category": "workflow",
+      "referenceFiles": ["src/cli/components/TranscriptViewport.tsx", "src/cli/components/App.tsx", "src/cli/terminalMouse.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 73466, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["src/cli/components/app.tsx", "src/cli/components/transcriptviewport.tsx", "src/cli/terminalmouse.ts", "src/cli/terminalmouse.test.ts", "src/cli/components/input/promptinput.tsx"]},
+        "claudeCode": {"success": true, "latencyMs": 113373, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 96.0, "rankedPaths": ["src/cli/components/app.tsx", "src/cli/components/transcriptviewport.tsx", "src/cli/terminalmouse.ts", "src/cli/components/transcriptviewport.test.ts", "src/cli/terminalmouse.test.ts"]}
+      },
+      "interpretation": "Quality tie; TurboFlux is about 35.2% faster."
+    },
+    {
+      "id": "chinese-setup-copy",
+      "category": "location",
+      "referenceFiles": ["src/cli/setup.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 65075, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["src/cli/setup.ts", "src/core/config.ts", "core/config.ts"]},
+        "claudeCode": {"success": false, "timedOut": true, "latencyMs": 240046, "recallAt10": 0.0, "mrr": 0.0, "qualityIndex": 0.0, "rankedPaths": []}
+      },
+      "interpretation": "TurboFlux directly located setup.ts; Claude Code timed out."
+    },
+    {
+      "id": "clipboard-images",
+      "category": "workflow",
+      "referenceFiles": ["src/cli/imageAttachments.ts", "src/cli/components/App.tsx", "src/core/contextManager.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 60879, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["src/cli/imageattachments.ts", "src/cli/components/app.tsx", "src/cli/components/input/promptinput.tsx", "src/core/contextmanager.ts", "src/shared/plugintypes.ts"]},
+        "claudeCode": {"success": true, "latencyMs": 106966, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["src/cli/imageattachments.ts", "src/core/contextmanager.ts", "src/cli/components/app.tsx", "src/core/agentengine.ts", "src/shared/agenttypes.ts"]}
+      },
+      "interpretation": "Quality tie; TurboFlux is about 43.1% faster."
+    },
+    {
+      "id": "background-terminal-lifecycle",
+      "category": "workflow",
+      "referenceFiles": ["src/core/agentEngine.ts", "src/core/runtime/nodeToolExecutor.ts", "src/shared/terminalTypes.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 95810, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["src/core/runtime/nodetoolexecutor.ts", "src/core/agentengine.ts", "src/tools/executor.ts", "src/shared/terminaltypes.ts", "src/cli/components/app.tsx", "src/core/runtime/agentruntime.ts"]},
+        "claudeCode": {"success": true, "latencyMs": 208740, "recallAt10": 0.667, "mrr": 1.0, "qualityIndex": 78.0, "rankedPaths": ["src/core/runtime/nodetoolexecutor.ts", "src/core/agentengine.ts", "src/core/runtime/runtimetaskmanager.ts", "src/core/runtime/agentruntime.ts", "src/cli/components/app.tsx", "src/cli/components/tools/terminalsessionsfooter.tsx"]}
+      },
+      "interpretation": "TurboFlux covered all three reference files and was about 54.1% faster."
+    },
+    {
+      "id": "model-request-compatibility",
+      "category": "workflow",
+      "referenceFiles": ["src/core/subAgent.ts", "src/core/modelRegistry.ts", "src/core/modelProtocol.ts", "src/core/agentEngine.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 66778, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["src/core/agentengine.ts", "src/core/modelregistry.ts", "src/core/modelprotocol.ts", "src/core/subagent.ts"]},
+        "claudeCode": {"success": true, "latencyMs": 91260, "recallAt10": 0.75, "mrr": 1.0, "qualityIndex": 85.0, "rankedPaths": ["src/core/subagent.ts", "src/core/modelprotocol.ts", "src/core/modelregistry.ts", "src/core/fastcontextsubagent.ts"]}
+      },
+      "interpretation": "TurboFlux covered all four reference files and was about 26.8% faster."
+    },
+    {
+      "id": "interrupted-stream-persistence",
+      "category": "workflow",
+      "referenceFiles": ["src/core/agentEngine.ts", "src/cli/components/App.tsx", "src/cli/conversations/manager.ts", "src/cli/conversations/store.ts"],
+      "results": {
+        "turboflux": {"success": true, "latencyMs": 107013, "recallAt10": 0.75, "mrr": 1.0, "qualityIndex": 85.0, "rankedPaths": ["src/cli/components/app.tsx", "src/cli/conversations/store.ts", "src/cli/conversations/types.ts", "src/core/agentengine.ts"]},
+        "claudeCode": {"success": true, "latencyMs": 122911, "recallAt10": 1.0, "mrr": 1.0, "qualityIndex": 100.0, "rankedPaths": ["src/cli/components/app.tsx", "src/core/agentengine.ts", "src/cli/conversations/manager.ts", "src/cli/conversations/store.ts", "src/cli/components/messages/messages.tsx", "src/cli/conversations/types.ts"]}
+      },
+      "interpretation": "Claude Code covered the complete four-layer persistence path; TurboFlux missed conversations/manager.ts but was about 12.9% faster."
+    }
+  ],
+  "claims": {
+    "supported": [
+      "TurboFlux had higher end-to-end completion rate in this round.",
+      "TurboFlux had lower successful p50 and p95 latency in this round.",
+      "Successful-only content quality was close, with TurboFlux slightly ahead on the selected reference-file metrics.",
+      "TurboFlux showed strong performance on terminal lifecycle and model compatibility tasks."
+    ],
+    "notSupported": [
+      "TurboFlux universally outperforms Claude Code Explore.",
+      "TurboFlux always has higher recall.",
+      "TurboFlux always costs fewer tokens or dollars.",
+      "A single round provides statistical proof of permanent superiority."
+    ]
+  },
+  "limitations": [
+    "One round and one sample per task; no confidence interval.",
+    "Reference files are manually curated and not a complete formal truth set.",
+    "Native reasoning was disabled because of the custom relay protocol limitation.",
+    "The task set is centered on the TurboFlux repository and current engineering pain points.",
+    "Timed-out Claude Code samples do not expose final usage totals.",
+    "The custom relay may affect protocol compatibility and tail latency."
+  ],
+  "artifacts": {
+    "formalReport": "comparison-report.md",
+    "shortReport": "report.md",
+    "rawResults": "raw-results.json",
+    "runner": "scripts/competitive-retrieval-benchmark.ts"
+  }
+}

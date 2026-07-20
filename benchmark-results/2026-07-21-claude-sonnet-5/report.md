@@ -1,5 +1,7 @@
 # TurboFlux FastContext vs Claude Code Explore
 
+> 正式详细对比资料见 `comparison-report.md`；机器可读数据见 `comparison-data.json`。本文件保留为快速摘要。
+
 - Date: 2026-07-20T18:06:14.078Z
 - Workspace commit: 629e4c25bc646c98113cddca4c86622a286cffdc
 - Model/API: claude-sonnet-5 through the same configured Anthropic endpoint
