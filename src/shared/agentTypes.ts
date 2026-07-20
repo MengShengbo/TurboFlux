@@ -167,7 +167,11 @@ export type ThinkingVerificationStatus = 'unverified' | 'partial' | 'verified' |
 export interface ThinkingTrace {
   content: string
   isStreaming?: boolean
+  status?: 'streaming' | 'complete' | 'interrupted' | 'redacted'
   source?: 'provider' | 'fallback'
+  tokenCount?: number
+  startedAt?: number
+  effort?: ReasoningEffort
   stage?: ThinkingStage
   evidenceLevel?: ThinkingEvidenceLevel
   verificationStatus?: ThinkingVerificationStatus

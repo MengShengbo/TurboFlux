@@ -107,6 +107,25 @@ describe.sequential('conversation journal store', () => {
     expect(recovered?.recovery).toMatchObject({ interrupted: true, truncatedJournal: true })
   })
 
+  it('recovers interrupted provider reasoning separately from the answer', () => {
+    appendConversationJournal('thinking-1', { version: 1, type: 'meta', timestamp: 100, meta: meta('thinking-1') })
+    appendConversationJournal('thinking-1', { version: 1, type: 'turn', timestamp: 101, turn: turn('user-1', 'user', 'inspect it', 101) })
+    appendConversationJournal('thinking-1', { version: 1, type: 'stream_start', timestamp: 102 })
+    appendConversationJournal('thinking-1', { version: 1, type: 'stream_thinking_delta', timestamp: 103, text: 'checking architecture ' })
+    appendConversationJournal('thinking-1', { version: 1, type: 'stream_thinking_delta', timestamp: 104, text: 'and tests' })
+    appendConversationJournal('thinking-1', { version: 1, type: 'stream_delta', timestamp: 105, text: 'partial answer' })
+
+    const recovered = loadConversation('thinking-1')
+
+    expect(recovered?.turns.at(-1)).toMatchObject({
+      content: 'partial answer',
+      metadata: {
+        interrupted: true,
+        thinking: { content: 'checking architecture and tests', status: 'interrupted' },
+      },
+    })
+  })
+
   it('closes unresolved tool calls with synthetic abort results', () => {
     const assistant: AgentTurn = {
       ...turn('assistant-1', 'assistant', '', 102),

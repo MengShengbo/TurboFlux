@@ -14,6 +14,7 @@
   AnthropicThinkingBlock,
   AgentRunState,
   AgentRunPhase,
+  ReasoningEffort,
 } from '../shared/agentTypes'
 import { generateSessionId, generateTurnId } from '../shared/agentTypes'
 import type { MemoryKind, MemoryScope } from '../shared/memoryTypes'
@@ -242,13 +243,6 @@ function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param
     aliases.add('tool_choice')
     aliases.add('parallel_tool_calls')
   }
-  if (rootParam === 'thinking' || rootParam === 'reasoning' || rootParam === 'reasoning_effort' || rootParam === 'output_config') {
-    aliases.add('thinking')
-    aliases.add('reasoning')
-    aliases.add('reasoning_effort')
-    aliases.add('output_config')
-  }
-
   let removed = false
   for (const key of aliases) {
     if (Object.prototype.hasOwnProperty.call(body, key)) {
@@ -257,6 +251,34 @@ function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param
     }
   }
   return removed
+}
+
+const REASONING_EFFORT_FALLBACKS: ReasoningEffort[] = ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none']
+
+export function downgradeReasoningEffort(body: Record<string, unknown>): { from: ReasoningEffort; to: ReasoningEffort } | null {
+  const candidates: Array<{ target: Record<string, unknown>; key: string }> = [{ target: body, key: 'reasoning_effort' }]
+  for (const key of ['output_config', 'reasoning']) {
+    const value = body[key]
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      candidates.push({ target: value as Record<string, unknown>, key: 'effort' })
+    }
+  }
+
+  for (const candidate of candidates) {
+    const current = candidate.target[candidate.key]
+    if (typeof current !== 'string') continue
+    const index = REASONING_EFFORT_FALLBACKS.indexOf(current as ReasoningEffort)
+    if (index < 0 || index >= REASONING_EFFORT_FALLBACKS.length - 1) continue
+    const next = REASONING_EFFORT_FALLBACKS[index + 1]
+    candidate.target[candidate.key] = next
+    return { from: current as ReasoningEffort, to: next }
+  }
+  return null
+}
+
+function isReasoningEffortValueError(error?: string): boolean {
+  if (!error || !/(?:reasoning[_ .-]?effort|output_config.*effort|effort)/i.test(error)) return false
+  return /(?:invalid|unsupported value|not supported|allowed values|one of|must be)/i.test(error)
 }
 
 function removeAnthropicCompatibleRequestParam(
@@ -2701,6 +2723,22 @@ Before retrying:
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted || receivedStreamData) break
       if (result.status !== 400 && result.status !== 422) break
+      if (isReasoningEffortValueError(result.error)) {
+        const fallback = downgradeReasoningEffort(requestBody)
+        if (fallback) {
+          this.emit({
+            type: 'notification',
+            level: 'warning',
+            message: `Provider rejected reasoning effort ${fallback.from}; retrying with ${fallback.to}.`,
+          })
+          serializedBody = JSON.stringify(requestBody)
+          result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+            streamId,
+            signal: this.abortController?.signal,
+          })
+          continue
+        }
+      }
       const unsupportedParam = extractUnsupportedRequestParam(result.error)
       if (!unsupportedParam || !removeAnthropicCompatibleRequestParam(requestBody, headers, unsupportedParam)) break
       this.emit({
@@ -2718,7 +2756,7 @@ Before retrying:
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
-        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        const interruptedTurn = this.finishInterruptedStream(textContent, reasoningContent, model, startTime)
         if (interruptedTurn) return interruptedTurn
         const err = new Error('aborted') as Error & { aborted?: boolean }
         err.aborted = true
@@ -2799,7 +2837,14 @@ Before retrying:
       mode: this.config.mode,
       reasoningEnabled: reasoningRequest?.enabled,
       reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
-      thinking: { content: reasoningContent, source: 'provider' },
+      thinking: reasoningContent ? {
+        content: reasoningContent,
+        source: 'provider',
+        status: 'complete',
+        durationMs: Date.now() - startTime,
+        tokenCount: Math.max(1, Math.ceil(reasoningContent.length / 4)),
+        effort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
+      } : undefined,
       rawReasoningPayload: rawReasoningBlocks.length > 0
         ? { provider: 'anthropic', blocks: rawReasoningBlocks }
         : undefined,
@@ -3056,6 +3101,22 @@ Before retrying:
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted) break
       if (result.status !== 400) break
+      if (isReasoningEffortValueError(result.error)) {
+        const fallback = downgradeReasoningEffort(body)
+        if (fallback) {
+          this.emit({
+            type: 'notification',
+            level: 'warning',
+            message: `Provider rejected reasoning effort ${fallback.from}; retrying with ${fallback.to}.`,
+          })
+          serializedBody = JSON.stringify(body)
+          result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+            streamId,
+            signal: this.abortController?.signal,
+          })
+          continue
+        }
+      }
       const unsupportedParam = extractUnsupportedRequestParam(result.error)
       if (!unsupportedParam || !removeOpenAICompatibleRequestParam(body, unsupportedParam)) break
       this.emit({
@@ -3073,7 +3134,7 @@ Before retrying:
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
-        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        const interruptedTurn = this.finishInterruptedStream(textContent, reasoningContent, model, startTime)
         if (interruptedTurn) return interruptedTurn
         const err = new Error('aborted') as Error & { aborted?: boolean }
         err.aborted = true
@@ -3164,7 +3225,14 @@ Before retrying:
       mode: this.config.mode,
       reasoningEnabled: reasoningRequest?.enabled,
       reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
-      thinking: { content: reasoningContent, source: 'provider' },
+      thinking: reasoningContent ? {
+        content: reasoningContent,
+        source: 'provider',
+        status: 'complete',
+        durationMs: Date.now() - startTime,
+        tokenCount: Math.max(1, Math.ceil(reasoningContent.length / 4)),
+        effort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
+      } : undefined,
       // Store reasoning_content so it can be passed back in subsequent turns.
       // OpenAI-compatible providers (e.g. mimo, DeepSeek-R1) require the
       // reasoning_content from the previous assistant message to be echoed
@@ -3387,6 +3455,22 @@ Before retrying:
     })
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted || result.status !== 400 || receivedStreamData) break
+      if (isReasoningEffortValueError(result.error)) {
+        const fallback = downgradeReasoningEffort(body)
+        if (fallback) {
+          this.emit({
+            type: 'notification',
+            level: 'warning',
+            message: `Responses endpoint rejected reasoning effort ${fallback.from}; retrying with ${fallback.to}.`,
+          })
+          serializedBody = JSON.stringify(body)
+          result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
+            streamId,
+            signal: this.abortController?.signal,
+          })
+          continue
+        }
+      }
       const unsupportedParam = extractUnsupportedRequestParam(result.error)
       if (!unsupportedParam || !removeOpenAICompatibleRequestParam(body, unsupportedParam)) break
       this.emit({
@@ -3404,7 +3488,7 @@ Before retrying:
 
     if (!result.success) {
       if (this.abortController?.signal.aborted) {
-        const interruptedTurn = this.finishInterruptedStream(textContent, model, startTime)
+        const interruptedTurn = this.finishInterruptedStream(textContent, reasoningContent, model, startTime)
         if (interruptedTurn) return interruptedTurn
         const aborted = new Error('aborted') as Error & { aborted?: boolean }
         aborted.aborted = true
@@ -3488,7 +3572,14 @@ Before retrying:
       mode: this.config.mode,
       reasoningEnabled: reasoningRequest?.enabled,
       reasoningEffort,
-      thinking: { content: reasoningContent, source: 'provider' },
+      thinking: reasoningContent ? {
+        content: reasoningContent,
+        source: 'provider',
+        status: 'complete',
+        durationMs: Date.now() - startTime,
+        tokenCount: Math.max(1, Math.ceil(reasoningContent.length / 4)),
+        effort: reasoningEffort,
+      } : undefined,
       rawReasoningPayload: reasoningContent
         ? { provider: 'openai-compatible', blocks: [], reasoningContent }
         : undefined,
@@ -3874,7 +3965,7 @@ Before retrying:
 
     for (const candidate of candidates) {
       if (typeof candidate === 'string' && candidate.trim()) {
-        return candidate.trim()
+        return candidate
       }
     }
     return ''
@@ -5997,15 +6088,22 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     }
   }
 
-  private finishInterruptedStream(textContent: string, model: APIModel | null, startTime: number): AgentTurn | null {
+  private finishInterruptedStream(textContent: string, reasoningContent: string, model: APIModel | null, startTime: number): AgentTurn | null {
     const visibleText = stripTextToolCallMarkup(textContent, { stripIncomplete: true })
     this.emit({ type: 'stream:end', interrupted: true })
-    if (!visibleText) return null
+    if (!visibleText && !reasoningContent.trim()) return null
     return this.createAssistantTurn(visibleText, undefined, {
       model: model?.name,
       duration: Date.now() - startTime,
       mode: this.config.mode,
       interrupted: true,
+      thinking: reasoningContent ? {
+        content: reasoningContent,
+        source: 'provider',
+        status: 'interrupted',
+        durationMs: Date.now() - startTime,
+        tokenCount: Math.max(1, Math.ceil(reasoningContent.length / 4)),
+      } : undefined,
     })
   }
 

@@ -15,7 +15,7 @@ import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
-import type { AgentAttachment, AgentRunState, AgentTurn, ApprovalPolicy, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
+import type { AgentAttachment, AgentRunState, AgentTurn, ApprovalPolicy, ChangeSummary, ThinkingTrace, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
 import type { ContextReservoirEntry, ContextSegment } from '../../state/types'
 import { type Message } from './messages/Messages'
@@ -198,6 +198,12 @@ export function turnsToMessages(turns: AgentTurn[]): Message[] {
       tools: tools && tools.length > 0 ? tools : undefined,
       changes: changes && changes.length > 0 ? changes : undefined,
       interrupted: turn.metadata?.interrupted === true,
+      thinking: turn.metadata?.thinking
+        ? {
+            ...turn.metadata.thinking,
+            ...(turn.metadata.reasoningEffort ? { effort: turn.metadata.reasoningEffort } : {}),
+          }
+        : undefined,
     }]
   })
 }
@@ -264,6 +270,20 @@ function estimateOutputTokensForDisplay(text: string): number {
   const trimmed = text.trim()
   if (!trimmed) return 0
   return Math.max(1, Math.ceil(trimmed.length / 4))
+}
+
+export function createThinkingTrace(content: string, startedAt?: number, interrupted = false): ThinkingTrace | undefined {
+  if (!content.trim()) return undefined
+  const endedAt = Date.now()
+  return {
+    content,
+    isStreaming: false,
+    status: interrupted ? 'interrupted' : 'complete',
+    source: 'provider',
+    startedAt,
+    durationMs: startedAt ? Math.max(0, endedAt - startedAt) : undefined,
+    tokenCount: Math.max(1, Math.ceil(content.length / 4)),
+  }
 }
 
 function CockpitRoot({ width, height, children }: { width: number; height: number; children: React.ReactNode }) {
@@ -348,6 +368,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [draftAttachments, setDraftAttachments] = useState<AgentAttachment[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const [streamText, setStreamText] = useState('')
+  const [streamThinkingText, setStreamThinkingText] = useState('')
+  const [showThinking, setShowThinking] = useState(verbose)
   const [currentTurnOutputTokens, setCurrentTurnOutputTokens] = useState(0)
   const [currentTools, setCurrentTools] = useState<ToolStatus[]>([])
   const [streamingToolDraft, setStreamingToolDraft] = useState<StreamingToolDraft | null>(null)
@@ -399,6 +421,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const selectedMessageMetrics = useBoxMetrics(selectedMessageRef)
   const messageIdRef = useRef(0)
   const streamBufferRef = useRef('')
+  const streamThinkingBufferRef = useRef('')
+  const streamThinkingStartedAtRef = useRef<number | undefined>(undefined)
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcEventBufferRef = useRef<FastContextScanEvent[]>([])
   const fcFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -557,8 +581,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setChangeSummaries([])
     setCurrentTurnOutputTokens(0)
     streamBufferRef.current = ''
+    streamThinkingBufferRef.current = ''
+    streamThinkingStartedAtRef.current = undefined
     clearStreamFlushTimer()
     setStreamText('')
+    setStreamThinkingText('')
     resetFastContextUi()
     setFcActive(false)
     setActiveTask(null)
@@ -633,6 +660,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           setCurrentTurnOutputTokens(0)
           setStreamingToolDraft(null)
           streamBufferRef.current = ''
+          streamThinkingBufferRef.current = ''
+          streamThinkingStartedAtRef.current = undefined
+          setStreamThinkingText('')
           clearStreamFlushTimer()
           break
         case 'stream:delta':
@@ -647,6 +677,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           }
           setLastActivity(Date.now())
           break
+        case 'stream:thinking_delta':
+          if (activePromptRef.current) activePromptRef.current.responseStarted = true
+          if (!streamThinkingStartedAtRef.current) streamThinkingStartedAtRef.current = Date.now()
+          streamThinkingBufferRef.current += event.text
+          setStreamThinkingText(streamThinkingBufferRef.current)
+          setLastActivity(Date.now())
+          break
         case 'stream:usage':
           setTokenUsage(event.usage)
           if (typeof event.usage.output === 'number') {
@@ -656,11 +693,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'stream:end': {
           clearStreamFlushTimer()
           const bufferedStreamText = streamBufferRef.current
+          const bufferedThinkingText = streamThinkingBufferRef.current
+          const thinkingStartedAt = streamThinkingStartedAtRef.current
           streamBufferRef.current = ''
+          streamThinkingBufferRef.current = ''
+          streamThinkingStartedAtRef.current = undefined
           const toolsSnapshot = currentToolsRef.current
           const changesSnapshot = changeSummariesRef.current
           const visibleText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
-          if (visibleText || toolsSnapshot.length > 0 || changesSnapshot.length > 0) {
+          const thinking = createThinkingTrace(bufferedThinkingText, thinkingStartedAt, event.interrupted === true)
+          if (visibleText || toolsSnapshot.length > 0 || changesSnapshot.length > 0 || thinking) {
             appendMessages([{
               id: genMsgId(),
               role: 'assistant',
@@ -668,9 +710,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               tools: [...toolsSnapshot],
               changes: [...changesSnapshot],
               interrupted: event.interrupted === true,
+              thinking,
             }])
           }
           setStreamText('')
+          setStreamThinkingText('')
           setCurrentTurnOutputTokens(0)
           setCurrentTools([])
           setChangeSummaries([])
@@ -789,8 +833,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'error':
           streamBufferRef.current = ''
+          streamThinkingBufferRef.current = ''
+          streamThinkingStartedAtRef.current = undefined
           clearStreamFlushTimer()
       setStreamText('')
+      setStreamThinkingText('')
       appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${event.error}` }])
       setStreamingToolDraft(null)
       setIsRunning(false)
@@ -922,8 +969,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     isRunningRef.current = true
     setMood('thinking')
     streamBufferRef.current = ''
+    streamThinkingBufferRef.current = ''
+    streamThinkingStartedAtRef.current = undefined
     clearStreamFlushTimer()
     setStreamText('')
+    setStreamThinkingText('')
     setCurrentTools([])
     setStreamingToolDraft(null)
     resetFastContextUi()
@@ -948,17 +998,22 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       }
     } catch (e: any) {
       const bufferedStreamText = streamBufferRef.current
+      const bufferedThinkingText = streamThinkingBufferRef.current
+      const thinkingStartedAt = streamThinkingStartedAtRef.current
       const visibleInterruptedText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
       const toolsSnapshot = currentToolsRef.current
       const changesSnapshot = changeSummariesRef.current
       const interrupted = abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))
       streamBufferRef.current = ''
+      streamThinkingBufferRef.current = ''
+      streamThinkingStartedAtRef.current = undefined
       clearStreamFlushTimer()
       setStreamText('')
+      setStreamThinkingText('')
       setStreamingToolDraft(null)
       if (abortRestoredPromptRef.current) {
         // The prompt is already back in the editor; avoid adding a synthetic transcript row.
-      } else if (interrupted && (visibleInterruptedText || toolsSnapshot.length > 0 || changesSnapshot.length > 0)) {
+      } else if (interrupted && (visibleInterruptedText || bufferedThinkingText || toolsSnapshot.length > 0 || changesSnapshot.length > 0)) {
         appendMessages([{
           id: genMsgId(),
           role: 'assistant',
@@ -966,6 +1021,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           tools: [...toolsSnapshot],
           changes: [...changesSnapshot],
           interrupted: true,
+          thinking: createThinkingTrace(bufferedThinkingText, thinkingStartedAt, true),
         }])
       } else if (interrupted) {
         appendMessages([{ id: genMsgId(), role: 'system', content: 'Interrupted.' }])
@@ -1222,6 +1278,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
     if (activeOverlay !== null) return // overlays handle their own keys
 
+    if (key.ctrl && ch.toLowerCase() === 't') {
+      setShowThinking(current => !current)
+      return
+    }
+
     if (noFlickerActive && !cursorMode && !pendingAsk) {
       const mouseEvents = parseTerminalMouseWheel(ch)
       if (mouseEvents.length > 0) {
@@ -1306,6 +1367,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         lastActivity={lastActivity}
         runState={runState}
         queuedCount={queuedPrompts.length}
+        thinkingText={streamThinkingText}
+        thinkingStartedAt={streamThinkingStartedAtRef.current}
+        reasoningEffort={config.reasoning?.effort}
+        showThinking={showThinking}
         verbose={verbose}
         idleLabel={!noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
       />
@@ -1508,6 +1573,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           diffMaxRows={0}
           selectedMessageId={selectedMessageId}
           selectedMessageRef={cursorMode ? selectedMessageRef : undefined}
+          showThinking={showThinking}
         />
         {runningNode}
       </TranscriptViewport>

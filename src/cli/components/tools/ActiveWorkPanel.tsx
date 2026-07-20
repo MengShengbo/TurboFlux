@@ -8,6 +8,8 @@ import { SpinnerGlyph } from '../spinner/SpinnerGlyph'
 import { StatusIcon } from '../design-system/StatusIcon'
 import type { ToolStatus } from './ToolCallTree'
 import type { AgentRunState } from '../../../shared/agentTypes'
+import type { ReasoningEffort, ThinkingTrace } from '../../../shared/agentTypes'
+import { ThinkingBlock } from '../messages/ThinkingBlock'
 
 export type StreamingToolDraft = {
   id: string
@@ -27,6 +29,10 @@ interface ActiveWorkPanelProps {
   lastActivity: number
   runState?: AgentRunState
   queuedCount?: number
+  thinkingText?: string
+  thinkingStartedAt?: number
+  reasoningEffort?: ReasoningEffort
+  showThinking?: boolean
   verbose: boolean
   idleLabel?: string | null
 }
@@ -60,6 +66,10 @@ export function ActiveWorkPanel({
   lastActivity,
   runState,
   queuedCount = 0,
+  thinkingText = '',
+  thinkingStartedAt,
+  reasoningEffort,
+  showThinking = false,
   verbose,
   idleLabel = 'Thinking...',
 }: ActiveWorkPanelProps) {
@@ -90,6 +100,20 @@ export function ActiveWorkPanel({
     <Box flexDirection="column" marginBottom={1}>
       {runState && runState.phase !== 'idle' && (
         <RunStateLine state={runState} now={now} queuedCount={queuedCount} />
+      )}
+      {thinkingText && (
+        <ThinkingBlock
+          trace={{
+            content: thinkingText,
+            isStreaming: true,
+            status: 'streaming',
+            startedAt: thinkingStartedAt,
+            tokenCount: Math.max(1, Math.ceil(thinkingText.length / 4)),
+            ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+          } as ThinkingTrace}
+          expanded={showThinking}
+          streaming
+        />
       )}
       {primary ? (
         <Box>

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -39,6 +39,21 @@ describe('appendRuntimeContextToLatestUserMessage', () => {
       { type: 'text', text: 'continue' },
       { type: 'text', text: '<runtime_context>internal</runtime_context>' },
     ])
+  })
+})
+
+describe('reasoning effort compatibility', () => {
+  it('downgrades chat, responses, and Anthropic effort fields independently', () => {
+    const chat = { reasoning_effort: 'max' }
+    const responses = { reasoning: { effort: 'xhigh' } }
+    const anthropic = { thinking: { type: 'adaptive' }, output_config: { effort: 'high' } }
+
+    expect(downgradeReasoningEffort(chat)).toEqual({ from: 'max', to: 'xhigh' })
+    expect(chat).toEqual({ reasoning_effort: 'xhigh' })
+    expect(downgradeReasoningEffort(responses)).toEqual({ from: 'xhigh', to: 'high' })
+    expect(responses).toEqual({ reasoning: { effort: 'high' } })
+    expect(downgradeReasoningEffort(anthropic)).toEqual({ from: 'high', to: 'medium' })
+    expect(anthropic).toEqual({ thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } })
   })
 })
 

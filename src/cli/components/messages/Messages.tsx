@@ -2,8 +2,9 @@ import React from 'react'
 import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
 import { formatMarkdown } from '../markdown/index'
+import { ThinkingBlock } from './ThinkingBlock'
 import type { ToolStatus } from '../tools/ToolCallTree'
-import type { ChangeSummary } from '../../../shared/agentTypes'
+import type { ChangeSummary, ThinkingTrace } from '../../../shared/agentTypes'
 
 export interface Message {
   id: string
@@ -12,6 +13,7 @@ export interface Message {
   tools?: ToolStatus[]
   changes?: ChangeSummary[]
   interrupted?: boolean
+  thinking?: ThinkingTrace
 }
 
 export function UserMessage({ content }: { content: string; key?: any }) {
@@ -24,11 +26,12 @@ export function UserMessage({ content }: { content: string; key?: any }) {
   )
 }
 
-export function AssistantMessage({ content, interrupted = false }: { content: string; interrupted?: boolean; key?: any }) {
+export function AssistantMessage({ content, interrupted = false, thinking, showThinking = false }: { content: string; interrupted?: boolean; thinking?: ThinkingTrace; showThinking?: boolean; key?: any }) {
   const theme = useTheme()
-  if (!content) return null
+  if (!content && !thinking) return null
   return (
     <Box flexDirection="column">
+      {thinking && <ThinkingBlock trace={thinking} expanded={showThinking} streaming={thinking.isStreaming} />}
       <Text>{formatMarkdown(content)}</Text>
       {interrupted && <Text dimColor color={theme.inactive}>Interrupted</Text>}
     </Box>

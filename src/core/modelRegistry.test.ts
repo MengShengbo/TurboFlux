@@ -82,6 +82,21 @@ describe('modelRegistry', () => {
     )).toMatchObject({ reasoningEffort: 'high' })
   })
 
+  it('narrows builtin effort choices to gateway-advertised values', () => {
+    const discovered: ModelCapabilities = {
+      reasoning: true,
+      reasoningEfforts: ['low', 'high'],
+      supportedParameters: ['reasoning_effort'],
+    }
+
+    expect(getModelReasoningCapabilities('gpt-5.6', 'custom', discovered)?.efforts).toEqual(['low', 'high'])
+    expect(normalizeNativeReasoningConfig('gpt-5.6', { effort: 'max' }, 'custom', discovered)?.effort).toBe('low')
+  })
+
+  it('honors an explicit API declaration that reasoning is unavailable', () => {
+    expect(getModelReasoningCapabilities('gpt-5.6', 'custom', { reasoning: false })).toBeNull()
+  })
+
   it('clamps unsupported effort values to each model default', () => {
     expect(normalizeNativeReasoningConfig('deepseek-v4-pro', { effort: 'low' })?.effort).toBe('high')
     expect(normalizeNativeReasoningConfig('claude-fable-5', { enabled: false })?.enabled).toBe(true)

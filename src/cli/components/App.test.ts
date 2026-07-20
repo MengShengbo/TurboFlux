@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   getEngineUserOrdinalForUiMessage,
+  createThinkingTrace,
   formatTaskProgressLabel,
   formatTaskToolSummary,
   shouldUseNoFlicker,
@@ -119,5 +120,31 @@ describe('interrupted assistant messages', () => {
       content: 'partial response',
       interrupted: true,
     })])
+  })
+
+  it('restores provider reasoning as a separate folded trace', () => {
+    const messages = turnsToMessages([{
+      id: 'assistant-thinking',
+      role: 'assistant',
+      content: 'final answer',
+      timestamp: 1,
+      metadata: {
+        reasoningEffort: 'high',
+        thinking: { content: 'inspect first', source: 'provider', durationMs: 1200 },
+      },
+    }])
+
+    expect(messages[0]).toMatchObject({
+      content: 'final answer',
+      thinking: { content: 'inspect first', effort: 'high', durationMs: 1200 },
+    })
+  })
+
+  it('marks interrupted live reasoning without mixing it into the answer', () => {
+    expect(createThinkingTrace('partial reasoning', Date.now() - 100, true)).toMatchObject({
+      content: 'partial reasoning',
+      status: 'interrupted',
+      isStreaming: false,
+    })
   })
 })

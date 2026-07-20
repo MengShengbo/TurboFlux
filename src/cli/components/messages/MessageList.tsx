@@ -14,6 +14,7 @@ interface Props {
   selectedIndex?: number
   selectedMessageId?: string
   selectedMessageRef?: Ref<DOMElement>
+  showThinking?: boolean
 }
 
 /** Group consecutive system messages into a single rendered block. */
@@ -54,6 +55,7 @@ export function MessageList({
   selectedIndex,
   selectedMessageId,
   selectedMessageRef,
+  showThinking = verbose,
 }: Props) {
   const theme = useTheme()
   const grouped = useGroupedMessages(messages)
@@ -163,7 +165,7 @@ export function MessageList({
                 />
               </Box>
             ))}
-            <AssistantMessage content={msg.content} interrupted={msg.interrupted} />
+            <AssistantMessage content={msg.content} interrupted={msg.interrupted} thinking={msg.thinking} showThinking={showThinking} />
           </Box>
         )
       })}

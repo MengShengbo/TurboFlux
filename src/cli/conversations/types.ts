@@ -36,6 +36,7 @@ export type ConversationJournalEntry =
   | { version: 1; type: 'turn'; timestamp: number; turn: AgentTurn }
   | { version: 1; type: 'stream_start'; timestamp: number }
   | { version: 1; type: 'stream_delta'; timestamp: number; text: string }
+  | { version: 1; type: 'stream_thinking_delta'; timestamp: number; text: string }
   | { version: 1; type: 'stream_end'; timestamp: number; interrupted: boolean }
   | { version: 1; type: 'tool_call'; timestamp: number; toolCall: ToolCall }
   | { version: 1; type: 'tool_result'; timestamp: number; toolResult: ToolResult }

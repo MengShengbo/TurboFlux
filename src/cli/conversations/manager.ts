@@ -44,6 +44,9 @@ export class ConversationManager {
       case 'stream:delta':
         if (event.text) this.append({ version: 1, type: 'stream_delta', timestamp, text: event.text })
         break
+      case 'stream:thinking_delta':
+        if (event.text) this.append({ version: 1, type: 'stream_thinking_delta', timestamp, text: event.text })
+        break
       case 'stream:end':
         this.append({ version: 1, type: 'stream_end', timestamp, interrupted: event.interrupted === true })
         break

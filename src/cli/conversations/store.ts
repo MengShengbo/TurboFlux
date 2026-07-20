@@ -84,14 +84,22 @@ function upsertTurn(turns: AgentTurn[], turn: AgentTurn): void {
   else turns.push(turn)
 }
 
-function createRecoveredAssistantTurn(timestamp: number, content: string, toolCalls?: ToolCall[]): AgentTurn {
+function createRecoveredAssistantTurn(timestamp: number, content: string, toolCalls?: ToolCall[], thinking = ''): AgentTurn {
   return {
     id: `recovered-assistant-${timestamp}`,
     role: 'assistant',
     content,
     timestamp,
     toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
-    metadata: { interrupted: true },
+    metadata: {
+      interrupted: true,
+      thinking: thinking ? {
+        content: thinking,
+        source: 'provider',
+        status: 'interrupted',
+        tokenCount: Math.max(1, Math.ceil(thinking.length / 4)),
+      } : undefined,
+    },
   }
 }
 
@@ -108,7 +116,7 @@ function createRecoveredToolResultTurn(timestamp: number, results: ToolResult[],
 
 function replayConversation(id: string, legacy: PersistedConversation | null, entries: ConversationJournalEntry[], truncatedJournal: boolean): PersistedConversation | null {
   let conversation = legacy ? cloneConversation(legacy) : null
-  let pendingStream: { startedAt: number; content: string; interrupted: boolean } | null = null
+  let pendingStream: { startedAt: number; content: string; thinking: string; interrupted: boolean } | null = null
   const pendingToolCalls = new Map<string, ToolCall>()
   const journalToolResults = new Map<string, ToolResult>()
   let latestTimestamp = conversation?.updatedAt || 0
@@ -138,13 +146,17 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
         }
         break
       case 'stream_start':
-        if (pendingStream && (pendingStream.content || pendingToolCalls.size > 0)) interrupted = true
+        if (pendingStream && (pendingStream.content || pendingStream.thinking || pendingToolCalls.size > 0)) interrupted = true
         pendingToolCalls.clear()
-        pendingStream = { startedAt: entry.timestamp, content: '', interrupted: false }
+        pendingStream = { startedAt: entry.timestamp, content: '', thinking: '', interrupted: false }
         break
       case 'stream_delta':
-        pendingStream = pendingStream || { startedAt: entry.timestamp, content: '', interrupted: false }
+        pendingStream = pendingStream || { startedAt: entry.timestamp, content: '', thinking: '', interrupted: false }
         pendingStream.content += entry.text
+        break
+      case 'stream_thinking_delta':
+        pendingStream = pendingStream || { startedAt: entry.timestamp, content: '', thinking: '', interrupted: false }
+        pendingStream.thinking += entry.text
         break
       case 'stream_end':
         if (pendingStream) pendingStream.interrupted = entry.interrupted
@@ -168,12 +180,13 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
   if (!conversation) return null
   conversation.activeTurns = conversation.activeTurns || [...conversation.turns]
 
-  if (pendingStream && (pendingStream.content || pendingToolCalls.size > 0)) {
+  if (pendingStream && (pendingStream.content || pendingStream.thinking || pendingToolCalls.size > 0)) {
     const calls = Array.from(pendingToolCalls.values())
     const recovered = createRecoveredAssistantTurn(
       Math.max(latestTimestamp, pendingStream.startedAt),
       pendingStream.content,
       calls,
+      pendingStream.thinking,
     )
     upsertTurn(conversation.turns, recovered)
     upsertTurn(conversation.activeTurns, recovered)

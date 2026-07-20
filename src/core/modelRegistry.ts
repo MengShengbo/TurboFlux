@@ -1,5 +1,5 @@
 import type { TiktokenEncoding } from 'js-tiktoken'
-import type { NativeReasoningConfig, ReasoningEffort } from '../shared/agentTypes'
+import { REASONING_EFFORTS, type NativeReasoningConfig, type ReasoningEffort } from '../shared/agentTypes'
 import type { ModelCapabilities } from './config'
 
 export type SupportedModelProvider = 'openai' | 'anthropic' | 'deepseek' | 'kimi' | 'glm'
@@ -196,6 +196,25 @@ function capabilities(
   }
 }
 
+function reconcileAdvertisedReasoning(
+  base: ModelReasoningCapabilities,
+  discovered?: ModelCapabilities,
+): ModelReasoningCapabilities | null {
+  if (!discovered) return base
+  if (discovered.reasoning === false) return null
+  if (base.control === 'fixed' || base.control === 'budget') return base
+  const advertised = discovered.reasoningEfforts?.filter(effort => REASONING_EFFORTS.includes(effort)) ?? []
+  if (advertised.length === 0) return base
+  const intersection = base.efforts.filter(effort => advertised.includes(effort))
+  const efforts = intersection.length > 0 ? intersection : advertised
+  const defaultEffort = efforts.includes(base.defaultEffort as ReasoningEffort)
+    ? base.defaultEffort
+    : efforts.includes('medium')
+      ? 'medium'
+      : efforts[0]
+  return { ...base, efforts, defaultEffort }
+}
+
 export function getModelReasoningCapabilities(
   model: string,
   provider?: string,
@@ -205,96 +224,96 @@ export function getModelReasoningCapabilities(
   const providerKey = normalizeModelKey(provider)
 
   if (/^claude-(?:fable-5|mythos-(?:5|preview))/.test(key)) {
-    return capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high', 'xhigh', 'max'], {
+    return reconcileAdvertisedReasoning(capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high', 'xhigh', 'max'], {
       supportsToggle: false,
       defaultEffort: 'high',
       description: 'Adaptive thinking is always on; effort controls total response work.',
-    })
+    }), discovered)
   }
   if (/^claude-(?:opus-4-(?:8|7)|sonnet-5)/.test(key)) {
-    return capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high', 'xhigh', 'max'], {
+    return reconcileAdvertisedReasoning(capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high', 'xhigh', 'max'], {
       defaultEffort: 'high',
       description: 'Adaptive thinking with native low through max effort.',
-    })
+    }), discovered)
   }
   if (/^claude-(?:opus|sonnet)-4-6/.test(key)) {
-    return capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high', 'max'], {
+    return reconcileAdvertisedReasoning(capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high', 'max'], {
       defaultEffort: key.includes('sonnet') ? 'medium' : 'high',
       description: 'Adaptive thinking with native effort; manual budgets are deprecated.',
-    })
+    }), discovered)
   }
   if (/^claude-opus-4-5/.test(key)) {
-    return capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high'], {
+    return reconcileAdvertisedReasoning(capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high'], {
       defaultEffort: 'high',
       description: 'Adaptive thinking with native low, medium, and high effort.',
-    })
+    }), discovered)
   }
   if (/^claude-/.test(key) || providerKey === 'anthropic') {
-    return capabilities('anthropic', 'budget', [], {
+    return reconcileAdvertisedReasoning(capabilities('anthropic', 'budget', [], {
       defaultBudgetTokens: 8_192,
       description: 'Manual extended thinking controlled by a token budget.',
-    })
+    }), discovered)
   }
 
   if (/^gpt-5\.6(?:$|-)/.test(key)) {
-    return capabilities('openai', 'effort', ['none', 'low', 'medium', 'high', 'xhigh', 'max'], {
+    return reconcileAdvertisedReasoning(capabilities('openai', 'effort', ['none', 'low', 'medium', 'high', 'xhigh', 'max'], {
       defaultEffort: 'medium',
       omitTemperature: false,
       description: 'GPT-5.6 native reasoning effort.',
-    })
+    }), discovered)
   }
   if (/^(?:gpt-5(?:\.|$)|o[1-9](?:-|$))/.test(key)) {
-    return capabilities('openai', 'effort', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'], {
+    return reconcileAdvertisedReasoning(capabilities('openai', 'effort', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'], {
       defaultEffort: 'medium',
       omitTemperature: false,
       description: 'OpenAI model-native reasoning effort; accepted values remain model-dependent.',
-    })
+    }), discovered)
   }
 
   if (/^deepseek-v4-(?:pro|flash)/.test(key) || providerKey === 'deepseek') {
-    return capabilities('deepseek', 'toggle-effort', ['high', 'max'], {
+    return reconcileAdvertisedReasoning(capabilities('deepseek', 'toggle-effort', ['high', 'max'], {
       defaultEffort: 'high',
       preservesReasoningContent: true,
       description: 'Thinking toggle with effective high and max effort levels.',
-    })
+    }), discovered)
   }
 
   if (/^kimi-k3/.test(key)) {
-    return capabilities('kimi', 'fixed', ['max'], {
+    return reconcileAdvertisedReasoning(capabilities('kimi', 'fixed', ['max'], {
       supportsToggle: false,
       defaultEffort: 'max',
       preservesReasoningContent: true,
       description: 'Thinking is always on; Kimi K3 currently accepts max effort only.',
-    })
+    }), discovered)
   }
   if (/^kimi-k2\.7-code/.test(key)) {
-    return capabilities('kimi', 'fixed', [], {
+    return reconcileAdvertisedReasoning(capabilities('kimi', 'fixed', [], {
       supportsToggle: false,
       preservesReasoningContent: true,
       description: 'Thinking and preserved thinking are always on with no request control.',
-    })
+    }), discovered)
   }
   if (/^kimi-k2\.(?:6|5)/.test(key)) {
-    return capabilities('kimi', 'toggle', [], {
+    return reconcileAdvertisedReasoning(capabilities('kimi', 'toggle', [], {
       preservesReasoningContent: key.startsWith('kimi-k2.6'),
       description: 'Kimi thinking can be enabled or disabled for this model.',
-    })
+    }), discovered)
   }
 
   if (/^glm-5\.2/.test(key)) {
-    return capabilities('glm', 'toggle-effort', ['max'], {
+    return reconcileAdvertisedReasoning(capabilities('glm', 'toggle-effort', ['max'], {
       defaultEffort: 'max',
       omitTemperature: false,
       preservesReasoningContent: true,
       description: 'GLM-5.2 thinking toggle with native max reasoning effort.',
-    })
+    }), discovered)
   }
   if (/^glm-(?:5(?:$|-|\.1)|4\.(?:5|6|7))/.test(key) || providerKey === 'glm') {
-    return capabilities('glm', 'toggle', [], {
+    return reconcileAdvertisedReasoning(capabilities('glm', 'toggle', [], {
       omitTemperature: false,
       preservesReasoningContent: true,
       description: 'GLM native thinking toggle.',
-    })
+    }), discovered)
   }
 
   if (discovered?.reasoning) {
