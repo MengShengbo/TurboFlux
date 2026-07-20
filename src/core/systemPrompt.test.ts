@@ -36,4 +36,13 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('Historical mentions of other projects do not change it')
     expect(prompt).toContain('without supporting tool output')
   })
+
+  it('does not project TurboFlux product positioning onto open-ended ideas', () => {
+    const prompt = buildSystemPrompt('vibe')
+
+    expect(prompt).not.toContain('workbench assistant')
+    expect(prompt).toContain('are not evidence of what the user wants to build')
+    expect(prompt).toContain('Do not infer that the user wants a CLI, coding agent, AI assistant, workbench, or local-first application')
+    expect(prompt).toContain("reason from the user's stated goals, audience, constraints, and existing work")
+  })
 })

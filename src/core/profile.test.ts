@@ -65,4 +65,14 @@ describe('TurboFlux profile', () => {
       'product-builder',
     ]))
   })
+
+  it('keeps the default persona neutral about the product being built', () => {
+    const section = buildProfileSystemPromptSection({
+      defaultPersonaId: 'default',
+      enabledPersonaIds: ['default'],
+    })
+
+    expect(section).toContain('capable execution partner')
+    expect(section).not.toContain('local workbench')
+  })
 })

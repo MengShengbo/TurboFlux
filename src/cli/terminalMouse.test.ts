@@ -12,11 +12,13 @@ describe('terminal mouse wheel parsing', () => {
     expect(parseTerminalMouseWheel('[<0;10;5M')).toEqual([])
   })
 
-  it('keeps native text selection unless fixed-view mouse tracking is explicitly enabled', () => {
-    expect(shouldEnableMouseTracking(true, true, {})).toBe(false)
+  it('enables fixed-view mouse tracking by default with an explicit opt-out', () => {
+    expect(shouldEnableMouseTracking(true, true, {})).toBe(true)
     expect(shouldEnableMouseTracking(true, true, { TURBOFLUX_MOUSE: '1' })).toBe(true)
-    expect(shouldEnableMouseTracking(false, true, { TURBOFLUX_MOUSE: '1' })).toBe(false)
-    expect(shouldEnableMouseTracking(true, false, { TURBOFLUX_MOUSE: '1' })).toBe(false)
-    expect(shouldEnableMouseTracking(true, true, { TERM: 'dumb', TURBOFLUX_MOUSE: '1' })).toBe(false)
+    expect(shouldEnableMouseTracking(true, true, { TURBOFLUX_MOUSE: '0' })).toBe(false)
+    expect(shouldEnableMouseTracking(true, true, { TURBOFLUX_MOUSE: 'off' })).toBe(false)
+    expect(shouldEnableMouseTracking(false, true, {})).toBe(false)
+    expect(shouldEnableMouseTracking(true, false, {})).toBe(false)
+    expect(shouldEnableMouseTracking(true, true, { TERM: 'dumb' })).toBe(false)
   })
 })
