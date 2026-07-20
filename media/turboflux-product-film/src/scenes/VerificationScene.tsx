@@ -1,89 +1,61 @@
 import {useCurrentFrame, useVideoConfig} from 'remotion';
 import {BRAND} from '../design';
 import {curves, phase, stagger} from '../motion';
-import {TerminalStage, TerminalText} from '../components/TerminalStage';
 
 const diffLines = [
-  {kind: 'same', text: ' const timeout = resolveUpstreamTimeout(config)'},
-  {kind: 'remove', text: '-const retryUntil = Date.now() + retryWindow'},
-  {kind: 'add', text: '+const retryUntil = Math.min('},
-  {kind: 'add', text: '+  Date.now() + retryWindow,'},
-  {kind: 'add', text: '+  requestDeadline - SAFETY_MARGIN_MS,'},
-  {kind: 'add', text: '+)'},
-  {kind: 'same', text: ' return retryWithCancellation(task, retryUntil)'},
+  [' ', 'const requiredLayers = collectRequiredLayers(query)'],
+  ['-', 'if (candidates.length >= targetCount) return candidates'],
+  ['+', 'const coverage = verifyRequiredLayers(candidates, requiredLayers)'],
+  ['+', 'if (!coverage.complete) candidates.push(...coverage.missing)'],
+  ['+', 'return rankEvidence(candidates, query)'],
 ];
 
 export const VerificationScene = () => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const time = frame / fps;
-  const diff = phase(frame, fps, 0.45, 0.48, curves.heroEnter);
-  const typecheck = phase(frame, fps, 2.6, 1.08, curves.editorial);
-  const tests = phase(frame, fps, 4.0, 2.36, curves.editorial);
-  const complete = phase(frame, fps, 6.4, 0.42, curves.micro);
-  const cameraIn = phase(frame, fps, 0, 0.9, curves.camera);
-  const cameraTravel = phase(frame, fps, 2.1, 3.6, curves.camera);
+  const diff = phase(frame, fps, 0.35, 0.85, curves.heroEnter);
+  const camera = phase(frame, fps, 4.4, 1.8, curves.camera);
+  const typecheck = phase(frame, fps, 5.4, 0.7, curves.heroEnter);
+  const tests = phase(frame, fps, 7.25, 1.2, curves.editorial);
+  const verified = phase(frame, fps, 9.45, 0.55, curves.heroEnter);
+  const exit = phase(frame, fps, 11.25, 0.65, curves.heroExit);
 
   return (
-    <TerminalStage
-      running={complete < 0.98}
-      scale={1 + cameraIn * 0.04}
-      translateX={cameraIn * -32 + cameraTravel * 66}
-      workItems={[
-        {label: 'EXECUTION', value: complete > 0.5 ? 'COMPLETE' : 'VERIFYING', tone: complete > 0.5 ? 'success' : 'accent', active: complete < 0.5},
-        {label: '✓ edit_file', value: 'session.ts', tone: 'success'},
-        {label: typecheck > 0.98 ? '✓ type-check' : '● type-check', value: typecheck > 0.98 ? 'PASS' : 'RUNNING', tone: typecheck > 0.98 ? 'success' : 'accent'},
-        {label: tests > 0.98 ? '✓ tests' : '● tests', value: tests > 0.98 ? 'PASS' : tests > 0.02 ? 'RUNNING' : 'QUEUED', tone: tests > 0.98 ? 'success' : 'accent'},
-        {label: 'Terminals', value: '1 ACTIVE', tone: 'accent'},
-      ]}
-      taskTitle="定位登录超时并修复"
-      taskItems={[
-        {label: 'Steps', value: complete > 0.5 ? '3/3' : '2/3', tone: 'success'},
-        {label: 'Elapsed', value: `${29 + Math.round(time)}s`, tone: 'accent'},
-        {label: 'NOW'},
-        {label: complete > 0.5 ? 'verification complete' : tests > 0.02 ? 'npm test' : 'npm run type-check', active: true},
-      ]}
-      taskProgress={complete > 0.5 ? 100 : 62 + tests * 34}
-      prompt="定位登录超时，修复并验证"
-      statusContext="25.8k/200k"
-      statusExtra="out 1.2k  cache 11.4k"
-    >
-      <div style={{display: 'grid', gridTemplateColumns: '1.08fr 0.92fr', gap: 18, height: '100%'}}>
-        <div style={{opacity: diff, transform: `translateX(${(1 - diff) * -40}px)`, minWidth: 0}}>
-          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12}}>
-            <TerminalText tone="accent" bold>~ src/core/session.ts</TerminalText>
-            <span style={{fontFamily: BRAND.mono, fontSize: 14}}><span style={{color: BRAND.success}}>+4</span>&nbsp; <span style={{color: BRAND.danger}}>-1</span></span>
-          </div>
-          <div style={{background: BRAND.surface, border: `1px solid ${BRAND.dividerSoft}`, padding: '12px 0'}}>
-            {diffLines.map((line, index) => {
-              const show = stagger(frame, fps, index, 0.78, 0.14, 0.28);
-              const background = line.kind === 'add' ? '#102518' : line.kind === 'remove' ? '#251313' : 'transparent';
-              const color = line.kind === 'add' ? BRAND.success : line.kind === 'remove' ? BRAND.danger : BRAND.muted;
-              return (
-                <div key={`${line.kind}-${index}`} style={{height: 34, display: 'flex', alignItems: 'center', padding: '0 14px', background, color, fontFamily: BRAND.mono, fontSize: 15, opacity: show, transform: `translateX(${(1 - show) * 22}px)`, whiteSpace: 'pre'}}>{line.text}</div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div style={{display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 2}}>
-          <div style={{fontFamily: BRAND.mono, fontSize: 15, color: BRAND.muted}}>BACKGROUND TERMINAL · verify</div>
-          <div style={{background: BRAND.surface, border: `1px solid ${BRAND.dividerSoft}`, padding: '16px 18px', flex: 1, display: 'flex', flexDirection: 'column', gap: 12}}>
-            <TerminalText><span style={{color: BRAND.accent}}>$</span>&nbsp; npm run type-check</TerminalText>
-            <div style={{opacity: typecheck, transform: `translateY(${(1 - typecheck) * 8}px)`}}><TerminalText tone="success">✓ TypeScript · no errors</TerminalText></div>
-            <div style={{height: 1, background: BRAND.dividerSoft}} />
-            <div style={{opacity: phase(frame, fps, 3.92, 0.2, curves.micro)}}><TerminalText><span style={{color: BRAND.accent}}>$</span>&nbsp; npm test</TerminalText></div>
-            <div style={{opacity: tests, transform: `translateY(${(1 - tests) * 12}px)`, display: 'flex', flexDirection: 'column', gap: 8}}>
-              <TerminalText><span style={{color: BRAND.muted}}>RUN</span>&nbsp; vitest</TerminalText>
-              <TerminalText tone="success">Test Files&nbsp; 57 passed (57)</TerminalText>
-              <TerminalText tone="success">Tests&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 493 passed (493)</TerminalText>
+    <div style={{position: 'absolute', inset: 0, background: BRAND.dark, color: BRAND.text, opacity: 1 - exit}}>
+      <div style={{position: 'absolute', left: 150, top: 95, fontSize: 48, fontWeight: 680}}>修改不是终点。验证才是。</div>
+      <div style={{position: 'absolute', left: 150, top: 210, width: 1620, height: 690, overflow: 'hidden'}}>
+        <div style={{display: 'flex', width: 2760, height: '100%', transform: `translateX(${-camera * 1500}px)`}}>
+          <div style={{width: 1500, paddingRight: 120, boxSizing: 'border-box', opacity: diff}}>
+            <div style={{display: 'flex', justifyContent: 'space-between', fontFamily: BRAND.mono, fontSize: 15, color: BRAND.textMuted, marginBottom: 22}}>
+              <span>src/core/fastContextSubagent.ts</span><span style={{color: BRAND.success}}>+4&nbsp;&nbsp;<span style={{color: BRAND.danger}}>-1</span></span>
             </div>
-            <div style={{marginTop: 'auto', opacity: complete, transform: `translateY(${(1 - complete) * 18}px)`, padding: '13px 14px', background: BRAND.successSoft, borderLeft: `3px solid ${BRAND.success}`}}>
-              <TerminalText tone="success" bold>✓ Change verified</TerminalText>
+            <div style={{borderTop: `1px solid ${BRAND.darkLine}`}}>
+              {diffLines.map(([kind, line], index) => {
+                const show = stagger(frame, fps, index, 1.15, 0.36, 0.5);
+                const color = kind === '+' ? BRAND.success : kind === '-' ? BRAND.danger : BRAND.textMuted;
+                const background = kind === '+' ? BRAND.successSoft : kind === '-' ? '#261513' : 'transparent';
+                return <div key={`${kind}-${line}`} style={{height: 78, display: 'grid', gridTemplateColumns: '52px 1fr', alignItems: 'center', padding: '0 20px', boxSizing: 'border-box', borderBottom: `1px solid ${BRAND.darkLine}`, background, opacity: show, transform: `translateX(${(1 - show) * 24}px)`, fontFamily: BRAND.mono, fontSize: 17, color}}><span>{kind}</span><span>{line}</span></div>;
+              })}
+            </div>
+          </div>
+          <div style={{width: 1260, padding: '28px 60px 0 60px', boxSizing: 'border-box'}}>
+            <div style={{fontFamily: BRAND.mono, fontSize: 16, color: BRAND.textMuted, marginBottom: 36}}>background terminal / verify</div>
+            <div style={{fontFamily: BRAND.mono, fontSize: 20, lineHeight: 2.1}}>
+              <div><span style={{color: BRAND.accent}}>$</span> npm run typecheck</div>
+              <div style={{opacity: typecheck, color: BRAND.success}}>TypeScript · no errors</div>
+              <div style={{height: 1, background: BRAND.darkLine, margin: '28px 0'}} />
+              <div style={{opacity: typecheck}}><span style={{color: BRAND.accent}}>$</span> npm test -- fastContext</div>
+              <div style={{opacity: tests, transform: `translateY(${(1 - tests) * 16}px)`}}>
+                <div style={{color: BRAND.success}}>Test Files&nbsp; 57 passed</div>
+                <div style={{color: BRAND.success}}>Tests&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 493 passed</div>
+              </div>
+            </div>
+            <div style={{marginTop: 54, height: 62, display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: `1px solid ${BRAND.success}`, opacity: verified}}>
+              <span style={{fontSize: 25, fontWeight: 650}}>Change verified</span><span style={{fontFamily: BRAND.mono, color: BRAND.success}}>ready</span>
             </div>
           </div>
         </div>
       </div>
-    </TerminalStage>
+    </div>
   );
 };

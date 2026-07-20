@@ -1,6 +1,6 @@
 # TurboFlux Product Film
 
-58 秒企业产品短片，使用 Remotion 以 1920×1080、30fps 确定性渲染。
+78 秒企业产品短片，使用 Remotion 以 1920×1080、30fps 确定性渲染。
 
 ## 内容
 
@@ -24,7 +24,8 @@ npm run render
 
 - 母版：`out/TurboFlux-Product-Film.mp4`
 - 低清预览：`out/TurboFlux-Product-Film-preview.mp4`
-- 联系表：`render-review/final-master/contact-sheet.jpg`
+- 预览联系表：`render-review/v2-preview/contact-sheet.jpg`
+- 母版联系表：`render-review/v2-master/contact-sheet.jpg`
 - 审计：`render-review/audit.md`
 
 `out/` 是可重复生成的渲染产物，不进入 Git。
@@ -37,4 +38,4 @@ npm run render
 - `motion-spec.json`：品牌、动效、交互锚点与音频提示
 - `src/components/`：共享终端舞台与影片画布
 - `src/scenes/`：八个独立镜头
-- `scripts/generate-score.mjs`：原创确定性配乐生成器
+- `scripts/generate-score.mjs`：原创确定性声音设计生成器

@@ -1,51 +1,29 @@
 import {useCurrentFrame, useVideoConfig} from 'remotion';
 import {BRAND} from '../design';
-import {curves, mix, phase, stagger} from '../motion';
+import {curves, phase} from '../motion';
 
-const fragments = [
-  {text: 'src/core/session.ts:184', x: 150, y: 174, speed: 0.44},
-  {text: 'TimeoutError: upstream did not respond', x: 1148, y: 198, speed: 0.62},
-  {text: 'retryPolicy.resolve()', x: 402, y: 314, speed: 0.82},
-  {text: 'auth/controller.ts:92', x: 1298, y: 346, speed: 0.57},
-  {text: 'POST /v1/session 504', x: 210, y: 512, speed: 0.68},
-  {text: 'context/messages.ts', x: 1240, y: 590, speed: 0.91},
-  {text: 'run regression suite', x: 448, y: 724, speed: 0.53},
-  {text: 'pending approval', x: 1314, y: 770, speed: 0.74},
-];
+const Mark = ({progress}: {progress: number}) => (
+  <div style={{width: 64, height: 64, border: `2px solid ${BRAND.ink}`, borderRadius: 14, display: 'grid', placeItems: 'center', transform: `scale(${0.86 + progress * 0.14})`, opacity: progress}}>
+    <div style={{fontFamily: BRAND.mono, fontSize: 29, fontWeight: 800, color: BRAND.accent}}>&gt;</div>
+  </div>
+);
 
 export const SignalScene = () => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const time = frame / fps;
-  const gather = phase(frame, fps, 2.1, 1.35, curves.camera);
-  const line = phase(frame, fps, 2.55, 0.72, curves.heroEnter);
-  const first = stagger(frame, fps, 0, 0.62, 0.16, 0.58);
-  const second = stagger(frame, fps, 1, 0.62, 0.16, 0.58);
+  const mark = phase(frame, fps, 0.45, 1.1, curves.heroEnter);
+  const name = phase(frame, fps, 2.4, 1.05, curves.heroEnter);
+  const nameOut = phase(frame, fps, 5.0, 0.55, curves.heroExit);
+  const promise = phase(frame, fps, 5.45, 0.95, curves.heroEnter);
+  const exit = phase(frame, fps, 8.25, 0.65, curves.heroExit);
 
   return (
-    <div style={{position: 'absolute', inset: 0, overflow: 'hidden'}}>
-      <div style={{position: 'absolute', left: 124, top: 92, fontFamily: BRAND.mono, fontSize: 15, color: BRAND.subtle}}>TurboFlux / 0.1.5</div>
-      {fragments.map((item, index) => {
-        const opacity = (1 - gather) * (0.22 + index * 0.045);
-        const targetX = 960;
-        const targetY = 822;
-        const x = mix(item.x + Math.sin(time * item.speed + index) * 34, targetX, gather);
-        const y = mix(item.y + Math.cos(time * item.speed * 0.7 + index) * 18, targetY, gather);
-        const scale = mix(1, 0.54, gather);
-        return (
-          <div key={item.text} style={{position: 'absolute', left: x, top: y, opacity, transform: `translate(-50%,-50%) scale(${scale})`, fontFamily: BRAND.mono, color: index % 3 === 0 ? BRAND.accent : BRAND.muted, fontSize: 18, whiteSpace: 'nowrap'}}>
-            {item.text}
-          </div>
-        );
-      })}
-
-      <div style={{position: 'absolute', left: 190, top: 346, overflow: 'hidden', width: 1540}}>
-        <div style={{fontSize: 92, fontWeight: 850, lineHeight: 1.04, transform: `translateY(${(1 - first) * 96}px)`, opacity: first, letterSpacing: 0}}>代码很多。</div>
-        <div style={{fontSize: 92, fontWeight: 850, lineHeight: 1.04, color: BRAND.muted, transform: `translateY(${(1 - second) * 96}px)`, opacity: second, letterSpacing: 0}}>线索不该散。</div>
+    <div style={{position: 'absolute', inset: 0, background: BRAND.paperBright, display: 'grid', placeItems: 'center', opacity: 1 - exit}}>
+      <div style={{position: 'absolute', top: 336, opacity: mark * (1 - nameOut), transform: `translateY(${(1 - mark) * 18 - nameOut * 16}px)`}}><Mark progress={mark} /></div>
+      <div style={{position: 'absolute', top: 462, fontSize: 72, fontWeight: 720, letterSpacing: 0, opacity: name * (1 - nameOut), transform: `translateY(${(1 - name) * 24 - nameOut * 18}px)`}}>TurboFlux</div>
+      <div style={{position: 'absolute', left: 260, right: 260, top: 448, textAlign: 'center', fontSize: 52, lineHeight: 1.28, fontWeight: 680, letterSpacing: 0, opacity: promise, transform: `translateY(${(1 - promise) * 34}px)`}}>
+        把复杂工程任务，交给一个可验证的 Agent 工作流。
       </div>
-
-      <div style={{position: 'absolute', left: 960 - 610 * line, top: 820, width: 1220 * line, height: 2, background: BRAND.foreground, boxShadow: `0 0 28px ${BRAND.accent}`}} />
-      <div style={{position: 'absolute', left: 960, top: 808, width: 3, height: 26, background: BRAND.foreground, opacity: 0.45 + Math.sin(time * Math.PI * 4) * 0.3}} />
     </div>
   );
 };

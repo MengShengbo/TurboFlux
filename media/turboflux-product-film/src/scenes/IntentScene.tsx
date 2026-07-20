@@ -1,58 +1,44 @@
 import {useCurrentFrame, useVideoConfig} from 'remotion';
-import {Pointer} from '../engine/Pointer';
-import {rectAnchor} from '../engine/geometry';
-import {clickPulse, samplePointerPath} from '../engine/pointerPath';
 import {BRAND} from '../design';
-import {phase, reveal, curves} from '../motion';
-import {TerminalStage, TerminalText} from '../components/TerminalStage';
+import {curves, phase, reveal} from '../motion';
 
-const promptText = '定位登录超时，修复并验证';
-const submitRect = {x: 1774, y: 906, width: 48, height: 48};
+const prompt = '读透 FastContext 调度链，修复漏检入口文件的问题，并跑完回归测试。';
 
 export const IntentScene = () => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const time = frame / fps;
-  const attachment = phase(frame, fps, 0.9, 0.34, curves.micro);
-  const typing = phase(frame, fps, 1.65, 2.05, curves.editorial);
-  const submitted = phase(frame, fps, 5.38, 0.18, curves.micro);
-  const pointer = samplePointerPath({
-    frame,
-    fps,
-    start: 4.35,
-    duration: 1,
-    from: {x: 1420, y: 760},
-    to: rectAnchor(submitRect),
-    arc: -0.1,
-  });
-  const press = clickPulse({frame, fps, at: 5.35});
+  const surface = phase(frame, fps, 0.35, 0.9, curves.heroEnter);
+  const attachment = phase(frame, fps, 1.3, 0.35, curves.micro);
+  const typing = phase(frame, fps, 2.0, 5.0, curves.editorial);
+  const metadata = phase(frame, fps, 6.2, 0.6, curves.heroEnter);
+  const submit = phase(frame, fps, 8.45, 0.18, curves.micro);
+  const processing = phase(frame, fps, 8.66, 0.55, curves.heroEnter);
+  const crop = phase(frame, fps, 9.8, 2.6, curves.camera);
+  const exit = phase(frame, fps, 12.35, 0.55, curves.heroExit);
 
   return (
-    <>
-      <TerminalStage
-        animateIn
-        running={submitted > 0.08}
-        workItems={submitted > 0.1 ? [
-          {label: 'EXECUTION', value: 'STARTING', tone: 'accent', active: true},
-          {label: 'Fast context', value: 'QUEUED', tone: 'accent'},
-          {label: 'Terminals', value: 'NONE'},
-        ] : [
-          {label: 'EXECUTION', value: 'READY'},
-          {label: 'Fast context', value: 'READY', tone: 'success'},
-          {label: 'Terminals', value: 'NONE'},
-        ]}
-        promptAttachment={attachment > 0.06 ? '[Image #1]' : undefined}
-        prompt={<span>{reveal(promptText, typing)}<span style={{opacity: Math.sin(time * Math.PI * 3) > 0 ? 1 : 0, color: BRAND.foreground}}>▋</span></span>}
-        statusContext="0/200k"
-      >
-        <div style={{height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 70px'}}>
-          <div style={{fontFamily: BRAND.font, fontSize: 46, lineHeight: 1.18, fontWeight: 800, color: BRAND.foreground}}>截图、日志、目标，<br />直接进入任务。</div>
-          <div style={{marginTop: 28, opacity: submitted}}>
-            <TerminalText tone="accent">● Objective accepted · preparing retrieval</TerminalText>
+    <div style={{position: 'absolute', inset: 0, background: BRAND.paperBright, opacity: 1 - exit}}>
+      <div style={{position: 'absolute', left: 160 - crop * 110, right: 160 - crop * 110, top: 290 + crop * 124, opacity: surface, transform: `scale(${1 + crop * 0.1})`, transformOrigin: 'center bottom'}}>
+        <div style={{height: 290, borderTop: `1px solid ${BRAND.line}`, borderBottom: `1px solid ${BRAND.line}`, padding: '42px 52px 34px', boxSizing: 'border-box', background: BRAND.paperBright}}>
+          <div style={{height: 128, fontSize: 28, lineHeight: 1.55, color: BRAND.ink, display: 'flex', alignItems: 'flex-start'}}>
+            <span style={{fontFamily: BRAND.mono, color: BRAND.accent, marginRight: 20}}>&gt;</span>
+            <span>{reveal(prompt, typing)}<span style={{display: 'inline-block', width: 2, height: 30, background: BRAND.ink, marginLeft: 4, opacity: typing < 1 ? 0.8 : 0}} /></span>
+          </div>
+          <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 18}}>
+            <div style={{display: 'flex', alignItems: 'center', gap: 26}}>
+              <span style={{fontFamily: BRAND.mono, fontSize: 15, color: BRAND.inkSoft, opacity: attachment, borderBottom: `1px solid ${BRAND.accent}`, paddingBottom: 4}}>[architecture.png]</span>
+              <span style={{fontFamily: BRAND.mono, fontSize: 14, color: BRAND.muted, opacity: metadata}}>claude-sonnet-5</span>
+              <span style={{fontFamily: BRAND.mono, fontSize: 14, color: BRAND.muted, opacity: metadata}}>effort high</span>
+              <span style={{fontFamily: BRAND.mono, fontSize: 14, color: BRAND.muted, opacity: metadata}}>approval agent</span>
+            </div>
+            <div style={{width: 54, height: 54, borderRadius: 28, display: 'grid', placeItems: 'center', background: submit > 0.5 ? BRAND.accent : BRAND.ink, color: 'white', fontSize: 24, transform: `scale(${1 - submit * 0.08})`}}>↑</div>
           </div>
         </div>
-      </TerminalStage>
-      {time >= 4.15 && time <= 5.78 ? <Pointer x={pointer.x} y={pointer.y} press={press} /> : null}
-    </>
+        <div style={{height: 2, marginTop: 26, background: BRAND.line, overflow: 'hidden', opacity: processing}}>
+          <div style={{height: 2, width: `${22 + processing * 78}%`, background: BRAND.accent, transform: `translateX(${processing * 340}px)`}} />
+        </div>
+        <div style={{fontFamily: BRAND.mono, fontSize: 13, color: BRAND.muted, marginTop: 15, opacity: processing}}>FastContext started in background · main agent remains available</div>
+      </div>
+    </div>
   );
 };
