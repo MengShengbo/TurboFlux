@@ -27,7 +27,7 @@ import { countMessagesTokens, countTurnishTokens } from './tokenCounter'
 import { resolveNativeReasoningRequest } from './modelRegistry'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
-import type { FastContextScanEvent, FastContextScanResult } from './fastContextTypes'
+import { getFastContextTuning, normalizeFastContextLevel, type FastContextLevel, type FastContextScanEvent, type FastContextScanResult } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
 import type { RuntimeTask } from '../shared/runtimeTaskTypes'
 import { runFastContextSubagent } from './fastContextSubagent'
@@ -577,14 +577,14 @@ export class AgentEngine {
     this.fastContextPack = null
   }
 
-  async runFastContextObjective(objective: string): Promise<FastContextScanResult | null> {
-    const run = this.startFastContextBackground(objective)
+  async runFastContextObjective(objective: string, level: FastContextLevel = 'medium'): Promise<FastContextScanResult | null> {
+    const run = this.startFastContextBackground(objective, { level })
     return run.promise
   }
 
   private startFastContextBackground(
     objective: string,
-    tuning?: { maxTurns?: number; maxParallel?: number },
+    tuning?: { level?: FastContextLevel; maxTurns?: number; maxParallel?: number },
   ): FastContextBackgroundStart {
     const nextObjective = objective.trim()
     if (!nextObjective || !this.config.workspacePath) {
@@ -600,6 +600,7 @@ export class AgentEngine {
     }
 
     this.setFastContextObjective(nextObjective)
+    const levelTuning = getFastContextTuning(tuning?.level)
     this.fastContextRunObjective = nextObjective
     const controller = new AbortController()
     const parentSignal = this.abortController?.signal
@@ -620,8 +621,9 @@ export class AgentEngine {
       run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
         signal,
         injectPack: true,
-        maxTurns: tuning?.maxTurns,
-        maxParallel: tuning?.maxParallel,
+        level: levelTuning.level,
+        maxTurns: tuning?.maxTurns ?? levelTuning.maxTurns,
+        maxParallel: tuning?.maxParallel ?? levelTuning.maxParallel,
         generation,
         agentId: taskId,
         recordEvent: event => recordEvent(event),
@@ -668,7 +670,7 @@ export class AgentEngine {
     return Boolean(this.fastContextRunPromise || this.standaloneFastContextRunPromise)
   }
 
-  async runStandaloneFastContextObjective(objective: string): Promise<FastContextScanResult | null> {
+  async runStandaloneFastContextObjective(objective: string, level: FastContextLevel = 'medium'): Promise<FastContextScanResult | null> {
     const nextObjective = objective.trim()
     if (!nextObjective) return null
     if (this.currentRunPromise) {
@@ -688,6 +690,7 @@ export class AgentEngine {
       run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
         signal,
         injectPack: false,
+        level,
         agentId: taskId,
         recordEvent: event => recordEvent(event),
       }),
@@ -2124,6 +2127,7 @@ Before retrying:
   private async runFastContextScan(objective: string, options: {
     signal?: AbortSignal
     injectPack: boolean
+    level?: FastContextLevel
     maxTurns?: number
     maxParallel?: number
     generation?: number
@@ -2152,6 +2156,7 @@ Before retrying:
       const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
       const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
       const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
+      const fastContextTuning = getFastContextTuning(options.level)
 
       emitIfCurrent({
         type: 'subagent:start',
@@ -2161,7 +2166,7 @@ Before retrying:
         objective,
         runKind: 'fast_context',
       })
-      onEvent({ type: 'insight', text: `Building FastContext code map with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' })
+      onEvent({ type: 'insight', text: `Building ${fastContextTuning.level} FastContext code map with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' })
       const result = await runFastContextSubagent({
         workspacePath: this.config.workspacePath,
         objective,
@@ -2170,10 +2175,15 @@ Before retrying:
         baseUrl: fastContextConfig?.baseUrl || 'https://api.deepseek.com',
         provider: fastContextConfig?.provider,
         customHeaders: fastContextConfig?.customHeaders,
-        reasoning: fastContextConfig?.reasoning,
+        reasoning: {
+          ...(fastContextConfig?.reasoning ?? {}),
+          enabled: true,
+          effort: fastContextTuning.reasoningEffort,
+        },
         modelCapabilities: fastContextConfig?.modelCapabilities,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
         codemap: skeleton,
+        level: fastContextTuning.level,
         maxTurns: options.maxTurns,
         maxParallel: options.maxParallel,
         abortSignal: options.signal,
@@ -5081,18 +5091,13 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!basePath) return `Error: no workspace selected`
         const objective = String(args.objective || '').trim()
         if (!objective) return `Error: objective is required`
-        const thoroughness = args.thoroughness === 'quick'
-          ? 'quick'
-          : args.thoroughness === 'very_thorough'
-            ? 'very_thorough'
-            : 'medium'
+        const level = normalizeFastContextLevel(args.level ?? args.thoroughness)
+        const tuning = getFastContextTuning(level)
         const context = typeof args.context === 'string' && args.context.trim()
           ? `\n\nParent context:\n${args.context.trim()}`
           : ''
-        const maxTurns = thoroughness === 'quick' ? 5 : thoroughness === 'very_thorough' ? 12 : 8
-        const maxParallel = thoroughness === 'quick' ? 4 : 6
-        const scanObjective = `${objective}\n\nThoroughness: ${thoroughness}${context}`
-        const background = this.startFastContextBackground(scanObjective, { maxTurns, maxParallel })
+        const scanObjective = `${objective}\n\nFastContext level: ${level}${context}`
+        const background = this.startFastContextBackground(scanObjective, tuning)
         if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
         if (background.status === 'busy') {
           return `FastContext background scan is already working on: ${background.objective}\nAgent ID: ${background.taskId || 'unavailable'}\nContinue now with targeted search/read tools; do not wait or call explore_code again.`
@@ -5688,7 +5693,8 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (def.id === 'fast_context') {
           if (!this.config.workspacePath) return 'Error: no workspace path set'
           const objective = (args.objective as string | undefined) || 'Locate relevant files for the current task'
-          const background = this.startFastContextBackground(objective)
+          const level = normalizeFastContextLevel(args.level)
+          const background = this.startFastContextBackground(objective, { level })
           if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
           if (background.status === 'busy') {
             return `FastContext is already running on: ${background.objective}. Agent ID: ${background.taskId || 'unavailable'}. Continue with normal targeted read/search tools.`

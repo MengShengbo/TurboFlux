@@ -4,6 +4,7 @@ import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../sha
 import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { ModelCapabilities } from './config'
+import { getFastContextTuning, type FastContextLevel } from './fastContextTypes'
 import { createTurboFluxRequestHeaders } from './clientIdentity'
 import { resolveNativeReasoningRequest } from './modelRegistry'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
@@ -168,7 +169,7 @@ const DEFINITIONS: Record<string, SubAgentDefinition> = {
     label: 'Fast Context',
     description: 'Fast issue-localization code map for large repositories. Use when you need ranked candidate files, roles, and evidence before deciding what to read.',
     driver: 'main-model',
-    systemPrompt: FAST_CONTEXT_SYSTEM_PROMPT(),
+    systemPrompt: buildFastContextSystemPrompt('medium'),
     maxTurns: 8,
     maxParallel: 6,
     temperature: 0,
@@ -220,8 +221,18 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
   },
 }
 
-function FAST_CONTEXT_SYSTEM_PROMPT(): string {
+export function buildFastContextSystemPrompt(level: FastContextLevel = 'medium'): string {
+  const tuning = getFastContextTuning(level)
+  const depthContract = tuning.level === 'low'
+    ? 'Fast location pass: form at least two hypotheses, identify the likely entry and implementation, and stop once 2-4 read-confirmed candidates answer the objective.'
+    : tuning.level === 'max'
+      ? 'Architecture pass: form at least four independent hypotheses, trace the complete caller-to-core-to-state/persistence flow, inspect tests and failure paths, and actively search for evidence that disproves the leading interpretation.'
+      : 'Engineering pass: form at least three hypotheses, trace the caller-to-core relationship plus relevant state/config boundaries, and return 3-7 read-confirmed candidates.'
   return `You are FastContext, a read-only code intelligence subagent for large repositories. Deterministic retrieval gives you recall, but you own semantic understanding. Your job is to rewrite the objective into independent search hypotheses, challenge the prefetched candidates, trace the real execution path, and return a compact ranked code map grounded in files and line ranges.
+
+Depth level: ${tuning.level}
+Depth contract: ${depthContract}
+Before finalizing, make at least ${tuning.minimumSearchCalls} model-directed search call(s) and ${tuning.minimumReadCalls} model-directed read_file call(s).
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
@@ -231,7 +242,7 @@ Tools:
 - read_file(path, offset?, limit?)
 
 Strategy:
-1. Rewrite the objective into at least three hypotheses: exact identifiers/text, likely ownership modules, and runtime/call-chain behavior. Search more than one naming convention.
+1. Follow the depth contract above. Cover exact identifiers/text, likely ownership modules, and runtime/call-chain behavior as appropriate for this level. Search more than one naming convention.
 2. Run independent searches in parallel. Use search_symbols for declarations, search_content for literals and references, search_files for naming hypotheses, and get_codemap only as orientation.
 3. Treat deterministic prefetch as untrusted leads. You MUST run your own search wave and MUST read the strongest source slices yourself.
 4. Trace relationships, not just mentions: entry/caller -> implementation -> state or persistence -> tests/error path. For lifecycle questions, identify the true execution core and at least one caller.
@@ -269,6 +280,8 @@ export interface RunSubAgentOptions {
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
   requireGroundedReport?: boolean
+  minimumSearchCalls?: number
+  minimumReadCalls?: number
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -641,13 +654,14 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const collectedEvidence: SubAgentEvidence[] = [...(options.initialEvidence || [])]
   const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
   let searchRecoveryUsed = false
-  let readRecoveryUsed = false
   let reportRecoveryUsed = false
   let modelSearchCalls = 0
   let modelReadCalls = 0
   let resolvedProtocol: ModelProtocol | null = null
   const isFastContextDefinition = definition.id === 'fast_context'
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
+  const minimumSearchCalls = strictFastContext ? Math.max(1, Math.floor(options.minimumSearchCalls ?? 1)) : 0
+  const minimumReadCalls = strictFastContext ? Math.max(1, Math.floor(options.minimumReadCalls ?? 1)) : 0
 
   const addEvidence = (evidence: SubAgentEvidence): void => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
@@ -660,6 +674,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const hasModelReadEvidence = (): boolean => collectedEvidence.some(evidence => evidence.reason === 'file read')
   const validateFastContextReport = (text: string): string | null => {
     const normalized = text.trim()
+    if (modelSearchCalls < minimumSearchCalls) return `final report requires ${minimumSearchCalls} model search calls; only ${modelSearchCalls} completed`
+    if (modelReadCalls < minimumReadCalls) return `final report requires ${minimumReadCalls} model read calls; only ${modelReadCalls} completed`
     if (!/^RANKED_CODE_MAP\b/m.test(normalized)) return 'final report must start with RANKED_CODE_MAP'
     if (!/\bEXECUTION_FLOW\b/m.test(normalized)) return 'final report is missing EXECUTION_FLOW'
     if (!/\bSEARCHES_TRIED\b/m.test(normalized)) return 'final report is missing SEARCHES_TRIED'
@@ -861,25 +877,25 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     }
 
     if (responseToolCalls.length === 0) {
-      if (strictFastContext && modelSearchCalls === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
+      if (strictFastContext && modelSearchCalls < minimumSearchCalls && turn < definition.maxTurns) {
+        const remaining = minimumSearchCalls - modelSearchCalls
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: 'The deterministic prefetch is only a lead set. Run your own independent search wave now using alternate identifiers, references, filenames, or runtime terms before ranking anything.',
+          content: `The deterministic prefetch is only a lead set. Run at least ${remaining} more independent search call(s) now using alternate identifiers, references, filenames, or runtime terms before ranking anything.`,
         })
-        searchRecoveryUsed = true
         continue
       }
       const missingRequiredRead = strictFastContext
-        ? (!hasModelReadEvidence() || modelReadCalls === 0)
+        ? (!hasModelReadEvidence() || modelReadCalls < minimumReadCalls)
         : !hasReadEvidence()
-      if (isFastContextDefinition && missingRequiredRead && collectedEvidence.length > 0 && !readRecoveryUsed && turn < definition.maxTurns) {
+      if (isFastContextDefinition && missingRequiredRead && collectedEvidence.length > 0 && turn < definition.maxTurns) {
+        const remaining = Math.max(1, minimumReadCalls - modelReadCalls)
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: 'Quality gate: candidate paths are not enough, and prefetched snippets are not proof. Use read_file yourself on the strongest runtime candidates, inspect exact line ranges, and trace at least one caller-to-core relationship.',
+          content: `Quality gate: candidate paths are not enough, and prefetched snippets are not proof. Make at least ${remaining} more read_file call(s) yourself on the strongest runtime candidates, inspect exact line ranges, and trace the relationships required by this depth level.`,
         })
-        readRecoveryUsed = true
         continue
       }
       if (isFastContextDefinition && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {

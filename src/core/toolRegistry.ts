@@ -171,7 +171,8 @@ const tools: EnhancedToolDef[] = [
     category: 'read',
     parameters: [
       { name: 'objective', type: 'string', description: 'Concrete thing to locate or understand. Include visible UI text, behavior, suspected feature area, symbol names, and what answer should prove.', required: true },
-      { name: 'thoroughness', type: 'string', description: 'How much exploration to spend before returning evidence.', required: false, default: 'medium', enum: ['quick', 'medium', 'very_thorough'] },
+      { name: 'level', type: 'string', description: 'Retrieval depth: low for quick location, medium for normal engineering work, max for architecture, complex bugs, complete call chains, and disproof searches.', required: false, default: 'medium', enum: ['low', 'medium', 'max'] },
+      { name: 'thoroughness', type: 'string', description: 'Deprecated compatibility alias. quick maps to low; very_thorough maps to max.', required: false, enum: ['quick', 'medium', 'very_thorough'] },
       { name: 'context', type: 'string', description: 'Optional prior findings, paths already checked, or constraints. Do not ask the user for a path before using this when the path can be discovered.', required: false },
     ],
     isReadOnly: true,
@@ -490,6 +491,7 @@ Launch multiple agents concurrently for independent topics and provide a highly 
     parameters: [
       { name: 'agent_type', type: 'string', description: 'Which subagent to spawn. Includes built-in types (fast_context, explorer, reviewer) and any custom agents from .turboflux/agents/.', required: true },
       { name: 'objective', type: 'string', description: 'Concrete question or task for the subagent. Be specific — include the area of the codebase, the feature, or the change to review.', required: true },
+      { name: 'level', type: 'string', description: 'FastContext depth when agent_type is fast_context.', required: false, default: 'medium', enum: ['low', 'medium', 'max'] },
       { name: 'context', type: 'string', description: 'Optional extra context that helps the subagent (related files, prior findings, constraints).', required: false },
     ],
     isReadOnly: true,

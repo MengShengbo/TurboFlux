@@ -2,20 +2,23 @@ import { isAbsolute, join, relative } from 'path'
 import type {
   FastContextConfidence,
   FastContextEvidenceKind,
+  FastContextLevel,
   FastContextScanEvent,
   FastContextScanHit,
   FastContextScanResult,
 } from './fastContextTypes'
-import type { SubAgentEvent, SubAgentEvidence } from '../shared/subAgentTypes'
+import type { SubAgentDefinition, SubAgentEvent, SubAgentEvidence } from '../shared/subAgentTypes'
 import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { ModelCapabilities } from './config'
-import { runSubAgent } from './subAgent'
+import { buildFastContextSystemPrompt, runSubAgent } from './subAgent'
+import { getFastContextTuning } from './fastContextTypes'
 
-const FAST_CONTEXT_DEFINITION = {
+const FAST_CONTEXT_DEFINITION: SubAgentDefinition = {
   id: 'fast_context',
   label: 'FastContext Code Map',
   description: 'Fast issue-localization code map for large repositories',
+  systemPrompt: buildFastContextSystemPrompt('medium'),
   maxTurns: 8,
   maxParallel: 6,
   driver: 'main-model',
@@ -54,6 +57,7 @@ interface RunParams {
   customHeaders?: Record<string, string>
   reasoning?: NativeReasoningConfig
   modelCapabilities?: ModelCapabilities
+  level?: FastContextLevel
   maxTurns?: number
   maxParallel?: number
   model?: string
@@ -655,11 +659,12 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   const tokens = __testObjectiveTokens(params.objective)
   const startedAt = Date.now()
 
-  const def = {
+  const tuning = getFastContextTuning(params.level)
+  const def: SubAgentDefinition = {
     ...FAST_CONTEXT_DEFINITION,
-    maxTurns: params.maxTurns ?? FAST_CONTEXT_DEFINITION.maxTurns,
-    maxParallel: params.maxParallel ?? FAST_CONTEXT_DEFINITION.maxParallel,
-    driver: (params.model as typeof FAST_CONTEXT_DEFINITION.driver) ?? FAST_CONTEXT_DEFINITION.driver,
+    systemPrompt: buildFastContextSystemPrompt(tuning.level),
+    maxTurns: params.maxTurns ?? tuning.maxTurns,
+    maxParallel: params.maxParallel ?? tuning.maxParallel,
   }
 
   const emit = (event: FastContextScanEvent): void => { onEvent?.(event) }
@@ -762,7 +767,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   }
 
   const result = await runSubAgent({
-    definition: def as any,
+    definition: def,
     objective: params.objective,
     workspacePath: params.workspacePath,
     toolExecutor: params.toolExecutor,
@@ -779,6 +784,8 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     retrievalContext: prefetch.context,
     initialEvidence: prefetch.evidence,
     requireGroundedReport: true,
+    minimumSearchCalls: tuning.minimumSearchCalls,
+    minimumReadCalls: tuning.minimumReadCalls,
     onEvent: onSubEvent,
   })
 

@@ -3,6 +3,34 @@ export type FastContextScanPhase = 'mapping' | 'ranking' | 'synthesizing' | 'com
 export type FastContextScanWorkerStatus = 'queued' | 'running' | 'completed' | 'error'
 export type FastContextEvidenceKind = 'entry' | 'implementation' | 'caller' | 'config' | 'schema' | 'test' | 'root_cause' | 'supporting'
 export type FastContextConfidence = 'high' | 'medium' | 'low'
+export type FastContextLevel = 'low' | 'medium' | 'max'
+
+export interface FastContextTuning {
+  level: FastContextLevel
+  maxTurns: number
+  maxParallel: number
+  minimumSearchCalls: number
+  minimumReadCalls: number
+  reasoningEffort: 'low' | 'medium' | 'max'
+}
+
+export function normalizeFastContextLevel(value: unknown): FastContextLevel {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'low' || normalized === 'quick') return 'low'
+  if (normalized === 'max' || normalized === 'very_thorough' || normalized === 'very-thorough') return 'max'
+  return 'medium'
+}
+
+export function getFastContextTuning(value: unknown = 'medium'): FastContextTuning {
+  const level = normalizeFastContextLevel(value)
+  if (level === 'low') {
+    return { level, maxTurns: 5, maxParallel: 4, minimumSearchCalls: 1, minimumReadCalls: 2, reasoningEffort: 'low' }
+  }
+  if (level === 'max') {
+    return { level, maxTurns: 12, maxParallel: 8, minimumSearchCalls: 4, minimumReadCalls: 6, reasoningEffort: 'max' }
+  }
+  return { level, maxTurns: 8, maxParallel: 6, minimumSearchCalls: 2, minimumReadCalls: 3, reasoningEffort: 'medium' }
+}
 
 export interface FastContextScanHit {
   path: string
