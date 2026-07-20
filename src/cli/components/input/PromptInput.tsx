@@ -15,6 +15,7 @@ interface PromptInputProps {
   value: string
   onChange: (value: string) => void
   onSubmit: (value: string) => void
+  onAlternateSubmit?: (value: string) => void
   onDoubleEsc?: () => void
   onPasteImage?: () => boolean
   onPasteText?: (pastedText: string, nextValue: string) => PasteTextResult | null
@@ -73,7 +74,7 @@ export function getImageTokenRangeAfterDelete(value: string, offset: number): { 
   return { start: offset, end: fullEnd }
 }
 
-export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteImage, onPasteText, mode }: PromptInputProps) {
+export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode }: PromptInputProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -203,7 +204,11 @@ export function PromptInput({ value, onChange, onSubmit, onDoubleEsc, onPasteIma
     }
 
     if (key.return) {
-      handleSubmit(value)
+      if ((key.ctrl || key.meta) && onAlternateSubmit) {
+        onAlternateSubmit(value)
+      } else {
+        handleSubmit(value)
+      }
       return
     }
 

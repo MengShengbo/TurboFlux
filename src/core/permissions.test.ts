@@ -157,6 +157,22 @@ describe('PermissionPipeline', () => {
       expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('allow')
       expect(pipeline.check('edit_file', { path: 'c.ts', old_string: 'a', new_string: 'b' }).verdict).toBe('allow')
     })
+
+    it('shares a run grant across file write and edit tools', () => {
+      const pipeline = new PermissionPipeline('ask')
+      pipeline.grantRun('write_file', JSON.stringify({ path: 'a.ts', content: 'a' }))
+
+      expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('allow')
+      expect(pipeline.check('edit_file', { path: 'c.ts', old_string: 'a', new_string: 'b' }).verdict).toBe('allow')
+    })
+
+    it('clears run grants independently from session grants', () => {
+      const pipeline = new PermissionPipeline('ask')
+      pipeline.grantRun('write_file', JSON.stringify({ path: 'a.ts', content: 'a' }))
+      pipeline.clearRunGrants()
+
+      expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('ask')
+    })
   })
 
   describe('approval policies', () => {

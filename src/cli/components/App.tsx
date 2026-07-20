@@ -15,7 +15,7 @@ import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
-import type { AgentAttachment, AgentTurn, ApprovalPolicy, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
+import type { AgentAttachment, AgentRunState, AgentTurn, ApprovalPolicy, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
 import type { ContextReservoirEntry, ContextSegment } from '../../state/types'
 import { type Message } from './messages/Messages'
@@ -363,6 +363,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   })
   const modelDiscoveryRequestRef = useRef(0)
   const [lastActivity, setLastActivity] = useState<number>(Date.now())
+  const [runState, setRunState] = useState<AgentRunState>({ phase: 'idle', updatedAt: Date.now() })
   const [convListRevision, setConvListRevision] = useState(0)
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
   const [fcSummary, setFcSummary] = useState(createFastContextUiSummary)
@@ -622,6 +623,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     const unsub = engine.subscribe((event: AgentEventType) => {
       convManager.recordEvent(event)
       switch (event.type) {
+        case 'run:state':
+          setRunState(event.state)
+          setLastActivity(event.state.updatedAt)
+          if (event.state.phase === 'awaiting_approval' || event.state.phase === 'awaiting_input') setMood('thinking')
+          break
         case 'stream:start':
           setIsRunning(true)
           setCurrentTurnOutputTokens(0)
@@ -669,7 +675,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           setCurrentTools([])
           setChangeSummaries([])
           setStreamingToolDraft(null)
-          setIsRunning(false)
+          setIsRunning(engine.isRunning())
           setMood(event.interrupted ? 'idle' : 'happy')
           setTokenUsage(engine.getContextUsage())
           convManager.scheduleSave()
@@ -1127,6 +1133,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       return
     }
 
+    if (isRunningRef.current) {
+      if (engine.submitSteeringMessage(trimmed)) {
+        appendMessages([{ id: genMsgId(), role: 'user', content: trimmed }], { forceLatest: true })
+        setLastActivity(Date.now())
+        return
+      }
+      runPrompt(trimmed, pendingDraftAttachments)
+      return
+    }
+
     if (commandRegistry.isCommand(trimmed)) {
       if (trimmed === '/model') {
         push('modelPicker')
@@ -1178,7 +1194,22 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
     }
     runPrompt(resolved.prompt, resolved.attachments)
-  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, workspacePath])
+  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, workspacePath, genMsgId])
+
+  const handleAlternateSubmit = useCallback((value: string) => {
+    if (!isRunningRef.current) {
+      handleSubmit(value)
+      return
+    }
+    const trimmed = value.trim()
+    if (!trimmed) return
+    const attachments = draftAttachmentsRef.current
+    inputRef.current = ''
+    setInput('')
+    draftAttachmentsRef.current = []
+    setDraftAttachments([])
+    runPrompt(trimmed, attachments)
+  }, [handleSubmit, runPrompt])
 
   useInput((ch, key) => {
     if (!startupFrame.complete) {
@@ -1273,6 +1304,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         streamText={streamTextForDisplay}
         outputTokens={currentTurnOutputTokens}
         lastActivity={lastActivity}
+        runState={runState}
+        queuedCount={queuedPrompts.length}
         verbose={verbose}
         idleLabel={!noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
       />
@@ -1424,10 +1457,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ) : null
   const promptNode = showPrompt ? (
     <Box flexDirection="column">
-      {(queuedPrompts.length > 0 || interruptHint || exitHint) && (
+      {(isRunning || queuedPrompts.length > 0 || interruptHint || exitHint) && (
         <Box paddingLeft={1}>
           <Text dimColor>
-            {interruptHint || exitHint || `${queuedPrompts.length} queued - will run after current agent turn`}
+            {interruptHint || exitHint || (isRunning
+              ? `Enter guide current run · Ctrl/⌘+Enter queue next${queuedPrompts.length > 0 ? ` · ${queuedPrompts.length} queued` : ''}`
+              : `${queuedPrompts.length} queued - will run after current agent turn`)}
           </Text>
         </Box>
       )}
@@ -1435,6 +1470,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         value={input}
         onChange={setComposedInput}
         onSubmit={handleSubmit}
+        onAlternateSubmit={handleAlternateSubmit}
         onDoubleEsc={() => {
           if (messages.length > 0) push('rewind')
         }}

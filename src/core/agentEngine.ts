@@ -12,6 +12,8 @@
   TaskNode,
   TokenUsage,
   AnthropicThinkingBlock,
+  AgentRunState,
+  AgentRunPhase,
 } from '../shared/agentTypes'
 import { generateSessionId, generateTurnId } from '../shared/agentTypes'
 import type { MemoryKind, MemoryScope } from '../shared/memoryTypes'
@@ -163,6 +165,7 @@ type PromptModuleSnapshot = {
 }
 
 export type AgentEventType =
+  | { type: 'run:state'; state: AgentRunState }
   | { type: 'turn:start'; turn: AgentTurn }
   | { type: 'turn:complete'; turn: AgentTurn }
   | { type: 'tool:call'; toolCall: ToolCall }
@@ -470,6 +473,8 @@ export class AgentEngine {
   // executeToolCalls.
   private lastAssistantMessageId: string | null = null
   private currentRunPromise: Promise<AgentTurn[]> | null = null
+  private pendingSteeringMessages: string[] = []
+  private runState: AgentRunState = { phase: 'idle', updatedAt: Date.now() }
   private forceContextCompactionBeforeNextCall = false
   private contextLimitRetryInProgress = false
 
@@ -1271,11 +1276,52 @@ export class AgentEngine {
     return () => this.listeners.delete(listener)
   }
 
+  getRunState(): AgentRunState {
+    return this.runState
+  }
+
+  private setRunState(phase: AgentRunPhase, options?: Pick<AgentRunState, 'detail' | 'activeTool' | 'recoverable'>): void {
+    const previousPhase = this.runState.phase
+    const startsNewRun = phase === 'thinking' && (previousPhase === 'idle' || previousPhase === 'completed' || previousPhase === 'recoverable_error')
+    const startedAt = phase === 'idle'
+      ? undefined
+      : startsNewRun
+        ? Date.now()
+        : this.runState.startedAt ?? Date.now()
+    this.runState = {
+      phase,
+      startedAt,
+      updatedAt: Date.now(),
+      ...options,
+    }
+    this.emit({ type: 'run:state', state: this.runState })
+  }
+
+  submitSteeringMessage(message: string): boolean {
+    const trimmed = message.trim()
+    if (!trimmed || !this.currentRunPromise) return false
+    this.pendingSteeringMessages.push(trimmed)
+    this.emit({ type: 'notification', message: 'Guidance added to the current run.', level: 'info' })
+    return true
+  }
+
+  private consumeSteeringMessages(newTurns: AgentTurn[]): boolean {
+    if (this.pendingSteeringMessages.length === 0) return false
+    const messages = this.pendingSteeringMessages.splice(0)
+    const userTurn = this.createUserTurn(messages.join('\n\n'))
+    this.session.turns.push(userTurn)
+    newTurns.push(userTurn)
+    this.emit({ type: 'turn:start', turn: userTurn })
+    return true
+  }
+
   publishRuntimeTaskFinished(task: RuntimeTask): void {
     this.emit({ type: 'runtime-task:finished', task })
   }
 
   abort(): void {
+    if (this.currentRunPromise) this.setRunState('aborting', { detail: 'Stopping current run' })
+    this.pendingSteeringMessages = []
     this.abortController?.abort()
     this.fastContextAbortController?.abort()
     this.standaloneFastContextAbortController?.abort()
@@ -1327,6 +1373,7 @@ export class AgentEngine {
   pause(): void {
     if (!this.isPaused) {
       this.isPaused = true
+      this.setRunState('paused', { detail: 'Paused by user' })
       this.pausePromise = new Promise(resolve => {
         this.pauseResolve = resolve
       })
@@ -1339,6 +1386,7 @@ export class AgentEngine {
       this.isPaused = false
       this.pausePromise = null
       this.pauseResolve = null
+      this.setRunState('thinking', { detail: 'Resuming run' })
     }
   }
 
@@ -1495,6 +1543,9 @@ export class AgentEngine {
     const runPromise = (async () => {
     await this.detectAndEnableGit()
     this.abortController = new AbortController()
+    this.permissions.clearRunGrants()
+    this.pendingSteeringMessages = []
+    this.setRunState('thinking', { detail: 'Preparing the next step' })
     this.runtimeAppendSystemPrompt = null
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
@@ -1560,6 +1611,7 @@ export class AgentEngine {
         }
 
         await this.waitIfPaused()
+        this.consumeSteeringMessages(newTurns)
         await this.prepareContextWindow()
 
         if (totalAssistantTurnCount >= effectiveMaxTurns) {
@@ -1571,6 +1623,7 @@ export class AgentEngine {
           break
         }
 
+        this.setRunState('thinking', { detail: 'Planning the next step' })
         const assistantTurn = await this.callModel()
         totalAssistantTurnCount++
 
@@ -1579,6 +1632,8 @@ export class AgentEngine {
         this.emit({ type: 'turn:complete', turn: assistantTurn })
 
         if (!assistantTurn.toolCalls || assistantTurn.toolCalls.length === 0) {
+
+          if (this.consumeSteeringMessages(newTurns)) continue
 
           // No tool calls — decide whether to continue or break
           const hasActiveTasks = this.taskManager.getTasksByStatus('in_progress').length > 0
@@ -1642,6 +1697,10 @@ export class AgentEngine {
           }
         }
 
+        this.setRunState('tool_running', {
+          detail: `Running ${assistantTurn.toolCalls.length} tool${assistantTurn.toolCalls.length === 1 ? '' : 's'}`,
+          activeTool: assistantTurn.toolCalls[0]?.name,
+        })
         const toolResults = await this.executeToolCalls(assistantTurn.toolCalls!)
 
         const errorCount = toolResults.filter(r => r.isError).length
@@ -1664,6 +1723,7 @@ export class AgentEngine {
 
         const hasAskUser = assistantTurn.toolCalls!.some(tc => tc.name === 'ask_user')
         if (hasAskUser) {
+          this.setRunState('awaiting_input', { detail: 'Waiting for your answer' })
           const userResponse = await this.waitForAskUserResponse()
           this.pendingAskUserResolve = null
 
@@ -1686,6 +1746,7 @@ export class AgentEngine {
         this.emit({ type: 'active:task', context: this.taskManager.getActiveTaskContext() })
       }
       this.emit({ type: 'session:complete', session: this.session })
+      this.setRunState('completed', { detail: 'Run completed' })
 
       await this.prepareContextWindow()
     } catch (error) {
@@ -1693,12 +1754,17 @@ export class AgentEngine {
         || this.abortController?.signal.aborted === true
       if (!errAborted) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+        this.setRunState('recoverable_error', { detail: errorMsg, recoverable: true })
         this.emit({ type: 'error', error: errorMsg })
       }
+      this.permissions.clearRunGrants()
+      this.pendingSteeringMessages = []
       this.clearFastContextBackground()
       throw error
     }
 
+    this.permissions.clearRunGrants()
+    this.pendingSteeringMessages = []
     this.clearFastContextBackground()
     return newTurns
     })()
@@ -4669,11 +4735,12 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       question: command
         ? `允许执行这个命令吗？`
         : `允许执行 ${toolCall.name} 吗？`,
-      options: ['allow-once', 'allow-session', 'deny'],
+      options: ['allow-once', 'allow-run', 'allow-session', 'deny'],
       reason: result.reason || 'Operation requires approval',
       command,
     })
 
+    this.setRunState('awaiting_approval', { detail: `Reviewing ${toolCall.name}`, activeTool: toolCall.name })
     const response = await this.waitForAskUserResponse()
     const decision = this.parsePermissionDecision(response)
     if (decision === 'deny') {
@@ -4686,22 +4753,28 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       }
     }
 
-    if (decision === 'allow-session') {
+    if (decision === 'allow-run') {
+      this.permissions.grantRun(toolCall.name, this.computePermissionFingerprint(toolCall))
+    } else if (decision === 'allow-session') {
       this.permissions.grantSession(toolCall.name, this.computePermissionFingerprint(toolCall))
     }
 
     return null
   }
 
-  private parsePermissionDecision(response: string): 'allow-once' | 'allow-session' | 'deny' {
+  private parsePermissionDecision(response: string): 'allow-once' | 'allow-run' | 'allow-session' | 'deny' {
     const normalized = response.trim().toLowerCase()
+    if (['allow-run', 'run', 'this-run', '本轮允许', '本次任务允许', '2'].includes(normalized)) {
+      return 'allow-run'
+    }
     if (['allow-session', 'always', 'all', 'a', 'session', '一直允许', '本次会话允许'].includes(normalized)) {
       return 'allow-session'
     }
     if (['deny', 'no', 'n', 'false', '拒绝', '不允许', '否'].includes(normalized)) {
       return 'deny'
     }
-    return 'allow-once'
+    if (['allow-once', 'yes', 'y', '1', 'once', '本次允许'].includes(normalized)) return 'allow-once'
+    return 'deny'
   }
 
   private computePermissionFingerprint(toolCall: ToolCall): string {

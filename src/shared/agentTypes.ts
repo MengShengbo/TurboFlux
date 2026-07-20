@@ -22,6 +22,26 @@ export type TaskPriority = 'major' | 'medium' | 'minor'
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 
+export type AgentRunPhase =
+  | 'idle'
+  | 'thinking'
+  | 'tool_running'
+  | 'awaiting_approval'
+  | 'awaiting_input'
+  | 'paused'
+  | 'aborting'
+  | 'recoverable_error'
+  | 'completed'
+
+export interface AgentRunState {
+  phase: AgentRunPhase
+  startedAt?: number
+  updatedAt: number
+  detail?: string
+  activeTool?: string
+  recoverable?: boolean
+}
+
 export type ToolCategory = 'read' | 'write' | 'execute' | 'communicate' | 'manage'
 
 export interface AgentTool {

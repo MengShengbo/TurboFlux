@@ -46,6 +46,7 @@ const SESSION_GRANT_GROUPS = new Map<string, string>([
 export class PermissionPipeline {
   private rules: PermissionRule[] = []
   private sessionGrants = new Map<string, number>()
+  private runGrants = new Map<string, number>()
 
   constructor(private approvalPolicy: ApprovalPolicy = 'agent') {}
 
@@ -65,6 +66,10 @@ export class PermissionPipeline {
 
     if (this.hasSessionGrant(toolName, args)) {
       return { verdict: 'allow', reason: 'Previously approved this session' }
+    }
+
+    if (this.hasRunGrant(toolName, args)) {
+      return { verdict: 'allow', reason: 'Previously approved for this run' }
     }
 
     if (toolName.includes('__') && this.approvalPolicy !== 'full') {
@@ -99,6 +104,15 @@ export class PermissionPipeline {
     this.sessionGrants.set(`${toolName}:${argsFingerprint}`, Date.now())
   }
 
+  grantRun(toolName: string, argsFingerprint: string): void {
+    const group = SESSION_GRANT_GROUPS.get(toolName)
+    if (group) {
+      this.runGrants.set(`group:${group}`, Date.now())
+      return
+    }
+    this.runGrants.set(`${toolName}:${argsFingerprint}`, Date.now())
+  }
+
   grantCommandPattern(pattern: string): void {
     this.sessionGrants.set(`run_command:pattern:${pattern}`, Date.now())
   }
@@ -110,6 +124,10 @@ export class PermissionPipeline {
 
   clearSessionGrants(): void {
     this.sessionGrants.clear()
+  }
+
+  clearRunGrants(): void {
+    this.runGrants.clear()
   }
 
   private checkDenyCommandPatterns(args: Record<string, unknown>): PermissionCheckResult | null {
@@ -166,6 +184,13 @@ export class PermissionPipeline {
     if (group && this.sessionGrants.has(`group:${group}`)) return true
     const fingerprint = this.computeFingerprint(toolName, args)
     return this.sessionGrants.has(`${toolName}:${fingerprint}`)
+  }
+
+  private hasRunGrant(toolName: string, args: Record<string, unknown>): boolean {
+    const group = SESSION_GRANT_GROUPS.get(toolName)
+    if (group && this.runGrants.has(`group:${group}`)) return true
+    const fingerprint = this.computeFingerprint(toolName, args)
+    return this.runGrants.has(`${toolName}:${fingerprint}`)
   }
 
   private computeFingerprint(toolName: string, args: Record<string, unknown>): string {

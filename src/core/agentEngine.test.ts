@@ -412,7 +412,7 @@ describe('AgentEngine permission requests', () => {
         requestId: 'write-approval-1',
         toolName: 'write_file',
         path: 'src/example.ts',
-        options: ['allow-once', 'allow-session', 'deny'],
+        options: ['allow-once', 'allow-run', 'allow-session', 'deny'],
       })])
       expect(engine.getSession().turns).toHaveLength(0)
     } finally {

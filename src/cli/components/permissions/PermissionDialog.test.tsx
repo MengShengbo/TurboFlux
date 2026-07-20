@@ -9,11 +9,12 @@ import {
 
 describe('PermissionDialog', () => {
   it('wraps selection and resolves the highlighted decision', () => {
-    expect(getNextPermissionIndex(0, -1)).toBe(2)
-    expect(getNextPermissionIndex(2, 1)).toBe(0)
+    expect(getNextPermissionIndex(0, -1)).toBe(3)
+    expect(getNextPermissionIndex(3, 1)).toBe(0)
     expect(getPermissionDecision(0)).toBe('allow-once')
-    expect(getPermissionDecision(1)).toBe('allow-session')
-    expect(getPermissionDecision(2)).toBe('deny')
+    expect(getPermissionDecision(1)).toBe('allow-run')
+    expect(getPermissionDecision(2)).toBe('allow-session')
+    expect(getPermissionDecision(3)).toBe('deny')
   })
 
   it('renders request context and a selectable decision list', () => {
@@ -33,6 +34,7 @@ describe('PermissionDialog', () => {
     expect(output).toContain('C:\\workspace')
     expect(output).toContain('npm test')
     expect(output).toContain('Allow once')
+    expect(output).toContain('Allow for this run')
     expect(output).toContain('Allow for this session')
     expect(output).toContain('Deny')
     expect(output).toContain('Enter confirm')
@@ -50,8 +52,9 @@ describe('PermissionDialog', () => {
     )
 
     expect(output).toContain('Allow once')
+    expect(output).toContain('Allow for this run')
     expect(output).toContain('Allow for this session')
     expect(output).toContain('Deny')
-    expect(output).toContain('Tab choose')
+    expect(output).toContain('1/2/3/4 choose')
   })
 })

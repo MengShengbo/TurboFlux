@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
@@ -7,6 +7,7 @@ import { formatMarkdown } from '../markdown/index'
 import { SpinnerGlyph } from '../spinner/SpinnerGlyph'
 import { StatusIcon } from '../design-system/StatusIcon'
 import type { ToolStatus } from './ToolCallTree'
+import type { AgentRunState } from '../../../shared/agentTypes'
 
 export type StreamingToolDraft = {
   id: string
@@ -24,6 +25,8 @@ interface ActiveWorkPanelProps {
   streamText: string
   outputTokens?: number
   lastActivity: number
+  runState?: AgentRunState
+  queuedCount?: number
   verbose: boolean
   idleLabel?: string | null
 }
@@ -55,11 +58,19 @@ export function ActiveWorkPanel({
   streamText,
   outputTokens = 0,
   lastActivity,
+  runState,
+  queuedCount = 0,
   verbose,
   idleLabel = 'Thinking...',
 }: ActiveWorkPanelProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!runState || runState.phase === 'idle' || runState.phase === 'completed') return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [runState?.phase])
   const activeTools = tools.filter(tool => tool.status === 'running')
   const groups = buildWorkGroups(tools, verbose)
   const primary = getPrimaryWorkLabel(activeTools, draft)
@@ -77,6 +88,9 @@ export function ActiveWorkPanel({
 
   return (
     <Box flexDirection="column" marginBottom={1}>
+      {runState && runState.phase !== 'idle' && (
+        <RunStateLine state={runState} now={now} queuedCount={queuedCount} />
+      )}
       {primary ? (
         <Box>
           <Text color={theme.inactive}>Work </Text>
@@ -102,6 +116,39 @@ export function ActiveWorkPanel({
       )}
     </Box>
   )
+}
+
+function RunStateLine({ state, now, queuedCount }: { state: AgentRunState; now: number; queuedCount: number }) {
+  const theme = useTheme()
+  const labels: Record<AgentRunState['phase'], { label: string; color: string }> = {
+    idle: { label: 'READY', color: theme.inactive },
+    thinking: { label: 'THINKING', color: theme.brandShimmer },
+    tool_running: { label: 'RUNNING', color: theme.brand },
+    awaiting_approval: { label: 'REVIEW', color: theme.warning },
+    awaiting_input: { label: 'WAITING', color: theme.warning },
+    paused: { label: 'PAUSED', color: theme.warning },
+    aborting: { label: 'STOPPING', color: theme.error },
+    recoverable_error: { label: 'RECOVERABLE', color: theme.error },
+    completed: { label: 'DONE', color: theme.success },
+  }
+  const current = labels[state.phase]
+  const elapsed = state.startedAt ? formatElapsed(Math.max(0, now - state.startedAt)) : ''
+  const detail = state.detail || ''
+  return (
+    <Box>
+      <Text color={current.color} bold>{`● ${current.label}`}</Text>
+      {elapsed && <Text color={theme.inactive}>{`  ${elapsed}`}</Text>}
+      {detail && <Text color={theme.text}>{`  ${cliTruncate(detail, 58, { position: 'end' })}`}</Text>}
+      {queuedCount > 0 && <Text color={theme.inactive}>{`  · ${queuedCount} queued`}</Text>}
+    </Box>
+  )
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
 function TurnTokenCounter({ tokens }: { tokens: number }) {

@@ -3,7 +3,7 @@ import { Box, Text, useInput } from 'ink'
 import figures from 'figures'
 import { useTheme } from '../../theme/index'
 
-export type PermissionDecision = 'allow-once' | 'allow-session' | 'deny'
+export type PermissionDecision = 'allow-once' | 'allow-run' | 'allow-session' | 'deny'
 
 export const PERMISSION_OPTIONS: Array<{
   decision: PermissionDecision
@@ -11,6 +11,7 @@ export const PERMISSION_OPTIONS: Array<{
   description: string
 }> = [
   { decision: 'allow-once', label: 'Allow once', description: 'Approve only this request' },
+  { decision: 'allow-run', label: 'Allow for this run', description: 'Approve matching actions until this task ends' },
   { decision: 'allow-session', label: 'Allow for this session', description: 'Remember matching requests until exit' },
   { decision: 'deny', label: 'Deny', description: 'Block this request and return to the agent' },
 ]
@@ -20,7 +21,7 @@ export function getNextPermissionIndex(current: number, direction: -1 | 1): numb
 }
 
 export function getPermissionDecision(index: number): PermissionDecision {
-  return PERMISSION_OPTIONS[index]?.decision ?? 'allow-once'
+  return PERMISSION_OPTIONS[index]?.decision ?? 'deny'
 }
 
 interface PermissionDialogProps {
@@ -45,7 +46,7 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
     onDecision(decision)
   }, [onDecision])
 
-  useInput(useCallback((_: string, key) => {
+  useInput(useCallback((ch: string, key) => {
     if (decidedRef.current) return
     if (key.escape) {
       finish('deny')
@@ -53,6 +54,22 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
     }
     if (key.return) {
       finish(getPermissionDecision(selected))
+      return
+    }
+    if (ch === '1' || ch.toLowerCase() === 'y') {
+      finish('allow-once')
+      return
+    }
+    if (ch === '2') {
+      finish('allow-run')
+      return
+    }
+    if (ch === '3' || ch.toLowerCase() === 'a' || ch.toLowerCase() === 's') {
+      finish('allow-session')
+      return
+    }
+    if (ch === '4' || ch.toLowerCase() === 'n') {
+      finish('deny')
       return
     }
     if (key.upArrow || key.leftArrow || (key.tab && key.shift)) {
@@ -89,7 +106,7 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
           return (
             <Box key={option.decision} flexDirection="column">
               <Text color={isSelected ? selectedColor : theme.inactive} bold={isSelected}>
-                {isSelected ? `${figures.pointer} ` : '  '}{option.label}
+                {isSelected ? `${figures.pointer} ` : '  '}{index + 1}. {option.label}
               </Text>
               {isSelected && (
                 <Box paddingLeft={2}>
@@ -101,7 +118,7 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
         })}
       </Box>
       <Box marginTop={1}>
-        <Text color={theme.subtle}>Up/Down/Tab choose - Enter confirm - Esc deny</Text>
+        <Text color={theme.subtle}>1/2/3/4 choose - arrows + Enter confirm</Text>
       </Box>
     </Box>
   )
