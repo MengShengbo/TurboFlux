@@ -1,0 +1,24 @@
+{
+  "name": "turboflux-product-film",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "remotion studio src/index.tsx",
+    "generate:audio": "node scripts/generate-score.mjs",
+    "typecheck": "tsc --noEmit",
+    "render": "remotion render src/index.tsx TurboFluxProductFilm out/TurboFlux-Product-Film.mp4 --codec=h264 --crf=16",
+    "preview": "remotion render src/index.tsx TurboFluxProductFilm out/TurboFlux-Product-Film-preview.mp4 --codec=h264 --crf=20 --scale=0.5",
+    "still": "remotion still src/index.tsx TurboFluxProductFilm out/hero.png --frame=285"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.495",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "remotion": "4.0.495"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "^5.9.0"
+  }
+}

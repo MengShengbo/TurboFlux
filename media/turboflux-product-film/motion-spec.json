@@ -1,0 +1,235 @@
+{
+  "version": "1.1",
+  "composition": {
+    "id": "TurboFluxProductFilm",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "duration": 58
+  },
+  "brand": {
+    "fontFamily": "Microsoft YaHei, Segoe UI, Arial, sans-serif",
+    "monoFamily": "Cascadia Mono, Consolas, monospace",
+    "background": "#050505",
+    "foreground": "#F2F2F0",
+    "muted": "#8F9499",
+    "surface": "#0A0B0C",
+    "surfaceRaised": "#121416",
+    "divider": "#303438",
+    "accent": "#7DE3FF",
+    "success": "#A8FFB0",
+    "warning": "#FFCF70",
+    "danger": "#FF8B8B",
+    "radius": {"small": 6, "medium": 10, "large": 16},
+    "safeArea": {"x": 120, "y": 76}
+  },
+  "motion": {
+    "curves": {
+      "heroEnter": [0.16, 1, 0.3, 1],
+      "heroExit": [0.7, 0, 0.84, 0],
+      "cameraGlide": [0.65, 0, 0.35, 1],
+      "microUI": [0.2, 0.8, 0.2, 1],
+      "editorial": [0.45, 0, 0.55, 1],
+      "pointerMove": [0.22, 0.61, 0.36, 1]
+    },
+    "durations": {"micro": 0.18, "component": 0.5, "hero": 0.9, "camera": 1.4},
+    "stagger": {"tight": 0.04, "normal": 0.08, "wide": 0.14},
+    "minimumReadHold": 0.8
+  },
+  "audio": {
+    "music": "public/audio/turboflux-score.wav",
+    "targetLufs": -16,
+    "cues": ["boot", "type", "submit", "scan", "approval", "edit", "verify", "compact", "select", "resolve"]
+  },
+  "narrativeGraph": {
+    "nodes": [
+      {"id": "signal-unresolved", "kind": "state"},
+      {"id": "intent-submitted", "kind": "event"},
+      {"id": "context-ranked", "kind": "result"},
+      {"id": "execution-approved", "kind": "event"},
+      {"id": "change-verified", "kind": "result"},
+      {"id": "continuity-preserved", "kind": "state"},
+      {"id": "model-controlled", "kind": "state"},
+      {"id": "promise-resolved", "kind": "result"}
+    ],
+    "edges": [
+      {"from": "signal-unresolved", "to": "intent-submitted", "cause": "scattered evidence collapses into the prompt boundary", "transition": "shared-element"},
+      {"from": "intent-submitted", "to": "context-ranked", "cause": "submit starts the activity line and retrieval", "transition": "camera-continuation"},
+      {"from": "context-ranked", "to": "execution-approved", "cause": "ranked evidence becomes the execution target", "transition": "shared-element"},
+      {"from": "execution-approved", "to": "change-verified", "cause": "approval unlocks edit and verification", "transition": "occlusion"},
+      {"from": "change-verified", "to": "continuity-preserved", "cause": "the successful command line becomes a context timeline", "transition": "match-cut"},
+      {"from": "continuity-preserved", "to": "model-controlled", "cause": "the context baseline becomes the model selection baseline", "transition": "shared-element"},
+      {"from": "model-controlled", "to": "promise-resolved", "cause": "the selected model signal redraws the wordmark", "transition": "shared-element"}
+    ]
+  },
+  "shots": [
+    {
+      "id": "signal",
+      "type": "kinetic-headline",
+      "start": 0,
+      "duration": 4.8,
+      "purpose": "Turn engineering noise into one clear place to act",
+      "focus": "intent-line",
+      "entryCause": "the film begins inside unresolved project evidence",
+      "exitCause": "the intent line finishes forming a prompt boundary",
+      "camera": {"from": {"x": 0, "y": 0, "scale": 1.06}, "to": {"x": 0, "y": 0, "scale": 1}, "ease": "cameraGlide"},
+      "tracks": {
+        "noise.depth": [{"at": 0, "value": 1, "velocity": 0}, {"at": 2.8, "value": 0.35, "velocity": -0.2, "easeOut": "editorial"}, {"at": 4.1, "value": 0, "velocity": 0}],
+        "intent.width": [{"at": 1.9, "value": 0, "velocity": 0}, {"at": 3.0, "value": 1180, "velocity": 900, "easeOut": "heroEnter"}, {"at": 4.8, "value": 1180, "velocity": 0}]
+      },
+      "audio": [{"at": 0.2, "cue": "boot"}, {"at": 2.9, "cue": "resolve"}],
+      "transitionOut": {"kind": "shared-element", "element": "intent-line", "reason": "the line becomes the prompt box top border"}
+    },
+    {
+      "id": "intent",
+      "type": "product-composer",
+      "start": 4.8,
+      "duration": 7,
+      "purpose": "Show a real multimodal task entering TurboFlux",
+      "focus": "prompt-submit",
+      "entryCause": "the previous intent line expands into the live prompt",
+      "exitCause": "submitting the prompt activates the work line",
+      "anchors": {
+        "submit": {"x": 1774, "y": 906, "width": 48, "height": 48}
+      },
+      "pointerPaths": [
+        {"start": 4.35, "duration": 1, "from": {"x": 1420, "y": 760}, "to": "submit", "anchor": "center", "curve": "pointerMove", "arc": -0.1}
+      ],
+      "events": [
+        {"at": 0.9, "type": "attachment.add", "target": "prompt", "value": "[Image #1]"},
+        {"at": 1.65, "type": "text.input", "target": "prompt", "value": "定位登录超时，修复并验证"},
+        {"at": 4.35, "type": "pointer.move", "target": "submit"},
+        {"at": 5.35, "type": "pointer.click", "target": "submit"},
+        {"at": 5.42, "type": "status.start", "target": "activity-line"}
+      ],
+      "audio": [{"at": 0.9, "cue": "type"}, {"at": 5.35, "cue": "submit"}],
+      "transitionOut": {"kind": "camera-continuation", "element": "activity-line", "reason": "the activity line sweeps left into FastContext status"}
+    },
+    {
+      "id": "fast-context",
+      "type": "product-stage",
+      "start": 11.8,
+      "duration": 8.4,
+      "purpose": "Prove background retrieval and ranked file evidence",
+      "focus": "fast-context-evidence",
+      "entryCause": "the running activity line reveals the WORK rail",
+      "exitCause": "the top-ranked evidence becomes the first execution target",
+      "camera": {"from": {"x": 0, "y": 0, "scale": 1}, "to": {"x": 122, "y": 8, "scale": 1.12}, "ease": "cameraGlide"},
+      "events": [
+        {"at": 0.4, "type": "status.start", "target": "fast-context"},
+        {"at": 1.3, "type": "evidence.hit", "target": "auth-controller"},
+        {"at": 2.2, "type": "evidence.hit", "target": "session-service"},
+        {"at": 3.1, "type": "evidence.hit", "target": "retry-policy"},
+        {"at": 5.8, "type": "status.confirm", "target": "ranked-evidence"}
+      ],
+      "audio": [{"at": 1.3, "cue": "scan"}, {"at": 2.2, "cue": "scan"}, {"at": 3.1, "cue": "scan"}],
+      "transitionOut": {"kind": "shared-element", "element": "top-ranked-file", "reason": "the ranked file path becomes the active tool target"}
+    },
+    {
+      "id": "controlled-execution",
+      "type": "shared-ui-close-up",
+      "start": 20.2,
+      "duration": 8.8,
+      "purpose": "Show task progress and scoped approval inside the workflow",
+      "focus": "approval-choice",
+      "entryCause": "the ranked file path docks into the execution rail",
+      "exitCause": "the approval choice unlocks the edit",
+      "anchors": {
+        "allow-run": {"x": 438, "y": 610, "width": 1028, "height": 52}
+      },
+      "pointerPaths": [
+        {"start": 3.1, "duration": 1, "from": {"x": 1220, "y": 540}, "to": "allow-run", "anchor": "center", "curve": "pointerMove", "arc": 0.08}
+      ],
+      "events": [
+        {"at": 0.4, "type": "task.progress", "target": "current-task", "value": 18},
+        {"at": 2.2, "type": "permission.open", "target": "edit-file"},
+        {"at": 3.1, "type": "pointer.move", "target": "allow-run"},
+        {"at": 4.1, "type": "pointer.click", "target": "allow-run"},
+        {"at": 4.17, "type": "permission.confirm", "target": "edit-file"},
+        {"at": 6.1, "type": "task.progress", "target": "current-task", "value": 62}
+      ],
+      "audio": [{"at": 2.2, "cue": "approval"}, {"at": 4.1, "cue": "submit"}],
+      "transitionOut": {"kind": "occlusion", "element": "approval-bottom-border", "reason": "the approval border wipes downward to reveal the resulting diff"}
+    },
+    {
+      "id": "verified-change",
+      "type": "generated-outcome",
+      "start": 29,
+      "duration": 8.8,
+      "purpose": "Prove that edits end in observable verification",
+      "focus": "tests-passed",
+      "entryCause": "the approved edit resolves into a diff",
+      "exitCause": "the successful verification line becomes a context bar",
+      "camera": {"from": {"x": -110, "y": 10, "scale": 1.12}, "to": {"x": 90, "y": -4, "scale": 1.08}, "ease": "cameraGlide"},
+      "events": [
+        {"at": 0.5, "type": "diff.open", "target": "session-file"},
+        {"at": 2.6, "type": "command.start", "target": "type-check"},
+        {"at": 3.7, "type": "command.confirm", "target": "type-check"},
+        {"at": 4.0, "type": "command.start", "target": "tests"},
+        {"at": 6.4, "type": "command.confirm", "target": "tests", "value": "57 files / 493 tests passed"},
+        {"at": 7.0, "type": "status.confirm", "target": "current-task"}
+      ],
+      "audio": [{"at": 0.5, "cue": "edit"}, {"at": 3.7, "cue": "verify"}, {"at": 6.4, "cue": "resolve"}],
+      "transitionOut": {"kind": "match-cut", "element": "success-line", "reason": "the success line retains its width while becoming context occupancy"}
+    },
+    {
+      "id": "continuity",
+      "type": "before-after-transformation",
+      "start": 37.8,
+      "duration": 7.7,
+      "purpose": "Show how long-running work keeps decisions while reducing old detail",
+      "focus": "context-timeline",
+      "entryCause": "the verification line expands into the context timeline",
+      "exitCause": "the active context baseline becomes a model selection baseline",
+      "events": [
+        {"at": 0.7, "type": "context.measure", "target": "context-bar", "value": "84.7k / 200k"},
+        {"at": 2.0, "type": "context.recap", "target": "recap"},
+        {"at": 3.2, "type": "context.compact", "target": "compact"},
+        {"at": 4.35, "type": "checkpoint.create", "target": "checkpoint"},
+        {"at": 5.45, "type": "session.resume", "target": "resume"}
+      ],
+      "audio": [{"at": 2.0, "cue": "compact"}, {"at": 3.2, "cue": "compact"}, {"at": 5.45, "cue": "verify"}],
+      "transitionOut": {"kind": "shared-element", "element": "context-baseline", "reason": "the baseline anchors the model list rows"}
+    },
+    {
+      "id": "model-control",
+      "type": "shared-ui-close-up",
+      "start": 45.5,
+      "duration": 6.5,
+      "purpose": "Show model discovery and native reasoning control",
+      "focus": "reasoning-effort",
+      "entryCause": "the context baseline divides into model rows",
+      "exitCause": "the selected model indicator rises into the wordmark",
+      "anchors": {
+        "xhigh": {"x": 420, "y": 548, "width": 1030, "height": 52}
+      },
+      "pointerPaths": [
+        {"start": 2.6, "duration": 0.9, "from": {"x": 1320, "y": 490}, "to": "xhigh", "anchor": "center", "curve": "pointerMove", "arc": -0.06}
+      ],
+      "events": [
+        {"at": 0.5, "type": "models.discover", "target": "model-list"},
+        {"at": 1.8, "type": "effort.open", "target": "effort-picker"},
+        {"at": 2.6, "type": "pointer.move", "target": "xhigh"},
+        {"at": 3.5, "type": "pointer.click", "target": "xhigh"},
+        {"at": 3.57, "type": "status.confirm", "target": "reasoning-status"}
+      ],
+      "audio": [{"at": 0.5, "cue": "select"}, {"at": 3.5, "cue": "submit"}],
+      "transitionOut": {"kind": "shared-element", "element": "model-indicator", "reason": "the indicator travels upward and redraws the TurboFlux wordmark"}
+    },
+    {
+      "id": "end-card",
+      "type": "end-card",
+      "start": 52,
+      "duration": 6,
+      "purpose": "Resolve the workflow into the TurboFlux promise and open-source CTA",
+      "focus": "brand-promise",
+      "entryCause": "the selected model signal draws the first wordmark stroke",
+      "events": [
+        {"at": 0.4, "type": "brand.reveal", "target": "wordmark"},
+        {"at": 1.65, "type": "claim.reveal", "target": "promise"},
+        {"at": 2.55, "type": "cta.reveal", "target": "repository"}
+      ],
+      "audio": [{"at": 0.4, "cue": "resolve"}, {"at": 2.55, "cue": "verify"}]
+    }
+  ]
+}

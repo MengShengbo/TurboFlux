@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "nodes": [
+    {"id": "signal-unresolved", "kind": "state", "focus": "scattered engineering evidence"},
+    {"id": "intent-submitted", "kind": "event", "focus": "task prompt with image context"},
+    {"id": "context-ranked", "kind": "result", "focus": "FastContext ranked evidence"},
+    {"id": "execution-approved", "kind": "event", "focus": "scoped permission decision"},
+    {"id": "change-verified", "kind": "result", "focus": "diff and passing verification"},
+    {"id": "continuity-preserved", "kind": "state", "focus": "recap, compaction, checkpoint and resume"},
+    {"id": "model-controlled", "kind": "state", "focus": "discovered model and native effort"},
+    {"id": "promise-resolved", "kind": "result", "focus": "TurboFlux brand promise"}
+  ],
+  "edges": [
+    {"from": "signal-unresolved", "to": "intent-submitted", "cause": "the scattered evidence collapses into the prompt boundary", "transition": "shared-element"},
+    {"from": "intent-submitted", "to": "context-ranked", "cause": "submitting the task starts the activity line and background retrieval", "transition": "camera-continuation"},
+    {"from": "context-ranked", "to": "execution-approved", "cause": "the highest-ranked file evidence becomes the first execution target", "transition": "shared-element"},
+    {"from": "execution-approved", "to": "change-verified", "cause": "the scoped approval unlocks the file edit and verification commands", "transition": "occlusion"},
+    {"from": "change-verified", "to": "continuity-preserved", "cause": "the completed command line stretches into the context occupancy timeline", "transition": "match-cut"},
+    {"from": "continuity-preserved", "to": "model-controlled", "cause": "the active context line becomes the selection baseline for model controls", "transition": "shared-element"},
+    {"from": "model-controlled", "to": "promise-resolved", "cause": "the selected model indicator rises and redraws the TurboFlux wordmark", "transition": "shared-element"}
+  ]
+}
