@@ -157,6 +157,26 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(runtimeTask).toMatchObject({ status: 'failed', exitCode: 7, interactive: false })
   }))
 
+  it('blocks internal process execution in a readonly sandbox', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'readonly' })
+
+    const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(0)'], workspace)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('read-only')
+    expect(executor.getRuntimeTaskManager().listTasks()).toHaveLength(0)
+  }))
+
+  it('blocks internal process arguments that escape the workspace sandbox', async () => withWorkspace(async ({ workspace, outside }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const result = await executor.runProcess('git', ['add', '--', outside], workspace)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('outside the workspace')
+    expect(executor.getRuntimeTaskManager().listTasks()).toHaveLength(0)
+  }))
+
   it('tracks successful foreground processes through completion', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
 

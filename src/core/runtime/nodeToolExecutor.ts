@@ -809,7 +809,12 @@ export class NodeToolExecutor implements ToolExecutor {
     let runtimeTaskId: string | undefined
     let logPath: string | undefined
     try {
+      this.ensureWritable()
       const safeCwd = this.ensureAllowedPath(cwd)
+      const sandboxError = this.checkCommandSandbox(args.join(' '), safeCwd)
+      if (sandboxError) {
+        return { success: false, error: sandboxError, data: { stdout: '', stderr: sandboxError, exitCode: 1 } }
+      }
       const runtimeTask = this.runtimeTaskManager.createTask({
         kind: 'shell',
         command: [command, ...args].join(' '),

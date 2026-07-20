@@ -7,6 +7,13 @@ import type { ModelCapabilities } from './config'
 import { getFastContextTuning, type FastContextLevel } from './fastContextTypes'
 import { createTurboFluxRequestHeaders } from './clientIdentity'
 import { resolveNativeReasoningRequest } from './modelRegistry'
+import {
+  downgradeReasoningEffort,
+  extractUnsupportedRequestParam,
+  isReasoningEffortValueError,
+  removeAnthropicCompatibleRequestParam,
+  removeOpenAICompatibleRequestParam,
+} from './requestCompatibility'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
 import type { SkillRuntime } from './skills/runtime'
 import type { LoadedSkill } from './skills/loader'
@@ -319,62 +326,15 @@ const TRANSIENT_NETWORK_CODES = new Set([
   'UND_ERR_SOCKET',
 ])
 
-function extractUnsupportedRequestParam(error?: string): string | null {
-  if (!error) return null
-  const quoted = error.match(/Unsupported parameter:\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
-  if (quoted?.[1]) return quoted[1]
-  const deprecated = error.match(/["'`]?([A-Za-z0-9_.-]+)["'`]?\s+is\s+deprecated\b/i)
-  if (deprecated?.[1]) return deprecated[1]
-  const named = error.match(/(?:unknown|unrecognized|unsupported|invalid)\s+(?:parameter|field|key|argument)\s*[:=]?\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
-  if (named?.[1]) return named[1]
-  if (!/(?:extra inputs?|extra fields?|not permitted|not allowed|unsupported|unrecognized|deprecated)/i.test(error)) return null
-  const knownOptionalParams = [
-    'cache_control', 'anthropic-beta', 'output_config', 'thinking', 'reasoning_effort',
-    'reasoning', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
-    'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store',
-  ]
-  return knownOptionalParams.find(param => error.toLowerCase().includes(param.toLowerCase())) || null
-}
-
 function removeCompatibleRequestParam(
   protocol: ModelProtocol,
   body: Record<string, unknown>,
   headers: Record<string, string>,
   param: string,
 ): boolean {
-  const rootParam = param.split('.')[0]
-  if (rootParam === 'anthropic-beta' || rootParam === 'anthropic_beta') {
-    if (headers['anthropic-beta'] === undefined) return false
-    delete headers['anthropic-beta']
-    return true
-  }
-  const aliases = new Set<string>([rootParam])
-  if (['max_output_tokens', 'max_completion_tokens', 'max_tokens'].includes(rootParam)) {
-    aliases.add('max_output_tokens')
-    aliases.add('max_completion_tokens')
-    aliases.add('max_tokens')
-  }
-  if (['thinking', 'reasoning', 'reasoning_effort', 'output_config'].includes(rootParam)) {
-    aliases.add('thinking')
-    aliases.add('reasoning')
-    aliases.add('reasoning_effort')
-    aliases.add('output_config')
-  }
-  const removable = protocol === 'anthropic_messages'
-    ? new Set(['temperature', 'thinking', 'output_config', 'tool_choice'])
-    : new Set([
-        'temperature', 'max_output_tokens', 'max_completion_tokens', 'max_tokens',
-        'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls',
-        'thinking', 'reasoning', 'reasoning_effort', 'output_config',
-        'prompt_cache_key', 'prompt_cache_retention', 'store',
-      ])
-  let removed = false
-  for (const key of aliases) {
-    if (!removable.has(key) || !Object.prototype.hasOwnProperty.call(body, key)) continue
-    delete body[key]
-    removed = true
-  }
-  return removed
+  return protocol === 'anthropic_messages'
+    ? removeAnthropicCompatibleRequestParam(body, headers, param)
+    : removeOpenAICompatibleRequestParam(body, param)
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, parentSignal?: AbortSignal, timeoutMs = 120_000): Promise<Response> {
@@ -778,6 +738,19 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           })
           if (res.ok) break
           errorText = await res.text()
+          if (isReasoningEffortValueError(errorText)) {
+            const fallback = downgradeReasoningEffort(requestBody)
+            if (fallback) {
+              emit({
+                type: 'model_retry',
+                turn,
+                attempt: compatibilityAttempt + 2,
+                delayMs: 0,
+                reason: `Provider rejected reasoning effort ${fallback.from}; retrying with ${fallback.to}.`,
+              })
+              continue
+            }
+          }
           const unsupportedParam = extractUnsupportedRequestParam(errorText)
           if (
             compatibilityAttempt >= 3
