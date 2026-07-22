@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { readFileSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { basename, extname, join, relative } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import type { TurboFluxConfig } from '../../src/core/config'
@@ -391,23 +391,74 @@ function cliVersion(name: 'claude' | 'opencode'): string {
   return String(result.stdout || result.stderr || '').trim().split(/\r?\n/)[0] || 'unknown'
 }
 
-function spawnCaptured(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+async function terminateProcessTree(child: ReturnType<typeof spawn>): Promise<void> {
+  if (!child.pid) {
+    child.kill('SIGKILL')
+    return
+  }
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+    } catch {
+      child.kill('SIGKILL')
+    }
+    return
+  }
+  await new Promise<void>(resolveTermination => {
+    const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    killer.once('error', () => {
+      child.kill('SIGKILL')
+      resolveTermination()
+    })
+    killer.once('close', () => resolveTermination())
+  })
+}
+
+export function spawnCaptured(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolveRun, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+    })
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let settled = false
+    let forceSettleTimer: ReturnType<typeof setTimeout> | undefined
+    const finish = (code: number | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (forceSettleTimer) clearTimeout(forceSettleTimer)
+      resolveRun({ code, stdout, stderr, timedOut })
+    }
     child.stdout.on('data', chunk => { stdout += chunk.toString() })
     child.stderr.on('data', chunk => { stderr += chunk.toString() })
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill()
+      void terminateProcessTree(child).finally(() => {
+        forceSettleTimer = setTimeout(() => {
+          child.stdout.destroy()
+          child.stderr.destroy()
+          finish(null)
+        }, 2_000)
+      })
     }, options.timeoutMs)
-    child.on('error', reject)
-    child.on('close', code => {
-      clearTimeout(timer)
-      resolveRun({ code, stdout, stderr, timedOut })
+    child.on('error', error => {
+      if (timedOut) finish(null)
+      else if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      }
     })
+    child.on('close', finish)
   })
 }
 
@@ -545,6 +596,7 @@ function openCodeConfig(config: TurboFluxConfig): string {
 
 async function runOpenCode(context: RunContext): Promise<RunnerOutput> {
   const startedAt = performance.now()
+  const runtimeRoot = mkdtempSync(join(tmpdir(), 'turboflux-opencode-'))
   try {
     const result = await spawnCaptured(executable('opencode'), [
       'run', benchmarkPrompt(context.item),
@@ -561,6 +613,8 @@ async function runOpenCode(context: RunContext): Promise<RunnerOutput> {
         ...process.env,
         OPENCODE_CONFIG_CONTENT: openCodeConfig(context.config),
         OPENCODE_DISABLE_AUTOUPDATE: '1',
+        XDG_DATA_HOME: join(runtimeRoot, 'data'),
+        XDG_STATE_HOME: join(runtimeRoot, 'state'),
       },
     })
     const usage = emptyUsage()
@@ -612,6 +666,8 @@ async function runOpenCode(context: RunContext): Promise<RunnerOutput> {
     }
   } catch (error) {
     return { ...errorOutput(startedAt, error), protocol: 'openai-chat', cliVersion: cliVersion('opencode') }
+  } finally {
+    try { rmSync(runtimeRoot, { recursive: true, force: true }) } catch {}
   }
 }
 

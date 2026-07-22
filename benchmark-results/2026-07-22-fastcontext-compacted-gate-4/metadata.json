@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "2026-07-22-gpt-5.5-no-reasoning-formal",
+  "createdAt": "2026-07-22T15:35:24.848Z",
+  "gitCommit": "dd0c21f6e6188d0cd9433284cfbb756a202cee11",
+  "model": "gpt-5.5",
+  "reasoning": "disabled",
+  "endpointHost": "redacted-gateway.invalid",
+  "manifestPath": "benchmark-data/retrieval-paper-v1/splits/holdout-test-manifest.json",
+  "manifestSha256": "92293117dbeba7ccf35547a2ece4b187925cc56e77ef639842a7d7b2c552e392",
+  "systems": [
+    "fastcontext"
+  ],
+  "caseIds": [
+    "pydata__xarray-6461",
+    "trinodb__trino-3392",
+    "django__django-12193",
+    "serverless__serverless-3534"
+  ],
+  "repeats": 1,
+  "concurrency": 4,
+  "timeoutMs": 180000,
+  "seed": 20260722,
+  "cliVersions": {
+    "claudeCode": "2.1.177 (Claude Code)",
+    "openCode": "1.17.18"
+  },
+  "notes": [
+    "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+    "Native reasoning is disabled; protocol differences are recorded per run.",
+    "Adaptive case-level concurrency starts at 4 and may rise to 4; systems within one case remain sequential and rotated.",
+    "Formal repeated experiment.",
+    "Selection starts at the first balanced case."
+  ]
+}

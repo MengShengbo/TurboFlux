@@ -249,10 +249,11 @@ Strategy:
 4. Trace relationships, not just mentions: entry/caller -> implementation -> state/config/persistence -> output/error path. Identify ownership boundaries and explain how data and control cross them.
 5. As soon as a search reveals the probable execution core, read that implementation before spending more turns on peripheral files. A search-confirmed core is not enough when it can still be read.
 6. After confirming a likely implementation, check exact-filename and symbol twins across package, platform, generated, vendored, or compatibility source trees. Read and rank each behavior-bearing mirror that would require the same change; reject stubs or generated copies explicitly.
-7. Estimate the change-impact frontier before submission. For each confirmed owner or implementation, inspect its direct callers, contracts/interfaces, schema/config sources, platform/package variants, and state or persistence collaborators. Explicitly reject edges that do not require edits.
-8. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
-9. Audit residual uncertainty. If a search result or relationship points to a named likely owner, mirror, contract, implementation, or direct collaborator that you have not read, read it now. Residual uncertainty is for ambiguity that cannot be removed with an available targeted read, not for known high-signal paths you skipped.
-10. Finish only by calling submit_code_map. Submit a compact set of read-confirmed architecture nodes, a grounded relationship map, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
+7. Census the implementation family. When behavior is split across a pipeline or one directory contains phase modules, inspect sibling filenames plus the dispatcher/index that wires them. Do not stop after one stage when validation, authorization, integration, response, permission, serialization, or platform adapters may require coordinated edits.
+8. Estimate the change-impact frontier before submission. For each confirmed owner or implementation, inspect its direct callers, contracts/interfaces, schema/config sources, platform/package variants, and state or persistence collaborators. Explicitly reject edges that do not require edits.
+9. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
+10. Audit residual uncertainty. If a search result or relationship points to a named likely owner, mirror, contract, implementation, or direct collaborator that you have not read, read it now. Residual uncertainty is for ambiguity that cannot be removed with an available targeted read, not for known high-signal paths you skipped.
+11. Finish only by calling submit_code_map. Submit up to ten read-confirmed architecture nodes, a grounded relationship map, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
 
 Map contract:
 - Rank candidates strictly by direct edit necessity: the most likely behavior owner or implementation that must change is first. Put architectural context in relationships instead of ranking a consumer or supporting file above the probable edit target.
@@ -267,7 +268,7 @@ Rules:
 - Prioritize source, entry, schema/config, and failing-path files over README-style context.
 - Include files that implement, configure, propagate, persist, or verify the behavior only when they add a necessary node or edge to the map.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
-- Avoid dumping many related files. Five strong candidates beat twenty weak ones.
+- Keep the result within ten candidates, but never omit a read-confirmed behavior-bearing mirror or pipeline stage merely to make the map shorter.
 - Use search_content pagination and context windows when a broad query is truncated or crowded.
 - If the objective contains Chinese or mixed UI text, search both exact text and nearby component/style naming guesses.
 - If you cannot produce a grounded submission, fail explicitly. No local semantic fallback exists.
@@ -303,6 +304,7 @@ export interface SubAgentResult {
   evidence?: SubAgentEvidence[]
   error?: string
   truncated?: boolean
+  codeMap?: SubmittedCodeMap
 }
 
 interface ToolCallRequest {
@@ -310,7 +312,7 @@ interface ToolCallRequest {
   function: { name: string; arguments: string }
 }
 
-interface SubmittedCandidate {
+export interface SubmittedCandidate {
   path: string
   startLine: number
   endLine: number
@@ -320,7 +322,7 @@ interface SubmittedCandidate {
   why: string
 }
 
-interface SubmittedRelationship {
+export interface SubmittedRelationship {
   from: string
   to: string
   relationship: string
@@ -329,7 +331,7 @@ interface SubmittedRelationship {
   endLine: number
 }
 
-interface SubmittedCodeMap {
+export interface SubmittedCodeMap {
   candidates: SubmittedCandidate[]
   relationships: SubmittedRelationship[]
   rejectedHypotheses: string[]
@@ -338,6 +340,38 @@ interface SubmittedCodeMap {
 }
 
 type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
+
+function compactToolHistory(
+  messages: SubAgentMessage[],
+  evidence: SubAgentEvidence[],
+  finalizationOnly: boolean,
+): SubAgentMessage[] {
+  let latestToolWave = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'assistant' && messages[index].tool_calls?.length) {
+      latestToolWave = index
+      break
+    }
+  }
+  const compacted = messages.map((message, index) => {
+    if (message.role !== 'tool' || (!finalizationOnly && index > latestToolWave) || message.content.length <= 1_600) return message
+    return {
+      ...message,
+      content: `${message.content.slice(0, 1_100)}\n...[older tool output compacted]...\n${message.content.slice(-300)}`,
+    }
+  })
+  if (!finalizationOnly) return compacted
+  const ledger = evidence
+    .filter(item => item.reason === 'file read')
+    .map(item => `${item.path}:${item.startLine}-${item.endLine} | ${item.preview.replace(/\s+/g, ' ').slice(0, 180)}`)
+    .filter((line, index, all) => all.indexOf(line) === index)
+    .slice(0, 40)
+  if (ledger.length === 0) return compacted
+  return [...compacted, {
+    role: 'user',
+    content: `FINAL READ-EVIDENCE LEDGER\n${ledger.join('\n')}\nUse only these read-confirmed ranges in submit_code_map.`,
+  }]
+}
 
 const TRANSIENT_HTTP_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504])
 const TRANSIENT_RETRY_DELAYS_MS = [300, 900, 1_800]
@@ -550,7 +584,7 @@ function normalizeEditKind(value: unknown, role: string): SubmittedCandidate['ed
 
 function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string): SubmittedCodeMap {
   const candidates = Array.isArray(value.candidates)
-    ? value.candidates.slice(0, 7).map((candidate: Record<string, any>) => {
+    ? value.candidates.slice(0, 10).map((candidate: Record<string, any>) => {
         const startLine = positiveLine(candidate.start_line ?? candidate.startLine)
         const role = String(candidate.role || '').replace(/\s+/g, ' ').trim().slice(0, 80)
         return {
@@ -703,7 +737,7 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
   return null
 }
 
-function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
+export function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
   const lines = ['RANKED_CODE_MAP']
   report.candidates.forEach((candidate, index) => {
     lines.push(`${index + 1}. ${candidate.path} L${candidate.startLine}-L${candidate.endLine} kind=${candidate.editKind} role=${candidate.role} confidence=${candidate.confidence}`)
@@ -947,10 +981,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
         const url = buildModelProtocolUrl(baseUrl, protocol)
-        const activeSystemPrompt = definition.systemPrompt
-        const activeMessages: SubAgentMessage[] = messages
-        const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
         const finalizationOnly = strictFastContext && turn === turnLimit && hasModelReadEvidence()
+        const activeSystemPrompt = definition.systemPrompt
+        const activeMessages = compactToolHistory(messages, collectedEvidence, finalizationOnly)
+        const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
         const requestTools = finalizationOnly ? tools.filter(tool => tool.function.name === 'submit_code_map') : tools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
@@ -1149,7 +1183,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         const finalText = renderSubmittedCodeMap(report)
         emit({ type: 'final', text: finalText })
         emit({ type: 'turn_complete', turn, calls: 1 })
-        return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence }
+        return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence, codeMap: report }
       }
       if (submissionRecoveryUsed) {
         const error = `FastContext submission rejected: ${submissionError}`

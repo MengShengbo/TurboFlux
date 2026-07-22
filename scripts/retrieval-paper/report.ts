@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { aggregateRuns, average, pairedPermutationPValue } from './metrics'
+import { aggregateRuns, average, pairedPermutationPValue, scoreRanking } from './metrics'
 import type { BenchmarkManifest, ExperimentMetadata, RetrievalSystemId, RunRecord } from './types'
 
 function percent(value: number): string {
@@ -63,6 +63,7 @@ export function generateReport(options: {
 }): void {
   const { outputDir, metadata, manifest } = options
   const deduplicated = [...new Map(options.runs.map(run => [run.runId, run])).values()]
+    .map(run => run.success ? run : { ...run, metrics: scoreRanking([], run.goldPaths) })
   const expected = manifest.cases.length * metadata.systems.reduce((sum, system) => sum + (system === 'bm25' ? 1 : metadata.repeats), 0)
   const datasets = [...new Set(manifest.cases.map(item => item.dataset))]
   const languages = [...new Set(manifest.cases.map(item => item.language))].sort()

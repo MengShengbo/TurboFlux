@@ -1,0 +1,153 @@
+{
+  "metadata": {
+    "schemaVersion": 1,
+    "experimentId": "2026-07-22-gpt-5.5-no-reasoning-formal",
+    "createdAt": "2026-07-22T14:54:52.304Z",
+    "gitCommit": "dd0c21f6e6188d0cd9433284cfbb756a202cee11",
+    "model": "gpt-5.5",
+    "reasoning": "disabled",
+    "endpointHost": "redacted-gateway.invalid",
+    "manifestPath": "benchmark-data/retrieval-paper-v1/splits/holdout-test-manifest.json",
+    "manifestSha256": "92293117dbeba7ccf35547a2ece4b187925cc56e77ef639842a7d7b2c552e392",
+    "systems": [
+      "fastcontext",
+      "claude-code-readonly",
+      "opencode-explore"
+    ],
+    "caseIds": [
+      "pydata__xarray-6461",
+      "trinodb__trino-3392",
+      "django__django-12193",
+      "serverless__serverless-3534",
+      "matplotlib__matplotlib-24970",
+      "langchain-ai__langchain-20064",
+      "pylint-dev__pylint-7080",
+      "microsoft__vscode-135805",
+      "astropy__astropy-7671",
+      "google__gson-2549",
+      "pytest-dev__pytest-10051",
+      "prettier__prettier-661"
+    ],
+    "repeats": 1,
+    "concurrency": 12,
+    "timeoutMs": 300000,
+    "seed": 20260722,
+    "cliVersions": {
+      "claudeCode": "2.1.177 (Claude Code)",
+      "openCode": "1.17.18"
+    },
+    "notes": [
+      "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+      "Native reasoning is disabled; protocol differences are recorded per run.",
+      "Adaptive case-level concurrency starts at 8 and may rise to 12; systems within one case remain sequential and rotated.",
+      "Formal repeated experiment.",
+      "Selection starts at the first balanced case."
+    ]
+  },
+  "completed": 36,
+  "expected": 36,
+  "summary": {
+    "fastcontext": {
+      "cases": 12,
+      "runs": 12,
+      "successes": 10,
+      "successRate": 0.8333333333333334,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.8194444444444445,
+        "low": 0.5833333333333334,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.7916666666666666,
+        "low": 0.5416666666666666,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.7308641975308642,
+        "low": 0.5037037037037037,
+        "high": 0.9277777777777777
+      },
+      "ndcgAt10": {
+        "mean": 0.771531513138454,
+        "low": 0.5374092272581474,
+        "high": 0.9537857814680253
+      },
+      "fullCoverageAt10": 0.75,
+      "latencyP50Ms": 80099.08980000007,
+      "latencyP95Ms": 98216.40910000005,
+      "averageToolCalls": 28.9,
+      "averageInputTokens": 95503.3,
+      "averageOutputTokens": 4955.7,
+      "totalCostUsd": 0
+    },
+    "claude-code-readonly": {
+      "cases": 12,
+      "runs": 12,
+      "successes": 12,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.8333333333333335,
+        "low": 0.6388888888888888,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.8333333333333334,
+        "low": 0.625,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.74375,
+        "low": 0.5430555555555555,
+        "high": 0.9166666666666666
+      },
+      "ndcgAt10": {
+        "mean": 0.7893373226576461,
+        "low": 0.6013105547072362,
+        "high": 0.9384882922619097
+      },
+      "fullCoverageAt10": 0.75,
+      "latencyP50Ms": 59713.671500000055,
+      "latencyP95Ms": 131350.0458999999,
+      "averageToolCalls": 8.166666666666666,
+      "averageInputTokens": 33936.333333333336,
+      "averageOutputTokens": 1564.5,
+      "totalCostUsd": 0
+    },
+    "opencode-explore": {
+      "cases": 12,
+      "runs": 12,
+      "successes": 7,
+      "successRate": 0.5833333333333334,
+      "timeoutRate": 0.4166666666666667,
+      "recallAt10": {
+        "mean": 0.5555555555555555,
+        "low": 0.3055555555555555,
+        "high": 0.8333333333333331
+      },
+      "mrr": {
+        "mean": 0.5833333333333334,
+        "low": 0.3333333333333333,
+        "high": 0.8333333333333334
+      },
+      "map": {
+        "mean": 0.5224537037037037,
+        "low": 0.26157407407407407,
+        "high": 0.7833333333333333
+      },
+      "ndcgAt10": {
+        "mean": 0.5487136720977738,
+        "low": 0.28860603335210494,
+        "high": 0.8088213108434429
+      },
+      "fullCoverageAt10": 0.5,
+      "latencyP50Ms": 166211.5526,
+      "latencyP95Ms": 278015.3377,
+      "averageToolCalls": 10.428571428571429,
+      "averageInputTokens": 65217.57142857143,
+      "averageOutputTokens": 2007.142857142857,
+      "totalCostUsd": 0
+    }
+  }
+}

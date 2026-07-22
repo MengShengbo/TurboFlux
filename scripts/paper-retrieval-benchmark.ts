@@ -76,13 +76,20 @@ function parseArgs(): Args {
   }
 }
 
+function effectiveCaseConcurrency(args: Args): number {
+  return args.systems.includes('fastcontext') ? Math.min(args.concurrency, 25) : args.concurrency
+}
+
 function readJournal(path: string): RunRecord[] {
   if (!existsSync(path)) return []
-  const runs: RunRecord[] = []
+  const runs = new Map<string, RunRecord>()
   for (const line of readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean)) {
-    try { runs.push(JSON.parse(line) as RunRecord) } catch {}
+    try {
+      const run = JSON.parse(line) as RunRecord
+      runs.set(run.runId, run)
+    } catch {}
   }
-  return runs
+  return [...runs.values()]
 }
 
 function redact(value: string | undefined, secret: string): string | undefined {
@@ -97,6 +104,65 @@ function rotate<T>(items: T[], offset: number): T[] {
   if (items.length === 0) return []
   const normalized = ((offset % items.length) + items.length) % items.length
   return [...items.slice(normalized), ...items.slice(0, normalized)]
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((left, right) => left - right)
+  return sorted[Math.floor(sorted.length / 2)]
+}
+
+class AdaptiveConcurrency {
+  readonly maximum: number
+  current: number
+  private stableRuns = 0
+  private requestDurations: number[] = []
+  private bestMedian = Number.POSITIVE_INFINITY
+
+  constructor(maximum: number) {
+    this.maximum = Math.max(1, maximum)
+    this.current = Math.min(this.maximum, 4)
+  }
+
+  observe(record: RunRecord): string | undefined {
+    const pressureFailure = record.failureKind === 'rate_limit'
+      || record.failureKind === 'timeout'
+      || /\b(?:429|502|503|504)\b|econnreset|fetch failed|timed?\s*out/i.test(record.error || '')
+    if (pressureFailure) {
+      const previous = this.current
+      this.current = Math.max(1, Math.floor(this.current / 2))
+      this.stableRuns = 0
+      return previous === this.current ? undefined : `pressure ${record.failureKind}: ${previous} -> ${this.current}`
+    }
+
+    if (!record.success) {
+      this.stableRuns = 0
+      return undefined
+    }
+    if (record.apiDurationMs && record.apiRequests > 0) {
+      this.requestDurations.push(record.apiDurationMs / record.apiRequests)
+      this.requestDurations = this.requestDurations.slice(-12)
+      if (this.requestDurations.length >= 6) {
+        const currentMedian = median(this.requestDurations)
+        this.bestMedian = Math.min(this.bestMedian, currentMedian)
+        if (currentMedian > this.bestMedian * 2.2 && this.current > 1) {
+          const previous = this.current
+          this.current -= 1
+          this.stableRuns = 0
+          return `latency inflation: ${previous} -> ${this.current}`
+        }
+      }
+    }
+
+    this.stableRuns += 1
+    if (this.stableRuns >= 8 && this.current < this.maximum) {
+      const previous = this.current
+      this.current += 1
+      this.stableRuns = 0
+      return `stable window: ${previous} -> ${this.current}`
+    }
+    return undefined
+  }
 }
 
 function balancedCases<T extends { dataset: string; language: string }>(items: T[], limit: number | undefined): T[] {
@@ -158,7 +224,7 @@ function experimentMetadata(args: Args, manifestPath: string, caseIds: string[])
     notes: [
       'All LLM systems use the active TurboFlux endpoint and gpt-5.5.',
       'Native reasoning is disabled; protocol differences are recorded per run.',
-      `Case-level concurrency is ${args.concurrency}; systems within one case remain sequential and rotated.`,
+      `Adaptive case-level concurrency starts at ${Math.min(effectiveCaseConcurrency(args), 4)} and may rise to ${effectiveCaseConcurrency(args)}; FastContext uses two concurrent model branches and the API request ceiling is ${args.concurrency}. Systems within one case remain sequential and rotated.`,
       args.command === 'calibrate' ? 'Calibration run; not a final comparative result.' : 'Formal repeated experiment.',
       args.caseOffset > 0 ? `Selection starts after ${args.caseOffset} balanced case(s), allowing a disjoint development slice.` : 'Selection starts at the first balanced case.',
     ],
@@ -217,17 +283,37 @@ async function runExperiment(args: Args): Promise<void> {
   const completed = new Set([...latestRuns.values()]
     .filter(run => !args.retryTransient
       || run.success
-      || (!transientFailures.has(run.failureKind) && !(run.system === 'neutral-tool-agent' && run.failureKind === 'unknown')))
+      || (!transientFailures.has(run.failureKind)
+        && !/database is locked|upstream service temporarily unavailable|\b(?:429|502|503|504)\b/i.test(run.error || '')
+        && !(run.system === 'neutral-tool-agent' && run.failureKind === 'unknown')))
     .map(run => run.runId))
   const cache = new BenchmarkWorkspaceCache()
+  const branchAwareMaximum = effectiveCaseConcurrency(args)
+  const concurrency = new AdaptiveConcurrency(branchAwareMaximum)
   const total = selectedCases.length * args.systems.reduce((sum, system) => sum + (system === 'bm25' ? 1 : args.repeats), 0)
   let position = 0
   const workspaces = new Map<string, Awaited<ReturnType<BenchmarkWorkspaceCache['prepare']>>>()
-  for (let caseIndex = 0; caseIndex < selectedCases.length; caseIndex += 1) {
-    const item = selectedCases[caseIndex]
-    console.log(`Preparing workspace ${caseIndex + 1}/${selectedCases.length}: ${item.id} (${item.repository}@${item.baseCommit.slice(0, 10)})`)
-    workspaces.set(item.id, await cache.prepare(item))
-  }
+  const repositoryQueues = [...selectedCases.reduce((queues, item) => {
+    const queue = queues.get(item.repository) || []
+    queue.push(item)
+    queues.set(item.repository, queue)
+    return queues
+  }, new Map<string, typeof selectedCases>()).values()]
+  let nextRepository = 0
+  let preparedCount = 0
+  const preparationWorkers = Array.from({ length: Math.min(4, repositoryQueues.length) }, async () => {
+    while (true) {
+      const queueIndex = nextRepository
+      nextRepository += 1
+      if (queueIndex >= repositoryQueues.length) return
+      for (const item of repositoryQueues[queueIndex]) {
+        preparedCount += 1
+        console.log(`Preparing workspace ${preparedCount}/${selectedCases.length}: ${item.id} (${item.repository}@${item.baseCommit.slice(0, 10)})`)
+        workspaces.set(item.id, await cache.prepare(item))
+      }
+    }
+  })
+  await Promise.all(preparationWorkers)
 
   const runCase = async (caseIndex: number): Promise<void> => {
     const item = selectedCases[caseIndex]
@@ -258,20 +344,22 @@ async function runExperiment(args: Args): Promise<void> {
         appendFileSync(journalPath, `${JSON.stringify(record)}\n`)
         completed.add(record.runId)
         console.log(`  ${record.success ? 'ok' : record.failureKind} ${(record.latencyMs / 1000).toFixed(1)}s R@10=${record.metrics.recallAt10.toFixed(2)} MRR=${record.metrics.reciprocalRank.toFixed(2)} req=${record.apiRequests}`)
+        const adjustment = concurrency.observe(record)
+        if (adjustment) console.log(`  concurrency ${adjustment}`)
       }
     }
   }
   let nextCaseIndex = 0
-  const workerCount = Math.min(args.concurrency, selectedCases.length)
-  const workers = Array.from({ length: workerCount }, async () => {
-    while (true) {
+  const active = new Set<Promise<void>>()
+  while (nextCaseIndex < selectedCases.length || active.size > 0) {
+    while (nextCaseIndex < selectedCases.length && active.size < concurrency.current) {
       const caseIndex = nextCaseIndex
       nextCaseIndex += 1
-      if (caseIndex >= selectedCases.length) return
-      await runCase(caseIndex)
+      const task = runCase(caseIndex).finally(() => active.delete(task))
+      active.add(task)
     }
-  })
-  await Promise.all(workers)
+    if (active.size > 0) await Promise.race(active)
+  }
   generateReport({ outputDir: args.output, metadata, manifest: selectedManifest, runs: readJournal(journalPath) })
   console.log(`Report: ${relative(process.cwd(), join(args.output, 'report.md'))}`)
 }

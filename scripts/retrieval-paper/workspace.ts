@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { BenchmarkCase, RepositoryStats } from './types'
@@ -53,6 +53,15 @@ export class BenchmarkWorkspaceCache {
 
   async ensureMirror(repository: string): Promise<string> {
     const mirror = this.mirrorPath(repository)
+    this.assertInsideRoot(mirror)
+    if (existsSync(mirror)) {
+      try {
+        const bare = (await run('git', ['rev-parse', '--is-bare-repository'], { cwd: mirror, timeoutMs: 30_000 })).trim()
+        if (bare !== 'true') throw new Error('not a bare repository')
+      } catch {
+        rmSync(mirror, { recursive: true, force: true })
+      }
+    }
     if (!existsSync(mirror)) {
       await run('git', ['clone', '--mirror', '--filter=blob:none', `https://github.com/${repository}.git`, mirror], { timeoutMs: 900_000 })
     }
@@ -71,6 +80,15 @@ export class BenchmarkWorkspaceCache {
     const readyMarker = `${snapshot}.ready`
     this.assertInsideRoot(snapshot)
     this.assertInsideRoot(readyMarker)
+    if (existsSync(snapshot) && existsSync(readyMarker)) {
+      try {
+        const head = (await run('git', ['rev-parse', 'HEAD'], { cwd: snapshot, timeoutMs: 30_000 })).trim()
+        if (head !== item.baseCommit) throw new Error(`snapshot is at ${head}`)
+      } catch {
+        rmSync(snapshot, { recursive: true, force: true })
+        rmSync(readyMarker, { force: true })
+      }
+    }
     if (existsSync(snapshot) && !existsSync(readyMarker)) rmSync(snapshot, { recursive: true, force: true })
     if (!existsSync(snapshot)) {
       try {
@@ -92,14 +110,16 @@ export class BenchmarkWorkspaceCache {
       }
       writeFileSync(readyMarker, `${item.repository}\n${item.baseCommit}\n`)
     }
-    const listing = await run('git', ['ls-tree', '-r', '-l', item.baseCommit], { cwd: mirror, timeoutMs: 120_000 })
+    const listing = await run('git', ['ls-files', '-z'], { cwd: snapshot, timeoutMs: 120_000 })
     let files = 0
     let bytes = 0
-    for (const line of listing.split(/\r?\n/)) {
-      const match = line.match(/^\d+\s+blob\s+[0-9a-f]+\s+(\d+)\t/)
-      if (!match) continue
-      files += 1
-      bytes += Number(match[1]) || 0
+    for (const path of listing.split('\0').filter(Boolean)) {
+      try {
+        const stats = statSync(join(snapshot, path))
+        if (!stats.isFile()) continue
+        files += 1
+        bytes += stats.size
+      } catch {}
     }
     return { path: snapshot, stats: { files, bytes } }
   }

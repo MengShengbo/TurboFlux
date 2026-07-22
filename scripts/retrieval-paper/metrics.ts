@@ -86,7 +86,7 @@ export function aggregateRuns(runs: RunRecord[], seed: number) {
     group.push(run)
     byCase.set(run.caseId, group)
   }
-  const caseMetric = (pick: (run: RunRecord) => number) => [...byCase.values()].map(group => average(group.map(pick)))
+  const caseMetric = (pick: (run: RunRecord) => number) => [...byCase.values()].map(group => average(group.map(run => run.success ? pick(run) : 0)))
   const recall = bootstrapMeanCI(caseMetric(run => run.metrics.recallAt10), seed)
   const mrr = bootstrapMeanCI(caseMetric(run => run.metrics.reciprocalRank), seed ^ 0xABCDEF)
   const map = bootstrapMeanCI(caseMetric(run => run.metrics.averagePrecision), seed ^ 0x123456)
