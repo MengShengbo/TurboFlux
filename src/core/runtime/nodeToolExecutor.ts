@@ -27,6 +27,7 @@ import { MemoryService } from '../../tools/memory/service'
 import { LocalHistoryService } from '../../tools/localHistory/service'
 import { hashText, writeFileAtomicSync } from '../fileIO'
 import { RuntimeTaskManager } from './runtimeTaskManager'
+import { CodeGraphService } from '../../tools/codeGraph/service.js'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
@@ -456,6 +457,18 @@ export class NodeToolExecutor implements ToolExecutor {
         ? resolveNativePath(safeRootPath, (query as any).path)
         : safeRootPath
       const safeWorkspacePath = this.ensureAllowedPath(requestedPath)
+      const limit = query.limit || 10
+      try {
+        const graph = await CodeGraphService.load()
+        const graphResults = await graph.searchSymbols({
+          workspacePath: safeRootPath,
+          query: query.query,
+          path: relative(safeRootPath, safeWorkspacePath),
+          kind: query.kind,
+          limit,
+        })
+        if (graphResults.length > 0) return { success: true, data: graphResults }
+      } catch {}
       const escapedQuery = this.escapeRegex(query.query)
       const pattern = [
         `(?:function|class|interface|type|enum|const|let|var)\\s+\\w*${escapedQuery}\\w*`,
@@ -526,7 +539,6 @@ export class NodeToolExecutor implements ToolExecutor {
           return { success: false, error: e instanceof Error ? e.message : String(e), data: [] }
         }
       }
-      const limit = query.limit || 10
       const fallback = ripgrepUnavailable
         ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit, safeRootPath)
         : []
@@ -580,6 +592,21 @@ export class NodeToolExecutor implements ToolExecutor {
   async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[] }>> {
     try {
       const basePath = this.ensureAllowedPath(query.workspacePath)
+      for (const target of query.targetPaths || (query.path ? [query.path] : [])) {
+        this.ensureAllowedPath(isAbsolute(target) ? target : join(basePath, target))
+      }
+      try {
+        const graph = await CodeGraphService.load()
+        const graphMap = await graph.getCodeMap({
+          workspacePath: basePath,
+          query: query.query,
+          path: query.path,
+          targetPaths: query.targetPaths,
+          depth: query.depth || 2,
+          maxPaths: query.maxPaths || 8,
+        })
+        if (graphMap.map.length > 0) return { success: true, data: graphMap }
+      } catch {}
       const targetPaths = this.resolveCodeMapTargets(basePath, query)
       const map: CodeMapNode[] = []
 

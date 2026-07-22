@@ -12,6 +12,7 @@ src-desktop/
 tsconfig.desktop.json
 
 .turboflux/
+.codegraph/
 .claude/
 .vscode/
 
