@@ -220,7 +220,7 @@ def retrieval_figure() -> Drawing:
     arrow(d, 88, 96, 47, 118)
     arrow(d, 123, 96, 123, 118)
     arrow(d, 158, 96, 199, 118)
-    box(d, 69, 15, 108, 24, "Objective + level", PINK, 7.1, True)
+    box(d, 69, 15, 108, 24, "Objective + contract", PINK, 7.1, True)
     arrow(d, 123, 39, 123, 62)
     loop_bracket(d, 10, 55, 163, "left", "1..T")
     d.add(Line(205, 226, 236, 226, strokeColor=INK, strokeWidth=1.0))
@@ -295,7 +295,7 @@ def pilot_figure() -> Drawing:
 
 FIGURES = {
     "architecture": (architecture_figure, "图 1. FastContext 双上下文架构。模型驱动检索平面与主交互平面共享工作区工具，但原始轨迹隔离，仅紧凑证据包单向进入主上下文。"),
-    "retrieval": (retrieval_figure, "图 2. 模型驱动检索与证据门控。循环上界 T 由档位决定；模型提交候选和关系，本地只验证引用区间由本轮读取完整覆盖。"),
+    "retrieval": (retrieval_figure, "图 2. 模型驱动检索与证据门控。循环具有固定资源上界；模型自适应选择查询并提交候选和关系，本地只验证引用区间由本轮读取完整覆盖。"),
     "lifecycle": (lifecycle_figure, "图 3. 后台生命周期。主会话 Ctrl+C 与 FastContext 控制器之间不存在父中断边；显式取消、销毁和硬超时仍可终止任务。"),
     "pilot": (pilot_figure, "图 4. 历史先导实验。数据来自已删除自动预扫描的旧提交，仅用于描述历史观察，不代表当前系统。"),
 }
@@ -308,7 +308,7 @@ TABLES = {
             ["ReAct / Toolformer", "模型决定工具与参数，并根据观察迭代", "只读代码工具；结构化终态提交"],
             ["Self-RAG / Repoformer", "按需、选择性检索，避免固定无效上下文", "无预扫描和固定调用次数"],
             ["AutoCodeRover / LocAgent", "符号与代码关系驱动的迭代、多跳定位", "按需 trace_symbol，不建设常驻图索引"],
-            ["Claude Code Explore", "独立上下文、只读、继承模型、三档深度", "low/medium/max 覆盖合同；读取区间核验"],
+            ["Claude Code Explore", "独立上下文、只读、继承模型", "单一架构探索合同；读取区间核验"],
             ["OpenCode TaskTool", "child session、后台 Job、取消与完成通知", "进程内 RuntimeTask + JSONL transcript + 一次性 pack"],
         ],
         [47, 89, 105],
@@ -325,14 +325,12 @@ TABLES = {
         ],
         [58, 54, 76, 53],
     ),
-    "levels": (
-        ["档位", "轮次", "并行", "覆盖合同", "推理", "总时限"],
+    "contract": (
+        ["轮次上界", "并行上界", "完成合同", "推理", "总时限"],
         [
-            ["low", "5", "4", "定位 + 实现", "low", "180 s"],
-            ["medium", "8", "6", "至少 1 条关系", "medium", "360 s"],
-            ["max", "12", "8", "2 条关系 + 反证", "max", "720 s"],
+            ["10", "8", "架构关系 + 变更影响边界", "high", "600 s"],
         ],
-        [34, 32, 34, 52, 47, 42],
+        [45, 45, 95, 48, 45],
     ),
     "modules": (
         ["模块", "职责", "关键技术"],
@@ -365,26 +363,26 @@ TABLES = {
 
 ALGORITHMS = {
     "schedule": [
-        "Algorithm 1  StartFastContext(q, level)",
+        "Algorithm 1  StartFastContext(q)",
         "1: q <- trim(q)",
         "2: if q is empty or workspace is absent: return UNAVAILABLE",
         "3: if activePromise exists and activeObjective = q: return RUNNING",
         "4: if activePromise exists: return BUSY(activeObjective)",
         "5: controller <- new AbortController()  // not linked to primary run",
         "6: generation <- generation + 1",
-        "7: task <- Runtime.start(kind=fast_context, timeout=budget[level])",
-        "8: activePromise <- task.run(ModelDirectedRetrieve(q, level))",
+        "7: task <- Runtime.start(kind=fast_context, timeout=600 s)",
+        "8: activePromise <- task.run(ModelDirectedRetrieve(q))",
         "9: on settle: clear slot iff activePromise identity still matches",
         "10: return STARTED(task.id)",
     ],
     "retrieve": [
-        "Algorithm 2  ModelDirectedRetrieve(q, level)",
-        "1: messages <- [system(depth contract), user(q)]",
+        "Algorithm 2  ModelDirectedRetrieve(q)",
+        "1: messages <- [system(architecture contract), user(q)]",
         "2: evidence <- empty read ledger; report <- none",
-        "3: for turn = 1..maxTurns[level]:",
+        "3: for turn = 1..10:",
         "4:   response <- model(messages, read-only tools)",
         "5:   if response has tool calls:",
-        "6:      execute at most maxParallel[level] calls concurrently",
+        "6:      execute at most 8 calls concurrently",
         "7:      append observations; normalize and deduplicate evidence",
         "8:      continue",
         "9:   if no read evidence: request targeted reads",

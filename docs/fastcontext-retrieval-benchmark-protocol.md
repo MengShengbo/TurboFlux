@@ -65,7 +65,6 @@ npm run benchmark:retrieval-splits
 ```powershell
 npm run benchmark:retrieval-paper -- prepare --per-dataset 100 --seed 20260722
 npm run benchmark:retrieval-paper -- calibrate --limit 6 --repeats 1
-npm run benchmark:retrieval-paper -- run --limit 100 --repeats 3 --systems fastcontext-medium,claude-code-readonly,opencode-explore,bm25
-npm run benchmark:retrieval-paper -- run --limit 30 --repeats 1 --systems fastcontext-low,fastcontext-medium,fastcontext-max,neutral-tool-agent,bm25 --output benchmark-results/2026-07-22-gpt-5.5-paper-ablation
+npm run benchmark:retrieval-paper -- run --manifest benchmark-data/retrieval-paper-v1/splits/holdout-test-manifest.json --limit 100 --repeats 3 --systems fastcontext,claude-code-readonly,opencode-explore,bm25
 npm run benchmark:retrieval-paper -- report
 ```

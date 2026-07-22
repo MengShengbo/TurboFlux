@@ -31,7 +31,7 @@ describe('FastContext retrieval', () => {
     expect(executor.getCodeMap).not.toHaveBeenCalled()
   })
 
-  it('treats the LLM final report as the primary ranked code map', () => {
+  it('treats the LLM final report as the authoritative architecture code map', () => {
     const candidates = new Map<string, FastContextScanHit[]>()
     candidates.set('src/fallback.ts', [{
       path: 'src/fallback.ts',

@@ -114,8 +114,8 @@ export function generateReport(options: {
   lines.push('', '## Paired Tests', '')
   lines.push('| FastContext system | Comparator | Pairs | Mean R@10 difference | Paired permutation p |')
   lines.push('|---|---|---:|---:|---:|')
-  const fastSystems = metadata.systems.filter(system => system.startsWith('fastcontext-'))
-  const comparators = metadata.systems.filter(system => !system.startsWith('fastcontext-'))
+  const fastSystems = metadata.systems.filter(system => system === 'fastcontext')
+  const comparators = metadata.systems.filter(system => system !== 'fastcontext')
   for (const fast of fastSystems) {
     for (const comparator of comparators) {
       const paired = pairedValues(deduplicated, fast, comparator)
@@ -167,8 +167,7 @@ export function generateReport(options: {
     '',
     '```powershell',
     'npm run benchmark:retrieval-paper -- prepare --per-dataset 100 --seed 20260722',
-    'npm run benchmark:retrieval-paper -- run --limit 100 --repeats 3 --systems fastcontext-medium,claude-code-readonly,opencode-explore,bm25',
-    'npm run benchmark:retrieval-paper -- run --limit 30 --repeats 1 --systems fastcontext-low,fastcontext-medium,fastcontext-max,neutral-tool-agent,bm25 --output benchmark-results/2026-07-22-gpt-5.5-paper-ablation',
+    'npm run benchmark:retrieval-paper -- run --manifest benchmark-data/retrieval-paper-v1/splits/holdout-test-manifest.json --limit 100 --repeats 3 --systems fastcontext,claude-code-readonly,opencode-explore,bm25',
     'npm run benchmark:retrieval-paper -- report',
     '```',
     '',

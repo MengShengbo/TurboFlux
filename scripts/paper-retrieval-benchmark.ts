@@ -12,9 +12,7 @@ import type { ExperimentMetadata, RetrievalSystemId, RunRecord } from './retriev
 const DEFAULT_MANIFEST = resolve('benchmark-data', 'retrieval-paper-v1', 'manifest.json')
 const DEFAULT_OUTPUT = resolve('benchmark-results', '2026-07-22-gpt-5.5-paper')
 const ALL_SYSTEMS: RetrievalSystemId[] = [
-  'fastcontext-low',
-  'fastcontext-medium',
-  'fastcontext-max',
+  'fastcontext',
   'claude-code-readonly',
   'opencode-explore',
   'neutral-tool-agent',

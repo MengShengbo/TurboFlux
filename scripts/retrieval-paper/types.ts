@@ -1,9 +1,7 @@
 export type DatasetId = 'swebench-verified' | 'swepolybench-verified'
 
 export type RetrievalSystemId =
-  | 'fastcontext-low'
-  | 'fastcontext-medium'
-  | 'fastcontext-max'
+  | 'fastcontext'
   | 'claude-code-readonly'
   | 'opencode-explore'
   | 'neutral-tool-agent'

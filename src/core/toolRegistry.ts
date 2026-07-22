@@ -167,12 +167,10 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'explore_code',
-    description: `Start a Claude Code-style FastContext locator in the background. Use when the user asks where a feature/page/component/style/text/entry point lives, when a bug or behavior may span multiple files, when naming is uncertain, or when one directed search is not enough. This returns immediately: continue only non-overlapping work while the isolated locator runs, and its ranked file:line evidence will be injected automatically on a later model turn. Do not duplicate broad retrieval, wait, or call explore_code repeatedly. For a single exact symbol/string/path, prefer search_symbols/search_content/search_files followed by read_file.`,
+    description: `Start FastContext architecture mapping in the background. Use when a feature, bug, workflow, or change may cross modules, ownership boundaries, implementations, configuration, state, persistence, or failure paths. It returns an evidence-grounded code map with execution relationships and change-impact candidates. Continue only non-overlapping work while it runs; do not duplicate broad retrieval or call explore_code repeatedly. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
     category: 'read',
     parameters: [
       { name: 'objective', type: 'string', description: 'Concrete thing to locate or understand. Include visible UI text, behavior, suspected feature area, symbol names, and what answer should prove.', required: true },
-      { name: 'level', type: 'string', description: 'Retrieval depth: low for quick location, medium for normal engineering work, max for architecture, complex bugs, complete call chains, and disproof searches.', required: false, default: 'medium', enum: ['low', 'medium', 'max'] },
-      { name: 'thoroughness', type: 'string', description: 'Deprecated compatibility alias. quick maps to low; very_thorough maps to max.', required: false, enum: ['quick', 'medium', 'very_thorough'] },
       { name: 'context', type: 'string', description: 'Optional prior findings, paths already checked, or constraints. Do not ask the user for a path before using this when the path can be discovered.', required: false },
     ],
     isReadOnly: true,
@@ -474,7 +472,7 @@ const tools: EnhancedToolDef[] = [
     description: `Launch a specialized subagent to handle a focused task autonomously.
 
 Available types:
-- fast_context: Fast issue-localization code map. Use when locating an unfamiliar feature/bug/UI area, when multiple keywords/routes may be involved, or when narrow read/search attempts failed. It returns ranked candidate files, evidence roles, confidence, and line ranges.
+- fast_context: Architecture-level code map. Use for unfamiliar features, bugs, workflows, or changes that may cross modules. It returns grounded architecture nodes and relationships, ownership boundaries, and change-impact evidence.
 - explorer: Deep investigation of a feature, call chain, or subsystem. Reads implementations and follows imports across multiple files.
 - reviewer: Code quality/security/bug review of a specific file or feature area.
 - git_inspector: Analyze recent git changes — what was modified, why, and what the diff shows.
@@ -491,7 +489,6 @@ Launch multiple agents concurrently for independent topics and provide a highly 
     parameters: [
       { name: 'agent_type', type: 'string', description: 'Which subagent to spawn. Includes built-in types (fast_context, explorer, reviewer) and any custom agents from .turboflux/agents/.', required: true },
       { name: 'objective', type: 'string', description: 'Concrete question or task for the subagent. Be specific — include the area of the codebase, the feature, or the change to review.', required: true },
-      { name: 'level', type: 'string', description: 'FastContext depth when agent_type is fast_context.', required: false, default: 'medium', enum: ['low', 'medium', 'max'] },
       { name: 'context', type: 'string', description: 'Optional extra context that helps the subagent (related files, prior findings, constraints).', required: false },
     ],
     isReadOnly: true,

@@ -493,7 +493,7 @@ describe('runSubAgent', () => {
         id: 'submit-1',
         function: { name: 'submit_code_map', arguments: JSON.stringify({
           candidates: [{ path: 'src/a.ts', start_line: 1, end_line: 2, role: 'entry', confidence: 'high', why: 'read and confirmed' }],
-          relationships: [],
+          relationships: [{ from: 'entry', to: 'run', relationship: 'invokes', evidence_path: 'src/a.ts', start_line: 1, end_line: 2 }],
           rejected_hypotheses: [],
           searches_tried: ['entry identifier'],
           uncertainty: ['none'],
@@ -513,7 +513,7 @@ describe('runSubAgent', () => {
       label: 'FastContext',
       description: 'test',
       driver: 'main-model',
-      systemPrompt: buildFastContextSystemPrompt('low'),
+      systemPrompt: buildFastContextSystemPrompt(),
       maxTurns: 3,
       maxParallel: 2,
     }
@@ -528,7 +528,6 @@ describe('runSubAgent', () => {
         baseUrl: 'http://example.test',
         model: 'test-model',
         requireGroundedReport: true,
-        fastContextLevel: 'low',
         initialEvidence: [{
           path: 'src/a.ts',
           startLine: 1,
@@ -789,7 +788,7 @@ describe('runSubAgent', () => {
     let requestCount = 0
     const submission = (startLine: number, endLine: number) => ({
       candidates: [{ path: 'src/core.ts', start_line: startLine, end_line: endLine, role: 'implementation', confidence: 'high', why: 'verified implementation' }],
-      relationships: [],
+      relationships: [{ from: 'caller', to: 'startRuntime', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: startLine, end_line: endLine }],
       rejected_hypotheses: [],
       searches_tried: ['startRuntime symbol'],
       uncertainty: ['none'],
@@ -825,7 +824,7 @@ describe('runSubAgent', () => {
           label: 'FastContext',
           description: 'test',
           driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt('low'),
+          systemPrompt: buildFastContextSystemPrompt(),
           maxTurns: 3,
           maxParallel: 2,
         },
@@ -836,12 +835,11 @@ describe('runSubAgent', () => {
         baseUrl: 'http://example.test',
         model: 'test-model',
         requireGroundedReport: true,
-        fastContextLevel: 'low',
       })
 
       expect(result.error).toBeUndefined()
       expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
-      expect(JSON.stringify(requestBodies[2].messages)).toContain('at least one ranked candidate is required')
+      expect(JSON.stringify(requestBodies[2].messages)).toContain('at least one grounded architecture node is required')
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -863,7 +861,7 @@ describe('runSubAgent', () => {
         id: `submit-final-recovery-${requestCount}`,
         function: { name: 'submit_code_map', arguments: JSON.stringify({
           candidates: [{ path: 'src/core.ts', start_line: range[0], end_line: range[1], role: 'implementation', confidence: 'high', why: 'verified implementation' }],
-          relationships: [],
+          relationships: [{ from: 'caller', to: 'startRuntime', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: range[0], end_line: range[1] }],
           rejected_hypotheses: [],
           searches_tried: ['core runtime'],
           uncertainty: ['none'],
@@ -886,7 +884,7 @@ describe('runSubAgent', () => {
           label: 'FastContext',
           description: 'test',
           driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt('low'),
+          systemPrompt: buildFastContextSystemPrompt(),
           maxTurns: 2,
           maxParallel: 2,
         },
@@ -897,7 +895,6 @@ describe('runSubAgent', () => {
         baseUrl: 'http://example.test',
         model: 'test-model',
         requireGroundedReport: true,
-        fastContextLevel: 'low',
       })
 
       expect(result.error).toBeUndefined()
@@ -928,7 +925,7 @@ describe('runSubAgent', () => {
             { path: 'src/core.ts', start_line: 1, end_line: 2, role: 'synchronized copy', edit_kind: 'mirror', confidence: 'high', why: 'requires the same edit' },
             { path: 'src/unread.ts', start_line: 1, end_line: 20, role: 'test', confidence: 'low', why: 'not actually read' },
           ],
-          relationships: [],
+          relationships: [{ from: 'entry', to: 'implementation', relationship: 'delegates', evidence_path: 'src/core.ts', start_line: 2, end_line: 5 }],
           rejected_hypotheses: [],
           searches_tried: ['core runtime'],
           uncertainty: ['none'],
@@ -951,7 +948,7 @@ describe('runSubAgent', () => {
           label: 'FastContext',
           description: 'test',
           driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt('low'),
+          systemPrompt: buildFastContextSystemPrompt(),
           maxTurns: 3,
           maxParallel: 2,
         },
@@ -962,7 +959,6 @@ describe('runSubAgent', () => {
         baseUrl: 'http://example.test',
         model: 'test-model',
         requireGroundedReport: true,
-        fastContextLevel: 'low',
       })
 
       expect(result.error).toBeUndefined()
@@ -993,7 +989,7 @@ describe('runSubAgent', () => {
         id: 'submit-final',
         function: { name: 'submit_code_map', arguments: JSON.stringify({
           candidates: [{ path: 'src/core.ts', start_line: 1, end_line: 6, role: 'implementation', confidence: 'high', why: 'verified implementation' }],
-          relationships: [],
+          relationships: [{ from: 'entry', to: 'implementation', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: 1, end_line: 5 }],
           rejected_hypotheses: [],
           searches_tried: ['core runtime'],
           uncertainty: ['none'],
@@ -1016,7 +1012,7 @@ describe('runSubAgent', () => {
           label: 'FastContext',
           description: 'test',
           driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt('low'),
+          systemPrompt: buildFastContextSystemPrompt(),
           maxTurns: 2,
           maxParallel: 2,
         },
@@ -1027,7 +1023,6 @@ describe('runSubAgent', () => {
         baseUrl: 'http://example.test',
         model: 'test-model',
         requireGroundedReport: true,
-        fastContextLevel: 'low',
       })
 
       expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('src/core.ts L1-L5') })
@@ -1143,7 +1138,7 @@ describe('runSubAgent', () => {
           label: 'FastContext',
           description: 'test',
           driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt('medium'),
+          systemPrompt: buildFastContextSystemPrompt(),
           maxTurns: 4,
           maxParallel: 2,
         },
@@ -1154,12 +1149,11 @@ describe('runSubAgent', () => {
         baseUrl: 'http://example.test',
         model: 'test-model',
         requireGroundedReport: true,
-        fastContextLevel: 'medium',
       })
 
-      expect(result).toMatchObject({ ok: true, turns: 5, finalText: expect.stringContaining('EXECUTION_FLOW') })
+      expect(result).toMatchObject({ ok: true, turns: 4, finalText: expect.stringContaining('EXECUTION_FLOW') })
       expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'src/core.ts', reason: 'file read' })]))
-      expect(JSON.stringify(requestBodies[4])).toContain('1 | export function startRuntime()')
+      expect(requestBodies).toHaveLength(4)
     } finally {
       globalThis.fetch = originalFetch
     }

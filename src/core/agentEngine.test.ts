@@ -370,7 +370,7 @@ describe('AgentEngine FastContext scheduling', () => {
       const result = await executeSingleTool({
         id: 'explore-1',
         name: 'explore_code',
-        arguments: { objective: 'find the CLI entry point', thoroughness: 'medium' },
+        arguments: { objective: 'map the CLI entry point and execution flow' },
       })
 
       expect(result.isError).toBe(false)

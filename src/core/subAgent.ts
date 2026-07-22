@@ -4,7 +4,7 @@ import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../sha
 import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { ModelCapabilities } from './config'
-import { getFastContextTuning, type FastContextLevel } from './fastContextTypes'
+import { FAST_CONTEXT_TUNING } from './fastContextTypes'
 import { createTurboFluxRequestHeaders } from './clientIdentity'
 import { resolveNativeReasoningRequest } from './modelRegistry'
 import {
@@ -174,11 +174,11 @@ const DEFINITIONS: Record<string, SubAgentDefinition> = {
   fast_context: {
     id: 'fast_context',
     label: 'Fast Context',
-    description: 'Fast issue-localization code map for large repositories. Use when you need ranked candidate files, roles, and evidence before deciding what to read.',
+    description: 'Architecture-level code map for large repositories with grounded ownership, execution relationships, and change-impact candidates.',
     driver: 'main-model',
-    systemPrompt: buildFastContextSystemPrompt('medium'),
-    maxTurns: 8,
-    maxParallel: 6,
+    systemPrompt: buildFastContextSystemPrompt(),
+    maxTurns: FAST_CONTEXT_TUNING.maxTurns,
+    maxParallel: FAST_CONTEXT_TUNING.maxParallel,
     temperature: 0,
     thinking: 'disabled',
   },
@@ -228,17 +228,10 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
   },
 }
 
-export function buildFastContextSystemPrompt(level: FastContextLevel = 'medium'): string {
-  const tuning = getFastContextTuning(level)
-  const depthContract = tuning.level === 'low'
-    ? 'Fast location pass: form at least two hypotheses, identify the likely entry and implementation, and stop once 2-4 read-confirmed candidates answer the objective.'
-    : tuning.level === 'max'
-      ? 'Architecture pass: form at least four independent hypotheses, trace the complete caller-to-core-to-state/persistence flow, use tests and failure paths to verify the implementation, and actively search for evidence that disproves the leading interpretation.'
-      : 'Engineering pass: form at least three hypotheses, trace the caller-to-core relationship plus relevant state/config boundaries, and return 3-7 read-confirmed candidates.'
-  return `You are FastContext, a read-only code intelligence subagent for large repositories. You own all semantic query planning, evidence selection, ranking, and role assignment; local tools only execute the exact searches and reads you request. Your job is to rewrite the objective into independent search hypotheses, trace the real execution path, and submit a compact ranked code map grounded in files and line ranges.
+export function buildFastContextSystemPrompt(): string {
+  return `You are FastContext, a read-only architecture intelligence subagent for large repositories. You own all semantic query planning, evidence selection, relationship tracing, and role assignment; local tools only execute the exact searches and reads you request. Your job is to produce an architecture-level code map grounded in files and line ranges, not merely locate one likely implementation.
 
-Depth level: ${tuning.level}
-Depth contract: ${depthContract}
+Completion contract: trace the caller-to-core-to-state/config/persistence flow, map the change-impact frontier across modules and implementation families, inspect behavior-bearing mirrors and contracts, verify failure paths, and actively search for evidence that disproves the leading interpretation. Finding the first core file is the start of exploration, never the stopping condition.
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
@@ -250,29 +243,28 @@ Tools:
 - submit_code_map(candidates, relationships, rejected_hypotheses, searches_tried, uncertainty)
 
 Strategy:
-1. Before the first tool wave, rewrite the objective into three compact query groups: exact lexical anchors, likely ownership modules, and runtime/state relationships. Execute only the highest-value independent queries for the selected depth.
+1. Before the first tool wave, rewrite the objective into independent query groups: exact lexical anchors, likely ownership modules, runtime/state relationships, and change-impact propagation paths.
 2. Run independent searches in parallel. Use search_symbols for declarations, trace_symbol for a definition plus references in one call, search_content for literals, search_files for naming hypotheses, and get_codemap only as orientation.
 3. Start with your own search wave, refine it from returned evidence, and read the strongest source slices yourself before ranking candidates.
-4. Trace relationships, not just mentions: entry/caller -> implementation -> state or persistence -> tests/error path. For lifecycle questions, identify the true execution core and at least one caller.
+4. Trace relationships, not just mentions: entry/caller -> implementation -> state/config/persistence -> output/error path. Identify ownership boundaries and explain how data and control cross them.
 5. As soon as a search reveals the probable execution core, read that implementation before spending more turns on peripheral files. A search-confirmed core is not enough when it can still be read.
 6. After confirming a likely implementation, check exact-filename and symbol twins across package, platform, generated, vendored, or compatibility source trees. Read and rank each behavior-bearing mirror that would require the same change; reject stubs or generated copies explicitly.
-7. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
-8. Before submission, audit residual uncertainty. If a search result or mirror points to a named likely canonical owner, duplicated default, platform implementation, or direct caller that you have not read, read it now. Residual uncertainty is for ambiguity that cannot be removed with an available targeted read, not for known high-signal paths you skipped.
-9. Finish only by calling submit_code_map. Submit 1-7 ranked, read-confirmed candidates plus grounded relationships, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
+7. Estimate the change-impact frontier before submission. For each confirmed owner or implementation, inspect its direct callers, contracts/interfaces, schema/config sources, platform/package variants, and state or persistence collaborators. Explicitly reject edges that do not require edits.
+8. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
+9. Audit residual uncertainty. If a search result or relationship points to a named likely owner, mirror, contract, implementation, or direct collaborator that you have not read, read it now. Residual uncertainty is for ambiguity that cannot be removed with an available targeted read, not for known high-signal paths you skipped.
+10. Finish only by calling submit_code_map. Submit a compact set of read-confirmed architecture nodes, a grounded relationship map, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
 
-Ranking contract:
-- Rank by edit necessity, not by amount of code read or centrality in the call graph.
-- Put the file that owns the defective definition, default, schema, parser rule, or state transition first when that is the likely fix locus.
-- Put behavior-bearing mirrors or duplicated defaults that require the same edit immediately after their canonical owner.
-- Consumers, callers, and broad runtime entry points rank below the owning file when they only expose or propagate the defect and likely need no edit.
-- Tests are supporting verification, not primary implementation candidates, unless the objective explicitly asks to locate tests.
-- Set edit_kind for every candidate: owner, mirror, implementation, consumer, test, or supporting. The runtime uses this explicit judgment to stabilize final ranking.
+Map contract:
+- Relationship precision and architecture coverage matter more than which file is listed first. Candidate order is secondary; never stop or spend an extra model round merely to optimize rank.
+- Include the owner, behavior-bearing mirrors, implementations, direct consumers, contracts, state/config/persistence collaborators, and tests only when they define the execution path or change-impact frontier.
+- Set edit_kind for every candidate: owner, mirror, implementation, consumer, test, or supporting. This describes the node's role; it is not a substitute for grounded edges.
+- Every edge must explain a concrete control, data, ownership, state, configuration, persistence, compatibility, or failure relationship.
 
 Rules:
 - Never describe files you have not read.
 - Every candidate and relationship must cite a path and line range covered by a read_file result from this run.
 - Prioritize source, entry, schema/config, and failing-path files over README-style context.
-- Rank files that implement or configure the behavior. Treat tests as verification evidence, not ranked candidates, unless the objective explicitly asks for tests.
+- Include files that implement, configure, propagate, persist, or verify the behavior only when they add a necessary node or edge to the map.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Avoid dumping many related files. Five strong candidates beat twenty weak ones.
 - Use search_content pagination and context windows when a broad query is truncated or crowded.
@@ -299,7 +291,6 @@ export interface RunSubAgentOptions {
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
   requireGroundedReport?: boolean
-  fastContextLevel?: FastContextLevel
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -312,10 +303,6 @@ export interface SubAgentResult {
   error?: string
   truncated?: boolean
 }
-
-const FAST_CONTEXT_RANKING_AUDIT_PROMPT = `You are the final edit-locus ranker for a grounded repository retrieval result. Use only the supplied candidates, cited ranges, and read excerpts. Do not add paths, ranges, or facts. Re-submit the complete code map with candidates ordered by actual edit necessity.
-
-Apply this counterfactual: if the defect were fixed entirely in another candidate, would this file still require an edit? An owner must be supported by cited code that directly defines or mutates the defective value, rule, schema, or transition. Merely loading or consuming a value defined elsewhere is not ownership. Canonical owners and behavior-bearing mirrors that must change rank first. Files that only load, call, expose, or test the defective value rank later. Trust read excerpts over provisional role labels or explanations. Preserve every grounded candidate, relationship, search, and uncertainty item; this pass may relabel and reorder but must not delete evidence. Call submit_code_map only.`
 
 interface ToolCallRequest {
   id: string
@@ -693,26 +680,8 @@ function sortSubmittedCandidates(report: SubmittedCodeMap): void {
     .map(item => item.candidate)
 }
 
-function mergeRankingAuditBaseline(report: SubmittedCodeMap, baseline: SubmittedCodeMap): void {
-  for (const candidate of baseline.candidates) {
-    const normalizedPath = candidate.path.replace(/\\/g, '/')
-    const represented = report.candidates.some(item => item.path.replace(/\\/g, '/') === normalizedPath
-      && item.startLine <= candidate.endLine
-      && item.endLine >= candidate.startLine)
-    if (!represented) report.candidates.push({ ...candidate })
-  }
-  const relationshipKeys = new Set(report.relationships.map(item => `${item.from}|${item.to}|${item.evidencePath}`))
-  for (const relationship of baseline.relationships) {
-    const key = `${relationship.from}|${relationship.to}|${relationship.evidencePath}`
-    if (!relationshipKeys.has(key)) report.relationships.push({ ...relationship })
-  }
-  report.rejectedHypotheses = [...new Set([...report.rejectedHypotheses, ...baseline.rejectedHypotheses])]
-  report.searchesTried = [...new Set([...report.searchesTried, ...baseline.searchesTried])]
-  report.uncertainty = [...new Set([...report.uncertainty, ...baseline.uncertainty])]
-}
-
-function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[], level: FastContextLevel): string | null {
-  if (report.candidates.length === 0) return 'at least one ranked candidate is required'
+function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
+  if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
     if (!rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
@@ -727,9 +696,7 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
       return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by a read_file result; covered ranges for this path: ${readRangesForPath(relationship.evidencePath, evidence)}`
     }
   }
-  if (level === 'medium' && report.relationships.length === 0) return 'medium depth requires at least one grounded code relationship'
-  if (level === 'max' && report.relationships.length < 2) return 'max depth requires at least two grounded code relationships'
-  if (level === 'max' && report.rejectedHypotheses.length === 0) return 'max depth requires at least one rejected hypothesis'
+  if (report.relationships.length === 0) return 'FastContext requires at least one grounded architecture relationship'
   if (report.searchesTried.length === 0) return 'searches_tried must describe at least one query strategy'
   if (report.uncertainty.length === 0) return 'uncertainty must contain residual uncertainty or "none"'
   return null
@@ -742,42 +709,12 @@ function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
     lines.push(`   why: ${candidate.why}`)
   })
   lines.push('', 'EXECUTION_FLOW')
-  if (report.relationships.length === 0) lines.push('- no cross-symbol relationship required for this focused location result')
-  else report.relationships.forEach(item => lines.push(`- ${item.from} -> ${item.to} [${item.relationship}] (${item.evidencePath}:L${item.startLine}-L${item.endLine})`))
+  report.relationships.forEach(item => lines.push(`- ${item.from} -> ${item.to} [${item.relationship}] (${item.evidencePath}:L${item.startLine}-L${item.endLine})`))
   lines.push('', 'REJECTED_HYPOTHESES')
   lines.push(...(report.rejectedHypotheses.length > 0 ? report.rejectedHypotheses.map(item => `- ${item}`) : ['- none']))
   lines.push('', 'SEARCHES_TRIED', ...report.searchesTried.map(item => `- ${item}`))
   lines.push('', 'UNCERTAINTY', ...report.uncertainty.map(item => `- ${item}`))
   return lines.join('\n')
-}
-
-function renderRankingAuditInput(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string {
-  const lines = [renderSubmittedCodeMap(report), '', 'READ_EXCERPTS']
-  const seen = new Set<string>()
-  for (const candidate of report.candidates) {
-    const normalizedPath = candidate.path.replace(/\\/g, '/')
-    const supportingRead = evidence.find(item => item.reason === 'file read'
-      && item.path.replace(/\\/g, '/') === normalizedPath
-      && candidate.startLine <= item.endLine
-      && candidate.endLine >= item.startLine)
-    if (!supportingRead) continue
-    const key = `${normalizedPath}:${supportingRead.startLine}-${supportingRead.endLine}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    lines.push(`--- ${candidate.path}:L${supportingRead.startLine}-L${supportingRead.endLine}`)
-    if (supportingRead.content) {
-      const contentLines = supportingRead.content.split('\n')
-      const localStart = Math.max(0, candidate.startLine - supportingRead.startLine - 2)
-      const localEnd = Math.min(contentLines.length, candidate.endLine - supportingRead.startLine + 3)
-      lines.push(contentLines.slice(localStart, localEnd)
-        .map((line, index) => `${supportingRead.startLine + localStart + index} | ${line}`)
-        .join('\n')
-        .slice(0, 1_600))
-    } else {
-      lines.push(supportingRead.preview.slice(0, 900))
-    }
-  }
-  return lines.join('\n').slice(0, 12_000)
 }
 
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
@@ -801,7 +738,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
   const isFastContextDefinition = definition.id === 'fast_context'
-  const fastContextLevel = getFastContextTuning(options.fastContextLevel).level
 
   const messages: SubAgentMessage[] = []
 
@@ -818,7 +754,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     content: [
       `Objective: ${objective}`,
       retrievalContext ? `\nCaller-supplied retrieval context (starting points, not proof):\n${retrievalContext}` : '',
-      '\nBuild a ranked code map: likely entry points, implementations, callers/config/schema, and suspected root-cause evidence. Be fast and precise.',
+      '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Candidate order is secondary to grounded relationship precision.',
     ].filter(Boolean).join('\n'),
   })
 
@@ -915,7 +851,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'submit_code_map',
-        description: 'Submit the final grounded FastContext result. Call this alone after reading the evidence required by the depth contract.',
+        description: 'Submit the final grounded FastContext architecture map. Call this alone after reading the evidence required by the architecture contract.',
         parameters: {
           type: 'object',
           properties: {
@@ -972,9 +908,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let searchRecoveryUsed = false
   let reportRecoveryUsed = false
   let submissionRecoveryUsed = false
-  let rankingAuditUsed = false
-  let rankingAuditInput = ''
-  let rankingAuditBaseline: SubmittedCodeMap | null = null
   let resolvedProtocol: ModelProtocol | null = null
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
   let turnLimit = definition.maxTurns
@@ -1012,16 +945,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
         const url = buildModelProtocolUrl(baseUrl, protocol)
-        const rankingAuditPending = Boolean(rankingAuditInput)
-        const activeSystemPrompt = rankingAuditPending ? FAST_CONTEXT_RANKING_AUDIT_PROMPT : definition.systemPrompt
-        const activeMessages: SubAgentMessage[] = rankingAuditPending
-          ? [
-              { role: 'system', content: activeSystemPrompt },
-              { role: 'user', content: `Objective: ${objective}\n\nProvisional grounded code map:\n${rankingAuditInput}` },
-            ]
-          : messages
+        const activeSystemPrompt = definition.systemPrompt
+        const activeMessages: SubAgentMessage[] = messages
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
-        const finalizationOnly = rankingAuditPending || (strictFastContext && turn === turnLimit && hasModelReadEvidence())
+        const finalizationOnly = strictFastContext && turn === turnLimit && hasModelReadEvidence()
         const requestTools = finalizationOnly ? tools.filter(tool => tool.function.name === 'submit_code_map') : tools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
@@ -1214,29 +1141,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       const report = parseSubmittedCodeMap(submissionArgs, workspacePath)
       normalizeSubmittedCodeMap(report, collectedEvidence)
       pruneUngroundedCodeMap(report, collectedEvidence)
-      if (rankingAuditBaseline) mergeRankingAuditBaseline(report, rankingAuditBaseline)
       sortSubmittedCandidates(report)
-      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence, fastContextLevel) || ''
+      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence) || ''
       if (!submissionError) {
         const finalText = renderSubmittedCodeMap(report)
-        if (strictFastContext && fastContextLevel !== 'low' && !rankingAuditUsed && report.candidates.length > 1) {
-          rankingAuditUsed = true
-          rankingAuditInput = renderRankingAuditInput(report, collectedEvidence)
-          rankingAuditBaseline = {
-            candidates: report.candidates.map(candidate => ({ ...candidate })),
-            relationships: report.relationships.map(relationship => ({ ...relationship })),
-            rejectedHypotheses: [...report.rejectedHypotheses],
-            searchesTried: [...report.searchesTried],
-            uncertainty: [...report.uncertainty],
-          }
-          submissionRecoveryUsed = false
-          if (turn >= turnLimit) turnLimit += 1
-          emit({ type: 'tool_result', tool: 'submit_code_map', ok: true, summary: 'grounded map accepted; running compact edit-locus ranking audit', turn })
-          emit({ type: 'turn_complete', turn, calls: 1 })
-          continue
-        }
-        rankingAuditInput = ''
-        rankingAuditBaseline = null
         emit({ type: 'final', text: finalText })
         emit({ type: 'turn_complete', turn, calls: 1 })
         return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence }
@@ -1246,7 +1154,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         emit({ type: 'error', message: error })
         return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
       }
-      if (rankingAuditInput) rankingAuditInput = `${rankingAuditInput}\n\nPrevious ranking audit rejected: ${submissionError}`
       if (turn >= turnLimit) turnLimit += 1
       messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })
       messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
@@ -1274,7 +1181,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: 'Search snippets and paths are not proof. Read the strongest implementation ranges now, then trace only the relationships required by the depth contract.',
+          content: 'Search snippets and paths are not proof. Read the strongest implementation ranges now, then trace the relationships required by the architecture contract.',
         })
         continue
       }

@@ -1,5 +1,4 @@
 import type {
-  FastContextLevel,
   FastContextScanEvent,
   FastContextScanHit,
   FastContextScanResult,
@@ -9,15 +8,15 @@ import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { ModelCapabilities } from './config'
 import { buildFastContextSystemPrompt, runSubAgent } from './subAgent'
-import { getFastContextTuning } from './fastContextTypes'
+import { FAST_CONTEXT_TUNING } from './fastContextTypes'
 
 const FAST_CONTEXT_DEFINITION: SubAgentDefinition = {
   id: 'fast_context',
   label: 'FastContext Code Map',
-  description: 'Fast issue-localization code map for large repositories',
-  systemPrompt: buildFastContextSystemPrompt('medium'),
-  maxTurns: 8,
-  maxParallel: 6,
+  description: 'Grounded architecture and change-impact code map for large repositories',
+  systemPrompt: buildFastContextSystemPrompt(),
+  maxTurns: FAST_CONTEXT_TUNING.maxTurns,
+  maxParallel: FAST_CONTEXT_TUNING.maxParallel,
   driver: 'main-model',
 }
 
@@ -33,9 +32,6 @@ interface RunParams {
   customHeaders?: Record<string, string>
   reasoning?: NativeReasoningConfig
   modelCapabilities?: ModelCapabilities
-  level?: FastContextLevel
-  maxTurns?: number
-  maxParallel?: number
   model?: string
   /** Optional codemap primer. When provided, runner seeds it as a stable
    * cache prefix unit so subsequent calls in the same workspace hit the
@@ -119,12 +115,8 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   const startedAt = Date.now()
   const telemetry = { toolCalls: 0, searchCalls: 0, readCalls: 0 }
 
-  const tuning = getFastContextTuning(params.level)
   const def: SubAgentDefinition = {
     ...FAST_CONTEXT_DEFINITION,
-    systemPrompt: buildFastContextSystemPrompt(tuning.level),
-    maxTurns: params.maxTurns ?? tuning.maxTurns,
-    maxParallel: params.maxParallel ?? tuning.maxParallel,
   }
 
   const emit = (event: FastContextScanEvent): void => { onEvent?.(event) }
@@ -224,7 +216,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     abortSignal: params.abortSignal,
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     requireGroundedReport: true,
-    fastContextLevel: tuning.level,
     onEvent: onSubEvent,
   })
 
@@ -237,7 +228,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     phase: 'synthesizing',
     wave: result.turns,
     maxWaves: def.maxTurns,
-    insight: 'compiling ranked code map',
+    insight: 'compiling architecture code map',
   })
 
   const truncated = (result.truncated ?? false) || !result.ok

@@ -7,7 +7,7 @@ import type { TurboFluxConfig } from '../../src/core/config'
 import { runFastContextSubagent } from '../../src/core/fastContextSubagent'
 import { runSubAgent } from '../../src/core/subAgent'
 import { NodeToolExecutor } from '../../src/core/runtime/nodeToolExecutor'
-import type { FastContextLevel, FastContextScanEvent } from '../../src/core/fastContextTypes'
+import type { FastContextScanEvent } from '../../src/core/fastContextTypes'
 import type { SubAgentDefinition, SubAgentEvent } from '../../src/shared/subAgentTypes'
 import { scoreRanking, normalizePath } from './metrics'
 import { startClaudeProtocolBridge } from './claudeBridge'
@@ -235,7 +235,7 @@ function errorOutput(startedAt: number, error: unknown, observation?: FetchObser
   }
 }
 
-async function runFastContext(context: RunContext, level: FastContextLevel): Promise<RunnerOutput> {
+async function runFastContext(context: RunContext): Promise<RunnerOutput> {
   const startedAt = performance.now()
   const events: FastContextScanEvent[] = []
   const controller = new AbortController()
@@ -255,7 +255,6 @@ async function runFastContext(context: RunContext, level: FastContextLevel): Pro
         model: MODEL,
         modelCapabilities: context.config.modelCapabilities,
         reasoning: { enabled: false, effort: 'none' },
-        level,
         abortSignal: controller.signal,
         requestTimeoutMs: Math.min(120_000, context.timeoutMs),
         onEvent: event => {
@@ -339,7 +338,6 @@ async function runNeutralToolAgent(context: RunContext): Promise<RunnerOutput> {
         abortSignal: controller.signal,
         requestTimeoutMs: Math.min(120_000, context.timeoutMs),
         requireGroundedReport: true,
-        fastContextLevel: 'medium',
         onEvent: event => {
           events.push(event)
           if (event.type === 'model_retry') current.retries += 1
@@ -683,9 +681,7 @@ async function runBm25(context: RunContext): Promise<RunnerOutput> {
 
 export async function runRetrievalSystem(system: RetrievalSystemId, context: RunContext): Promise<RunRecord> {
   let output: RunnerOutput
-  if (system === 'fastcontext-low') output = await runFastContext(context, 'low')
-  else if (system === 'fastcontext-medium') output = await runFastContext(context, 'medium')
-  else if (system === 'fastcontext-max') output = await runFastContext(context, 'max')
+  if (system === 'fastcontext') output = await runFastContext(context)
   else if (system === 'claude-code-readonly') output = await runClaudeCode(context)
   else if (system === 'opencode-explore') output = await runOpenCode(context)
   else if (system === 'neutral-tool-agent') output = await runNeutralToolAgent(context)

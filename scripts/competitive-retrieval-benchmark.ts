@@ -217,7 +217,6 @@ async function runTurboFlux(benchmark: BenchmarkCase, workspacePath: string, con
       customHeaders: config.customHeaders,
       reasoning: { enabled: false, effort: 'none' },
       model: MODEL,
-      level: 'medium',
       abortSignal: controller.signal,
       requestTimeoutMs: 90_000,
       onEvent: event => {
