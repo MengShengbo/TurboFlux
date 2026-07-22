@@ -235,7 +235,7 @@ export function buildFastContextSystemPrompt(level: FastContextLevel = 'medium')
     : tuning.level === 'max'
       ? 'Architecture pass: form at least four independent hypotheses, trace the complete caller-to-core-to-state/persistence flow, inspect tests and failure paths, and actively search for evidence that disproves the leading interpretation.'
       : 'Engineering pass: form at least three hypotheses, trace the caller-to-core relationship plus relevant state/config boundaries, and return 3-7 read-confirmed candidates.'
-  return `You are FastContext, a read-only code intelligence subagent for large repositories. Deterministic retrieval gives you recall, but you own semantic understanding. Your job is to rewrite the objective into independent search hypotheses, challenge the prefetched candidates, trace the real execution path, and return a compact ranked code map grounded in files and line ranges.
+  return `You are FastContext, a read-only code intelligence subagent for large repositories. You own both semantic query planning and evidence selection; local tools execute only the searches and reads you request. Your job is to rewrite the objective into independent search hypotheses, trace the real execution path, and return a compact ranked code map grounded in files and line ranges.
 
 Depth level: ${tuning.level}
 Depth contract: ${depthContract}
@@ -251,7 +251,7 @@ Tools:
 Strategy:
 1. Follow the depth contract above. Cover exact identifiers/text, likely ownership modules, and runtime/call-chain behavior as appropriate for this level. Search more than one naming convention.
 2. Run independent searches in parallel. Use search_symbols for declarations, search_content for literals and references, search_files for naming hypotheses, and get_codemap only as orientation.
-3. Treat deterministic prefetch as untrusted leads. You MUST run your own search wave and MUST read the strongest source slices yourself.
+3. Start with your own search wave, refine it from returned evidence, and read the strongest source slices yourself before ranking candidates.
 4. Trace relationships, not just mentions: entry/caller -> implementation -> state or persistence -> tests/error path. For lifecycle questions, identify the true execution core and at least one caller.
 5. As soon as a search reveals the probable execution core, read that implementation before spending more turns on peripheral files. A search-confirmed core is not enough when it can still be read.
 6. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
@@ -526,7 +526,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     role: 'user',
     content: [
       `Objective: ${objective}`,
-      retrievalContext ? `\nDeterministic prefetch (grounded starting points, not proof):\n${retrievalContext}` : '',
+      retrievalContext ? `\nCaller-supplied retrieval context (starting points, not proof):\n${retrievalContext}` : '',
       '\nBuild a ranked code map: likely entry points, implementations, callers/config/schema, and suspected root-cause evidence. Be fast and precise.',
     ].filter(Boolean).join('\n'),
   })
@@ -630,7 +630,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     collectedEvidence.push(evidence)
   }
 
-  const hasReadEvidence = (): boolean => collectedEvidence.some(evidence => /(?:file read|read confirmation|prefetch read)/i.test(evidence.reason))
+  const hasReadEvidence = (): boolean => collectedEvidence.some(evidence => /(?:file read|read confirmation)/i.test(evidence.reason))
   const hasModelReadEvidence = (): boolean => collectedEvidence.some(evidence => evidence.reason === 'file read')
   const validateFastContextReport = (text: string): string | null => {
     const normalized = text.trim()
@@ -855,7 +855,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: `The deterministic prefetch is only a lead set. Run at least ${remaining} more independent search call(s) now using alternate identifiers, references, filenames, or runtime terms before ranking anything.`,
+          content: `The evidence is not broad enough yet. Run at least ${remaining} more independent search call(s) now using alternate identifiers, references, filenames, or runtime terms before ranking anything.`,
         })
         continue
       }
@@ -867,7 +867,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: `Quality gate: candidate paths are not enough, and prefetched snippets are not proof. Make at least ${remaining} more read_file call(s) yourself on the strongest runtime candidates, inspect exact line ranges, and trace the relationships required by this depth level.`,
+          content: `Quality gate: candidate paths are not enough, and search snippets are not proof. Make at least ${remaining} more read_file call(s) yourself on the strongest runtime candidates, inspect exact line ranges, and trace the relationships required by this depth level.`,
         })
         continue
       }

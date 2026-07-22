@@ -37,5 +37,7 @@ describe('FastContext retrieval levels', () => {
     expect(maxPrompt).toContain('Depth level: max')
     expect(maxPrompt).toContain('6 model-directed read_file call(s)')
     expect(maxPrompt).toContain('disproves the leading interpretation')
+    expect(mediumPrompt).toContain('local tools execute only the searches and reads you request')
+    expect(mediumPrompt).not.toContain('prefetch')
   })
 })
