@@ -235,37 +235,38 @@ export function buildFastContextSystemPrompt(level: FastContextLevel = 'medium')
     : tuning.level === 'max'
       ? 'Architecture pass: form at least four independent hypotheses, trace the complete caller-to-core-to-state/persistence flow, inspect tests and failure paths, and actively search for evidence that disproves the leading interpretation.'
       : 'Engineering pass: form at least three hypotheses, trace the caller-to-core relationship plus relevant state/config boundaries, and return 3-7 read-confirmed candidates.'
-  return `You are FastContext, a read-only code intelligence subagent for large repositories. You own both semantic query planning and evidence selection; local tools execute only the searches and reads you request. Your job is to rewrite the objective into independent search hypotheses, trace the real execution path, and return a compact ranked code map grounded in files and line ranges.
+  return `You are FastContext, a read-only code intelligence subagent for large repositories. You own all semantic query planning, evidence selection, ranking, and role assignment; local tools only execute the exact searches and reads you request. Your job is to rewrite the objective into independent search hypotheses, trace the real execution path, and submit a compact ranked code map grounded in files and line ranges.
 
 Depth level: ${tuning.level}
 Depth contract: ${depthContract}
-Before finalizing, make at least ${tuning.minimumSearchCalls} model-directed search call(s) and ${tuning.minimumReadCalls} model-directed read_file call(s).
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
 - search_files(pattern)
 - search_symbols(query, path?, symbol_kind?)
+- trace_symbol(query, path?)
 - get_codemap(query, path?)
 - read_file(path, offset?, limit?)
+- submit_code_map(candidates, relationships, rejected_hypotheses, searches_tried, uncertainty)
 
 Strategy:
-1. Follow the depth contract above. Cover exact identifiers/text, likely ownership modules, and runtime/call-chain behavior as appropriate for this level. Search more than one naming convention.
-2. Run independent searches in parallel. Use search_symbols for declarations, search_content for literals and references, search_files for naming hypotheses, and get_codemap only as orientation.
+1. Before the first tool wave, rewrite the objective into three compact query groups: exact lexical anchors, likely ownership modules, and runtime/state relationships. Execute only the highest-value independent queries for the selected depth.
+2. Run independent searches in parallel. Use search_symbols for declarations, trace_symbol for a definition plus references in one call, search_content for literals, search_files for naming hypotheses, and get_codemap only as orientation.
 3. Start with your own search wave, refine it from returned evidence, and read the strongest source slices yourself before ranking candidates.
 4. Trace relationships, not just mentions: entry/caller -> implementation -> state or persistence -> tests/error path. For lifecycle questions, identify the true execution core and at least one caller.
 5. As soon as a search reveals the probable execution core, read that implementation before spending more turns on peripheral files. A search-confirmed core is not enough when it can still be read.
 6. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
-7. Return a concise final report that starts with exactly "RANKED_CODE_MAP". Include 3-7 ranked candidates with path, line range, role, confidence, and why. Then list "EXECUTION_FLOW", "SEARCHES_TRIED", and "UNCERTAINTY".
+7. Finish only by calling submit_code_map. Submit 1-7 ranked, read-confirmed candidates plus grounded relationships, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
 
 Rules:
 - Never describe files you have not read.
-- Every ranked candidate must be supported by a read_file result from this run.
+- Every candidate and relationship must cite a path and line range covered by a read_file result from this run.
 - Prioritize source, entry, schema/config, and failing-path files over README-style context.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Avoid dumping many related files. Five strong candidates beat twenty weak ones.
 - Use search_content pagination and context windows when a broad query is truncated or crowded.
 - If the objective contains Chinese or mixed UI text, search both exact text and nearby component/style naming guesses.
-- Your final report is the ranking authority. Local scoring is only a fallback if your report is missing or unusable.
+- If you cannot produce a grounded submission, fail explicitly. No local semantic fallback exists.
 - Do NOT expose hidden reasoning. Call tools and return concise, evidence-backed findings.`
 }
 
@@ -287,8 +288,7 @@ export interface RunSubAgentOptions {
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
   requireGroundedReport?: boolean
-  minimumSearchCalls?: number
-  minimumReadCalls?: number
+  fastContextLevel?: FastContextLevel
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -305,6 +305,32 @@ export interface SubAgentResult {
 interface ToolCallRequest {
   id: string
   function: { name: string; arguments: string }
+}
+
+interface SubmittedCandidate {
+  path: string
+  startLine: number
+  endLine: number
+  role: string
+  confidence: 'high' | 'medium' | 'low'
+  why: string
+}
+
+interface SubmittedRelationship {
+  from: string
+  to: string
+  relationship: string
+  evidencePath: string
+  startLine: number
+  endLine: number
+}
+
+interface SubmittedCodeMap {
+  candidates: SubmittedCandidate[]
+  relationships: SubmittedRelationship[]
+  rejectedHypotheses: string[]
+  searchesTried: string[]
+  uncertainty: string[]
 }
 
 type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
@@ -491,6 +517,104 @@ function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, 
   return normalized
 }
 
+function stringList(value: unknown, maxItems: number, maxLength = 240): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(item => String(item || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, maxItems)
+    .map(item => item.slice(0, maxLength))
+}
+
+function positiveLine(value: unknown, fallback = 1): number {
+  const parsed = Math.floor(Number(value))
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string): SubmittedCodeMap {
+  const candidates = Array.isArray(value.candidates)
+    ? value.candidates.slice(0, 7).map((candidate: Record<string, any>) => {
+        const startLine = positiveLine(candidate.start_line ?? candidate.startLine)
+        return {
+          path: toWorkspaceRelative(workspacePath, String(candidate.path || '').trim()),
+          startLine,
+          endLine: Math.max(startLine, positiveLine(candidate.end_line ?? candidate.endLine, startLine)),
+          role: String(candidate.role || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+          confidence: ['high', 'medium', 'low'].includes(candidate.confidence) ? candidate.confidence : 'medium',
+          why: String(candidate.why || '').replace(/\s+/g, ' ').trim().slice(0, 320),
+        } satisfies SubmittedCandidate
+      })
+    : []
+  const relationships = Array.isArray(value.relationships)
+    ? value.relationships.slice(0, 12).map((relationship: Record<string, any>) => {
+        const startLine = positiveLine(relationship.start_line ?? relationship.startLine)
+        return {
+          from: String(relationship.from || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+          to: String(relationship.to || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+          relationship: String(relationship.relationship || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+          evidencePath: toWorkspaceRelative(workspacePath, String(relationship.evidence_path ?? relationship.evidencePath ?? '').trim()),
+          startLine,
+          endLine: Math.max(startLine, positiveLine(relationship.end_line ?? relationship.endLine, startLine)),
+        } satisfies SubmittedRelationship
+      })
+    : []
+  return {
+    candidates,
+    relationships,
+    rejectedHypotheses: stringList(value.rejected_hypotheses ?? value.rejectedHypotheses, 8),
+    searchesTried: stringList(value.searches_tried ?? value.searchesTried, 12),
+    uncertainty: stringList(value.uncertainty, 8),
+  }
+}
+
+function rangeIsRead(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): boolean {
+  const normalizedPath = path.replace(/\\/g, '/')
+  return evidence.some(item => item.reason === 'file read'
+    && item.path.replace(/\\/g, '/') === normalizedPath
+    && startLine >= item.startLine
+    && endLine <= item.endLine)
+}
+
+function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[], level: FastContextLevel): string | null {
+  if (report.candidates.length === 0) return 'at least one ranked candidate is required'
+  for (const candidate of report.candidates) {
+    if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
+    if (!rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
+      return `candidate ${candidate.path}:${candidate.startLine}-${candidate.endLine} is not covered by a read_file result`
+    }
+  }
+  for (const relationship of report.relationships) {
+    if (!relationship.from || !relationship.to || !relationship.relationship || !relationship.evidencePath) {
+      return 'every relationship requires from, to, relationship, and evidence_path'
+    }
+    if (!rangeIsRead(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence)) {
+      return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by a read_file result`
+    }
+  }
+  if (level === 'medium' && report.relationships.length === 0) return 'medium depth requires at least one grounded code relationship'
+  if (level === 'max' && report.relationships.length < 2) return 'max depth requires at least two grounded code relationships'
+  if (level === 'max' && report.rejectedHypotheses.length === 0) return 'max depth requires at least one rejected hypothesis'
+  if (report.searchesTried.length === 0) return 'searches_tried must describe at least one query strategy'
+  if (report.uncertainty.length === 0) return 'uncertainty must contain residual uncertainty or "none"'
+  return null
+}
+
+function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
+  const lines = ['RANKED_CODE_MAP']
+  report.candidates.forEach((candidate, index) => {
+    lines.push(`${index + 1}. ${candidate.path} L${candidate.startLine}-L${candidate.endLine} role=${candidate.role} confidence=${candidate.confidence}`)
+    lines.push(`   why: ${candidate.why}`)
+  })
+  lines.push('', 'EXECUTION_FLOW')
+  if (report.relationships.length === 0) lines.push('- no cross-symbol relationship required for this focused location result')
+  else report.relationships.forEach(item => lines.push(`- ${item.from} -> ${item.to} [${item.relationship}] (${item.evidencePath}:L${item.startLine}-L${item.endLine})`))
+  lines.push('', 'REJECTED_HYPOTHESES')
+  lines.push(...(report.rejectedHypotheses.length > 0 ? report.rejectedHypotheses.map(item => `- ${item}`) : ['- none']))
+  lines.push('', 'SEARCHES_TRIED', ...report.searchesTried.map(item => `- ${item}`))
+  lines.push('', 'UNCERTAINTY', ...report.uncertainty.map(item => `- ${item}`))
+  return lines.join('\n')
+}
+
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
   const {
     definition,
@@ -511,6 +635,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? 120_000)
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
+  const isFastContextDefinition = definition.id === 'fast_context'
+  const fastContextLevel = getFastContextTuning(options.fastContextLevel).level
 
   const messages: SubAgentMessage[] = []
 
@@ -531,7 +657,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     ].filter(Boolean).join('\n'),
   })
 
-  const tools = [
+  const tools: Array<Record<string, any>> = [
     {
       type: 'function',
       function: {
@@ -552,6 +678,21 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             file_type: { type: 'string' },
           },
           required: ['pattern'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'trace_symbol',
+        description: 'Find a symbol declaration and its exact textual references together. Use after a likely core symbol appears to reduce search turns.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+            path: { type: 'string' },
+          },
+          required: ['query'],
         },
       },
     },
@@ -604,6 +745,55 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     },
   ]
 
+  if (isFastContextDefinition) {
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'submit_code_map',
+        description: 'Submit the final grounded FastContext result. Call this alone after reading the evidence required by the depth contract.',
+        parameters: {
+          type: 'object',
+          properties: {
+            candidates: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string' },
+                  start_line: { type: 'number' },
+                  end_line: { type: 'number' },
+                  role: { type: 'string' },
+                  confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+                  why: { type: 'string' },
+                },
+                required: ['path', 'start_line', 'end_line', 'role', 'confidence', 'why'],
+              },
+            },
+            relationships: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  from: { type: 'string' },
+                  to: { type: 'string' },
+                  relationship: { type: 'string' },
+                  evidence_path: { type: 'string' },
+                  start_line: { type: 'number' },
+                  end_line: { type: 'number' },
+                },
+                required: ['from', 'to', 'relationship', 'evidence_path', 'start_line', 'end_line'],
+              },
+            },
+            rejected_hypotheses: { type: 'array', items: { type: 'string' } },
+            searches_tried: { type: 'array', items: { type: 'string' } },
+            uncertainty: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['candidates', 'relationships', 'rejected_hypotheses', 'searches_tried', 'uncertainty'],
+        },
+      },
+    })
+  }
+
   const modelId = model?.trim()
   if (!modelId) {
     const message = `Subagent ${definition.label} requires an active model from the main agent.`
@@ -615,13 +805,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
   let searchRecoveryUsed = false
   let reportRecoveryUsed = false
-  let modelSearchCalls = 0
-  let modelReadCalls = 0
   let resolvedProtocol: ModelProtocol | null = null
-  const isFastContextDefinition = definition.id === 'fast_context'
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
-  const minimumSearchCalls = strictFastContext ? Math.max(1, Math.floor(options.minimumSearchCalls ?? 1)) : 0
-  const minimumReadCalls = strictFastContext ? Math.max(1, Math.floor(options.minimumReadCalls ?? 1)) : 0
 
   const addEvidence = (evidence: SubAgentEvidence): void => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
@@ -630,21 +815,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     collectedEvidence.push(evidence)
   }
 
-  const hasReadEvidence = (): boolean => collectedEvidence.some(evidence => /(?:file read|read confirmation)/i.test(evidence.reason))
   const hasModelReadEvidence = (): boolean => collectedEvidence.some(evidence => evidence.reason === 'file read')
-  const validateFastContextReport = (text: string): string | null => {
-    const normalized = text.trim()
-    if (modelSearchCalls < minimumSearchCalls) return `final report requires ${minimumSearchCalls} model search calls; only ${modelSearchCalls} completed`
-    if (modelReadCalls < minimumReadCalls) return `final report requires ${minimumReadCalls} model read calls; only ${modelReadCalls} completed`
-    if (!/^RANKED_CODE_MAP\b/m.test(normalized)) return 'final report must start with RANKED_CODE_MAP'
-    if (!/\bEXECUTION_FLOW\b/m.test(normalized)) return 'final report is missing EXECUTION_FLOW'
-    if (!/\bSEARCHES_TRIED\b/m.test(normalized)) return 'final report is missing SEARCHES_TRIED'
-    if (!/\bUNCERTAINTY\b/m.test(normalized)) return 'final report is missing UNCERTAINTY'
-    const readPaths = new Set(collectedEvidence.filter(evidence => evidence.reason === 'file read').map(evidence => evidence.path.replace(/\\/g, '/')))
-    if (readPaths.size === 0) return 'final report has no model-read evidence'
-    if (![...readPaths].some(path => normalized.includes(path))) return 'ranked candidates are not grounded in model-read files'
-    return null
-  }
 
   while (turn < definition.maxTurns) {
     if (abortSignal?.aborted) break
@@ -849,29 +1020,43 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       clearInterval(waitTimer)
     }
 
+    const submissionCalls = responseToolCalls.filter(call => call.function.name === 'submit_code_map')
+    if (submissionCalls.length > 0) {
+      const submission = submissionCalls[0]
+      let submissionArgs: Record<string, any> = {}
+      let submissionError = responseToolCalls.length === 1 ? '' : 'submit_code_map must be called alone, without retrieval tools'
+      try {
+        submissionArgs = JSON.parse(submission.function.arguments || '{}')
+      } catch {
+        submissionError = 'submit_code_map arguments are not valid JSON'
+      }
+      const report = parseSubmittedCodeMap(submissionArgs, workspacePath)
+      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence, fastContextLevel) || ''
+      if (!submissionError) {
+        const finalText = renderSubmittedCodeMap(report)
+        emit({ type: 'final', text: finalText })
+        emit({ type: 'turn_complete', turn, calls: 1 })
+        return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence }
+      }
+      if (reportRecoveryUsed || turn >= definition.maxTurns) {
+        const error = `FastContext submission rejected: ${submissionError}`
+        emit({ type: 'error', message: error })
+        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
+      }
+      messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })
+      messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
+      messages.push({
+        role: 'user',
+        content: 'Correct the grounded evidence map and call submit_code_map again. Retrieve or read only if the rejection identifies missing evidence.',
+      })
+      reportRecoveryUsed = true
+      emit({ type: 'tool_result', tool: 'submit_code_map', ok: false, summary: submissionError, turn })
+      emit({ type: 'turn_complete', turn, calls: 1 })
+      continue
+    }
+
     if (responseToolCalls.length === 0) {
-      if (strictFastContext && modelSearchCalls < minimumSearchCalls && turn < definition.maxTurns) {
-        const remaining = minimumSearchCalls - modelSearchCalls
-        messages.push({ role: 'assistant', content: messageText })
-        messages.push({
-          role: 'user',
-          content: `The evidence is not broad enough yet. Run at least ${remaining} more independent search call(s) now using alternate identifiers, references, filenames, or runtime terms before ranking anything.`,
-        })
-        continue
-      }
-      const missingRequiredRead = strictFastContext
-        ? (!hasModelReadEvidence() || modelReadCalls < minimumReadCalls)
-        : !hasReadEvidence()
-      if (isFastContextDefinition && missingRequiredRead && collectedEvidence.length > 0 && turn < definition.maxTurns) {
-        const remaining = Math.max(1, minimumReadCalls - modelReadCalls)
-        messages.push({ role: 'assistant', content: messageText })
-        messages.push({
-          role: 'user',
-          content: `Quality gate: candidate paths are not enough, and search snippets are not proof. Make at least ${remaining} more read_file call(s) yourself on the strongest runtime candidates, inspect exact line ranges, and trace the relationships required by this depth level.`,
-        })
-        continue
-      }
-      if (isFastContextDefinition && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
+      if (strictFastContext && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
@@ -880,21 +1065,27 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         searchRecoveryUsed = true
         continue
       }
+      if (strictFastContext && !hasModelReadEvidence() && turn < definition.maxTurns) {
+        messages.push({ role: 'assistant', content: messageText })
+        messages.push({
+          role: 'user',
+          content: 'Search snippets and paths are not proof. Read the strongest implementation ranges now, then trace only the relationships required by the depth contract.',
+        })
+        continue
+      }
+      if (strictFastContext && !reportRecoveryUsed && turn < definition.maxTurns) {
+        messages.push({ role: 'assistant', content: messageText })
+        messages.push({
+          role: 'user',
+          content: 'Do not return a prose report. Finish by calling submit_code_map with only read-confirmed candidates and relationships.',
+        })
+        reportRecoveryUsed = true
+        continue
+      }
       if (strictFastContext) {
-        const reportError = validateFastContextReport(messageText)
-        if (reportError && !reportRecoveryUsed && turn < definition.maxTurns) {
-          messages.push({ role: 'assistant', content: messageText })
-          messages.push({
-            role: 'user',
-            content: `Final report rejected: ${reportError}. Return the required RANKED_CODE_MAP now using only files you personally read. Include EXECUTION_FLOW, SEARCHES_TRIED, and UNCERTAINTY. Do not call more tools unless a missing fact makes the report impossible.`,
-          })
-          reportRecoveryUsed = true
-          continue
-        }
-        if (reportError) {
-          emit({ type: 'error', message: `FastContext final report rejected: ${reportError}` })
-          return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error: reportError }
-        }
+        const error = 'FastContext ended without a valid submit_code_map call'
+        emit({ type: 'error', message: error })
+        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
       }
       emit({ type: 'final', text: messageText })
       emit({ type: 'turn_complete', turn, calls: 0 })
@@ -907,8 +1098,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.function.arguments) } catch {}
       emit({ type: 'tool_call', tool: tc.function.name, args, turn })
-      if (tc.function.name === 'read_file') modelReadCalls += 1
-      else if (['search_content', 'search_files', 'search_symbols', 'get_codemap'].includes(tc.function.name)) modelSearchCalls += 1
       return { tc, args }
     })
     const results = await Promise.all(entries.map(async entry => {
@@ -957,7 +1146,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     if (strictFastContext && turn === definition.maxTurns - 1) {
       messages.push({
         role: 'user',
-        content: 'One turn remains. Synthesize the final RANKED_CODE_MAP now. Do not call more tools. Include EXECUTION_FLOW, SEARCHES_TRIED, and UNCERTAINTY, and rank only files you read yourself.',
+        content: 'One turn remains. Call submit_code_map now using only read-confirmed evidence. Do not call more retrieval tools.',
       })
     }
 
@@ -977,6 +1166,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     }
   }
 
+  if (strictFastContext) {
+    const error = 'FastContext exhausted its turn budget without a valid evidence map'
+    emit({ type: 'error', message: error })
+    return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
+  }
   return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: turn >= definition.maxTurns }
 }
 
@@ -1141,6 +1335,62 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         return `${relPath}:${hit.line || hit.startLine || 1}: ${hit.title} (${hit.symbolKind || hit.source}) ${hit.preview || hit.subtitle || ''}`.trim()
       })
       return { ok: true, output: lines.join('\n'), summary: `symbols "${query}" -> ${hits.length} hits`, evidence }
+    }
+
+    case 'trace_symbol': {
+      const query = String(args.query || '').trim()
+      if (!query) return { ok: false, output: 'Symbol query is required.', summary: 'trace skipped: missing symbol', evidence }
+      const basePath = args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath
+      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const pattern = /^[A-Za-z_$][\w$]*$/.test(query) ? `\\b${escaped}\\b` : escaped
+      const [symbolResult, referenceResult] = await Promise.all([
+        executor.searchCodeSymbols({ workspacePath, query, path: typeof args.path === 'string' ? args.path : undefined, limit: 12 }),
+        executor.searchContentPage
+          ? executor.searchContentPage(pattern, basePath, undefined, false, { limit: 30, contextBefore: 1, contextAfter: 1 })
+          : executor.searchContent(pattern, basePath, undefined, false),
+      ])
+      const symbolHits = normalizeCodeSearchHits(symbolResult.data).slice(0, 10)
+      const referencePage = referenceResult.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }> } | Array<{ file: string; line: number; text: string; context?: string }> | undefined
+      const referenceHits = (Array.isArray(referencePage) ? referencePage : referencePage?.hits || []).slice(0, 30)
+      if (!symbolResult.success && !referenceResult.success) {
+        const error = symbolResult.error || referenceResult.error || 'symbol trace failed'
+        return { ok: false, output: `Symbol trace failed: ${error}`, summary: `trace "${query}" failed`, evidence }
+      }
+      const lines: string[] = ['DEFINITIONS']
+      for (const hit of symbolHits) {
+        const relPath = toWorkspaceRelative(workspacePath, hit.path)
+        const line = hit.startLine || hit.line || 1
+        lines.push(`${relPath}:${line}: ${hit.title} (${hit.symbolKind || hit.source}) ${hit.preview || hit.subtitle || ''}`.trim())
+        evidence.push({
+          path: relPath,
+          startLine: line,
+          endLine: hit.endLine || line,
+          preview: hit.preview || hit.subtitle || hit.title,
+          reason: `symbol: ${query}`,
+          symbol: hit.symbolName || hit.title,
+        })
+      }
+      lines.push('REFERENCES')
+      for (const hit of referenceHits) {
+        const relPath = toWorkspaceRelative(workspacePath, hit.file)
+        lines.push(`${relPath}:${hit.line}: ${hit.text}`)
+        evidence.push({
+          path: relPath,
+          startLine: Math.max(1, hit.line - 1),
+          endLine: hit.line + 1,
+          preview: hit.text,
+          reason: `reference: ${query}`,
+          symbol: query,
+        })
+      }
+      if (symbolHits.length === 0) lines.splice(1, 0, '- none')
+      if (referenceHits.length === 0) lines.push('- none')
+      return {
+        ok: true,
+        output: lines.join('\n'),
+        summary: `trace "${query}" -> ${symbolHits.length} definition(s), ${referenceHits.length} reference(s)`,
+        evidence,
+      }
     }
 
     case 'get_codemap': {

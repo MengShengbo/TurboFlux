@@ -5156,12 +5156,12 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const background = this.startFastContextBackground(scanObjective, tuning)
         if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
         if (background.status === 'busy') {
-          return `FastContext background scan is already working on: ${background.objective}\nAgent ID: ${background.taskId || 'unavailable'}\nContinue now with targeted search/read tools; do not wait or call explore_code again.`
+          return `FastContext background scan is already working on: ${background.objective}\nAgent ID: ${background.taskId || 'unavailable'}\nContinue only non-overlapping work; do not repeat broad retrieval or call explore_code again.`
         }
         if (background.status === 'running') {
-          return `FastContext background scan is already running for this objective. Agent ID: ${background.taskId || 'unavailable'}. Continue now with targeted search/read tools; evidence will be injected automatically when ready.`
+          return `FastContext background scan is already running for this objective. Agent ID: ${background.taskId || 'unavailable'}. Continue only non-overlapping work; evidence will be injected automatically when ready.`
         }
-        return `FastContext background scan started. Agent ID: ${background.taskId}. Continue now with targeted search_content/search_symbols/get_codemap and read_file calls; do not wait. Ranked evidence will be injected automatically on a later model turn.`
+        return `FastContext background scan started. Agent ID: ${background.taskId}. Continue only non-overlapping reasoning or work; avoid duplicating its broad retrieval. Use a targeted tool only for a specific fact needed immediately. Ranked evidence will be injected automatically on a later model turn.`
       }
 
       case 'list_memories': {

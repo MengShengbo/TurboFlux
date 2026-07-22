@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { runSubAgent } from './subAgent'
+import { buildFastContextSystemPrompt, runSubAgent } from './subAgent'
 import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
@@ -489,9 +489,16 @@ describe('runSubAgent', () => {
           }],
         }), { status: 200 })
       }
-      return new Response(JSON.stringify({
-        choices: [{ message: { content: 'RANKED_CODE_MAP\n1. src/a.ts L1-L2 role=entry confidence=high' } }],
-      }), { status: 200 })
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+        id: 'submit-1',
+        function: { name: 'submit_code_map', arguments: JSON.stringify({
+          candidates: [{ path: 'src/a.ts', start_line: 1, end_line: 2, role: 'entry', confidence: 'high', why: 'read and confirmed' }],
+          relationships: [],
+          rejected_hypotheses: [],
+          searches_tried: ['entry identifier'],
+          uncertainty: ['none'],
+        }) },
+      }] } }] }), { status: 200 })
     }) as unknown as typeof fetch
 
     const executor = {
@@ -506,7 +513,7 @@ describe('runSubAgent', () => {
       label: 'FastContext',
       description: 'test',
       driver: 'main-model',
-      systemPrompt: 'test',
+      systemPrompt: buildFastContextSystemPrompt('low'),
       maxTurns: 3,
       maxParallel: 2,
     }
@@ -520,6 +527,8 @@ describe('runSubAgent', () => {
         apiKey: 'test',
         baseUrl: 'http://example.test',
         model: 'test-model',
+        requireGroundedReport: true,
+        fastContextLevel: 'low',
         initialEvidence: [{
           path: 'src/a.ts',
           startLine: 1,
@@ -531,7 +540,7 @@ describe('runSubAgent', () => {
 
       expect(result).toMatchObject({ ok: true, finalText: expect.stringContaining('L1-L2') })
       expect(requestBodies).toHaveLength(3)
-      expect(JSON.stringify(requestBodies[1].messages)).toContain('Quality gate: candidate paths are not enough')
+      expect(JSON.stringify(requestBodies[1].messages)).toContain('Search snippets and paths are not proof')
       expect(result.evidence?.some(evidence => evidence.reason === 'file read')).toBe(true)
     } finally {
       globalThis.fetch = originalFetch
@@ -706,7 +715,138 @@ describe('runSubAgent', () => {
     }
   })
 
-  it('forces strict FastContext to search, read, and return a grounded execution flow', async () => {
+  it('traces a symbol declaration and references in one tool round', async () => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'trace-1',
+          function: { name: 'trace_symbol', arguments: JSON.stringify({ query: 'startRuntime' }) },
+        }] } }] }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'finished' } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      searchCodeSymbols: vi.fn(async () => ({ success: true, data: [{
+        path: 'C:/repo/src/core.ts',
+        line: 4,
+        startLine: 4,
+        endLine: 8,
+        title: 'startRuntime',
+        symbolName: 'startRuntime',
+        symbolKind: 'function',
+        preview: 'export function startRuntime()',
+      }] })),
+      searchContentPage: vi.fn(async () => ({ success: true, data: {
+        hits: [{ file: 'C:/repo/src/app.ts', line: 12, text: 'startRuntime()' }],
+        totalMatches: 1,
+        offset: 0,
+        limit: 30,
+        truncated: false,
+      } })),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      readFile: async () => ({ success: true, data: '' }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'explorer',
+          label: 'Explorer',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'test',
+          maxTurns: 2,
+          maxParallel: 2,
+        },
+        objective: 'trace runtime',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      })
+
+      expect(result.evidence).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: 'src/core.ts', reason: 'symbol: startRuntime' }),
+        expect.objectContaining({ path: 'src/app.ts', reason: 'reference: startRuntime' }),
+      ]))
+      expect(executor.searchCodeSymbols).toHaveBeenCalledTimes(1)
+      expect(executor.searchContentPage).toHaveBeenCalledTimes(1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('rejects an ungrounded structured submission and allows one correction', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    const submission = (startLine: number, endLine: number) => ({
+      candidates: [{ path: 'src/core.ts', start_line: startLine, end_line: endLine, role: 'implementation', confidence: 'high', why: 'verified implementation' }],
+      relationships: [],
+      rejected_hypotheses: [],
+      searches_tried: ['startRuntime symbol'],
+      uncertainty: ['none'],
+    })
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)))
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'read-1',
+          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 3 }) },
+        }] } }] }), { status: 200 })
+      }
+      const range = requestCount === 2 ? [50, 60] : [1, 3]
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+        id: `submit-${requestCount}`,
+        function: { name: 'submit_code_map', arguments: JSON.stringify(submission(range[0], range[1])) },
+      }] } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: 'export function startRuntime() {\n  return true\n}' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'fast_context',
+          label: 'FastContext',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: buildFastContextSystemPrompt('low'),
+          maxTurns: 3,
+          maxParallel: 2,
+        },
+        objective: 'find runtime implementation',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        requireGroundedReport: true,
+        fastContextLevel: 'low',
+      })
+
+      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
+      expect(JSON.stringify(requestBodies[2].messages)).toContain('not covered by a read_file result')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('forces strict FastContext to submit a structured grounded execution flow', async () => {
     const originalFetch = globalThis.fetch
     let requestCount = 0
     globalThis.fetch = vi.fn(async () => {
@@ -726,16 +866,16 @@ describe('runSubAgent', () => {
           function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 20 }) },
         }] } }] }), { status: 200 })
       }
-      return new Response(JSON.stringify({ choices: [{ message: { content: [
-        'RANKED_CODE_MAP',
-        '1. src/core.ts L1-L3 role=execution-core confidence=high why=read and confirmed',
-        'EXECUTION_FLOW',
-        'caller -> startRuntime',
-        'SEARCHES_TRIED',
-        'startRuntime',
-        'UNCERTAINTY',
-        'none',
-      ].join('\n') } }] }), { status: 200 })
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+        id: 'submit-1',
+        function: { name: 'submit_code_map', arguments: JSON.stringify({
+          candidates: [{ path: 'src/core.ts', start_line: 1, end_line: 3, role: 'execution-core', confidence: 'high', why: 'read and confirmed' }],
+          relationships: [{ from: 'caller', to: 'startRuntime', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: 1, end_line: 3 }],
+          rejected_hypotheses: [],
+          searches_tried: ['startRuntime'],
+          uncertainty: ['none'],
+        }) },
+      }] } }] }), { status: 200 })
     }) as unknown as typeof fetch
 
     const executor = {
@@ -753,7 +893,7 @@ describe('runSubAgent', () => {
           label: 'FastContext',
           description: 'test',
           driver: 'main-model',
-          systemPrompt: 'test',
+          systemPrompt: buildFastContextSystemPrompt('medium'),
           maxTurns: 4,
           maxParallel: 2,
         },
@@ -764,6 +904,7 @@ describe('runSubAgent', () => {
         baseUrl: 'http://example.test',
         model: 'test-model',
         requireGroundedReport: true,
+        fastContextLevel: 'medium',
       })
 
       expect(result).toMatchObject({ ok: true, turns: 4, finalText: expect.stringContaining('EXECUTION_FLOW') })

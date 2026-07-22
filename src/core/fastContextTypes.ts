@@ -10,8 +10,6 @@ export interface FastContextTuning {
   maxTurns: number
   maxParallel: number
   taskTimeoutMs: number
-  minimumSearchCalls: number
-  minimumReadCalls: number
   reasoningEffort: 'low' | 'medium' | 'max'
 }
 
@@ -25,12 +23,12 @@ export function normalizeFastContextLevel(value: unknown): FastContextLevel {
 export function getFastContextTuning(value: unknown = 'medium'): FastContextTuning {
   const level = normalizeFastContextLevel(value)
   if (level === 'low') {
-    return { level, maxTurns: 5, maxParallel: 4, taskTimeoutMs: 180_000, minimumSearchCalls: 1, minimumReadCalls: 2, reasoningEffort: 'low' }
+    return { level, maxTurns: 5, maxParallel: 4, taskTimeoutMs: 180_000, reasoningEffort: 'low' }
   }
   if (level === 'max') {
-    return { level, maxTurns: 12, maxParallel: 8, taskTimeoutMs: 720_000, minimumSearchCalls: 4, minimumReadCalls: 6, reasoningEffort: 'max' }
+    return { level, maxTurns: 12, maxParallel: 8, taskTimeoutMs: 720_000, reasoningEffort: 'max' }
   }
-  return { level, maxTurns: 8, maxParallel: 6, taskTimeoutMs: 360_000, minimumSearchCalls: 2, minimumReadCalls: 3, reasoningEffort: 'medium' }
+  return { level, maxTurns: 8, maxParallel: 6, taskTimeoutMs: 360_000, reasoningEffort: 'medium' }
 }
 
 export interface FastContextScanHit {

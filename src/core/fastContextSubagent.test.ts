@@ -3,22 +3,10 @@ import type { FastContextScanHit } from './fastContextTypes'
 import type { ToolExecutor } from '../tools/executor'
 import {
   __testBuildEvidencePack,
-  __testObjectiveTokens,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
 describe('FastContext retrieval', () => {
-  it('keeps Chinese UI wording and mixed code identifiers searchable', () => {
-    const tokens = __testObjectiveTokens('\u627e\u5230\u540d\u7247\u6837\u5f0f tier-card-color-schemes \u4ee5\u53ca HeaderTitle')
-
-    expect(tokens).toContain('\u540d\u7247\u6837\u5f0f')
-    expect(tokens).toContain('\u540d\u7247')
-    expect(tokens).toContain('\u6837\u5f0f')
-    expect(tokens).toContain('tier-card-color-schemes')
-    expect(tokens).toContain('header')
-    expect(tokens).toContain('title')
-  })
-
   it('starts with the model instead of eagerly scanning the workspace', async () => {
     const executor = {
       searchFiles: vi.fn(),
@@ -70,5 +58,15 @@ describe('FastContext retrieval', () => {
     expect(pack).toContain('src/llm.ts L20-L40')
     expect(pack).not.toContain('local_recall_candidates:')
     expect(pack).not.toContain('src/fallback.ts')
+  })
+
+  it('refuses to manufacture a local semantic fallback', () => {
+    expect(() => __testBuildEvidencePack(
+      'find card styles',
+      new Map(),
+      123,
+      2,
+      true,
+    )).toThrow('without a valid model-submitted code map')
   })
 })

@@ -1,6 +1,4 @@
 import type {
-  FastContextConfidence,
-  FastContextEvidenceKind,
   FastContextLevel,
   FastContextScanEvent,
   FastContextScanHit,
@@ -25,23 +23,6 @@ const FAST_CONTEXT_DEFINITION: SubAgentDefinition = {
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 90_000
 
-const STOP_WORDS = new Set([
-  'the', 'and', 'for', 'with', 'from', 'this', 'that', 'when', 'where', 'what',
-  'why', 'how', 'into', 'your', 'ours', 'their', 'file', 'code', 'task', 'fix',
-  'bug', 'issue', 'error', 'failed', 'fails', 'wrong', 'about', 'need', 'needs',
-  'current', 'now', 'then', 'there', 'here', 'read', 'write', 'edit',
-  'locate', 'find', 'identify', 'show', 'implementation', 'implement', 'handling',
-  'support', 'codebase', 'source', 'logic', 'feature', 'behavior', 'trace', 'tracing',
-  'start', 'started', 'persist', 'persisted', 'poll', 'polled', 'restore', 'restored',
-  'terminate', 'terminated',
-])
-
-const FAILURE_QUERY_TERMS = new Set([
-  'abort', 'aborted', 'crash', 'crashes', 'deadlock', 'freeze', 'freezes', 'hang', 'hangs',
-  'stuck', 'timeout', 'timedout', 'exception', 'panic', 'failure',
-])
-const ENTRY_QUERY_TERMS = new Set(['bootstrap', 'entry', 'entrypoint', 'launch', 'startup'])
-
 interface RunParams {
   workspacePath: string
   objective: string
@@ -65,148 +46,12 @@ interface RunParams {
   onEvent?: (event: FastContextScanEvent) => void
 }
 
-interface CandidateSummary {
-  path: string
-  hits: FastContextScanHit[]
-  score: number
-  confidence: FastContextConfidence
-  kinds: FastContextEvidenceKind[]
-  reasons: string[]
-  symbols: string[]
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value))
-}
-
 function trimText(value: string, max = 220): string {
   const flat = value.replace(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}...` : flat
 }
 
-export function __testObjectiveTokens(objective: string): string[] {
-  const tokens: string[] = []
-  const add = (token: string): void => {
-    const value = token.trim().replace(/^[./-]+|[./-]+$/g, '').toLowerCase()
-    if (!value || STOP_WORDS.has(value)) return
-    if (/^[a-z0-9_.$/-]+$/i.test(value) && value.length < 2) return
-    if (/^[\u4e00-\u9fff]+$/u.test(value) && value.length < 2) return
-    tokens.push(value)
-  }
-
-  for (const quoted of objective.matchAll(/["'`“”‘’]([^"'`“”‘’]{2,})["'`“”‘’]/g)) {
-    add(quoted[1])
-  }
-
-  for (const raw of objective.match(/[A-Za-z0-9_.$/-]+/g) || []) {
-    add(raw)
-    for (const part of raw
-      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-      .split(/[_.$/-]+|\s+/)
-      .filter(Boolean)) {
-      add(part)
-    }
-  }
-
-  for (const raw of objective.match(/[\u4e00-\u9fff]+/gu) || []) {
-    add(raw)
-    for (let size = Math.min(4, raw.length); size >= 2; size--) {
-      for (let i = 0; i <= raw.length - size; i++) add(raw.slice(i, i + size))
-    }
-  }
-
-  return Array.from(new Set(tokens)).slice(0, 32)
-}
-
-function countTokenMatches(value: string, tokens: string[]): number {
-  const lower = value.toLowerCase()
-  let count = 0
-  for (const token of tokens) {
-    if (lower.includes(token)) count++
-  }
-  return count
-}
-
-function basename(path: string): string {
-  return path.split(/[\\/]/).pop() || path
-}
-
-function inferKind(hit: SubAgentEvidence, tokens: string[]): FastContextEvidenceKind {
-  const path = hit.path.toLowerCase()
-  const base = basename(path)
-  const preview = hit.preview.toLowerCase()
-  const reason = hit.reason.toLowerCase()
-  const objectiveMatches = countTokenMatches(`${path}\n${preview}`, tokens)
-  const looksLikeFailureSite = /\b(throw|error|exception|failed|failure|invalid|missing|undefined|null|abort|reject)\b/.test(preview)
-  const objectiveLooksLikeFailure = tokens.some(token => FAILURE_QUERY_TERMS.has(token))
-
-  if (/\b(test|spec|benchmark|fixture)\b|__tests__|\.test\.|\.spec\./.test(path)) return 'test'
-  if (/\b(schema|types?|interface|contract|protocol|ipc|dto|registry)\b/.test(path)) return 'schema'
-  if (/(\.config\.|config|settings|package\.json|tsconfig|vite|webpack|rollup|eslint|env)/.test(path)) return 'config'
-  if (/^bin\/.*\.(?:mjs|cjs|js|ts|py|sh|ps1|cmd|bat)$/.test(path) || /^(index|main|app|server|client|router|routes|cli)\./.test(base) || /\b(routes?|entry|bootstrap)\b/.test(path)) return 'entry'
-  if (objectiveLooksLikeFailure && looksLikeFailureSite && objectiveMatches >= 2) return 'root_cause'
-  if ((reason.includes('grep') || reason.includes('symbol')) && /\b(import|from|require|use[A-Z]|\w+\()/.test(hit.preview)) return 'caller'
-  if (reason.includes('file read') || /\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|java|cs|cpp|c|swift|kt)$/.test(path)) return 'implementation'
-  return 'supporting'
-}
-
-function extractSymbol(hit: SubAgentEvidence): string | undefined {
-  const preview = hit.preview.replace(/\s+/g, ' ')
-  const symbolMatch = preview.match(/\b(?:function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)/)
-    || preview.match(/\b([A-Za-z_$][\w$]*)\s*[:=]\s*(?:async\s*)?(?:\(|function\b)/)
-    || preview.match(/\bexport\s+(?:default\s+)?([A-Za-z_$][\w$]*)/)
-  return symbolMatch?.[1]
-}
-
-function scoreHit(hit: SubAgentEvidence, kind: FastContextEvidenceKind, tokens: string[]): number {
-  const path = hit.path.toLowerCase()
-  const preview = hit.preview.toLowerCase()
-  const reason = hit.reason.toLowerCase()
-  const pathMatches = countTokenMatches(path, tokens)
-  const previewMatches = countTokenMatches(preview, tokens)
-  const kindWeight: Record<FastContextEvidenceKind, number> = {
-    root_cause: 78,
-    entry: 72,
-    implementation: 68,
-    caller: 63,
-    schema: 60,
-    config: 56,
-    test: 54,
-    supporting: 44,
-  }
-  const sourceWeight = reason.includes('file read')
-    ? 10
-    : reason.includes('read confirmation')
-      ? 8
-      : reason.includes('symbol')
-        ? 8
-        : reason.includes('codemap')
-          ? 5
-          : reason.includes('grep') || reason.includes('glob')
-            ? 3
-            : 0
-  const lineSpan = Math.max(1, hit.endLine - hit.startLine + 1)
-  const spanPenalty = lineSpan > 90 ? 6 : 0
-  const documentationPenalty = /(?:^|\/)(?:docs?|readme)(?:\/|\.|$)/.test(path) && pathMatches === 0 ? 14 : 0
-  const entryIntent = tokens.some(token => ENTRY_QUERY_TERMS.has(token))
-  const entryIntentAdjustment = entryIntent ? (kind === 'entry' ? 18 : -8) : 0
-  return clamp(
-    kindWeight[kind] + pathMatches * 8 + previewMatches * 4 + sourceWeight
-      + entryIntentAdjustment - spanPenalty - documentationPenalty,
-    20,
-    140,
-  )
-}
-
-function confidenceForScore(score: number): FastContextConfidence {
-  if (score >= 78) return 'high'
-  if (score >= 58) return 'medium'
-  return 'low'
-}
-
-function decorateHit(hit: SubAgentEvidence, tokens: string[], workerId?: string): FastContextScanHit {
-  const kind = inferKind(hit, tokens)
-  const score = scoreHit(hit, kind, tokens)
+function toScanHit(hit: SubAgentEvidence, workerId?: string): FastContextScanHit {
   return {
     path: hit.path,
     line: hit.startLine,
@@ -215,37 +60,8 @@ function decorateHit(hit: SubAgentEvidence, tokens: string[], workerId?: string)
     preview: hit.preview,
     reason: hit.reason,
     workerId,
-    kind,
-    score,
-    confidence: confidenceForScore(score),
-    symbol: extractSymbol(hit),
+    symbol: hit.symbol,
   }
-}
-
-function summarizeCandidates(candidates: Map<string, FastContextScanHit[]>): CandidateSummary[] {
-  return Array.from(candidates.entries())
-    .map(([path, hits]) => {
-      const sortedHits = [...hits].sort((a, b) => (b.score || 0) - (a.score || 0))
-      const topScore = sortedHits[0]?.score || 0
-      const kinds = Array.from(new Set(sortedHits.map(hit => hit.kind || 'supporting')))
-      const reasons = Array.from(new Set(sortedHits.map(hit => hit.reason || '').filter(Boolean))).slice(0, 3)
-      const symbols = Array.from(new Set(sortedHits.map(hit => hit.symbol || '').filter(Boolean))).slice(0, 4)
-      const diversityBonus = Math.min(7, Math.max(0, kinds.length - 1) * 3)
-      const densityBonus = Math.min(12, Math.max(0, sortedHits.length - 1) * 3)
-      const readConfirmedBonus = reasons.some(reason => /(?:file read|read confirmation)/i.test(reason)) ? 6 : 0
-      const testPenalty = kinds.length === 1 && kinds[0] === 'test' ? 12 : 0
-      const score = Math.max(20, topScore + diversityBonus + densityBonus + readConfirmedBonus - testPenalty)
-      return {
-        path,
-        hits: sortedHits,
-        score,
-        confidence: confidenceForScore(score),
-        kinds,
-        reasons,
-        symbols,
-      }
-    })
-    .sort((a, b) => b.score - a.score)
 }
 
 export function __testBuildEvidencePack(
@@ -256,8 +72,8 @@ export function __testBuildEvidencePack(
   truncated: boolean,
   llmReport?: string,
 ): string {
-  const fallbackRanked = summarizeCandidates(candidates).slice(0, 12)
   const finalReport = trimLlmReport(llmReport)
+  if (!finalReport) throw new Error('FastContext completed without a valid model-submitted code map')
   const readConfirmedCount = Array.from(candidates.values())
     .flat()
     .filter(hit => /(?:file read|read confirmation)/i.test(hit.reason || ''))
@@ -270,44 +86,18 @@ export function __testBuildEvidencePack(
     'isolation: subagent raw tool history is not injected; only this compact result enters the main context.',
   ]
 
-  if (finalReport) {
-    lines.push(
-      'status: complete',
-      'authority: llm_verified_code_map',
-      '',
-      'use_policy:',
-      '- This report is the semantic retrieval result from model-directed search and file reads.',
-      '- Read only the files/ranges needed for the current task and verify again before editing.',
-      truncated ? '- Retrieval ended near its budget; investigate any stated uncertainty before editing.' : '',
-      '',
-      'llm_ranked_code_map:',
-      finalReport,
-    )
-  } else {
-    lines.push(
-      'status: degraded',
-      'authority: none',
-      '',
-      'use_policy:',
-      '- The semantic retrieval report did not complete. These are unranked tool evidence, not a code map or conclusion.',
-      '- The main agent must run targeted search and read_file before making claims or edits.',
-      '- Do not infer execution flow from ordering below.',
-      '',
-      'unranked_tool_evidence:',
-    )
-    if (fallbackRanked.length === 0) {
-      lines.push('- no concrete local candidates found')
-    }
-    fallbackRanked.forEach((candidate, idx) => {
-      lines.push(`${idx + 1}. ${candidate.path} [${candidate.confidence}] roles=${candidate.kinds.join(',')}`)
-      if (candidate.symbols.length > 0) lines.push(`   symbols: ${candidate.symbols.join(', ')}`)
-      if (candidate.reasons.length > 0) lines.push(`   why: ${candidate.reasons.join('; ')}`)
-      for (const hit of candidate.hits.slice(0, 2)) {
-        const label = hit.kind ? `${hit.kind} ` : ''
-        lines.push(`   evidence: ${label}L${hit.startLine}-${hit.endLine} ${trimText(hit.preview, 140)}`)
-      }
-    })
-  }
+  lines.push(
+    'status: complete',
+    'authority: llm_verified_code_map',
+    '',
+    'use_policy:',
+    '- This report is the semantic retrieval result from model-directed search and file reads.',
+    '- Read only the files/ranges needed for the current task and verify again before editing.',
+    truncated ? '- Retrieval ended near its budget; investigate any stated uncertainty before editing.' : '',
+    '',
+    'llm_ranked_code_map:',
+    finalReport,
+  )
 
   lines.push('', '</fast_context_pack>')
   return lines.join('\n').replace(/\n{3,}/g, '\n\n')
@@ -326,7 +116,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   const candidates = new Map<string, FastContextScanHit[]>()
   const allHits: FastContextScanHit[] = []
   const seenHitKeys = new Set<string>()
-  const tokens = __testObjectiveTokens(params.objective)
   const startedAt = Date.now()
 
   const tuning = getFastContextTuning(params.level)
@@ -391,7 +180,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       if (seenHitKeys.has(key)) return
       seenHitKeys.add(key)
       const workerId = currentTurn > 0 ? `map-pass-${currentTurn}` : undefined
-      const scanHit = decorateHit(event.evidence, tokens, workerId)
+      const scanHit = toScanHit(event.evidence, workerId)
       const list = candidates.get(scanHit.path) || []
       list.push(scanHit)
       candidates.set(scanHit.path, list)
@@ -403,9 +192,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         status: 'absorbed',
         workerId,
         reason: scanHit.reason,
-        kind: scanHit.kind,
-        score: scanHit.score,
-        confidence: scanHit.confidence,
       })
     } else if (event.type === 'turn_complete') {
       const workerId = `map-pass-${event.turn}`
@@ -434,8 +220,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     abortSignal: params.abortSignal,
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     requireGroundedReport: true,
-    minimumSearchCalls: tuning.minimumSearchCalls,
-    minimumReadCalls: tuning.minimumReadCalls,
+    fastContextLevel: tuning.level,
     onEvent: onSubEvent,
   })
 
@@ -451,7 +236,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     insight: 'compiling ranked code map',
   })
 
-  const ranked = summarizeCandidates(candidates)
   const truncated = (result.truncated ?? false) || !result.ok
   const evidencePack = __testBuildEvidencePack(
     params.objective,
@@ -467,14 +251,14 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     phase: 'completed',
     wave: result.turns,
     maxWaves: def.maxTurns,
-    insight: `completed - ${ranked.length} candidate files - ${allHits.length} evidence ranges`,
+    insight: `completed - ${candidates.size} candidate files - ${allHits.length} evidence ranges`,
   })
   emit({
     type: 'insight',
-    text: ranked.length > 0
-      ? `Code map ranked ${ranked.length} files; top candidate ${ranked[0].path} (${ranked[0].confidence})`
+    text: candidates.size > 0
+      ? `Model-submitted code map grounded in ${candidates.size} file(s)`
       : (result.finalText ? `Code map finished without concrete evidence - ${trimText(result.finalText, 160)}` : 'Code map found no specific evidence'),
-    tone: ranked.length > 0 ? 'success' : 'warning',
+    tone: candidates.size > 0 ? 'success' : 'warning',
   })
 
   return {
