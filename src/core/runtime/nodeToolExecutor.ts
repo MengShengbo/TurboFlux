@@ -68,7 +68,7 @@ const SENSITIVE_ENV_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVAT
 const CODE_SEARCH_SKIPPED_DIRS = new Set([
   '.git', '.hg', '.svn', '.claude', '.turboflux', '.vscode', '.cache', '.next', '.turbo',
   '.gradle', '.m2', '.npm', '.pnpm-store', '.rustup', '.venv',
-  'AppData', 'Library', 'node_modules', 'vendor', 'venv', 'dist', 'dist-desktop', 'build', 'out',
+  'AppData', 'appdata', 'Library', 'library', 'node_modules', 'vendor', 'venv', 'dist', 'dist-desktop', 'build', 'out',
   'coverage', 'target', 'tmp', 'temp',
 ])
 const CODE_SEARCH_EXCLUDE_GLOBS = Array.from(CODE_SEARCH_SKIPPED_DIRS, directory => `**/${directory}/**`)
