@@ -32,6 +32,7 @@ interface Args {
   timeoutMs: number
   systems: RetrievalSystemId[]
   retryTransient: boolean
+  transientAttempts: number
 }
 
 function option(name: string): string | undefined {
@@ -73,6 +74,7 @@ function parseArgs(): Args {
     timeoutMs: numberOption('--timeout-seconds', calibration ? 240 : 600) * 1000,
     systems: parseSystems(option('--systems')),
     retryTransient: process.argv.includes('--retry-transient'),
+    transientAttempts: numberOption('--transient-attempts', 3),
   }
 }
 
@@ -110,6 +112,20 @@ function median(values: number[]): number {
   if (values.length === 0) return 0
   const sorted = [...values].sort((left, right) => left - right)
   return sorted[Math.floor(sorted.length / 2)]
+}
+
+const TRANSIENT_FAILURES = new Set(['timeout', 'protocol', 'authentication', 'rate_limit', 'model'])
+
+function isTransientFailure(run: RunRecord): boolean {
+  return !run.success && (
+    TRANSIENT_FAILURES.has(run.failureKind)
+    || /database is locked|upstream service temporarily unavailable|\b(?:429|502|503|504)\b/i.test(run.error || '')
+    || (run.system === 'neutral-tool-agent' && run.failureKind === 'unknown')
+  )
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolveDelay => setTimeout(resolveDelay, ms))
 }
 
 class AdaptiveConcurrency {
@@ -224,7 +240,8 @@ function experimentMetadata(args: Args, manifestPath: string, caseIds: string[])
     notes: [
       'All LLM systems use the active TurboFlux endpoint and gpt-5.5.',
       'Native reasoning is disabled; protocol differences are recorded per run.',
-      `Adaptive case-level concurrency starts at ${Math.min(effectiveCaseConcurrency(args), 4)} and may rise to ${effectiveCaseConcurrency(args)}; FastContext uses two concurrent model branches and the API request ceiling is ${args.concurrency}. Systems within one case remain sequential and rotated.`,
+      `Adaptive case-level concurrency starts at ${Math.min(effectiveCaseConcurrency(args), 4)} and may rise to ${effectiveCaseConcurrency(args)}; FastContext uses one closed listwise model judgment and the API request ceiling is ${args.concurrency}. Systems within one case remain sequential and rotated.`,
+      args.retryTransient ? `Transient failures are retried up to ${args.transientAttempts} time(s) per run invocation.` : 'Transient retries are disabled.',
       args.command === 'calibrate' ? 'Calibration run; not a final comparative result.' : 'Formal repeated experiment.',
       args.caseOffset > 0 ? `Selection starts after ${args.caseOffset} balanced case(s), allowing a disjoint development slice.` : 'Selection starts at the first balanced case.',
     ],
@@ -279,13 +296,10 @@ async function runExperiment(args: Args): Promise<void> {
   writeManifest(selectedManifestPath, selectedManifest)
   const existingRuns = readJournal(journalPath)
   const latestRuns = new Map(existingRuns.map(run => [run.runId, run]))
-  const transientFailures = new Set(['timeout', 'protocol', 'authentication', 'rate_limit', 'model'])
   const completed = new Set([...latestRuns.values()]
     .filter(run => !args.retryTransient
       || run.success
-      || (!transientFailures.has(run.failureKind)
-        && !/database is locked|upstream service temporarily unavailable|\b(?:429|502|503|504)\b/i.test(run.error || '')
-        && !(run.system === 'neutral-tool-agent' && run.failureKind === 'unknown')))
+      || !isTransientFailure(run))
     .map(run => run.runId))
   const cache = new BenchmarkWorkspaceCache()
   const branchAwareMaximum = effectiveCaseConcurrency(args)
@@ -331,21 +345,30 @@ async function runExperiment(args: Args): Promise<void> {
           continue
         }
         console.log(`[${position}/${total}] ${system} :: ${item.id} #${repeat}`)
-        const record = safeRecord(await runRetrievalSystem(system, {
-          experimentId: metadata.experimentId,
-          item,
-          workspacePath: workspace.path,
-          repositoryStats: workspace.stats,
-          config,
-          repeat,
-          order,
-          timeoutMs: args.timeoutMs,
-        }), config.apiKey)
-        appendFileSync(journalPath, `${JSON.stringify(record)}\n`)
-        completed.add(record.runId)
-        console.log(`  ${record.success ? 'ok' : record.failureKind} ${(record.latencyMs / 1000).toFixed(1)}s R@10=${record.metrics.recallAt10.toFixed(2)} MRR=${record.metrics.reciprocalRank.toFixed(2)} req=${record.apiRequests}`)
-        const adjustment = concurrency.observe(record)
-        if (adjustment) console.log(`  concurrency ${adjustment}`)
+        const maximumAttempts = args.retryTransient ? args.transientAttempts : 1
+        for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+          const record = safeRecord(await runRetrievalSystem(system, {
+            experimentId: metadata.experimentId,
+            item,
+            workspacePath: workspace.path,
+            repositoryStats: workspace.stats,
+            config,
+            repeat,
+            order,
+            timeoutMs: args.timeoutMs,
+          }), config.apiKey)
+          appendFileSync(journalPath, `${JSON.stringify(record)}\n`)
+          const adjustment = concurrency.observe(record)
+          if (adjustment) console.log(`  concurrency ${adjustment}`)
+          if (isTransientFailure(record) && attempt < maximumAttempts) {
+            console.log(`  transient retry ${attempt}/${maximumAttempts}`)
+            await delay(Math.min(4_000, 750 * 2 ** (attempt - 1)))
+            continue
+          }
+          completed.add(record.runId)
+          console.log(`  ${record.success ? 'ok' : record.failureKind} ${(record.latencyMs / 1000).toFixed(1)}s R@10=${record.metrics.recallAt10.toFixed(2)} MRR=${record.metrics.reciprocalRank.toFixed(2)} req=${record.apiRequests}`)
+          break
+        }
       }
     }
   }
