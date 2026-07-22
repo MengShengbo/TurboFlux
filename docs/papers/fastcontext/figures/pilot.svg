@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE svg
+  PUBLIC '-//W3C//DTD SVG 1.0//EN'
+  'http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd'>
+<svg width="246" height="190" preserveAspectRatio="xMinYMin meet" viewBox="0 0 246 190" xmlns="http://www.w3.org/2000/svg" version="1.0" fill-rule="evenodd" xmlns:xlink="http://www.w3.org/1999/xlink">
+	<title>...</title>
+	<desc>...</desc>
+	<clipPath id="clip">
+		<rect x="0" y="0" width="246" height="190"/>
+	</clipPath>
+	<g id="group" transform="scale(1,-1) translate(0,-190)" style="clip-path: url(#clip)">
+		<g transform="">
+			<path d="M 82,36 L 82,152 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1;"/>
+			<path d="M 82,36 L 230,36 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1;"/>
+			<path d="M 79,36 L 230,36 Z" style="stroke: rgb(78%,80%,83%); stroke-linecap: butt; stroke-width: 0.55;"/>
+			<text x="71.77431640625" y="34.0" style="font-family: ArialEmbedded; font-size: 5.8px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,68) scale(1,-1)">0</text>
+			<path d="M 79,65 L 230,65 Z" style="stroke: rgb(78%,80%,83%); stroke-linecap: butt; stroke-width: 0.55;"/>
+			<text x="68.5486328125" y="63.0" style="font-family: ArialEmbedded; font-size: 5.8px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,126) scale(1,-1)">25</text>
+			<path d="M 79,94 L 230,94 Z" style="stroke: rgb(78%,80%,83%); stroke-linecap: butt; stroke-width: 0.55;"/>
+			<text x="68.5486328125" y="92.0" style="font-family: ArialEmbedded; font-size: 5.8px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,184) scale(1,-1)">50</text>
+			<path d="M 79,123 L 230,123 Z" style="stroke: rgb(78%,80%,83%); stroke-linecap: butt; stroke-width: 0.55;"/>
+			<text x="68.5486328125" y="121.0" style="font-family: ArialEmbedded; font-size: 5.8px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,242) scale(1,-1)">75</text>
+			<path d="M 79,152 L 230,152 Z" style="stroke: rgb(78%,80%,83%); stroke-linecap: butt; stroke-width: 0.55;"/>
+			<text x="65.32294921875" y="150.0" style="font-family: ArialEmbedded; font-size: 5.8px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,300) scale(1,-1)">100</text>
+			<rect x="97" y="36" width="10" height="109.96799999999999" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(70%,32%,21%); fill-rule: evenodd;"/>
+			<text x="96.550390625" y="148.968" style="font-family: ArialEmbedded; font-size: 5.6px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,297) scale(1,-1)">94.8</text>
+			<rect x="110" y="36" width="10" height="81.084" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(39%,48%,51%); fill-rule: evenodd;"/>
+			<text x="109.550390625" y="120.084" style="font-family: ArialEmbedded; font-size: 5.6px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,240) scale(1,-1)">69.9</text>
+			<text x="94.641064453125" y="23" style="font-family: ArialEmbedded; font-size: 5.4px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,46) scale(1,-1)">End-to-end</text>
+			<text x="105.899853515625" y="16" style="font-family: ArialEmbedded; font-size: 5.4px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,32) scale(1,-1)">Q</text>
+			<rect x="144" y="36" width="10" height="109.96799999999999" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(70%,32%,21%); fill-rule: evenodd;"/>
+			<text x="143.550390625" y="148.968" style="font-family: ArialEmbedded; font-size: 5.6px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,297) scale(1,-1)">94.8</text>
+			<rect x="157" y="36" width="10" height="108.11200000000002" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(39%,48%,51%); fill-rule: evenodd;"/>
+			<text x="156.550390625" y="147.11200000000002" style="font-family: ArialEmbedded; font-size: 5.6px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,294) scale(1,-1)">93.2</text>
+			<text x="138.943701171875" y="23" style="font-family: ArialEmbedded; font-size: 5.4px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,46) scale(1,-1)">Success-only</text>
+			<text x="152.899853515625" y="16" style="font-family: ArialEmbedded; font-size: 5.4px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,32) scale(1,-1)">Q</text>
+			<rect x="191" y="36" width="10" height="116.0" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(70%,32%,21%); fill-rule: evenodd;"/>
+			<text x="191.3283203125" y="155.0" style="font-family: ArialEmbedded; font-size: 5.6px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,310) scale(1,-1)">100</text>
+			<rect x="204" y="36" width="10" height="87.0" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(39%,48%,51%); fill-rule: evenodd;"/>
+			<text x="205.885546875" y="126.0" style="font-family: ArialEmbedded; font-size: 5.6px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,252) scale(1,-1)">75</text>
+			<text x="191.7958984375" y="23" style="font-family: ArialEmbedded; font-size: 5.4px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,46) scale(1,-1)">Success</text>
+			<text x="197.347509765625" y="16" style="font-family: ArialEmbedded; font-size: 5.4px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,32) scale(1,-1)">rate</text>
+			<rect x="88" y="166" width="8" height="8" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(70%,32%,21%); fill-rule: evenodd;"/>
+			<text x="100" y="166" style="font-family: ArialEmbedded; font-size: 6.1px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,332) scale(1,-1)">Historical FastContext</text>
+			<rect x="174" y="166" width="8" height="8" style="stroke: none; stroke-linecap: butt; stroke-width: 1; fill: rgb(39%,48%,51%); fill-rule: evenodd;"/>
+			<text x="186" y="166" style="font-family: ArialEmbedded; font-size: 6.1px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,332) scale(1,-1)">Claude Code</text>
+			<text x="51.77724609375001" y="3" style="font-family: ArialEmbedded-Bold; font-size: 5.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,6) scale(1,-1)">Pilot only: old commit, eight tasks, one run per task</text>
+		</g>
+	</g>
+</svg>

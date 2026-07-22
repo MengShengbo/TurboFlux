@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE svg
+  PUBLIC '-//W3C//DTD SVG 1.0//EN'
+  'http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd'>
+<svg width="246" height="330" preserveAspectRatio="xMinYMin meet" viewBox="0 0 246 330" xmlns="http://www.w3.org/2000/svg" version="1.0" fill-rule="evenodd" xmlns:xlink="http://www.w3.org/1999/xlink">
+	<title>...</title>
+	<desc>...</desc>
+	<clipPath id="clip">
+		<rect x="0" y="0" width="246" height="330"/>
+	</clipPath>
+	<g id="group" transform="scale(1,-1) translate(0,-330)" style="clip-path: url(#clip)">
+		<g transform="">
+			<text x="41.971875" y="317" style="font-family: ArialEmbedded-Bold; font-size: 7.2px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,634) scale(1,-1)">Compact evidence enters primary context once</text>
+			<rect x="78" y="286" width="90" height="22" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(84%,92%,85%); fill-rule: evenodd;"/>
+			<text x="83.329345703125" y="294.55" style="font-family: ArialEmbedded-Bold; font-size: 7.0px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,589) scale(1,-1)">FAST_CONTEXT_PACK</text>
+			<rect x="16" y="232" width="92" height="38" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(95%,87%,76%); fill-rule: evenodd;"/>
+			<text x="37.7341552734375" y="252.765" style="font-family: ArialEmbedded-Bold; font-size: 7.1px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,505) scale(1,-1)">Primary Agent</text>
+			<text x="28.278466796875" y="244.265" style="font-family: ArialEmbedded-Bold; font-size: 7.1px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,488) scale(1,-1)">model and tool loop</text>
+			<rect x="138" y="232" width="92" height="38" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(95%,87%,76%); fill-rule: evenodd;"/>
+			<text x="163.486962890625" y="252.765" style="font-family: ArialEmbedded-Bold; font-size: 7.1px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,505) scale(1,-1)">FastContext</text>
+			<text x="151.256103515625" y="244.265" style="font-family: ArialEmbedded-Bold; font-size: 7.1px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,488) scale(1,-1)">read-only subagent</text>
+			<path d="M 184,270 L 150,286 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="150 286, 153.0178 281.8445, 155.1255 286.3233" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<path d="M 123,286 L 62,270 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="62 270, 66.9807 268.7477, 65.72482 273.5357" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<rect x="20" y="179" width="84" height="30" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
+			<text x="34.977636718750006" y="195.72" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,391) scale(1,-1)">Context assembly</text>
+			<text x="30.154882812500002" y="187.52" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,375) scale(1,-1)">conversation + policy</text>
+			<rect x="142" y="179" width="84" height="30" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(92%,91%,72%); fill-rule: evenodd;"/>
+			<text x="162.451171875" y="195.72" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,391) scale(1,-1)">Evidence gate</text>
+			<text x="151.86767578125" y="187.52" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,375) scale(1,-1)">read-grounded report</text>
+			<path d="M 62,209 L 62,232 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="62 232, 59.525 227.5, 64.475 227.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<path d="M 184,209 L 184,232 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="184 232, 181.525 227.5, 186.475 227.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<rect x="20" y="128" width="84" height="30" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
+			<text x="39.9593505859375" y="144.67499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,289) scale(1,-1)">Execution tools</text>
+			<text x="30.569580078124996" y="136.77499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,273) scale(1,-1)">write / shell / approval</text>
+			<rect x="142" y="128" width="84" height="30" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
+			<text x="161.418212890625" y="144.67499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,289) scale(1,-1)">Read-only tools</text>
+			<text x="152.0284423828125" y="136.77499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,273) scale(1,-1)">search / symbol / read</text>
+			<path d="M 62,158 L 62,179 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="62 179, 59.525 174.5, 64.475 174.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<path d="M 184,158 L 184,179 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="184 179, 181.525 174.5, 186.475 174.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<rect x="20" y="78" width="84" height="28" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(86%,87%,94%); fill-rule: evenodd;"/>
+			<text x="40.772973632812494" y="93.705" style="font-family: ArialEmbedded; font-size: 6.7px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,187) scale(1,-1)">Main run state</text>
+			<text x="37.7043212890625" y="85.605" style="font-family: ArialEmbedded; font-size: 6.7px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,171) scale(1,-1)">Ctrl+C / steering</text>
+			<rect x="142" y="78" width="84" height="28" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(86%,87%,94%); fill-rule: evenodd;"/>
+			<text x="159.063232421875" y="93.675" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,187) scale(1,-1)">Independent task</text>
+			<text x="151.3095703125" y="85.77499999999999" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,171) scale(1,-1)">ID / timeout / transcript</text>
+			<path d="M 62,106 L 62,128 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="62 128, 59.525 123.5, 64.475 123.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<path d="M 184,106 L 184,128 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="184 128, 181.525 123.5, 186.475 123.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<rect x="78" y="28" width="90" height="28" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(96%,85%,87%); fill-rule: evenodd;"/>
+			<text x="85.164794921875" y="39.55" style="font-family: ArialEmbedded-Bold; font-size: 7.0px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,79) scale(1,-1)">Workspace + objective</text>
+			<path d="M 102,56 L 62,78 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="62 78, 64.75022 73.66273, 67.13572 78" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<path d="M 144,56 L 184,78 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
+			<polygon points="184 78, 178.8643 78, 181.2498 73.66273" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
+			<path d="M 123,67 L 123,222 Z" style="stroke: rgb(78%,80%,83%); stroke-linecap: butt; stroke-width: 0.8; stroke-dasharray: 3, 3;"/>
+			<text x="96.0358154296875" y="215" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,430) scale(1,-1)">raw trace boundary</text>
+			<path d="M 10 122 L 3 122 L 3 215 L 10 215 " style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.2; fill: none; fill-rule: evenodd;"/>
+			<text x="-8.25" y="166.5" style="font-family: ArialEmbedded; font-size: 7px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,333) scale(1,-1)">N x</text>
+			<path d="M 236 122 L 243 122 L 243 215 L 236 215 " style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.2; fill: none; fill-rule: evenodd;"/>
+			<text x="243.75" y="166.5" style="font-family: ArialEmbedded; font-size: 7px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,333) scale(1,-1)">N x</text>
+			<text x="28.731201171875" y="10" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,20) scale(1,-1)">interactive control plane</text>
+			<text x="152.48154296875" y="10" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(37%,38%,40%); stroke:none;" transform="translate(0,20) scale(1,-1)">isolated retrieval plane</text>
+		</g>
+	</g>
+</svg>
