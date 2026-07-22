@@ -56,6 +56,7 @@ export class BenchmarkWorkspaceCache {
     if (!existsSync(mirror)) {
       await run('git', ['clone', '--mirror', '--filter=blob:none', `https://github.com/${repository}.git`, mirror], { timeoutMs: 900_000 })
     }
+    await run('git', ['config', 'core.longpaths', 'true'], { cwd: mirror, timeoutMs: 30_000 })
     return mirror
   }
 

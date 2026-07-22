@@ -59,4 +59,9 @@ export interface FastContextScanResult {
   hits: FastContextScanHit[]
   elapsedMs: number
   truncated: boolean
+  telemetry?: {
+    toolCalls: number
+    searchCalls: number
+    readCalls: number
+  }
 }

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "2026-07-22-gpt-5.5-no-reasoning-calibration",
+  "createdAt": "2026-07-22T10:48:23.555Z",
+  "gitCommit": "a5c614e42ec5e50d43eb31fb4a2828c4c3c2625a",
+  "model": "gpt-5.5",
+  "reasoning": "disabled",
+  "endpointHost": "api.aibinghe.xyz",
+  "manifestPath": "benchmark-data/retrieval-paper-v1/splits/generalization-dev-manifest.json",
+  "manifestSha256": "06b62b219933f8c23e7ce4664c571105e9925b8bf57b52748d89211386a5b90d",
+  "systems": [
+    "fastcontext-medium"
+  ],
+  "caseIds": [
+    "pytest-dev__pytest-6202",
+    "pytest-dev__pytest-7205",
+    "psf__requests-1766",
+    "django__django-16595",
+    "mwaskom__seaborn-3187",
+    "sphinx-doc__sphinx-9320",
+    "pydata__xarray-4075",
+    "sympy__sympy-15345",
+    "django__django-16263",
+    "psf__requests-1142",
+    "django__django-15499",
+    "pydata__xarray-6992",
+    "apolloconfig__apollo-4568",
+    "apache__rocketmq-5062",
+    "trinodb__trino-3599",
+    "serverless__serverless-3804",
+    "sveltejs__svelte-5616",
+    "sveltejs__svelte-1190",
+    "mui__material-ui-26623",
+    "microsoft__vscode-122991",
+    "microsoft__vscode-108964",
+    "langchain-ai__langchain-6765",
+    "keras-team__keras-18871",
+    "langchain-ai__langchain-4579"
+  ],
+  "repeats": 1,
+  "timeoutMs": 300000,
+  "seed": 20260722,
+  "cliVersions": {
+    "claudeCode": "2.1.177 (Claude Code)",
+    "openCode": "1.17.18"
+  },
+  "notes": [
+    "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+    "Native reasoning is disabled; protocol differences are recorded per run.",
+    "Calibration run; not a final comparative result.",
+    "Selection starts at the first balanced case."
+  ]
+}

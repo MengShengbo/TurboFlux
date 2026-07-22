@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "seed": 20260722,
+  "sourceManifest": "benchmark-data/retrieval-paper-v1/manifest.json",
+  "contaminatedCaseIds": [
+    "sympy__sympy-13615",
+    "google__guava-3971",
+    "yt-dlp__yt-dlp-9862",
+    "serverless__serverless-5640",
+    "matplotlib__matplotlib-22865",
+    "mui__material-ui-19794"
+  ],
+  "counts": {
+    "contaminated": 6,
+    "generalizationDevelopment": 24,
+    "holdoutTest": 100,
+    "reserve": 70
+  },
+  "policy": {
+    "contaminated": "Never use for comparative claims; retained only for regression debugging.",
+    "generalizationDevelopment": "May guide architecture work; becomes contaminated after first result inspection.",
+    "holdoutTest": "Run only after implementation freeze; never tune against individual outcomes.",
+    "reserve": "Unused replacement pool for future preregistered studies."
+  }
+}

@@ -1,4 +1,4 @@
-import { isAbsolute, join, relative } from 'path'
+import { basename, isAbsolute, join, relative } from 'path'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
 import type { NativeReasoningConfig } from '../shared/agentTypes'
@@ -233,7 +233,7 @@ export function buildFastContextSystemPrompt(level: FastContextLevel = 'medium')
   const depthContract = tuning.level === 'low'
     ? 'Fast location pass: form at least two hypotheses, identify the likely entry and implementation, and stop once 2-4 read-confirmed candidates answer the objective.'
     : tuning.level === 'max'
-      ? 'Architecture pass: form at least four independent hypotheses, trace the complete caller-to-core-to-state/persistence flow, inspect tests and failure paths, and actively search for evidence that disproves the leading interpretation.'
+      ? 'Architecture pass: form at least four independent hypotheses, trace the complete caller-to-core-to-state/persistence flow, use tests and failure paths to verify the implementation, and actively search for evidence that disproves the leading interpretation.'
       : 'Engineering pass: form at least three hypotheses, trace the caller-to-core relationship plus relevant state/config boundaries, and return 3-7 read-confirmed candidates.'
   return `You are FastContext, a read-only code intelligence subagent for large repositories. You own all semantic query planning, evidence selection, ranking, and role assignment; local tools only execute the exact searches and reads you request. Your job is to rewrite the objective into independent search hypotheses, trace the real execution path, and submit a compact ranked code map grounded in files and line ranges.
 
@@ -255,13 +255,24 @@ Strategy:
 3. Start with your own search wave, refine it from returned evidence, and read the strongest source slices yourself before ranking candidates.
 4. Trace relationships, not just mentions: entry/caller -> implementation -> state or persistence -> tests/error path. For lifecycle questions, identify the true execution core and at least one caller.
 5. As soon as a search reveals the probable execution core, read that implementation before spending more turns on peripheral files. A search-confirmed core is not enough when it can still be read.
-6. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
-7. Finish only by calling submit_code_map. Submit 1-7 ranked, read-confirmed candidates plus grounded relationships, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
+6. After confirming a likely implementation, check exact-filename and symbol twins across package, platform, generated, vendored, or compatibility source trees. Read and rank each behavior-bearing mirror that would require the same change; reject stubs or generated copies explicitly.
+7. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
+8. Before submission, audit residual uncertainty. If a search result or mirror points to a named likely canonical owner, duplicated default, platform implementation, or direct caller that you have not read, read it now. Residual uncertainty is for ambiguity that cannot be removed with an available targeted read, not for known high-signal paths you skipped.
+9. Finish only by calling submit_code_map. Submit 1-7 ranked, read-confirmed candidates plus grounded relationships, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
+
+Ranking contract:
+- Rank by edit necessity, not by amount of code read or centrality in the call graph.
+- Put the file that owns the defective definition, default, schema, parser rule, or state transition first when that is the likely fix locus.
+- Put behavior-bearing mirrors or duplicated defaults that require the same edit immediately after their canonical owner.
+- Consumers, callers, and broad runtime entry points rank below the owning file when they only expose or propagate the defect and likely need no edit.
+- Tests are supporting verification, not primary implementation candidates, unless the objective explicitly asks to locate tests.
+- Set edit_kind for every candidate: owner, mirror, implementation, consumer, test, or supporting. The runtime uses this explicit judgment to stabilize final ranking.
 
 Rules:
 - Never describe files you have not read.
 - Every candidate and relationship must cite a path and line range covered by a read_file result from this run.
 - Prioritize source, entry, schema/config, and failing-path files over README-style context.
+- Rank files that implement or configure the behavior. Treat tests as verification evidence, not ranked candidates, unless the objective explicitly asks for tests.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Avoid dumping many related files. Five strong candidates beat twenty weak ones.
 - Use search_content pagination and context windows when a broad query is truncated or crowded.
@@ -302,6 +313,10 @@ export interface SubAgentResult {
   truncated?: boolean
 }
 
+const FAST_CONTEXT_RANKING_AUDIT_PROMPT = `You are the final edit-locus ranker for a grounded repository retrieval result. Use only the supplied candidates, cited ranges, and read excerpts. Do not add paths, ranges, or facts. Re-submit the complete code map with candidates ordered by actual edit necessity.
+
+Apply this counterfactual: if the defect were fixed entirely in another candidate, would this file still require an edit? An owner must be supported by cited code that directly defines or mutates the defective value, rule, schema, or transition. Merely loading or consuming a value defined elsewhere is not ownership. Canonical owners and behavior-bearing mirrors that must change rank first. Files that only load, call, expose, or test the defective value rank later. Trust read excerpts over provisional role labels or explanations. Preserve every grounded candidate, relationship, search, and uncertainty item; this pass may relabel and reorder but must not delete evidence. Call submit_code_map only.`
+
 interface ToolCallRequest {
   id: string
   function: { name: string; arguments: string }
@@ -312,6 +327,7 @@ interface SubmittedCandidate {
   startLine: number
   endLine: number
   role: string
+  editKind: 'owner' | 'mirror' | 'implementation' | 'consumer' | 'test' | 'supporting'
   confidence: 'high' | 'medium' | 'low'
   why: string
 }
@@ -531,15 +547,30 @@ function positiveLine(value: unknown, fallback = 1): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function normalizeEditKind(value: unknown, role: string): SubmittedCandidate['editKind'] {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'].includes(normalized)) {
+    return normalized as SubmittedCandidate['editKind']
+  }
+  if (/mirror|duplicate|synchron|same[- ]edit/.test(role)) return 'mirror'
+  if (/root[- ]cause|owner|definition|default|schema|parser rule|state transition/.test(role)) return 'owner'
+  if (/test|verification/.test(role)) return 'test'
+  if (/caller|consumer|entry|lifecycle/.test(role)) return 'consumer'
+  if (/implementation|core|handler|runtime/.test(role)) return 'implementation'
+  return 'supporting'
+}
+
 function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string): SubmittedCodeMap {
   const candidates = Array.isArray(value.candidates)
     ? value.candidates.slice(0, 7).map((candidate: Record<string, any>) => {
         const startLine = positiveLine(candidate.start_line ?? candidate.startLine)
+        const role = String(candidate.role || '').replace(/\s+/g, ' ').trim().slice(0, 80)
         return {
           path: toWorkspaceRelative(workspacePath, String(candidate.path || '').trim()),
           startLine,
           endLine: Math.max(startLine, positiveLine(candidate.end_line ?? candidate.endLine, startLine)),
-          role: String(candidate.role || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+          role,
+          editKind: normalizeEditKind(candidate.edit_kind ?? candidate.editKind, role.toLowerCase()),
           confidence: ['high', 'medium', 'low'].includes(candidate.confidence) ? candidate.confidence : 'medium',
           why: String(candidate.why || '').replace(/\s+/g, ' ').trim().slice(0, 320),
         } satisfies SubmittedCandidate
@@ -567,20 +598,117 @@ function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string
   }
 }
 
-function rangeIsRead(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): boolean {
-  const normalizedPath = path.replace(/\\/g, '/')
-  return evidence.some(item => item.reason === 'file read'
-    && item.path.replace(/\\/g, '/') === normalizedPath
-    && startLine >= item.startLine
-    && endLine <= item.endLine)
+interface LineRange {
+  startLine: number
+  endLine: number
 }
 
-function readRangesForPath(path: string, evidence: SubAgentEvidence[]): string {
+function mergedReadRanges(path: string, evidence: SubAgentEvidence[]): LineRange[] {
   const normalizedPath = path.replace(/\\/g, '/')
   const ranges = evidence
     .filter(item => item.reason === 'file read' && item.path.replace(/\\/g, '/') === normalizedPath)
-    .map(item => `${item.startLine}-${item.endLine}`)
+    .map(item => ({ startLine: item.startLine, endLine: item.endLine }))
+    .sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine)
+  const merged: LineRange[] = []
+  for (const range of ranges) {
+    const previous = merged.at(-1)
+    if (!previous || range.startLine > previous.endLine + 1) {
+      merged.push({ ...range })
+      continue
+    }
+    previous.endLine = Math.max(previous.endLine, range.endLine)
+  }
+  return merged
+}
+
+function rangeIsRead(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): boolean {
+  return mergedReadRanges(path, evidence).some(range => startLine >= range.startLine && endLine <= range.endLine)
+}
+
+function readRangesForPath(path: string, evidence: SubAgentEvidence[]): string {
+  const ranges = mergedReadRanges(path, evidence).map(item => `${item.startLine}-${item.endLine}`)
   return ranges.length > 0 ? ranges.join(', ') : 'none'
+}
+
+function clampNearReadBoundary(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): LineRange | null {
+  const overlaps = mergedReadRanges(path, evidence)
+    .map(range => ({
+      startLine: Math.max(startLine, range.startLine),
+      endLine: Math.min(endLine, range.endLine),
+    }))
+    .filter(range => range.startLine <= range.endLine)
+    .sort((left, right) => (right.endLine - right.startLine) - (left.endLine - left.startLine))
+  const best = overlaps[0]
+  if (!best) return null
+  const requestedLength = endLine - startLine + 1
+  const coveredLength = best.endLine - best.startLine + 1
+  const outsideLines = requestedLength - coveredLength
+  if (outsideLines > 2 || coveredLength / requestedLength < 0.8) return null
+  return best
+}
+
+function normalizeSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): void {
+  const normalizeRange = (item: { path?: string; evidencePath?: string; startLine: number; endLine: number }): void => {
+    const path = item.path || item.evidencePath || ''
+    if (!path || rangeIsRead(path, item.startLine, item.endLine, evidence)) return
+    const grounded = clampNearReadBoundary(path, item.startLine, item.endLine, evidence)
+    if (!grounded) return
+    item.startLine = grounded.startLine
+    item.endLine = grounded.endLine
+  }
+  report.candidates.forEach(normalizeRange)
+  report.relationships.forEach(normalizeRange)
+}
+
+function pruneUngroundedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): void {
+  const candidateCount = report.candidates.length
+  const relationshipCount = report.relationships.length
+  report.candidates = report.candidates.filter(candidate => Boolean(candidate.path && candidate.role && candidate.why)
+    && rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence))
+  report.relationships = report.relationships.filter(relationship => Boolean(
+    relationship.from && relationship.to && relationship.relationship && relationship.evidencePath,
+  ) && rangeIsRead(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence))
+  const removedCandidates = candidateCount - report.candidates.length
+  const removedRelationships = relationshipCount - report.relationships.length
+  if (removedCandidates > 0 || removedRelationships > 0) {
+    report.uncertainty.push(`evidence gate excluded ${removedCandidates} ungrounded candidate(s) and ${removedRelationships} ungrounded relationship(s)`)
+  }
+}
+
+function sortSubmittedCandidates(report: SubmittedCodeMap): void {
+  const priority: Record<SubmittedCandidate['editKind'], number> = {
+    owner: 0,
+    mirror: 1,
+    implementation: 2,
+    consumer: 3,
+    test: 4,
+    supporting: 5,
+  }
+  const confidencePriority: Record<SubmittedCandidate['confidence'], number> = { high: 0, medium: 1, low: 2 }
+  report.candidates = report.candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((left, right) => priority[left.candidate.editKind] - priority[right.candidate.editKind]
+      || confidencePriority[left.candidate.confidence] - confidencePriority[right.candidate.confidence]
+      || left.index - right.index)
+    .map(item => item.candidate)
+}
+
+function mergeRankingAuditBaseline(report: SubmittedCodeMap, baseline: SubmittedCodeMap): void {
+  for (const candidate of baseline.candidates) {
+    const normalizedPath = candidate.path.replace(/\\/g, '/')
+    const represented = report.candidates.some(item => item.path.replace(/\\/g, '/') === normalizedPath
+      && item.startLine <= candidate.endLine
+      && item.endLine >= candidate.startLine)
+    if (!represented) report.candidates.push({ ...candidate })
+  }
+  const relationshipKeys = new Set(report.relationships.map(item => `${item.from}|${item.to}|${item.evidencePath}`))
+  for (const relationship of baseline.relationships) {
+    const key = `${relationship.from}|${relationship.to}|${relationship.evidencePath}`
+    if (!relationshipKeys.has(key)) report.relationships.push({ ...relationship })
+  }
+  report.rejectedHypotheses = [...new Set([...report.rejectedHypotheses, ...baseline.rejectedHypotheses])]
+  report.searchesTried = [...new Set([...report.searchesTried, ...baseline.searchesTried])]
+  report.uncertainty = [...new Set([...report.uncertainty, ...baseline.uncertainty])]
 }
 
 function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[], level: FastContextLevel): string | null {
@@ -610,7 +738,7 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
 function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
   const lines = ['RANKED_CODE_MAP']
   report.candidates.forEach((candidate, index) => {
-    lines.push(`${index + 1}. ${candidate.path} L${candidate.startLine}-L${candidate.endLine} role=${candidate.role} confidence=${candidate.confidence}`)
+    lines.push(`${index + 1}. ${candidate.path} L${candidate.startLine}-L${candidate.endLine} kind=${candidate.editKind} role=${candidate.role} confidence=${candidate.confidence}`)
     lines.push(`   why: ${candidate.why}`)
   })
   lines.push('', 'EXECUTION_FLOW')
@@ -621,6 +749,35 @@ function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
   lines.push('', 'SEARCHES_TRIED', ...report.searchesTried.map(item => `- ${item}`))
   lines.push('', 'UNCERTAINTY', ...report.uncertainty.map(item => `- ${item}`))
   return lines.join('\n')
+}
+
+function renderRankingAuditInput(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string {
+  const lines = [renderSubmittedCodeMap(report), '', 'READ_EXCERPTS']
+  const seen = new Set<string>()
+  for (const candidate of report.candidates) {
+    const normalizedPath = candidate.path.replace(/\\/g, '/')
+    const supportingRead = evidence.find(item => item.reason === 'file read'
+      && item.path.replace(/\\/g, '/') === normalizedPath
+      && candidate.startLine <= item.endLine
+      && candidate.endLine >= item.startLine)
+    if (!supportingRead) continue
+    const key = `${normalizedPath}:${supportingRead.startLine}-${supportingRead.endLine}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    lines.push(`--- ${candidate.path}:L${supportingRead.startLine}-L${supportingRead.endLine}`)
+    if (supportingRead.content) {
+      const contentLines = supportingRead.content.split('\n')
+      const localStart = Math.max(0, candidate.startLine - supportingRead.startLine - 2)
+      const localEnd = Math.min(contentLines.length, candidate.endLine - supportingRead.startLine + 3)
+      lines.push(contentLines.slice(localStart, localEnd)
+        .map((line, index) => `${supportingRead.startLine + localStart + index} | ${line}`)
+        .join('\n')
+        .slice(0, 1_600))
+    } else {
+      lines.push(supportingRead.preview.slice(0, 900))
+    }
+  }
+  return lines.join('\n').slice(0, 12_000)
 }
 
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
@@ -771,10 +928,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                   start_line: { type: 'number' },
                   end_line: { type: 'number' },
                   role: { type: 'string' },
+                  edit_kind: { type: 'string', enum: ['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'] },
                   confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
                   why: { type: 'string' },
                 },
-                required: ['path', 'start_line', 'end_line', 'role', 'confidence', 'why'],
+                required: ['path', 'start_line', 'end_line', 'role', 'edit_kind', 'confidence', 'why'],
               },
             },
             relationships: {
@@ -814,6 +972,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let searchRecoveryUsed = false
   let reportRecoveryUsed = false
   let submissionRecoveryUsed = false
+  let rankingAuditUsed = false
+  let rankingAuditInput = ''
+  let rankingAuditBaseline: SubmittedCodeMap | null = null
   let resolvedProtocol: ModelProtocol | null = null
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
   let turnLimit = definition.maxTurns
@@ -851,13 +1012,23 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
         const url = buildModelProtocolUrl(baseUrl, protocol)
-        const requestMessages = messages.map(message => ({ ...message })) as Array<Record<string, unknown>>
+        const rankingAuditPending = Boolean(rankingAuditInput)
+        const activeSystemPrompt = rankingAuditPending ? FAST_CONTEXT_RANKING_AUDIT_PROMPT : definition.systemPrompt
+        const activeMessages: SubAgentMessage[] = rankingAuditPending
+          ? [
+              { role: 'system', content: activeSystemPrompt },
+              { role: 'user', content: `Objective: ${objective}\n\nProvisional grounded code map:\n${rankingAuditInput}` },
+            ]
+          : messages
+        const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
+        const finalizationOnly = rankingAuditPending || (strictFastContext && turn === turnLimit && hasModelReadEvidence())
+        const requestTools = finalizationOnly ? tools.filter(tool => tool.function.name === 'submit_code_map') : tools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
               model: modelId,
-              system: definition.systemPrompt,
-              messages: toAnthropicMessages(messages),
-              tools: tools.map(tool => ({
+              system: activeSystemPrompt,
+              messages: toAnthropicMessages(activeMessages),
+              tools: requestTools.map(tool => ({
                 name: tool.function.name,
                 description: tool.function.description,
                 input_schema: tool.function.parameters,
@@ -868,17 +1039,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           : protocol === 'openai_responses'
             ? {
                 model: modelId,
-                instructions: definition.systemPrompt,
+                instructions: activeSystemPrompt,
                 input: toResponsesInput(requestMessages),
-                tools: toResponsesTools(tools),
+                tools: toResponsesTools(requestTools),
                 temperature: definition.temperature ?? 0,
                 max_output_tokens: definition.maxOutputTokens || 4096,
                 store: false,
               }
             : {
                 model: modelId,
-                messages,
-                tools,
+                messages: activeMessages,
+                tools: requestTools,
                 temperature: definition.temperature ?? 0,
                 max_tokens: definition.maxOutputTokens || 4096,
                 stream: false,
@@ -1041,9 +1212,31 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         submissionError = 'submit_code_map arguments are not valid JSON'
       }
       const report = parseSubmittedCodeMap(submissionArgs, workspacePath)
+      normalizeSubmittedCodeMap(report, collectedEvidence)
+      pruneUngroundedCodeMap(report, collectedEvidence)
+      if (rankingAuditBaseline) mergeRankingAuditBaseline(report, rankingAuditBaseline)
+      sortSubmittedCandidates(report)
       submissionError ||= validateSubmittedCodeMap(report, collectedEvidence, fastContextLevel) || ''
       if (!submissionError) {
         const finalText = renderSubmittedCodeMap(report)
+        if (strictFastContext && fastContextLevel !== 'low' && !rankingAuditUsed && report.candidates.length > 1) {
+          rankingAuditUsed = true
+          rankingAuditInput = renderRankingAuditInput(report, collectedEvidence)
+          rankingAuditBaseline = {
+            candidates: report.candidates.map(candidate => ({ ...candidate })),
+            relationships: report.relationships.map(relationship => ({ ...relationship })),
+            rejectedHypotheses: [...report.rejectedHypotheses],
+            searchesTried: [...report.searchesTried],
+            uncertainty: [...report.uncertainty],
+          }
+          submissionRecoveryUsed = false
+          if (turn >= turnLimit) turnLimit += 1
+          emit({ type: 'tool_result', tool: 'submit_code_map', ok: true, summary: 'grounded map accepted; running compact edit-locus ranking audit', turn })
+          emit({ type: 'turn_complete', turn, calls: 1 })
+          continue
+        }
+        rankingAuditInput = ''
+        rankingAuditBaseline = null
         emit({ type: 'final', text: finalText })
         emit({ type: 'turn_complete', turn, calls: 1 })
         return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence }
@@ -1053,6 +1246,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         emit({ type: 'error', message: error })
         return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
       }
+      if (rankingAuditInput) rankingAuditInput = `${rankingAuditInput}\n\nPrevious ranking audit rejected: ${submissionError}`
       if (turn >= turnLimit) turnLimit += 1
       messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })
       messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
@@ -1192,6 +1386,59 @@ interface ToolExecResult {
   evidence: SubAgentEvidence[]
 }
 
+const GENERIC_TWIN_FILENAMES = new Set([
+  'index.js', 'index.jsx', 'index.ts', 'index.tsx', 'main.js', 'main.ts',
+  'mod.rs', 'lib.rs', '__init__.py', 'package.json', 'readme.md',
+])
+
+async function findPathTwinHints(path: string, workspacePath: string, executor: ToolExecutor): Promise<string[]> {
+  const filename = basename(path).toLowerCase()
+  if (!filename || GENERIC_TWIN_FILENAMES.has(filename)) return []
+  try {
+    const result = await executor.searchFiles(`**/${basename(path)}`, workspacePath)
+    if (!result.success || !result.data || result.data.truncated) return []
+    const matches = [...new Set(result.data.matches.map(match => toWorkspaceRelative(workspacePath, match)))]
+      .filter(match => match.replace(/\\/g, '/') !== path.replace(/\\/g, '/'))
+    return matches.length <= 8 ? matches : []
+  } catch {
+    return []
+  }
+}
+
+interface SubAgentSearchHit {
+  file: string
+  line: number
+  text: string
+  context?: string
+}
+
+function searchPathPriority(path: string): number {
+  const normalized = path.replace(/\\/g, '/').toLowerCase()
+  if (/(^|\/)(docs?|examples?|fixtures?|templates?|vendor|generated)(\/|$)/.test(normalized)) return 2
+  if (/(^|\/)(__tests__|tests?|spec)(\/|$)|\.(?:test|spec)\.[^/]+$/.test(normalized)) return 1
+  return 0
+}
+
+function diversifySearchHits(hits: SubAgentSearchHit[], limit: number): SubAgentSearchHit[] {
+  const buckets = new Map<string, { priority: number; firstIndex: number; hits: SubAgentSearchHit[] }>()
+  hits.forEach((hit, index) => {
+    const path = hit.file.replace(/\\/g, '/')
+    const bucket = buckets.get(path)
+    if (bucket) bucket.hits.push(hit)
+    else buckets.set(path, { priority: searchPathPriority(path), firstIndex: index, hits: [hit] })
+  })
+  const orderedBuckets = [...buckets.values()].sort((left, right) => left.priority - right.priority || left.firstIndex - right.firstIndex)
+  const selected: SubAgentSearchHit[] = []
+  for (let depth = 0; selected.length < limit && orderedBuckets.some(bucket => depth < bucket.hits.length); depth += 1) {
+    for (const bucket of orderedBuckets) {
+      const hit = bucket.hits[depth]
+      if (hit) selected.push(hit)
+      if (selected.length >= limit) break
+    }
+  }
+  return selected
+}
+
 async function executeSubAgentTool(name: string, args: Record<string, any>, workspacePath: string, executor: ToolExecutor): Promise<ToolExecResult> {
   const evidence: SubAgentEvidence[] = []
 
@@ -1209,10 +1456,11 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       const contextBefore = Math.max(0, Math.min(12, Math.floor(Number(args.context_before) || 0)))
       const contextAfter = Math.max(0, Math.min(12, Math.floor(Number(args.context_after) || 0)))
       const usingPagedSearch = typeof executor.searchContentPage === 'function'
+      const retrievalLimit = Math.min(200, headLimit * 4)
       const res = usingPagedSearch
         ? await executor.searchContentPage!(pattern, basePath, filePattern, caseInsensitive, {
             offset,
-            limit: headLimit,
+            limit: retrievalLimit,
             contextBefore,
             contextAfter,
             multiline: args.multiline === true,
@@ -1224,13 +1472,13 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         return { ok: false, output: `Search failed: ${error}`, summary: `grep "${pattern}" failed: ${error}`, evidence }
       }
       const page = usingPagedSearch
-        ? res.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }>; totalMatches?: number; truncated?: boolean }
+        ? res.data as { hits?: SubAgentSearchHit[]; totalMatches?: number; truncated?: boolean }
         : { hits: Array.isArray(res.data) ? res.data : [], totalMatches: Array.isArray(res.data) ? res.data.length : 0, truncated: false }
       const pageHits = page.hits || []
       if (pageHits.length === 0) {
         return { ok: true, output: 'No matches found.', summary: `grep "${pattern}" → 0 hits`, evidence }
       }
-      const hits = pageHits.slice(0, headLimit)
+      const hits = diversifySearchHits(pageHits, headLimit)
       const lines: string[] = []
       for (const hit of hits) {
         const relPath = toWorkspaceRelative(workspacePath, hit.file)
@@ -1244,7 +1492,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
           reason: `grep: ${pattern}`,
         })
       }
-      if (page.truncated) lines.push(`[More matches available. Continue with offset=${offset + hits.length}.]`)
+      if (page.truncated) lines.push(`[More matches available. Continue with offset=${offset + pageHits.length}.]`)
       return { ok: true, output: lines.join('\n'), summary: `grep "${pattern}" → ${hits.length} hits`, evidence }
     }
 
@@ -1283,10 +1531,15 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         startLine: offset + 1,
         endLine: offset + slice.length,
         preview,
+        content: slice.join('\n').slice(0, 20_000),
         reason: 'file read',
       })
       const outputLines = slice.map((line, index) => `${offset + index + 1} | ${line}`)
       if (rangeData?.truncated) outputLines.push(`[More lines available. Continue with offset=${offset + slice.length + 1}.]`)
+      const pathTwins = await findPathTwinHints(relativePath, workspacePath, executor)
+      if (pathTwins.length > 0) {
+        outputLines.push(`[Same-name source candidates: ${pathTwins.join(', ')}. Read behavior-bearing platform/package mirrors before final ranking; ignore stubs and generated copies that do not require edits.]`)
+      }
       return { ok: true, output: outputLines.join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence }
     }
 

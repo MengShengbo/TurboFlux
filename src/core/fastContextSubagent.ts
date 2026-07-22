@@ -117,6 +117,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   const allHits: FastContextScanHit[] = []
   const seenHitKeys = new Set<string>()
   const startedAt = Date.now()
+  const telemetry = { toolCalls: 0, searchCalls: 0, readCalls: 0 }
 
   const tuning = getFastContextTuning(params.level)
   const def: SubAgentDefinition = {
@@ -167,6 +168,9 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         tone: 'warning',
       })
     } else if (event.type === 'tool_call') {
+      telemetry.toolCalls += 1
+      if (event.tool === 'read_file') telemetry.readCalls += 1
+      else if (event.tool !== 'submit_code_map') telemetry.searchCalls += 1
       const argSummary = (() => {
         const obj = (event.args && typeof event.args === 'object') ? (event.args as Record<string, unknown>) : {}
         const pattern = obj.pattern ?? obj.path ?? ''
@@ -268,5 +272,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     hits: allHits,
     elapsedMs: Date.now() - startedAt,
     truncated,
+    telemetry,
   }
 }

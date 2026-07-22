@@ -67,6 +67,7 @@ export interface SubAgentEvidence {
   startLine: number
   endLine: number
   preview: string
+  content?: string
   reason: string
   kind?: 'entry' | 'implementation' | 'caller' | 'config' | 'schema' | 'test' | 'root_cause' | 'supporting'
   score?: number

@@ -36,6 +36,8 @@ describe('FastContext retrieval levels', () => {
     expect(maxPrompt).toContain('disproves the leading interpretation')
     expect(mediumPrompt).toContain('local tools only execute the exact searches and reads you request')
     expect(mediumPrompt).toContain('submit_code_map')
+    expect(mediumPrompt).toContain('Rank by edit necessity')
+    expect(mediumPrompt).toContain('behavior-bearing mirrors')
     expect(mediumPrompt).not.toContain('at least 2 model-directed search call(s)')
     expect(mediumPrompt).not.toContain('prefetch')
   })

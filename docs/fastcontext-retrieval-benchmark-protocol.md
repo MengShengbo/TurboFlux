@@ -56,6 +56,12 @@ Failures and timeouts score zero in end-to-end quality metrics. Latency and toke
 
 ## Commands
 
+Generate fixed data splits before further tuning. Any case found in an existing `runs.jsonl` is assigned to the contaminated split and excluded from development and holdout data. The 24-case generalization split may guide architecture work; the 100-case holdout must remain uninspected until implementation freeze and must never be used for per-case tuning.
+
+```powershell
+npm run benchmark:retrieval-splits
+```
+
 ```powershell
 npm run benchmark:retrieval-paper -- prepare --per-dataset 100 --seed 20260722
 npm run benchmark:retrieval-paper -- calibrate --limit 6 --repeats 1

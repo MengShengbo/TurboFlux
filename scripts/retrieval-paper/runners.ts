@@ -266,17 +266,19 @@ async function runFastContext(context: RunContext, level: FastContextLevel): Pro
     })
     observation = observed.observation
     const report = observed.value.evidencePack
-    const eventText = events.filter(event => event.type === 'insight').map(event => event.text)
-    const readPaths = events.filter(event => event.type === 'hit').map(event => event.hit.path)
+    const telemetry = observed.value.telemetry
+    const readPaths = events
+      .filter((event): event is Extract<FastContextScanEvent, { type: 'hit' }> => event.type === 'hit' && event.hit.reason === 'file read')
+      .map(event => event.hit.path)
     return {
       success: /authority:\s*llm_verified_code_map/i.test(report),
       timedOut: controller.signal.aborted,
       latencyMs: performance.now() - startedAt,
       apiRequests: observation.requests,
       apiRetries: observation.retries,
-      toolCalls: eventText.filter(text => /^(?:search_|trace_symbol|get_codemap|read_file):/i.test(text)).length,
-      searchCalls: eventText.filter(text => /^(?:search_|trace_symbol|get_codemap):/i.test(text)).length,
-      readCalls: eventText.filter(text => /^read_file:/i.test(text)).length,
+      toolCalls: telemetry?.toolCalls || 0,
+      searchCalls: telemetry?.searchCalls || 0,
+      readCalls: telemetry?.readCalls || 0,
       rankedPaths: extractPaths(report, context.workspacePath),
       readPaths: uniquePaths(readPaths, context.workspacePath),
       usage: observation.usage,
@@ -285,13 +287,15 @@ async function runFastContext(context: RunContext, level: FastContextLevel): Pro
     }
   } catch (error) {
     const base = errorOutput(startedAt, error, observation)
-    const eventText = events.filter(event => event.type === 'insight').map(event => event.text)
+    const toolCallText = events.filter(event => event.type === 'insight').map(event => event.text)
     return {
       ...base,
-      toolCalls: eventText.filter(text => /^(?:search_|trace_symbol|get_codemap|read_file):/i.test(text)).length,
-      searchCalls: eventText.filter(text => /^(?:search_|trace_symbol|get_codemap):/i.test(text)).length,
-      readCalls: eventText.filter(text => /^read_file:/i.test(text)).length,
-      readPaths: uniquePaths(events.filter(event => event.type === 'hit').map(event => event.hit.path), context.workspacePath),
+      toolCalls: toolCallText.filter(text => /^(?:search_|trace_symbol|get_codemap|read_file):/i.test(text)).length,
+      searchCalls: toolCallText.filter(text => /^(?:search_|trace_symbol|get_codemap):/i.test(text)).length,
+      readCalls: toolCallText.filter(text => /^read_file:/i.test(text)).length,
+      readPaths: uniquePaths(events
+        .filter((event): event is Extract<FastContextScanEvent, { type: 'hit' }> => event.type === 'hit' && event.hit.reason === 'file read')
+        .map(event => event.hit.path), context.workspacePath),
     }
   } finally {
     clearTimeout(timer)

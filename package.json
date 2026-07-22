@@ -19,7 +19,8 @@
     "test": "vitest run",
     "benchmark:fast-context": "tsx scripts/retrieval-benchmark.ts",
     "benchmark:retrieval-competitive": "tsx scripts/competitive-retrieval-benchmark.ts",
-    "benchmark:retrieval-paper": "tsx scripts/paper-retrieval-benchmark.ts"
+    "benchmark:retrieval-paper": "tsx scripts/paper-retrieval-benchmark.ts",
+    "benchmark:retrieval-splits": "tsx scripts/prepare-retrieval-splits.ts"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

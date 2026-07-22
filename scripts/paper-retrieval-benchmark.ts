@@ -27,6 +27,7 @@ interface Args {
   output: string
   perDataset: number
   limit?: number
+  caseOffset: number
   repeats: number
   seed: number
   timeoutMs: number
@@ -66,6 +67,7 @@ function parseArgs(): Args {
     output: resolve(option('--output') || defaultOutput),
     perDataset: numberOption('--per-dataset', 100),
     limit: option('--limit') ? numberOption('--limit', 6) : calibration ? 6 : undefined,
+    caseOffset: Math.max(0, Number(option('--case-offset')) || 0),
     repeats: numberOption('--repeats', calibration ? 1 : 3),
     seed: numberOption('--seed', 20260722),
     timeoutMs: numberOption('--timeout-seconds', calibration ? 240 : 600) * 1000,
@@ -156,6 +158,7 @@ function experimentMetadata(args: Args, manifestPath: string, caseIds: string[])
       'All LLM systems use the active TurboFlux endpoint and gpt-5.5.',
       'Native reasoning is disabled; protocol differences are recorded per run.',
       args.command === 'calibrate' ? 'Calibration run; not a final comparative result.' : 'Formal repeated experiment.',
+      args.caseOffset > 0 ? `Selection starts after ${args.caseOffset} balanced case(s), allowing a disjoint development slice.` : 'Selection starts at the first balanced case.',
     ],
   }
 }
@@ -171,7 +174,8 @@ async function runExperiment(args: Args): Promise<void> {
   await ensureManifest(args)
   mkdirSync(args.output, { recursive: true })
   const manifest = readManifest(args.manifest)
-  const selectedCases = balancedCases(manifest.cases, args.limit)
+  const selectionLimit = args.limit === undefined ? undefined : args.limit + args.caseOffset
+  const selectedCases = balancedCases(manifest.cases, selectionLimit).slice(args.caseOffset)
   const config = await loadConfig()
   if (!config.apiKey || !config.baseUrl) throw new Error('Active TurboFlux API configuration is incomplete')
   const metadataPath = join(args.output, 'metadata.json')
