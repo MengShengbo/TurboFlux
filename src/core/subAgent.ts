@@ -575,12 +575,20 @@ function rangeIsRead(path: string, startLine: number, endLine: number, evidence:
     && endLine <= item.endLine)
 }
 
+function readRangesForPath(path: string, evidence: SubAgentEvidence[]): string {
+  const normalizedPath = path.replace(/\\/g, '/')
+  const ranges = evidence
+    .filter(item => item.reason === 'file read' && item.path.replace(/\\/g, '/') === normalizedPath)
+    .map(item => `${item.startLine}-${item.endLine}`)
+  return ranges.length > 0 ? ranges.join(', ') : 'none'
+}
+
 function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[], level: FastContextLevel): string | null {
   if (report.candidates.length === 0) return 'at least one ranked candidate is required'
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
     if (!rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
-      return `candidate ${candidate.path}:${candidate.startLine}-${candidate.endLine} is not covered by a read_file result`
+      return `candidate ${candidate.path}:${candidate.startLine}-${candidate.endLine} is not covered by a read_file result; covered ranges for this path: ${readRangesForPath(candidate.path, evidence)}`
     }
   }
   for (const relationship of report.relationships) {
@@ -588,7 +596,7 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
       return 'every relationship requires from, to, relationship, and evidence_path'
     }
     if (!rangeIsRead(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence)) {
-      return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by a read_file result`
+      return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by a read_file result; covered ranges for this path: ${readRangesForPath(relationship.evidencePath, evidence)}`
     }
   }
   if (level === 'medium' && report.relationships.length === 0) return 'medium depth requires at least one grounded code relationship'
@@ -805,8 +813,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
   let searchRecoveryUsed = false
   let reportRecoveryUsed = false
+  let submissionRecoveryUsed = false
   let resolvedProtocol: ModelProtocol | null = null
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
+  let turnLimit = definition.maxTurns
 
   const addEvidence = (evidence: SubAgentEvidence): void => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
@@ -817,10 +827,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
 
   const hasModelReadEvidence = (): boolean => collectedEvidence.some(evidence => evidence.reason === 'file read')
 
-  while (turn < definition.maxTurns) {
+  while (turn < turnLimit) {
     if (abortSignal?.aborted) break
     turn++
-    emit({ type: 'turn_start', turn, maxTurns: definition.maxTurns })
+    emit({ type: 'turn_start', turn, maxTurns: turnLimit })
 
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
@@ -1038,25 +1048,26 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         emit({ type: 'turn_complete', turn, calls: 1 })
         return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence }
       }
-      if (reportRecoveryUsed || turn >= definition.maxTurns) {
+      if (submissionRecoveryUsed) {
         const error = `FastContext submission rejected: ${submissionError}`
         emit({ type: 'error', message: error })
         return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
       }
+      if (turn >= turnLimit) turnLimit += 1
       messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })
       messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
       messages.push({
         role: 'user',
         content: 'Correct the grounded evidence map and call submit_code_map again. Retrieve or read only if the rejection identifies missing evidence.',
       })
-      reportRecoveryUsed = true
+      submissionRecoveryUsed = true
       emit({ type: 'tool_result', tool: 'submit_code_map', ok: false, summary: submissionError, turn })
       emit({ type: 'turn_complete', turn, calls: 1 })
       continue
     }
 
     if (responseToolCalls.length === 0) {
-      if (strictFastContext && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < definition.maxTurns) {
+      if (strictFastContext && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < turnLimit) {
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
@@ -1065,7 +1076,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         searchRecoveryUsed = true
         continue
       }
-      if (strictFastContext && !hasModelReadEvidence() && turn < definition.maxTurns) {
+      if (strictFastContext && !hasModelReadEvidence() && turn < turnLimit) {
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
@@ -1073,7 +1084,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         })
         continue
       }
-      if (strictFastContext && !reportRecoveryUsed && turn < definition.maxTurns) {
+      if (strictFastContext && !reportRecoveryUsed && turn < turnLimit) {
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
@@ -1143,7 +1154,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
 
     emit({ type: 'turn_complete', turn, calls: results.length })
 
-    if (strictFastContext && turn === definition.maxTurns - 1) {
+    if (strictFastContext && turn === turnLimit - 1) {
       messages.push({
         role: 'user',
         content: 'One turn remains. Call submit_code_map now using only read-confirmed evidence. Do not call more retrieval tools.',
@@ -1156,7 +1167,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       && results.every(({ result }) => result.ok)
       && results.every(({ result }) => result.evidence.length === 0)
       && !searchRecoveryUsed
-      && turn < definition.maxTurns
+      && turn < turnLimit
     ) {
       messages.push({
         role: 'user',
@@ -1171,7 +1182,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     emit({ type: 'error', message: error })
     return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
   }
-  return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: turn >= definition.maxTurns }
+  return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: turn >= turnLimit }
 }
 
 interface ToolExecResult {

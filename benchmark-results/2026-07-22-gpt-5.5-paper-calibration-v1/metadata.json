@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "2026-07-22-gpt-5.5-no-reasoning-calibration",
+  "createdAt": "2026-07-22T08:13:43.697Z",
+  "gitCommit": "29bc11201ee6ab1e28f4da03894f8086bc841f5b",
+  "model": "gpt-5.5",
+  "reasoning": "disabled",
+  "endpointHost": "api.aibinghe.xyz",
+  "manifestPath": "benchmark-data/retrieval-paper-v1/manifest.json",
+  "manifestSha256": "af84b012c67b5936646f07ec6712323f40a4a61ce75a3783e7d20124121160c9",
+  "systems": [
+    "fastcontext-low",
+    "fastcontext-medium",
+    "fastcontext-max",
+    "claude-code-readonly",
+    "opencode-explore",
+    "neutral-tool-agent",
+    "bm25"
+  ],
+  "repeats": 1,
+  "timeoutMs": 240000,
+  "seed": 20260722,
+  "cliVersions": {
+    "claudeCode": "2.1.177 (Claude Code)",
+    "openCode": "1.17.18"
+  },
+  "notes": [
+    "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+    "Native reasoning is disabled; protocol differences are recorded per run.",
+    "Calibration run; not a final comparative result."
+  ],
+  "caseIds": [
+    "matplotlib__matplotlib-22865",
+    "google__guava-3971",
+    "serverless__serverless-5640",
+    "yt-dlp__yt-dlp-9862",
+    "mui__material-ui-19794"
+  ]
+}

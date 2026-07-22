@@ -20,6 +20,7 @@ tmp/
 *.out.log
 *.err.log
 manifest.json
+!benchmark-data/retrieval-paper-v1/manifest.json
 move-results.json
 planner.md
 ui-ux-designer.md

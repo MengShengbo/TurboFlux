@@ -839,8 +839,70 @@ describe('runSubAgent', () => {
         fastContextLevel: 'low',
       })
 
+      expect(result.error).toBeUndefined()
       expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
       expect(JSON.stringify(requestBodies[2].messages)).toContain('not covered by a read_file result')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('grants one correction request when the final-turn submission is ungrounded', async () => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'read-final-recovery',
+          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 3 }) },
+        }] } }] }), { status: 200 })
+      }
+      const range = requestCount === 2 ? [1, 4] : [1, 3]
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+        id: `submit-final-recovery-${requestCount}`,
+        function: { name: 'submit_code_map', arguments: JSON.stringify({
+          candidates: [{ path: 'src/core.ts', start_line: range[0], end_line: range[1], role: 'implementation', confidence: 'high', why: 'verified implementation' }],
+          relationships: [],
+          rejected_hypotheses: [],
+          searches_tried: ['core runtime'],
+          uncertainty: ['none'],
+        }) },
+      }] } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: 'export function startRuntime() {\n  return true\n}' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'fast_context',
+          label: 'FastContext',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: buildFastContextSystemPrompt('low'),
+          maxTurns: 2,
+          maxParallel: 2,
+        },
+        objective: 'find runtime implementation',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        requireGroundedReport: true,
+        fastContextLevel: 'low',
+      })
+
+      expect(result.error).toBeUndefined()
+      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
+      expect(requestCount).toBe(3)
     } finally {
       globalThis.fetch = originalFetch
     }

@@ -1,0 +1,283 @@
+{
+  "metadata": {
+    "schemaVersion": 1,
+    "experimentId": "2026-07-22-gpt-5.5-no-reasoning-calibration",
+    "createdAt": "2026-07-22T08:13:43.697Z",
+    "gitCommit": "29bc11201ee6ab1e28f4da03894f8086bc841f5b",
+    "model": "gpt-5.5",
+    "reasoning": "disabled",
+    "endpointHost": "api.aibinghe.xyz",
+    "manifestPath": "benchmark-data/retrieval-paper-v1/manifest.json",
+    "manifestSha256": "af84b012c67b5936646f07ec6712323f40a4a61ce75a3783e7d20124121160c9",
+    "systems": [
+      "fastcontext-low",
+      "fastcontext-medium",
+      "fastcontext-max",
+      "claude-code-readonly",
+      "opencode-explore",
+      "neutral-tool-agent",
+      "bm25"
+    ],
+    "repeats": 1,
+    "timeoutMs": 240000,
+    "seed": 20260722,
+    "cliVersions": {
+      "claudeCode": "2.1.177 (Claude Code)",
+      "openCode": "1.17.18"
+    },
+    "notes": [
+      "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+      "Native reasoning is disabled; protocol differences are recorded per run.",
+      "Calibration run; not a final comparative result."
+    ],
+    "caseIds": [
+      "matplotlib__matplotlib-22865",
+      "google__guava-3971",
+      "serverless__serverless-5640",
+      "yt-dlp__yt-dlp-9862",
+      "mui__material-ui-19794"
+    ]
+  },
+  "completed": 35,
+  "expected": 35,
+  "summary": {
+    "fastcontext-low": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 3,
+      "successRate": 0.6,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.5,
+        "low": 0.1,
+        "high": 0.9
+      },
+      "mrr": {
+        "mean": 0.6,
+        "low": 0.2,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.5,
+        "low": 0.1,
+        "high": 0.9
+      },
+      "ndcgAt10": {
+        "mean": 0.5226294385530916,
+        "low": 0.12262943855309168,
+        "high": 0.9226294385530917
+      },
+      "fullCoverageAt10": 0.4,
+      "latencyP50Ms": 63138.5061,
+      "latencyP95Ms": 74225.5019,
+      "averageToolCalls": 5.666666666666667,
+      "averageInputTokens": 51773.333333333336,
+      "averageOutputTokens": 2508,
+      "totalCostUsd": 0
+    },
+    "fastcontext-medium": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 5,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.8,
+        "low": 0.6,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.9,
+        "low": 0.7,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.75,
+        "low": 0.45,
+        "high": 1
+      },
+      "ndcgAt10": {
+        "mean": 0.8,
+        "low": 0.5547411228938166,
+        "high": 1
+      },
+      "fullCoverageAt10": 0.6,
+      "latencyP50Ms": 82223.16840000002,
+      "latencyP95Ms": 115133.97729999997,
+      "averageToolCalls": 9.8,
+      "averageInputTokens": 127938.8,
+      "averageOutputTokens": 3071.8,
+      "totalCostUsd": 0
+    },
+    "fastcontext-max": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 2,
+      "successRate": 0.4,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.3,
+        "low": 0,
+        "high": 0.7
+      },
+      "mrr": {
+        "mean": 0.3,
+        "low": 0,
+        "high": 0.7
+      },
+      "map": {
+        "mean": 0.25,
+        "low": 0,
+        "high": 0.65
+      },
+      "ndcgAt10": {
+        "mean": 0.2773705614469083,
+        "low": 0,
+        "high": 0.6773705614469083
+      },
+      "fullCoverageAt10": 0.2,
+      "latencyP50Ms": 56431.433699999936,
+      "latencyP95Ms": 71642.304,
+      "averageToolCalls": 12.5,
+      "averageInputTokens": 103243.5,
+      "averageOutputTokens": 2402,
+      "totalCostUsd": 0
+    },
+    "claude-code-readonly": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 5,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.9,
+        "low": 0.7,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.9,
+        "low": 0.7,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.8166666666666667,
+        "low": 0.6166666666666666,
+        "high": 1
+      },
+      "ndcgAt10": {
+        "mean": 0.8613147192765458,
+        "low": 0.7065735963827292,
+        "high": 1
+      },
+      "fullCoverageAt10": 0.8,
+      "latencyP50Ms": 43198.80969999998,
+      "latencyP95Ms": 60618.04370000004,
+      "averageToolCalls": 7.2,
+      "averageInputTokens": 55781.4,
+      "averageOutputTokens": 1546.4,
+      "totalCostUsd": 0
+    },
+    "opencode-explore": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 5,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.9666666666666666,
+        "low": 0.9,
+        "high": 1
+      },
+      "ndcgAt10": {
+        "mean": 0.9839441578296375,
+        "low": 0.9518324734889125,
+        "high": 1
+      },
+      "fullCoverageAt10": 1,
+      "latencyP50Ms": 87059.18599999999,
+      "latencyP95Ms": 132017.27850000001,
+      "averageToolCalls": 13.8,
+      "averageInputTokens": 126257,
+      "averageOutputTokens": 2486.8,
+      "totalCostUsd": 0
+    },
+    "neutral-tool-agent": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 3,
+      "successRate": 0.6,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.5,
+        "low": 0.1,
+        "high": 0.9
+      },
+      "mrr": {
+        "mean": 0.6,
+        "low": 0.2,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.5,
+        "low": 0.1,
+        "high": 0.9
+      },
+      "ndcgAt10": {
+        "mean": 0.5226294385530916,
+        "low": 0.12262943855309168,
+        "high": 0.9226294385530917
+      },
+      "fullCoverageAt10": 0.4,
+      "latencyP50Ms": 58434.3725,
+      "latencyP95Ms": 59263.56649999996,
+      "averageToolCalls": 15,
+      "averageInputTokens": 85718.66666666667,
+      "averageOutputTokens": 2313,
+      "totalCostUsd": 0
+    },
+    "bm25": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 5,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.7,
+        "low": 0.3,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.4,
+        "low": 0.13333333333333333,
+        "high": 0.7333333333333333
+      },
+      "map": {
+        "mean": 0.3833333333333333,
+        "low": 0.1,
+        "high": 0.7
+      },
+      "ndcgAt10": {
+        "mean": 0.4698674380779243,
+        "low": 0.17472594945453135,
+        "high": 0.7698674380779245
+      },
+      "fullCoverageAt10": 0.6,
+      "latencyP50Ms": 564.7694999999949,
+      "latencyP95Ms": 2051.8658000002615,
+      "averageToolCalls": 1,
+      "averageInputTokens": 0,
+      "averageOutputTokens": 0,
+      "totalCostUsd": 0
+    }
+  }
+}
