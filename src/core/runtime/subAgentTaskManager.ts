@@ -48,6 +48,7 @@ export interface StartSubAgentTaskInput<TResult> {
   workspacePath: string
   ownerSessionId?: string
   controller?: AbortController
+  timeoutMs?: number
   run: (context: StartSubAgentTaskContext) => Promise<TResult>
   isSuccess?: (result: TResult) => boolean
   getError?: (result: TResult) => string | undefined
@@ -175,7 +176,7 @@ export class SubAgentTaskManager {
       outputOffset: this.outputBytes.get(id) || 0,
     })
 
-    const promise = Promise.resolve().then(() => input.run({
+    const runPromise = Promise.resolve().then(() => input.run({
       taskId: id,
       signal: controller.signal,
       recordEvent: event => this.appendRecord(id, {
@@ -184,7 +185,23 @@ export class SubAgentTaskManager {
         timestamp: this.now(),
         event,
       }),
-    })).then(result => {
+    }))
+    const timeoutMs = input.timeoutMs && input.timeoutMs > 0 ? Math.floor(input.timeoutMs) : 0
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const boundedRun = timeoutMs > 0
+      ? Promise.race([
+          runPromise,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => {
+              reject(new Error(`${input.label} timed out after ${timeoutMs}ms`))
+              controller.abort()
+            }, timeoutMs)
+          }),
+        ])
+      : runPromise
+    const promise = boundedRun.finally(() => {
+      if (timeout) clearTimeout(timeout)
+    }).then(result => {
       const succeeded = input.isSuccess ? input.isSuccess(result) : true
       const error = succeeded ? undefined : input.getError?.(result) || 'Subagent failed'
       this.results.set(id, result)

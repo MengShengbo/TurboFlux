@@ -92,6 +92,37 @@ describe('SubAgentTaskManager', () => {
     }
   })
 
+  it('aborts and releases a subagent that exceeds its runtime deadline', async () => {
+    const workspacePath = createWorkspace()
+    const runtimeTaskManager = new RuntimeTaskManager()
+    const manager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager })
+    let aborted = false
+
+    try {
+      const started = manager.startTask({
+        kind: 'fast_context',
+        agentType: 'fast_context',
+        label: 'FastContext',
+        objective: 'Never finish',
+        workspacePath,
+        timeoutMs: 20,
+        run: ({ signal }) => new Promise(() => {
+          signal.addEventListener('abort', () => { aborted = true }, { once: true })
+        }),
+      })
+
+      await expect(started.promise).rejects.toThrow('FastContext timed out after 20ms')
+      expect(aborted).toBe(true)
+      expect(manager.getTask(started.task.id)?.runtimeTask).toMatchObject({
+        status: 'failed',
+        error: 'FastContext timed out after 20ms',
+      })
+    } finally {
+      manager.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
   it('recovers completed results and marks unfinished tasks interrupted', async () => {
     const workspacePath = createWorkspace()
     const firstRuntime = new RuntimeTaskManager()

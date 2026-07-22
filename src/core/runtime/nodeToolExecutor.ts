@@ -67,7 +67,9 @@ const DEFAULT_TERMINAL_SHELL_LABEL = process.platform === 'win32' ? 'PowerShell'
 const SENSITIVE_ENV_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)/i
 const CODE_SEARCH_SKIPPED_DIRS = new Set([
   '.git', '.hg', '.svn', '.claude', '.turboflux', '.vscode', '.cache', '.next', '.turbo',
-  'node_modules', 'vendor', 'dist', 'dist-desktop', 'build', 'out', 'coverage', 'target', 'tmp', 'temp',
+  '.gradle', '.m2', '.npm', '.pnpm-store', '.rustup', '.venv',
+  'AppData', 'Library', 'node_modules', 'vendor', 'venv', 'dist', 'dist-desktop', 'build', 'out',
+  'coverage', 'target', 'tmp', 'temp',
 ])
 const CODE_SEARCH_EXCLUDE_GLOBS = Array.from(CODE_SEARCH_SKIPPED_DIRS, directory => `**/${directory}/**`)
 const DEFAULT_SEARCH_LIMIT = 50
@@ -455,35 +457,34 @@ export class NodeToolExecutor implements ToolExecutor {
         : safeRootPath
       const safeWorkspacePath = this.ensureAllowedPath(requestedPath)
       const escapedQuery = this.escapeRegex(query.query)
-      const patterns = [
+      const pattern = [
         `(?:function|class|interface|type|enum|const|let|var)\\s+\\w*${escapedQuery}\\w*`,
         `(?:async\\s+)?def\\s+\\w*${escapedQuery}\\w*`,
         `(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+\\w*${escapedQuery}\\w*`,
         `func\\s+(?:\\([^)]*\\)\\s*)?\\w*${escapedQuery}\\w*`,
         `(?:class|interface|record|struct|enum|trait|protocol|object)\\s+\\w*${escapedQuery}\\w*`,
-      ]
+      ].map(value => `(?:${value})`).join('|')
       const results: CodeSearchHit[] = []
       let ripgrepUnavailable = false
-      for (const pattern of patterns) {
-        const args = [
-          '--line-number',
-          '--no-heading',
-          '--hidden',
-          '--ignore-case',
-          '--max-count=80',
-          '--max-columns=500',
-          '--max-columns-preview',
-          '--glob=*.{ts,tsx,js,jsx,mjs,cjs,py,pyi,rs,go,java,kt,kts,cs,c,cc,cpp,cxx,h,hpp,swift,scala,rb,php}',
-          ...CODE_SEARCH_EXCLUDE_GLOBS.map(exclude => `--glob=!${exclude}`),
-          '--',
-          pattern,
-          '.',
-        ]
-        try {
-          const { stdout } = await execFileAsync('rg', args, { cwd: safeWorkspacePath, timeout: 8000, maxBuffer: 512 * 1024 })
-          const output = stdout.trim()
-          if (!output) continue
-          for (const line of output.split('\n').slice(0, query.limit || 10)) {
+      const args = [
+        '--line-number',
+        '--no-heading',
+        '--hidden',
+        '--ignore-case',
+        '--max-count=80',
+        '--max-columns=500',
+        '--max-columns-preview',
+        '--glob=*.{ts,tsx,js,jsx,mjs,cjs,py,pyi,rs,go,java,kt,kts,cs,c,cc,cpp,cxx,h,hpp,swift,scala,rb,php}',
+        ...CODE_SEARCH_EXCLUDE_GLOBS.map(exclude => `--glob=!${exclude}`),
+        '--',
+        pattern,
+        '.',
+      ]
+      try {
+        const { stdout } = await execFileAsync('rg', args, { cwd: safeWorkspacePath, timeout: 8000, maxBuffer: 512 * 1024 })
+        const output = stdout.trim()
+        if (output) {
+          for (const line of output.split('\n').slice(0, Math.max(40, (query.limit || 10) * 8))) {
             const match = line.match(/^(.+?):(\d+):(.*)$/)
             if (!match) continue
             const filePath = resolveNativePath(safeWorkspacePath, match[1])
@@ -518,15 +519,12 @@ export class NodeToolExecutor implements ToolExecutor {
               preview: text,
             })
           }
-        } catch (e: any) {
-          if (e.code === 1 || e.exitCode === 1) continue
-          if (e.code === 'ENOENT') {
-            ripgrepUnavailable = true
-            break
-          }
+        }
+      } catch (e: any) {
+        if (e.code === 'ENOENT') ripgrepUnavailable = true
+        else if (e.code !== 1 && e.exitCode !== 1) {
           return { success: false, error: e instanceof Error ? e.message : String(e), data: [] }
         }
-        if (results.length >= (query.limit || 10)) break
       }
       const limit = query.limit || 10
       const fallback = ripgrepUnavailable

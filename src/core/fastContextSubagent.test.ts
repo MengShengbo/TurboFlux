@@ -1,14 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { FastContextScanHit } from './fastContextTypes'
 import type { ToolExecutor } from '../tools/executor'
 import {
   __testBuildEvidencePack,
   __testObjectiveTokens,
-  __testSelectPrefetchTokens,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
-describe('FastContext objective tokenization', () => {
+describe('FastContext retrieval', () => {
   it('keeps Chinese UI wording and mixed code identifiers searchable', () => {
     const tokens = __testObjectiveTokens('\u627e\u5230\u540d\u7247\u6837\u5f0f tier-card-color-schemes \u4ee5\u53ca HeaderTitle')
 
@@ -20,24 +19,28 @@ describe('FastContext objective tokenization', () => {
     expect(tokens).toContain('title')
   })
 
-  it('keeps a compact mix of symbol and Chinese terms for deterministic prefetch', () => {
-    const tokens = __testSelectPrefetchTokens('定位 FastContext 调度链，以及“输入框左右渲染”')
+  it('starts with the model instead of eagerly scanning the workspace', async () => {
+    const executor = {
+      searchFiles: vi.fn(),
+      searchContent: vi.fn(),
+      searchCodeSymbols: vi.fn(),
+      readFile: vi.fn(),
+      getCodeMap: vi.fn(),
+    } as unknown as ToolExecutor
 
-    expect(tokens).toContain('fastcontext')
-    expect(tokens.some(token => token.includes('输入框'))).toBe(true)
-    expect(tokens.length).toBeLessThanOrEqual(6)
-  })
+    await expect(runFastContextSubagent({
+      workspacePath: 'C:/repo',
+      objective: 'locate FastContext scheduling',
+      toolExecutor: executor,
+      apiKey: '',
+      baseUrl: 'http://example.test',
+    })).rejects.toThrow('requires an active model')
 
-  it('prefers complete identifiers and compound terms over noisy fragments', () => {
-    const fastContextTokens = __testSelectPrefetchTokens('Locate FastContext background scheduling and subagent retrieval')
-    const scrollTokens = __testSelectPrefetchTokens('Locate row-level transcript viewport scrolling and terminal mouse-wheel handling')
-
-    expect(fastContextTokens).toEqual(expect.arrayContaining(['fastcontext', 'background', 'scheduling', 'subagent']))
-    expect(fastContextTokens).not.toContain('fast')
-    expect(fastContextTokens).not.toContain('context')
-    expect(scrollTokens).toEqual(expect.arrayContaining(['row-level', 'transcript', 'viewport', 'mouse-wheel']))
-    expect(scrollTokens).not.toContain('row')
-    expect(scrollTokens).not.toContain('wheel')
+    expect(executor.searchFiles).not.toHaveBeenCalled()
+    expect(executor.searchContent).not.toHaveBeenCalled()
+    expect(executor.searchCodeSymbols).not.toHaveBeenCalled()
+    expect(executor.readFile).not.toHaveBeenCalled()
+    expect(executor.getCodeMap).not.toHaveBeenCalled()
   })
 
   it('treats the LLM final report as the primary ranked code map', () => {
@@ -67,51 +70,5 @@ describe('FastContext objective tokenization', () => {
     expect(pack).toContain('src/llm.ts L20-L40')
     expect(pack).not.toContain('local_recall_candidates:')
     expect(pack).not.toContain('src/fallback.ts')
-  })
-
-  it('returns read-confirmed deterministic evidence when model ranking is unavailable', async () => {
-    const executor = {
-      searchFiles: async () => ({
-        success: true,
-        data: { matches: ['C:/repo/package.json', 'C:/repo/src/index.ts'] },
-      }),
-      searchContent: async () => ({
-        success: true,
-        data: [{ file: 'C:/repo/src/fastContext.ts', line: 3, text: 'export function runFastContext() {' }],
-      }),
-      searchCodeSymbols: async () => ({
-        success: true,
-        data: [{
-          path: 'src/fastContext.ts',
-          line: 3,
-          startLine: 3,
-          endLine: 8,
-          title: 'runFastContext',
-          preview: 'export function runFastContext() {',
-        }],
-      }),
-      readFile: async () => ({
-        success: true,
-        data: ['import { search } from "./search"', '', 'export function runFastContext() {', '  return search()', '}'].join('\n'),
-      }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    const result = await runFastContextSubagent({
-      workspacePath: 'C:/repo',
-      objective: 'locate FastContext scheduling',
-      toolExecutor: executor,
-      apiKey: '',
-      baseUrl: 'http://example.test',
-    })
-
-    expect(result.filesScanned).toBeGreaterThan(0)
-    expect(result.hits.some(hit => hit.reason === 'prefetch read confirmation')).toBe(true)
-    expect(result.evidencePack).toContain('quality:')
-    expect(result.evidencePack).toContain('read-confirmed evidence range')
-    expect(result.evidencePack).toContain('status: degraded')
-    expect(result.evidencePack).toContain('authority: none')
-    expect(result.evidencePack).toContain('local_recall_candidates:')
-    expect(result.truncated).toBe(true)
   })
 })

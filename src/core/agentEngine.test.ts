@@ -376,6 +376,10 @@ describe('AgentEngine FastContext scheduling', () => {
       expect(result.isError).toBe(false)
       expect(result.output).toContain('background scan started')
       expect(engine.isFastContextRunning()).toBe(true)
+
+      engine.abort()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(engine.isFastContextRunning()).toBe(true)
     } finally {
       engine.destroy()
       globalThis.fetch = originalFetch

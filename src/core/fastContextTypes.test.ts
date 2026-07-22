@@ -8,11 +8,13 @@ describe('FastContext retrieval levels', () => {
     const medium = getFastContextTuning('medium')
     const max = getFastContextTuning('max')
 
-    expect(low).toMatchObject({ maxTurns: 5, maxParallel: 4, minimumSearchCalls: 1, minimumReadCalls: 2, reasoningEffort: 'low' })
-    expect(medium).toMatchObject({ maxTurns: 8, maxParallel: 6, minimumSearchCalls: 2, minimumReadCalls: 3, reasoningEffort: 'medium' })
-    expect(max).toMatchObject({ maxTurns: 12, maxParallel: 8, minimumSearchCalls: 4, minimumReadCalls: 6, reasoningEffort: 'max' })
+    expect(low).toMatchObject({ maxTurns: 5, maxParallel: 4, taskTimeoutMs: 180_000, minimumSearchCalls: 1, minimumReadCalls: 2, reasoningEffort: 'low' })
+    expect(medium).toMatchObject({ maxTurns: 8, maxParallel: 6, taskTimeoutMs: 360_000, minimumSearchCalls: 2, minimumReadCalls: 3, reasoningEffort: 'medium' })
+    expect(max).toMatchObject({ maxTurns: 12, maxParallel: 8, taskTimeoutMs: 720_000, minimumSearchCalls: 4, minimumReadCalls: 6, reasoningEffort: 'max' })
     expect(low.maxTurns).toBeLessThan(medium.maxTurns)
     expect(medium.maxTurns).toBeLessThan(max.maxTurns)
+    expect(low.taskTimeoutMs).toBeLessThan(medium.taskTimeoutMs)
+    expect(medium.taskTimeoutMs).toBeLessThan(max.taskTimeoutMs)
   })
 
   it('keeps legacy thoroughness values compatible', () => {

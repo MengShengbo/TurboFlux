@@ -1015,7 +1015,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (pressedAt - lastCtrlCEventAtRef.current < 120) return
     lastCtrlCEventAtRef.current = pressedAt
 
-    if (isRunningRef.current || engine.isRunning() || engine.isFastContextRunning()) {
+    if (isRunningRef.current || engine.isRunning()) {
       const activePrompt = activePromptRef.current
       abortingRef.current = true
       engine.abort()

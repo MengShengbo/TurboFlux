@@ -524,10 +524,6 @@ export class AgentEngine {
     const levelTuning = getFastContextTuning(tuning?.level)
     this.fastContextRunObjective = nextObjective
     const controller = new AbortController()
-    const parentSignal = this.abortController?.signal
-    const abortFromParent = () => controller.abort()
-    if (parentSignal?.aborted) controller.abort()
-    else parentSignal?.addEventListener('abort', abortFromParent, { once: true })
     this.fastContextAbortController = controller
 
     const generation = ++this.fastContextGeneration
@@ -539,6 +535,7 @@ export class AgentEngine {
       workspacePath: this.config.workspacePath,
       ownerSessionId: this.config.conversationId,
       controller,
+      timeoutMs: levelTuning.taskTimeoutMs,
       run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
         signal,
         injectPack: true,
@@ -556,31 +553,19 @@ export class AgentEngine {
     this.fastContextRunPromise = promise
     this.fastContextRuntimeTaskId = started.task.id
     void promise.finally(() => {
-      parentSignal?.removeEventListener('abort', abortFromParent)
       if (this.fastContextRunPromise === promise) {
         this.fastContextRunPromise = null
         this.fastContextRunObjective = null
         this.fastContextRuntimeTaskId = null
+        if (!this.fastContextPack && this.fastContextObjective === nextObjective) {
+          this.fastContextObjective = null
+        }
       }
       if (this.fastContextAbortController === controller) {
         this.fastContextAbortController = null
       }
-    })
+    }).catch(() => {})
     return { status: 'started', objective: nextObjective, promise, taskId: started.task.id }
-  }
-
-  private clearFastContextBackground(): void {
-    this.fastContextGeneration += 1
-    if (this.fastContextRuntimeTaskId) {
-      void this.subAgentTaskManager.stopTask(this.fastContextRuntimeTaskId, 'FastContext background scan cleared').catch(() => {})
-    }
-    this.fastContextAbortController?.abort()
-    this.fastContextAbortController = null
-    this.fastContextRunPromise = null
-    this.fastContextRunObjective = null
-    this.fastContextRuntimeTaskId = null
-    this.fastContextObjective = null
-    this.fastContextPack = null
   }
 
   isRunning(): boolean {
@@ -608,6 +593,7 @@ export class AgentEngine {
       workspacePath: this.config.workspacePath || '',
       ownerSessionId: this.config.conversationId,
       controller,
+      timeoutMs: getFastContextTuning(level).taskTimeoutMs,
       run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
         signal,
         injectPack: false,
@@ -627,7 +613,7 @@ export class AgentEngine {
         this.standaloneFastContextAbortController = null
         this.standaloneFastContextRuntimeTaskId = null
       }
-    })
+    }).catch(() => {})
     return promise
   }
 
@@ -1239,11 +1225,7 @@ export class AgentEngine {
     if (this.currentRunPromise) this.setRunState('aborting', { detail: 'Stopping current run' })
     this.pendingSteeringMessages = []
     this.abortController?.abort()
-    this.fastContextAbortController?.abort()
     this.standaloneFastContextAbortController?.abort()
-    if (this.fastContextRuntimeTaskId) {
-      void this.subAgentTaskManager.stopTask(this.fastContextRuntimeTaskId, 'Parent agent aborted').catch(() => {})
-    }
     if (this.standaloneFastContextRuntimeTaskId) {
       void this.subAgentTaskManager.stopTask(this.standaloneFastContextRuntimeTaskId, 'FastContext command aborted').catch(() => {})
     }
@@ -1675,13 +1657,11 @@ export class AgentEngine {
       }
       this.permissions.clearRunGrants()
       this.pendingSteeringMessages = []
-      this.clearFastContextBackground()
       throw error
     }
 
     this.permissions.clearRunGrants()
     this.pendingSteeringMessages = []
-    this.clearFastContextBackground()
     return newTurns
     })()
     this.currentRunPromise = runPromise
@@ -2133,9 +2113,6 @@ Before retrying:
     const agentId = options.agentId || `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     const startedAt = Date.now()
     try {
-      // Build (or reuse) a stable workspace skeleton primer. This is
-      // deliberately objective-agnostic so repeated scans reuse the prefix.
-      const skeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
       const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
       const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
       const fastContextTuning = getFastContextTuning(options.level)
@@ -2164,7 +2141,6 @@ Before retrying:
         },
         modelCapabilities: fastContextConfig?.modelCapabilities,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
-        codemap: skeleton,
         level: fastContextTuning.level,
         maxTurns: options.maxTurns,
         maxParallel: options.maxParallel,
