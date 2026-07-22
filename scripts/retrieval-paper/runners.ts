@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, extname, join, relative } from 'node:path'
@@ -59,6 +60,9 @@ interface FetchObservation {
   usage: UsageMetrics
 }
 
+const fetchObservationContext = new AsyncLocalStorage<FetchObservation>()
+let fetchObserverInstalled = false
+
 function emptyUsage(): UsageMetrics {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }
 }
@@ -99,24 +103,29 @@ function protocolFromUrl(value: string): string {
 
 async function observeFetch<T>(run: (observation: FetchObservation) => Promise<T>): Promise<{ value: T; observation: FetchObservation }> {
   const observation: FetchObservation = { requests: 0, retries: 0, protocol: 'unknown', usage: emptyUsage() }
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = async (...args) => {
-    observation.requests += 1
-    const input = args[0]
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-    observation.protocol = protocolFromUrl(url)
-    const response = await originalFetch(...args)
-    try {
-      const payload = await response.clone().json() as Record<string, any>
-      addUsage(observation.usage, payload.usage)
-    } catch {}
-    return response
+  if (!fetchObserverInstalled) {
+    const originalFetch = globalThis.fetch.bind(globalThis)
+    globalThis.fetch = async (...args) => {
+      const current = fetchObservationContext.getStore()
+      if (current) {
+        current.requests += 1
+        const input = args[0]
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+        current.protocol = protocolFromUrl(url)
+      }
+      const response = await originalFetch(...args)
+      if (current) {
+        try {
+          const payload = await response.clone().json() as Record<string, any>
+          addUsage(current.usage, payload.usage)
+        } catch {}
+      }
+      return response
+    }
+    fetchObserverInstalled = true
   }
-  try {
-    return { value: await run(observation), observation }
-  } finally {
-    globalThis.fetch = originalFetch
-  }
+  const value = await fetchObservationContext.run(observation, () => run(observation))
+  return { value, observation }
 }
 
 function uniquePaths(paths: string[], workspacePath: string): string[] {
