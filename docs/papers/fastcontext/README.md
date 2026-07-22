@@ -9,7 +9,8 @@ This directory contains the reproducible source for the FastContext technical pr
 - `references.bib`: editable bibliography for future LaTeX submission.
 - `figures/*.svg`: standalone vector figures generated from the renderer.
 - `artifact-manifest.json`: source commits and validity boundaries.
-- `../../../output/pdf/FastContext-Architecture-Paper-ZH.pdf`: final reviewed PDF.
+- `../../../output/pdf/FastContext-Architecture-Paper-ZH-v1.1.pdf`: current reviewed PDF.
+- `../../../output/pdf/FastContext-Architecture-Paper-ZH.pdf`: archived v1.0 PDF.
 
 ## Build
 
@@ -21,11 +22,11 @@ C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\
 The renderer requires ReportLab and the Windows SimSun, SimHei, and Noto Sans SC fonts. Render the PDF with Poppler before release:
 
 ```powershell
-pdftoppm -png -r 150 output\pdf\FastContext-Architecture-Paper-ZH.pdf tmp\pdfs\fastcontext-page
+pdftoppm -png -r 150 output\pdf\FastContext-Architecture-Paper-ZH-v1.1.pdf tmp\pdfs\fastcontext-page
 ```
 
 ## Evidence policy
 
-The manuscript studies TurboFlux commit `5779a946d02106836f60054ec3cd4d27647bddeb`. The benchmark table is explicitly historical: it was produced from commit `629e4c25bc646c98113cddca4c86622a286cffdc`, whose deterministic prefetch stage no longer exists. Do not use that table to claim current-version superiority.
+The manuscript studies TurboFlux commit `f7b190a77d7cb0362b30b680618d2c6088bdb09f`. The benchmark table is explicitly historical: it was produced from commit `629e4c25bc646c98113cddca4c86622a286cffdc`, whose deterministic prefetch stage no longer exists. Do not use that table to claim current-version superiority.
 
 Before journal submission, add verified author identities and affiliations, select the target journal template, rerun the current implementation across multiple public repositories and seeds, report confidence intervals, and archive the complete reproduction package.

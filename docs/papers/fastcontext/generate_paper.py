@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SOURCE = Path(__file__).with_name("paper.md")
 FIGURE_DIR = Path(__file__).with_name("figures")
 OUTPUT_DIR = ROOT / "output" / "pdf"
-OUTPUT_PDF = OUTPUT_DIR / "FastContext-Architecture-Paper-ZH.pdf"
+OUTPUT_PDF = OUTPUT_DIR / "FastContext-Architecture-Paper-ZH-v1.1.pdf"
 MANIFEST = Path(__file__).with_name("artifact-manifest.json")
 
 SIMSUN = Path("C:/Windows/Fonts/simsun.ttc")
@@ -188,14 +188,14 @@ def cover_figure() -> Drawing:
     box(d, 4, 78, 82, 42, "Objective\n+ workspace", PINK, 8.0, True)
     box(d, 112, 78, 82, 42, "Model plans\nsearch hypotheses", PEACH, 7.4, True)
     box(d, 220, 78, 82, 42, "Local tools\nsearch + read", BLUE, 7.4, True)
-    box(d, 328, 78, 82, 42, "Evidence gate\nranked map", YELLOW, 7.4, True)
+    box(d, 328, 78, 82, 42, "Structured submit\ngrounded map", YELLOW, 7.2, True)
     arrow(d, 86, 99, 112, 99)
     arrow(d, 194, 99, 220, 99)
     arrow(d, 302, 99, 328, 99)
     d.add(Line(153, 63, 153, 39, strokeColor=INK, strokeWidth=1.0))
     d.add(Line(153, 39, 369, 39, strokeColor=INK, strokeWidth=1.0))
     arrow(d, 369, 39, 369, 78)
-    label(d, 261, 27, "iterate until search/read/report gates pass", 7.0)
+    label(d, 261, 27, "iterate until the coverage contract passes", 7.0)
     box(d, 125, 137, 188, 24, "Independent background task", LAVENDER, 7.6, True)
     arrow(d, 219, 137, 219, 120)
     label(d, 45, 5, "Primary agent remains interactive", 6.8, True, "start")
@@ -205,18 +205,18 @@ def cover_figure() -> Drawing:
 
 def retrieval_figure() -> Drawing:
     d = Drawing(246, 315)
-    box(d, 69, 279, 108, 24, "RANKED_CODE_MAP", GREEN, 7.2, True)
-    box(d, 53, 229, 140, 32, "Report validator\npaths read + required sections", YELLOW, 6.8)
+    box(d, 69, 279, 108, 24, "SUBMITTED_CODE_MAP", GREEN, 7.0, True)
+    box(d, 53, 229, 140, 32, "Mechanical verifier\nread-covered path ranges", YELLOW, 6.8)
     arrow(d, 123, 261, 123, 279)
     box(d, 53, 179, 140, 32, "Evidence ledger\npath : line range : role", LAVENDER, 6.8)
     arrow(d, 123, 211, 123, 229)
     box(d, 16, 118, 62, 36, "search_content\nsearch_files", BLUE, 6.3)
-    box(d, 92, 118, 62, 36, "search_symbols\nget_codemap", BLUE, 6.3)
+    box(d, 92, 118, 62, 36, "search_symbols\ntrace_symbol", BLUE, 6.3)
     box(d, 168, 118, 62, 36, "read_file\nbounded ranges", BLUE, 6.3)
     arrow(d, 47, 154, 91, 179)
     arrow(d, 123, 154, 123, 179)
     arrow(d, 199, 154, 155, 179)
-    box(d, 53, 62, 140, 34, "Hypothesis planner\nquery rewrite + disproof", PEACH, 6.9, True)
+    box(d, 53, 62, 140, 34, "Hypothesis planner\nlexical + owner + runtime", PEACH, 6.8, True)
     arrow(d, 88, 96, 47, 118)
     arrow(d, 123, 96, 123, 118)
     arrow(d, 158, 96, 199, 118)
@@ -295,7 +295,7 @@ def pilot_figure() -> Drawing:
 
 FIGURES = {
     "architecture": (architecture_figure, "图 1. FastContext 双上下文架构。模型驱动检索平面与主交互平面共享工作区工具，但原始轨迹隔离，仅紧凑证据包单向进入主上下文。"),
-    "retrieval": (retrieval_figure, "图 2. 模型驱动检索与证据门控。循环上界 T 由档位决定；不足的搜索、读取或报告结构触发受限恢复。"),
+    "retrieval": (retrieval_figure, "图 2. 模型驱动检索与证据门控。循环上界 T 由档位决定；模型提交候选和关系，本地只验证引用区间由本轮读取完整覆盖。"),
     "lifecycle": (lifecycle_figure, "图 3. 后台生命周期。主会话 Ctrl+C 与 FastContext 控制器之间不存在父中断边；显式取消、销毁和硬超时仍可终止任务。"),
     "pilot": (pilot_figure, "图 4. 历史先导实验。数据来自已删除自动预扫描的旧提交，仅用于描述历史观察，不代表当前系统。"),
 }
@@ -305,9 +305,10 @@ TABLES = {
     "reference": (
         ["来源", "采用的思想", "FastContext 的差异"],
         [
-            ["ReAct / Toolformer", "模型决定工具与参数，并根据观察迭代", "工具域限制为只读代码证据；增加读取与报告门控"],
-            ["Self-RAG / RepoCoder", "按需、迭代检索，而非固定一次性上下文", "无自动预扫描；最终产物是代码图而非答案或补全"],
-            ["Claude Code Explore", "独立上下文、只读、继承模型、三档深度", "low/medium/max；显式最少搜索/读取与结构校验"],
+            ["ReAct / Toolformer", "模型决定工具与参数，并根据观察迭代", "只读代码工具；结构化终态提交"],
+            ["Self-RAG / Repoformer", "按需、选择性检索，避免固定无效上下文", "无预扫描和固定调用次数"],
+            ["AutoCodeRover / LocAgent", "符号与代码关系驱动的迭代、多跳定位", "按需 trace_symbol，不建设常驻图索引"],
+            ["Claude Code Explore", "独立上下文、只读、继承模型、三档深度", "low/medium/max 覆盖合同；读取区间核验"],
             ["OpenCode TaskTool", "child session、后台 Job、取消与完成通知", "进程内 RuntimeTask + JSONL transcript + 一次性 pack"],
         ],
         [47, 89, 105],
@@ -325,11 +326,11 @@ TABLES = {
         [58, 54, 76, 53],
     ),
     "levels": (
-        ["档位", "轮次", "并行", "搜索/读取", "推理", "总时限"],
+        ["档位", "轮次", "并行", "覆盖合同", "推理", "总时限"],
         [
-            ["low", "5", "4", "1 / 2", "low", "180 s"],
-            ["medium", "8", "6", "2 / 3", "medium", "360 s"],
-            ["max", "12", "8", "4 / 6", "max", "720 s"],
+            ["low", "5", "4", "定位 + 实现", "low", "180 s"],
+            ["medium", "8", "6", "至少 1 条关系", "medium", "360 s"],
+            ["max", "12", "8", "2 条关系 + 反证", "max", "720 s"],
         ],
         [34, 32, 34, 52, 47, 42],
     ),
@@ -337,8 +338,8 @@ TABLES = {
         ["模块", "职责", "关键技术"],
         [
             ["agentEngine.ts", "入口、去重、generation、pack 注入", "Promise 槽；独立 AbortController"],
-            ["fastContextSubagent.ts", "事件映射、证据角色、紧凑代码图", "后验评分；5,000 字符报告上限"],
-            ["subAgent.ts", "模型循环、协议适配、工具执行、质量门控", "ReAct 式循环；并行 Promise.all"],
+            ["fastContextSubagent.ts", "事件映射、证据隔离、紧凑代码图", "无语义 fallback；5,000 字符上限"],
+            ["subAgent.ts", "模型循环、结构化提交、工具执行、范围核验", "ReAct；trace_symbol 并行查询"],
             ["SubAgentTaskManager", "后台任务、超时、JSONL transcript", "Promise.race；append-only journal"],
             ["RuntimeTaskManager", "统一运行状态与 stop control", "状态机；事件发布"],
             ["NodeToolExecutor", "搜索、符号、读取、sandbox", "ripgrep；路径约束；目录排除"],
@@ -379,16 +380,16 @@ ALGORITHMS = {
     "retrieve": [
         "Algorithm 2  ModelDirectedRetrieve(q, level)",
         "1: messages <- [system(depth contract), user(q)]",
-        "2: evidence <- empty ledger; searches <- 0; reads <- 0",
+        "2: evidence <- empty read ledger; report <- none",
         "3: for turn = 1..maxTurns[level]:",
         "4:   response <- model(messages, read-only tools)",
         "5:   if response has tool calls:",
         "6:      execute at most maxParallel[level] calls concurrently",
         "7:      append observations; normalize and deduplicate evidence",
         "8:      continue",
-        "9:   if searches or reads below minimum: append recovery instruction",
-        "10:  else if report schema or read grounding fails: recover once",
-        "11:  else return compact RANKED_CODE_MAP",
+        "9:   if no read evidence: request targeted reads",
+        "10:  if submit_code_map is not read-grounded: reject once",
+        "11:  else return deterministic RANKED_CODE_MAP rendering",
         "12: return FAILED or TRUNCATED with explicit uncertainty",
     ],
 }
@@ -557,7 +558,7 @@ def build_story(source: str, style_map: dict[str, ParagraphStyle]) -> list:
         Spacer(1, 5 * mm),
         Paragraph(safe_text(author), style_map["author"]),
         Paragraph(safe_text(version), style_map["meta"]),
-        Paragraph("System snapshot: <font name='ConsolasEmbedded'>5779a946d02106836f60054ec3cd4d27647bddeb</font>", style_map["meta"]),
+        Paragraph("System snapshot: <font name='ConsolasEmbedded'>f7b190a77d7cb0362b30b680618d2c6088bdb09f</font>", style_map["meta"]),
         Spacer(1, 11 * mm),
         cover_figure(),
         Spacer(1, 5 * mm),
@@ -696,7 +697,7 @@ def build_pdf() -> None:
     manifest = {
         "title": "FastContext: A Model-Directed Asynchronous Code Retrieval Architecture for Interactive Software Engineering Agents",
         "language": "zh-CN with English abstract",
-        "systemCommit": "5779a946d02106836f60054ec3cd4d27647bddeb",
+        "systemCommit": "f7b190a77d7cb0362b30b680618d2c6088bdb09f",
         "historicalBenchmarkCommit": "629e4c25bc646c98113cddca4c86622a286cffdc",
         "historicalBenchmarkStatus": "single-round pilot; not representative of current no-prefetch implementation",
         "generatedPdf": str(OUTPUT_PDF.relative_to(ROOT)).replace("\\", "/"),

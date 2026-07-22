@@ -11,10 +11,10 @@
 	<g id="group" transform="scale(1,-1) translate(0,-315)" style="clip-path: url(#clip)">
 		<g transform="">
 			<rect x="69" y="279" width="108" height="24" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(84%,92%,85%); fill-rule: evenodd;"/>
-			<text x="85.1947265625" y="288.48" style="font-family: ArialEmbedded-Bold; font-size: 7.2px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,576) scale(1,-1)">RANKED_CODE_MAP</text>
+			<text x="80.8017578125" y="288.55" style="font-family: ArialEmbedded-Bold; font-size: 7.0px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,577) scale(1,-1)">SUBMITTED_CODE_MAP</text>
 			<rect x="53" y="229" width="140" height="32" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(92%,91%,72%); fill-rule: evenodd;"/>
-			<text x="98.99912109375" y="246.72" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,493) scale(1,-1)">Report validator</text>
-			<text x="77.16640625" y="238.52" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,477) scale(1,-1)">paths read + required sections</text>
+			<text x="94.65615234375" y="246.72" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,493) scale(1,-1)">Mechanical verifier</text>
+			<text x="84.06435546875" y="238.52" style="font-family: ArialEmbedded; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,477) scale(1,-1)">read-covered path ranges</text>
 			<path d="M 123,261 L 123,279 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
 			<polygon points="123 279, 120.525 274.5, 125.475 274.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
 			<rect x="53" y="179" width="140" height="32" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(86%,87%,94%); fill-rule: evenodd;"/>
@@ -27,7 +27,7 @@
 			<text x="30.191796875" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">search_files</text>
 			<rect x="92" y="118" width="62" height="36" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
 			<text x="100.2409423828125" y="137.64499999999998" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,275) scale(1,-1)">search_symbols</text>
-			<text x="103.9108154296875" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">get_codemap</text>
+			<text x="104.2676513671875" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">trace_symbol</text>
 			<rect x="168" y="118" width="62" height="36" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
 			<text x="186.916796875" y="137.64499999999998" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,275) scale(1,-1)">read_file</text>
 			<text x="176.23017578125" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">bounded ranges</text>
@@ -38,8 +38,8 @@
 			<path d="M 199,154 L 155,179 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
 			<polygon points="155 179, 157.6899 174.6251, 160.1352 178.9289" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
 			<rect x="53" y="62" width="140" height="34" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(95%,87%,76%); fill-rule: evenodd;"/>
-			<text x="90.9847412109375" y="80.735" style="font-family: ArialEmbedded-Bold; font-size: 6.9px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,161) scale(1,-1)">Hypothesis planner</text>
-			<text x="83.60295410156249" y="72.435" style="font-family: ArialEmbedded-Bold; font-size: 6.9px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,144) scale(1,-1)">query rewrite + disproof</text>
+			<text x="91.44873046875" y="80.72" style="font-family: ArialEmbedded-Bold; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,161) scale(1,-1)">Hypothesis planner</text>
+			<text x="82.37265625" y="72.52" style="font-family: ArialEmbedded-Bold; font-size: 6.8px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,145) scale(1,-1)">lexical + owner + runtime</text>
 			<path d="M 88,96 L 47,118 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
 			<polygon points="47 118, 49.795 113.6914, 52.13545 118.0532" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
 			<path d="M 123,96 L 123,118 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
