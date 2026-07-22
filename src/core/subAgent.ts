@@ -787,7 +787,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'trace_symbol',
-        description: 'Find graph-indexed symbol declarations and exact textual references together. Use after a likely core symbol appears to verify definitions and usages in one turn.',
+        description: 'Inspect graph-indexed declarations and exact references together with bounded source evidence for the strongest definitions and callers. Prefer this after a likely core symbol appears.',
         parameters: {
           type: 'object',
           properties: {
@@ -909,6 +909,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let searchRecoveryUsed = false
   let reportRecoveryUsed = false
   let submissionRecoveryUsed = false
+  let evidenceSaturationPrompted = false
   let resolvedProtocol: ModelProtocol | null = null
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
   let turnLimit = definition.maxTurns
@@ -1254,6 +1255,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result.output })
     }
 
+    const readEvidencePaths = new Set(collectedEvidence
+      .filter(evidence => evidence.reason === 'file read')
+      .map(evidence => evidence.path.toLowerCase()))
+    if (strictFastContext && !evidenceSaturationPrompted && turn >= 4 && readEvidencePaths.size >= 6 && turn < turnLimit - 1) {
+      messages.push({
+        role: 'user',
+        content: `You now have read-confirmed evidence from ${readEvidencePaths.size} files. On the next turn, submit the ranked code map unless one specific unresolved owner, mirror, or failure edge still requires a targeted read. Do not broaden the search generically.`,
+      })
+      evidenceSaturationPrompted = true
+    }
+
     emit({ type: 'turn_complete', turn, calls: results.length })
 
     if (strictFastContext && turn === turnLimit - 1) {
@@ -1523,7 +1535,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       ])
       const symbolHits = normalizeCodeSearchHits(symbolResult.data).slice(0, 10)
       const referencePage = referenceResult.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }> } | Array<{ file: string; line: number; text: string; context?: string }> | undefined
-      const referenceHits = (Array.isArray(referencePage) ? referencePage : referencePage?.hits || []).slice(0, 30)
+      const referenceHits = diversifySearchHits(Array.isArray(referencePage) ? referencePage : referencePage?.hits || [], 30)
       if (!symbolResult.success && !referenceResult.success) {
         const error = symbolResult.error || referenceResult.error || 'symbol trace failed'
         return { ok: false, output: `Symbol trace failed: ${error}`, summary: `trace "${query}" failed`, evidence }
@@ -1555,12 +1567,59 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
           symbol: query,
         })
       }
+      const definitionPaths = new Set<string>()
+      const readTargets: Array<{ path: string; offset: number; limit: number; label: string }> = []
+      for (const hit of symbolHits) {
+        const relPath = toWorkspaceRelative(workspacePath, hit.path)
+        const key = relPath.toLowerCase()
+        if (definitionPaths.has(key) || readTargets.length >= 4) continue
+        definitionPaths.add(key)
+        const startLine = hit.startLine || hit.line || 1
+        const endLine = hit.endLine || startLine
+        const offset = Math.max(1, startLine - 6)
+        readTargets.push({
+          path: relPath,
+          offset,
+          limit: Math.min(100, Math.max(40, endLine - offset + 24)),
+          label: `definition ${hit.title}`,
+        })
+      }
+      const referencePaths = new Set<string>()
+      for (const hit of referenceHits) {
+        const relPath = toWorkspaceRelative(workspacePath, hit.file)
+        const key = relPath.toLowerCase()
+        if (definitionPaths.has(key) || referencePaths.has(key) || referencePaths.size >= 2) continue
+        referencePaths.add(key)
+        readTargets.push({
+          path: relPath,
+          offset: Math.max(1, hit.line - 12),
+          limit: 36,
+          label: `reference ${query}`,
+        })
+      }
+      const readResults = await Promise.all(readTargets.map(async target => ({
+        target,
+        result: await executeSubAgentTool('read_file', {
+          path: target.path,
+          offset: target.offset,
+          limit: target.limit,
+        }, workspacePath, executor),
+      })))
+      const successfulReads = readResults.filter(item => item.result.ok && item.result.evidence.some(item => item.reason === 'file read'))
+      if (successfulReads.length > 0) {
+        lines.push('SOURCE_EVIDENCE')
+        for (const item of successfulReads) {
+          lines.push(`[${item.target.label}]`)
+          lines.push(item.result.output)
+          for (const readEvidence of item.result.evidence) evidence.push(readEvidence)
+        }
+      }
       if (symbolHits.length === 0) lines.splice(1, 0, '- none')
       if (referenceHits.length === 0) lines.push('- none')
       return {
         ok: true,
         output: lines.join('\n'),
-        summary: `trace "${query}" -> ${symbolHits.length} definition(s), ${referenceHits.length} reference(s)`,
+        summary: `trace "${query}" -> ${symbolHits.length} definition(s), ${referenceHits.length} reference(s), ${successfulReads.length} source slice(s)`,
         evidence,
       }
     }

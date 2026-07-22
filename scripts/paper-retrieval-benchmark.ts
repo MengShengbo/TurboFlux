@@ -27,6 +27,7 @@ interface Args {
   limit?: number
   caseOffset: number
   repeats: number
+  concurrency: number
   seed: number
   timeoutMs: number
   systems: RetrievalSystemId[]
@@ -67,6 +68,7 @@ function parseArgs(): Args {
     limit: option('--limit') ? numberOption('--limit', 6) : calibration ? 6 : undefined,
     caseOffset: Math.max(0, Number(option('--case-offset')) || 0),
     repeats: numberOption('--repeats', calibration ? 1 : 3),
+    concurrency: Math.min(50, numberOption('--concurrency', 1)),
     seed: numberOption('--seed', 20260722),
     timeoutMs: numberOption('--timeout-seconds', calibration ? 240 : 600) * 1000,
     systems: parseSystems(option('--systems')),
@@ -149,12 +151,14 @@ function experimentMetadata(args: Args, manifestPath: string, caseIds: string[])
     systems: args.systems,
     caseIds,
     repeats: args.repeats,
+    concurrency: args.concurrency,
     timeoutMs: args.timeoutMs,
     seed: args.seed,
     cliVersions: installedCliVersions(),
     notes: [
       'All LLM systems use the active TurboFlux endpoint and gpt-5.5.',
       'Native reasoning is disabled; protocol differences are recorded per run.',
+      `Case-level concurrency is ${args.concurrency}; systems within one case remain sequential and rotated.`,
       args.command === 'calibrate' ? 'Calibration run; not a final comparative result.' : 'Formal repeated experiment.',
       args.caseOffset > 0 ? `Selection starts after ${args.caseOffset} balanced case(s), allowing a disjoint development slice.` : 'Selection starts at the first balanced case.',
     ],
@@ -190,6 +194,7 @@ async function runExperiment(args: Args): Promise<void> {
       || metadata.manifestSha256 !== fileSha256(args.manifest)
       || metadata.endpointHost !== new URL(config.baseUrl).host
       || metadata.repeats !== args.repeats
+      || (metadata.concurrency || 1) !== args.concurrency
       || metadata.timeoutMs !== args.timeoutMs
       || metadata.seed !== args.seed
       || JSON.stringify(metadata.systems) !== JSON.stringify(args.systems)
@@ -217,11 +222,17 @@ async function runExperiment(args: Args): Promise<void> {
   const cache = new BenchmarkWorkspaceCache()
   const total = selectedCases.length * args.systems.reduce((sum, system) => sum + (system === 'bm25' ? 1 : args.repeats), 0)
   let position = 0
-
+  const workspaces = new Map<string, Awaited<ReturnType<BenchmarkWorkspaceCache['prepare']>>>()
   for (let caseIndex = 0; caseIndex < selectedCases.length; caseIndex += 1) {
     const item = selectedCases[caseIndex]
-    console.log(`Workspace ${caseIndex + 1}/${selectedCases.length}: ${item.id} (${item.repository}@${item.baseCommit.slice(0, 10)})`)
-    const workspace = await cache.prepare(item)
+    console.log(`Preparing workspace ${caseIndex + 1}/${selectedCases.length}: ${item.id} (${item.repository}@${item.baseCommit.slice(0, 10)})`)
+    workspaces.set(item.id, await cache.prepare(item))
+  }
+
+  const runCase = async (caseIndex: number): Promise<void> => {
+    const item = selectedCases[caseIndex]
+    const workspace = workspaces.get(item.id)
+    if (!workspace) throw new Error(`Prepared workspace missing for ${item.id}`)
     for (let repeat = 1; repeat <= args.repeats; repeat += 1) {
       const systems = rotate(args.systems, caseIndex + repeat - 1)
       for (let order = 0; order < systems.length; order += 1) {
@@ -250,6 +261,17 @@ async function runExperiment(args: Args): Promise<void> {
       }
     }
   }
+  let nextCaseIndex = 0
+  const workerCount = Math.min(args.concurrency, selectedCases.length)
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const caseIndex = nextCaseIndex
+      nextCaseIndex += 1
+      if (caseIndex >= selectedCases.length) return
+      await runCase(caseIndex)
+    }
+  })
+  await Promise.all(workers)
   generateReport({ outputDir: args.output, metadata, manifest: selectedManifest, runs: readJournal(journalPath) })
   console.log(`Report: ${relative(process.cwd(), join(args.output, 'report.md'))}`)
 }

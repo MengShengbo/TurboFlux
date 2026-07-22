@@ -121,6 +121,7 @@ export interface ExperimentMetadata {
   systems: RetrievalSystemId[]
   caseIds: string[]
   repeats: number
+  concurrency?: number
   timeoutMs: number
   seed: number
   cliVersions: Record<string, string>

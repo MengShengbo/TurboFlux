@@ -748,7 +748,17 @@ describe('runSubAgent', () => {
       } })),
       searchContent: async () => ({ success: true, data: [] }),
       searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      readFile: async () => ({ success: true, data: '' }),
+      readFile: async () => ({ success: true, data: 'export function startRuntime() {}' }),
+      readFileRange: vi.fn(async (_path: string, offset: number, limit: number) => ({
+        success: true,
+        data: {
+          content: Array.from({ length: Math.min(limit, 8) }, (_, index) => `line ${offset + index + 1}`).join('\n'),
+          startLine: offset + 1,
+          endLine: offset + Math.min(limit, 8),
+          totalLines: 40,
+          truncated: true,
+        },
+      })),
       getCodeMap: async () => ({ success: true, data: { map: [] } }),
     } as unknown as ToolExecutor
 
@@ -774,9 +784,12 @@ describe('runSubAgent', () => {
       expect(result.evidence).toEqual(expect.arrayContaining([
         expect.objectContaining({ path: 'src/core.ts', reason: 'symbol: startRuntime' }),
         expect.objectContaining({ path: 'src/app.ts', reason: 'reference: startRuntime' }),
+        expect.objectContaining({ path: 'src/core.ts', reason: 'file read' }),
+        expect.objectContaining({ path: 'src/app.ts', reason: 'file read' }),
       ]))
       expect(executor.searchCodeSymbols).toHaveBeenCalledTimes(1)
       expect(executor.searchContentPage).toHaveBeenCalledTimes(1)
+      expect(executor.readFileRange).toHaveBeenCalledTimes(2)
     } finally {
       globalThis.fetch = originalFetch
     }
