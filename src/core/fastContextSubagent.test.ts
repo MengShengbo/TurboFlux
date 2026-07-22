@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { FastContextScanHit } from './fastContextTypes'
 import type { ToolExecutor } from '../tools/executor'
+import { __testFirstPartyImportPatterns } from './fastContextRetrieval'
 import {
   __testApplyCausalAnchorRanking,
   __testBuildEvidencePack,
@@ -148,6 +149,33 @@ describe('FastContext retrieval', () => {
     expect(queries.contentPatterns).toContain('http[\\s_.-]*proxy')
     expect(queries.contentPatterns).toContain('api[\\s_.-]*gateway')
     expect(queries.contentPatterns).not.toContain('forum[\\s_.-]*serverless[\\s_.-]*com')
+  })
+
+  it('preserves repository source paths embedded in GitHub blob links', () => {
+    const queries = __testRetrievalPrimerQueries('Warning in IsolationForest\nhttps://github.com/scikit-learn/scikit-learn/blob/9aaed498/sklearn/ensemble/_iforest.py#L337')
+
+    expect(queries.pathHints).toContain('sklearn/ensemble/_iforest.py')
+  })
+
+  it('expands Python from-import modules into concrete first-party files', () => {
+    const patterns = __testFirstPartyImportPatterns([{
+      path: 'sphinx/domains/python.py',
+      startLine: 1,
+      endLine: 40,
+      preview: 'from sphinx.pycode import ast',
+      content: 'from sphinx.pycode import ast\nfrom sphinx.util import logging as sphinx_logging',
+      reason: 'file read',
+    }, {
+      path: 'sphinx/domains/python.py',
+      startLine: 100,
+      endLine: 160,
+      preview: 'ast.parse(source)',
+      content: 'ast.parse(source)\nast.NodeVisitor()\nast_parse(annotation)',
+      reason: 'file read',
+    }], ['sphinx/domains/python.py'])
+
+    expect(patterns).toContain('sphinx/pycode/ast.py')
+    expect(patterns).toContain('sphinx/util/logging.py')
   })
 
   it('builds a bounded listwise rerank pack from branch maps and read evidence', () => {

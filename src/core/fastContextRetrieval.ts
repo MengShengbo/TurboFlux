@@ -25,6 +25,7 @@ interface PrimerHit {
   line: string
   lineNumber?: number
   source: 'symbol' | 'filename' | 'content' | 'explicit'
+  weight?: number
 }
 
 const STOP_WORDS = new Set([
@@ -48,6 +49,27 @@ function unique(values: string[], limit: number): string[] {
     if (result.length >= limit) break
   }
   return result
+}
+
+async function runLimited<T>(tasks: Array<() => Promise<T>>, concurrency = 4): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(tasks.length)
+  let nextIndex = 0
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+    while (nextIndex < tasks.length) {
+      const index = nextIndex
+      nextIndex += 1
+      try {
+        results[index] = { status: 'fulfilled', value: await tasks[index]() }
+      } catch (firstReason) {
+        try {
+          results[index] = { status: 'fulfilled', value: await tasks[index]() }
+        } catch (reason) {
+          results[index] = { status: 'rejected', reason: reason || firstReason }
+        }
+      }
+    }
+  }))
+  return results
 }
 
 function regexPhrase(value: string): string {
@@ -78,10 +100,39 @@ function parentDirectories(path: string): string[] {
 function firstPartyImportPatterns(evidence: SubAgentEvidence[], candidatePaths: string[]): string[] {
   const knownPaths = candidatePaths.map(path => path.replace(/\\/g, '/').toLowerCase())
   const scored = new Map<string, number>()
+  const evidenceByPath = new Map<string, { path: string; contents: string[] }>()
   for (const item of evidence) {
     const path = item.path.replace(/\\/g, '/')
-    const content = item.content || item.preview || ''
+    const key = path.toLowerCase()
+    const grouped = evidenceByPath.get(key) || { path, contents: [] }
+    grouped.contents.push(item.content || item.preview || '')
+    evidenceByPath.set(key, grouped)
+  }
+  for (const item of evidenceByPath.values()) {
+    const path = item.path
+    const content = item.contents.join('\n')
     if (/\.py$/i.test(path)) {
+      for (const match of content.matchAll(/^\s*from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import\s+([^\n#]+)/gm)) {
+        const modulePath = match[1].replace(/\./g, '/')
+        const root = modulePath.split('/')[0].toLowerCase()
+        if (!knownPaths.some(candidate => candidate === `${root}.py` || candidate.startsWith(`${root}/`) || candidate.includes(`/${root}/`))) continue
+        const importedNames = match[2]
+          .replace(/[()]/g, '')
+          .split(',')
+          .map(value => value.trim().split(/\s+as\s+/i, 1)[0])
+          .filter(value => /^[A-Za-z][A-Za-z0-9_]*$/.test(value))
+        const moduleParts = modulePath.split('/')
+        if (moduleParts.length >= 2) {
+          const moduleReferences = content.match(new RegExp(`\\b${moduleParts[moduleParts.length - 1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'))?.length || 1
+          scored.set(`${modulePath}.py`, Math.max(scored.get(`${modulePath}.py`) || 0, moduleReferences + 6))
+        }
+        for (const importedName of importedNames) {
+          if (moduleParts[moduleParts.length - 1] === importedName || moduleParts.length < 2) continue
+          const importedPath = `${modulePath}/${importedName}`
+          const references = content.match(new RegExp(`\\b${importedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'))?.length || 1
+          scored.set(`${importedPath}.py`, Math.max(scored.get(`${importedPath}.py`) || 0, references))
+        }
+      }
       for (const match of content.matchAll(/^\s*(?:from|import)\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)/gm)) {
         const moduleName = match[1]
         const modulePath = moduleName.replace(/\./g, '/')
@@ -114,16 +165,39 @@ function firstPartyImportPatterns(evidence: SubAgentEvidence[], candidatePaths: 
     }
   }
   return [...scored.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .sort((left, right) => right[1] - left[1]
+      || Number(left[0].startsWith('**/')) - Number(right[0].startsWith('**/'))
+      || left[0].localeCompare(right[0]))
     .slice(0, 12)
     .map(([pattern]) => pattern)
 }
+
+export const __testFirstPartyImportPatterns = firstPartyImportPatterns
 
 function titleWords(objective: string): string[] {
   const title = objective.split(/\r?\n/, 1)[0]
   return unique((title.toLowerCase().match(/[a-z][a-z0-9]{2,}/g) || [])
     .map(word => word === 'multiple' ? 'multi' : word.endsWith('s') && word.length > 4 ? word.slice(0, -1) : word)
     .filter(word => !STOP_WORDS.has(word)), 8)
+}
+
+function responsibilityTerms(objective: string): string[] {
+  const terms: string[] = []
+  if (/\b(?:sql|query|database|column|insert|update|conflict|upsert|orm)\b/i.test(objective)) terms.push('compiler')
+  if (/\b(?:parse|parser|syntax|annotation|ast|unparse)\b/i.test(objective)) terms.push('ast', 'parser')
+  if (/\b(?:serializ|deserializ|json|encode|decode)\b/i.test(objective)) terms.push('serializer', 'encoder')
+  if (/\b(?:validat|invalid|schema|constraint)\b/i.test(objective)) terms.push('validator')
+  if (/\b(?:permission|authoriz|access|policy)\b/i.test(objective)) terms.push('authoriz', 'permission')
+  if (/\b(?:dispatch|route|handler|middleware)\b/i.test(objective)) terms.push('handler', 'dispatcher')
+  return unique(terms, 4)
+}
+
+function commonPathPrefix(left: string, right: string): number {
+  const leftParts = left.replace(/\\/g, '/').toLowerCase().split('/')
+  const rightParts = right.replace(/\\/g, '/').toLowerCase().split('/')
+  let index = 0
+  while (index < leftParts.length && index < rightParts.length && leftParts[index] === rightParts[index]) index += 1
+  return index
 }
 
 function identifierVariants(value: string): string[] {
@@ -137,6 +211,10 @@ function identifierVariants(value: string): string[] {
 
 export function buildFastContextPrimerQueries(objective: string): FastContextPrimerQueries {
   const title = objective.split(/\r?\n/, 1)[0]
+  const linkedSourcePaths = [...objective.matchAll(/https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/blob\/[^/\s]+\/([^#?\s)]+\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte))/gi)]
+    .map(match => {
+      try { return decodeURIComponent(match[1]) } catch { return match[1] }
+    })
   const focusedObjective = `${title}\n${objective.slice(0, 2_400)}`
     .replace(/!?\[[^\]]*\]\([^)]*\)/g, ' ')
     .replace(/https?:\/\/\S+/gi, ' ')
@@ -155,7 +233,7 @@ export function buildFastContextPrimerQueries(objective: string): FastContextPri
     ...dottedIdentifiers.flatMap(value => value.split(/[.-]/)).filter(value => /^[A-Za-z_$][\w$]{3,}$/.test(value)),
   ]
   const symbols = unique(rawSymbols.flatMap(identifierVariants), 10)
-  const pathHints = unique((focusedObjective.match(/(?:[A-Za-z0-9_.-]+[\\/]){1,}[A-Za-z0-9_.-]+\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte|rst|md)/gi) || [])
+  const pathHints = unique([...linkedSourcePaths, ...(focusedObjective.match(/(?:[A-Za-z0-9_.-]+[\\/]){1,}[A-Za-z0-9_.-]+\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte|rst|md)/gi) || [])]
     .map(path => path.replace(/\\/g, '/').replace(/^\/+/, ''))
     .map(path => path.includes('site-packages/') ? path.slice(path.indexOf('site-packages/') + 'site-packages/'.length) : path), 8)
   const words = titleWords(objective)
@@ -184,16 +262,28 @@ export function buildFastContextPrimerQueries(objective: string): FastContextPri
   return { symbols, pathHints, filePatterns, contentPatterns, structuralSignals, behavioralSignals }
 }
 
-function normalizeContentHits(workspacePath: string, query: string, hits: SearchContentHit[], limit = 8): PrimerHit[] {
+function normalizeContentHits(workspacePath: string, query: string, hits: SearchContentHit[], limit = 8, weight = 1): PrimerHit[] {
   const seenPaths = new Set<string>()
   const selected: PrimerHit[] = []
   const sourcePriority = (path: string): number => {
     const normalized = path.replace(/\\/g, '/').toLowerCase()
-    if (/(?:^|\/)(?:test|tests|__tests__|testing)(?:\/|$)|(?:\.(?:test|spec)\.)/.test(normalized)) return 0
+    if (/(?:^|\/)(?:test|tests|__tests__|testing|benchmarks?)(?:\/|$)|(?:\.(?:test|spec)\.)/.test(normalized)) return 0
     if (/(?:^|\/)(?:docs?|documentation|examples?)(?:\/|$)|\.md$|\.rst$/.test(normalized)) return 1
     return 2
   }
-  const rankedHits = [...hits].sort((left, right) => sourcePriority(right.file) - sourcePriority(left.file))
+  const pathFrequency = new Map<string, number>()
+  for (const hit of hits) {
+    const key = relativePath(workspacePath, hit.file).toLowerCase()
+    pathFrequency.set(key, (pathFrequency.get(key) || 0) + 1)
+  }
+  const rankedHits = [...hits].sort((left, right) => {
+    const leftPath = relativePath(workspacePath, left.file)
+    const rightPath = relativePath(workspacePath, right.file)
+    return sourcePriority(right.file) - sourcePriority(left.file)
+      || (pathFrequency.get(rightPath.toLowerCase()) || 0) - (pathFrequency.get(leftPath.toLowerCase()) || 0)
+      || leftPath.localeCompare(rightPath)
+      || left.line - right.line
+  })
   for (const hit of rankedHits) {
     const path = relativePath(workspacePath, hit.file)
     const key = path.toLowerCase()
@@ -204,6 +294,7 @@ function normalizeContentHits(workspacePath: string, query: string, hits: Search
       line: `content[${query}] ${path}:${hit.line} ${hit.text.replace(/\s+/g, ' ').trim().slice(0, 180)}`,
       lineNumber: hit.line,
       source: 'content',
+      weight,
     })
     if (selected.length >= limit) break
   }
@@ -219,35 +310,42 @@ export async function buildFastContextRetrievalPrimer(params: {
   const structuralPatterns = unique(queries.structuralSignals.slice(0, 8).map(regexPhrase), 8)
   const behavioralPatterns = unique(queries.behavioralSignals.map(regexPhrase), 4)
   const selectedContentPatterns = unique([...structuralPatterns, ...behavioralPatterns], 8)
-  const tasks: Array<Promise<PrimerHit[]>> = [
-    ...queries.filePatterns.slice(0, 10).map(async pattern => {
+  const tasks: Array<() => Promise<PrimerHit[]>> = [
+    ...queries.filePatterns.slice(0, 10).map(pattern => async () => {
       const result = await params.toolExecutor.searchFiles(pattern, params.workspacePath)
       return result.success ? (result.data?.matches || []).slice(0, 8).map(path => {
         const workspaceRelative = relativePath(params.workspacePath, path)
         return { path: workspaceRelative, line: `filename[${pattern}] ${workspaceRelative}`, source: 'filename' as const }
       }) : []
     }),
-    ...selectedContentPatterns.map(async pattern => {
+    ...selectedContentPatterns.map((pattern, index) => async () => {
       const result = params.toolExecutor.searchContentPage
-        ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 128 })
+        ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 200 })
         : await params.toolExecutor.searchContent(pattern, params.workspacePath, SOURCE_FILE_GLOB, true)
       const hits = Array.isArray(result.data) ? result.data : result.data?.hits || []
-      return result.success ? normalizeContentHits(params.workspacePath, pattern, hits, 10) : []
+      const weight = index < 2 ? 3 : index < 4 ? 2 : 1
+      return result.success ? normalizeContentHits(params.workspacePath, pattern, hits, 16, weight) : []
     }),
   ]
   if (tasks.length === 0) return { calls: 0, readCalls: 0, candidatePaths: [], seedEvidence: [], queries }
-  const settled = await Promise.allSettled(tasks)
-  const initialHits = settled.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+  const settled = await runLimited(tasks)
+  const explicitHits: PrimerHit[] = queries.pathHints.map(path => ({
+    path,
+    line: `explicit[path] ${path}`,
+    source: 'explicit',
+    weight: 4,
+  }))
+  const initialHits = [...explicitHits, ...settled.flatMap(result => result.status === 'fulfilled' ? result.value : [])]
   const directoryScores = new Map<string, number>()
   for (const hit of initialHits) {
-    const weight = hit.source === 'explicit' ? 8 : hit.source === 'content' ? 3 : hit.source === 'symbol' ? 2 : 1
+    const weight = (hit.source === 'explicit' ? 8 : hit.source === 'content' ? 3 : hit.source === 'symbol' ? 2 : 1) * (hit.weight || 1)
     for (const directory of parentDirectories(hit.path)) {
       directoryScores.set(directory, (directoryScores.get(directory) || 0) + weight)
     }
   }
   const directSourceDirectories = unique(initialHits
     .filter(hit => (hit.source === 'content' || hit.source === 'filename' || hit.source === 'explicit') && SOURCE_FILE.test(hit.path))
-    .filter(hit => !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples)(?:\/|$)/i.test(hit.path))
+    .filter(hit => !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)/i.test(hit.path))
     .flatMap(hit => parentDirectories(hit.path)), 8)
   const familyDirectories = unique([
     ...directSourceDirectories,
@@ -255,15 +353,15 @@ export async function buildFastContextRetrievalPrimer(params: {
     .sort((left, right) => right[1] - left[1] || left[0].length - right[0].length)
       .map(([directory]) => directory),
   ], 6)
-  const familyTasks = familyDirectories.map(async directory => {
+  const familyTasks = familyDirectories.map(directory => async () => {
     const result = await params.toolExecutor.searchFiles(`${directory}/**/*`, params.workspacePath)
     const matches = result.success ? result.data?.matches || [] : []
     return unique(matches
       .map(path => relativePath(params.workspacePath, path))
-      .filter(path => SOURCE_FILE.test(path) && !/(?:^|\/)(?:test|tests|__tests__)(?:\/|$)|(?:\.test|\.spec)\.[^/]+$/i.test(path))
+      .filter(path => SOURCE_FILE.test(path) && !/(?:^|\/)(?:test|tests|__tests__|benchmarks?)(?:\/|$)|(?:\.test|\.spec)\.[^/]+$/i.test(path))
       .map(path => `family[${directory}] ${path}`), 32)
   })
-  const familySettled = await Promise.allSettled(familyTasks)
+  const familySettled = await runLimited(familyTasks)
   const familyLines = unique(familySettled.flatMap(result => result.status === 'fulfilled' ? result.value : []), 160)
   const hitLines = unique(initialHits.map(hit => hit.line), 80)
   const candidatePaths = unique([
@@ -273,19 +371,19 @@ export async function buildFastContextRetrievalPrimer(params: {
   ], 200)
   const pathSignals = new Map<string, { path: string; score: number; sources: Set<PrimerHit['source']>; lines: number[] }>()
   for (const hit of initialHits) {
-    if (!SOURCE_FILE.test(hit.path) || /(?:^|\/)(?:docs?|documentation|test|tests|__tests__)(?:\/|$)/i.test(hit.path)) continue
+    if (!SOURCE_FILE.test(hit.path) || /(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)/i.test(hit.path)) continue
     const key = hit.path.toLowerCase()
     const current = pathSignals.get(key) || { path: hit.path, score: 0, sources: new Set(), lines: [] }
     current.sources.add(hit.source)
-    current.score += hit.source === 'explicit' ? 30 : hit.source === 'content' ? 20 : hit.source === 'symbol' ? 20 : 4
+    current.score += (hit.source === 'explicit' ? 30 : hit.source === 'content' ? 20 : hit.source === 'symbol' ? 20 : 4) * (hit.weight || 1)
     if (hit.lineNumber && hit.lineNumber > 0) current.lines.push(hit.lineNumber)
     pathSignals.set(key, current)
   }
-  const responsibilityName = /authori[sz]|permission|validat|integrat|response|serializ|deserializ|adapter|handler|registry|dispatch|resolver|transform|normaliz|parser|schema|policy|resource|cors|method/i
+  const responsibilityName = /authori[sz]|permission|validat|integrat|response|serializ|deserializ|adapter|handler|registry|dispatch|resolver|transform|normaliz|parser|compiler|schema|policy|resource|cors|method/i
   for (const line of familyLines) {
     const path = line.replace(/^family\[[^\]]+\]\s+/, '')
     const familyDirectory = line.match(/^family\[([^\]]+)\]/)?.[1] || ''
-    if (!SOURCE_FILE.test(path) || /(?:^|\/)(?:docs?|documentation|test|tests|__tests__)(?:\/|$)/i.test(path)) continue
+    if (!SOURCE_FILE.test(path) || /(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)/i.test(path)) continue
     const key = path.toLowerCase()
     const current = pathSignals.get(key) || { path, score: 0, sources: new Set<PrimerHit['source']>(), lines: [] }
     current.sources.add('filename')
@@ -294,10 +392,49 @@ export async function buildFastContextRetrievalPrimer(params: {
       + (responsibilityName.test(path.slice(path.lastIndexOf('/') + 1)) ? 4 : 0)
     pathSignals.set(key, current)
   }
-  const seedPaths = [...pathSignals.values()]
-    .filter(item => item.sources.size >= 2 || item.score >= 4)
-    .sort((left, right) => right.score - left.score || right.sources.size - left.sources.size || left.path.localeCompare(right.path))
-    .slice(0, 12)
+  const rankedSeedPaths = [...pathSignals.values()]
+    .filter(item => item.sources.has('explicit') || item.sources.has('content') || item.sources.size >= 2)
+    .sort((left, right) => {
+      const sourceRank = (item: typeof left) => item.sources.has('explicit') ? 3 : item.sources.has('content') ? 2 : item.sources.has('symbol') ? 1 : 0
+      return sourceRank(right) - sourceRank(left)
+        || right.score - left.score
+        || right.sources.size - left.sources.size
+        || left.path.localeCompare(right.path)
+    })
+  const coreSeedPaths = rankedSeedPaths.slice(0, 8)
+  const coreKeys = new Set(coreSeedPaths.map(item => item.path.toLowerCase()))
+  const coreDirectories = new Set(rankedSeedPaths.slice(0, 12).flatMap(item => parentDirectories(item.path)).map(value => value.toLowerCase()))
+  const frontierFilenamePaths = candidatePaths
+    .filter(path => SOURCE_FILE.test(path))
+    .filter(path => !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?|migrations?)(?:\/|$)/i.test(path))
+    .filter(path => responsibilityName.test(path.slice(path.lastIndexOf('/') + 1)))
+    .map(path => ({ path, score: 0, sources: new Set<PrimerHit['source']>(['filename']), lines: [] }))
+  const frontierPool = [...pathSignals.values(), ...frontierFilenamePaths]
+    .filter(item => !coreKeys.has(item.path.toLowerCase()))
+    .filter(item => parentDirectories(item.path).some(directory => coreDirectories.has(directory.toLowerCase())))
+    .sort((left, right) => Number(right.sources.has('content')) - Number(left.sources.has('content'))
+      || right.score - left.score
+      || left.path.localeCompare(right.path))
+  const contentFrontier = frontierPool.find(item => item.sources.has('content'))
+  const objectiveTerms = new Set((params.objective.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) || []).filter(term => !STOP_WORDS.has(term)))
+  const roleFrontier = frontierPool
+    .filter(item => item !== contentFrontier && responsibilityName.test(item.path.slice(item.path.lastIndexOf('/') + 1)))
+    .map(item => {
+      const normalizedPath = item.path.toLowerCase()
+      const filename = normalizedPath.slice(normalizedPath.lastIndexOf('/') + 1)
+      const roleScore = /compiler|parser|validat|serializ|deserializ|resolver|handler|adapter|dispatch/.test(filename) ? 4 : 1
+      const objectiveScore = [...objectiveTerms].filter(term => normalizedPath.includes(term)).length
+      return { item, score: roleScore + Math.min(4, objectiveScore) }
+    })
+    .sort((left, right) => right.score - left.score || right.item.score - left.item.score || left.item.path.localeCompare(right.item.path))[0]?.item
+  const frontierSeedPaths = [contentFrontier, roleFrontier]
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  const frontierKeys = new Set(frontierSeedPaths.map(item => item.path.toLowerCase()))
+  const seedPaths = [
+    ...coreSeedPaths,
+    ...frontierSeedPaths,
+    ...rankedSeedPaths.filter(item => !coreKeys.has(item.path.toLowerCase()) && !frontierKeys.has(item.path.toLowerCase())),
+  ].slice(0, 10)
   const seedResults = await Promise.allSettled(seedPaths.map(async item => {
     const anchor = item.lines.length > 0 ? Math.min(...item.lines) : 1
     const offset = Math.max(0, anchor - 61)
@@ -328,12 +465,77 @@ export async function buildFastContextRetrievalPrimer(params: {
     } satisfies SubAgentEvidence
   }))
   const directSeedEvidence = seedResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
-  const importPatterns = firstPartyImportPatterns(directSeedEvidence, candidatePaths)
-  const importSearchResults = await Promise.allSettled(importPatterns.map(pattern => params.toolExecutor.searchFiles(pattern, params.workspacePath)))
+  const headerProbePaths = seedPaths
+    .filter(item => /\.(?:py|pyi|[cm]?[jt]sx?)$/i.test(item.path))
+    .filter(item => Math.min(...item.lines, 97) > 96)
+    .slice(0, 4)
+  const headerResults = await Promise.allSettled(headerProbePaths.map(async item => {
+    if (!params.toolExecutor.readFileRange) return undefined
+    const result = await params.toolExecutor.readFileRange(item.path, 0, 96, 48_000)
+    if (!result.success || !result.data?.content) return undefined
+    return {
+      path: item.path,
+      startLine: result.data.startLine,
+      endLine: result.data.endLine,
+      preview: result.data.content.split('\n').slice(0, 12).join('\n'),
+      content: result.data.content.slice(0, 12_000),
+      reason: 'file read',
+    } satisfies SubAgentEvidence
+  }))
+  const headerEvidence = headerResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
+  const responsibilityRoots = [...new Set(directSeedEvidence
+    .map(item => item.path.replace(/\\/g, '/').split('/')[0])
+    .filter(Boolean))].slice(0, 2)
+  const responsibilityPatterns = responsibilityTerms(params.objective)
+    .flatMap(term => responsibilityRoots.map(root => `${root}/**/*${term}*.*`))
+  const responsibilitySearchResults = await runLimited(responsibilityPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)))
+  const knownSeedPaths = new Set([...directSeedEvidence, ...headerEvidence].map(item => item.path.toLowerCase()))
+  const responsibilityPathRanks = new Map<string, { path: string; patternRank: number }>()
+  responsibilitySearchResults.forEach((result, patternRank) => {
+    if (result.status !== 'fulfilled' || !result.value.success) return
+    for (const matchedPath of result.value.data?.matches || []) {
+      const path = relativePath(params.workspacePath, matchedPath)
+      const key = path.toLowerCase()
+      if (!responsibilityPathRanks.has(key)) responsibilityPathRanks.set(key, { path, patternRank })
+    }
+  })
+  const responsibilityPaths = [...responsibilityPathRanks.values()]
+    .sort((left, right) => left.patternRank - right.patternRank || left.path.localeCompare(right.path))
+    .slice(0, 24)
+    .map(item => item.path)
+    .filter(path => SOURCE_FILE.test(path))
+    .filter(path => !knownSeedPaths.has(path.toLowerCase()))
+    .filter(path => !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)/i.test(path))
+    .sort((left, right) => {
+      const leftScore = Math.max(...directSeedEvidence.map(item => commonPathPrefix(left, item.path)))
+      const rightScore = Math.max(...directSeedEvidence.map(item => commonPathPrefix(right, item.path)))
+      const leftRank = responsibilityPathRanks.get(left.toLowerCase())?.patternRank || 0
+      const rightRank = responsibilityPathRanks.get(right.toLowerCase())?.patternRank || 0
+      return rightScore - leftScore || leftRank - rightRank || left.localeCompare(right)
+    })
+    .slice(0, 2)
+  const responsibilityReadResults = await runLimited(responsibilityPaths.map(path => () => (async () => {
+    const result = params.toolExecutor.readFileRange
+      ? await params.toolExecutor.readFileRange(path, 0, 320, 96_000)
+      : undefined
+    if (!result?.success || !result.data?.content) return undefined
+    return {
+      path,
+      startLine: result.data.startLine,
+      endLine: result.data.endLine,
+      preview: result.data.content.split('\n').slice(0, 12).join('\n'),
+      content: result.data.content.slice(0, 24_000),
+      reason: 'file read',
+    } satisfies SubAgentEvidence
+  })()))
+  const responsibilityEvidence = responsibilityReadResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
+  candidatePaths.push(...responsibilityEvidence.map(item => item.path).filter(path => !candidatePaths.some(candidate => candidate.toLowerCase() === path.toLowerCase())))
+  const importPatterns = firstPartyImportPatterns([...directSeedEvidence, ...headerEvidence, ...responsibilityEvidence], candidatePaths)
+  const importSearchResults = await runLimited(importPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)))
   const importPaths = unique(importSearchResults.flatMap(result => result.status === 'fulfilled' && result.value.success
     ? result.value.data?.matches || []
     : []).map(path => relativePath(params.workspacePath, path)), 6)
-  const importReadResults = await Promise.allSettled(importPaths.map(async path => {
+  const importReadResults = await runLimited(importPaths.map(path => async () => {
     const result = params.toolExecutor.readFileRange
       ? await params.toolExecutor.readFileRange(path, 0, 220, 64_000)
       : undefined
@@ -348,7 +550,7 @@ export async function buildFastContextRetrievalPrimer(params: {
     } satisfies SubAgentEvidence
   }))
   const importEvidence = importReadResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
-  const seedEvidence = [...directSeedEvidence, ...importEvidence]
+  const seedEvidence = [...responsibilityEvidence, ...directSeedEvidence, ...importEvidence]
     .filter((item, index, all) => all.findIndex(other => other.path.toLowerCase() === item.path.toLowerCase()) === index)
     .slice(0, 18)
   candidatePaths.push(...importEvidence.map(item => item.path).filter(path => !candidatePaths.some(candidate => candidate.toLowerCase() === path.toLowerCase())))
@@ -361,8 +563,8 @@ export async function buildFastContextRetrievalPrimer(params: {
     seedLines.length > 0 ? `High-confidence read-confirmed source seeds:\n${seedLines.join('\n---\n')}` : '',
   ].filter(Boolean)
   return {
-    calls: tasks.length + familyTasks.length + seedPaths.length + importPatterns.length + importPaths.length,
-    readCalls: seedPaths.length + importPaths.length,
+    calls: tasks.length + familyTasks.length + seedPaths.length + headerProbePaths.length + responsibilityPatterns.length + responsibilityPaths.length + importPatterns.length + importPaths.length,
+    readCalls: seedPaths.length + headerProbePaths.length + responsibilityPaths.length + importPaths.length,
     candidatePaths,
     seedEvidence,
     queries,
