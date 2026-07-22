@@ -4,8 +4,12 @@ import type { ToolExecutor } from '../tools/executor'
 import {
   __testApplyCausalAnchorRanking,
   __testBuildEvidencePack,
+  __testBuildRerankContext,
   __testMergeCodeMaps,
   __testRetrievalPrimerQueries,
+  __testApplyResponsibilityRanking,
+  __testEnsureFeatureFrontierCandidates,
+  __testSelectFrontierAuditPaths,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
@@ -126,6 +130,52 @@ describe('FastContext retrieval', () => {
     expect(queries.symbols).toContain('CheckboxInput')
     expect(queries.symbols).toContain('get_context')
     expect(queries.filePatterns).toContain('**/*multicursor*.*')
+    expect(queries.contentPatterns).toContain('multi[\\s_.-]*cursor')
+  })
+
+  it('separates structural configuration anchors from behavioral phrases', () => {
+    const queries = __testRetrievalPrimerQueries('`--recursive=y` ignores `ignore-paths`\nExpected generated files to be skipped')
+
+    expect(queries.structuralSignals).toContain('--recursive=y')
+    expect(queries.structuralSignals).toContain('ignore-paths')
+    expect(queries.contentPatterns).toContain('ignore[\\s_.-]*paths')
+    expect(queries.behavioralSignals).toContain('recursive ignore')
+  })
+
+  it('keeps behavior queries when issue templates contain URLs and image links', () => {
+    const queries = __testRetrievalPrimerQueries('Support HTTP Proxy Api Gateway Integration Type\nSee https://forum.serverless.com and ![image](https://cloud.example.com/a.png)')
+
+    expect(queries.contentPatterns).toContain('http[\\s_.-]*proxy')
+    expect(queries.contentPatterns).toContain('api[\\s_.-]*gateway')
+    expect(queries.contentPatterns).not.toContain('forum[\\s_.-]*serverless[\\s_.-]*com')
+  })
+
+  it('builds a bounded listwise rerank pack from branch maps and read evidence', () => {
+    const primary = {
+      candidates: [{ path: 'src/wrapper.ts', startLine: 1, endLine: 8, role: 'wrapper', editKind: 'consumer' as const, confidence: 'high' as const, why: 'calls owner' }],
+      relationships: [],
+      rejectedHypotheses: [],
+      searchesTried: ['wrapper'],
+      uncertainty: [],
+    }
+    const coverage = {
+      candidates: [{ path: 'src/owner.ts', startLine: 10, endLine: 30, role: 'owner', editKind: 'owner' as const, confidence: 'high' as const, why: 'mutates state' }],
+      relationships: [],
+      rejectedHypotheses: [],
+      searchesTried: ['owner'],
+      uncertainty: [],
+    }
+    const context = __testBuildRerankContext({
+      primer: 'family[src] src/owner.ts',
+      primary,
+      coverage,
+      evidence: [{ path: 'src/owner.ts', startLine: 10, endLine: 30, preview: 'mutate()', content: 'state.value = next', reason: 'file read' }],
+    })
+
+    expect(context).toContain('CAUSAL-OWNER BRANCH')
+    expect(context).toContain('CHANGE-FRONTIER BRANCH')
+    expect(context).toContain('READ-CONFIRMED SOURCE EXCERPTS')
+    expect(context).toContain('state.value = next')
   })
 
   it('promotes an unambiguous compact title filename match', () => {
@@ -143,5 +193,80 @@ describe('FastContext retrieval', () => {
     const ranked = __testApplyCausalAnchorRanking(report, 'Multiple cursors + Word wrap')
 
     expect(ranked.candidates[0].path).toBe('src/contrib/multicursor/multicursor.ts')
+  })
+
+  it('promotes the semantic predicate over a caller that only forwards configuration', () => {
+    const report = __testMergeCodeMaps({
+      candidates: [
+        { path: 'src/options.ts', startLine: 1, endLine: 20, role: 'configuration schema for ignore paths', editKind: 'supporting', confidence: 'medium', why: 'Defines ignore-paths as regex patterns that match paths. This is supporting configuration, not where recursive filtering fails.' },
+        { path: 'src/runner.ts', startLine: 1, endLine: 20, role: 'recursive discovery owner', editKind: 'owner', confidence: 'high', why: 'Walks directories and calls the shared ignore predicate with configured ignore paths.' },
+        { path: 'src/matcher.ts', startLine: 4, endLine: 30, role: 'shared ignore predicate and normal expansion entry filtering', editKind: 'implementation', confidence: 'high', why: 'Defines _is_ignored_file. It computes basename and path regex matches. Because recursive discovery calls this helper, semantic mismatch in ignore-paths is centralized here.' },
+      ],
+      relationships: [],
+      rejectedHypotheses: [],
+      searchesTried: ['ignore paths'],
+      uncertainty: ['none'],
+    })!
+
+    const ranked = __testApplyResponsibilityRanking(report, '--recursive ignores ignore-paths')
+
+    expect(ranked.candidates[0].path).toBe('src/matcher.ts')
+  })
+
+  it('selects unread responsibility siblings from an implementation family', () => {
+    const report = __testMergeCodeMaps({
+      candidates: [
+        { path: 'src/pipeline/method/integration.ts', startLine: 1, endLine: 20, role: 'integration stage', editKind: 'implementation', confidence: 'high', why: 'builds integration' },
+        { path: 'src/pipeline/validate.ts', startLine: 1, endLine: 20, role: 'validator', editKind: 'implementation', confidence: 'high', why: 'validates config' },
+      ],
+      relationships: [],
+      rejectedHypotheses: [],
+      searchesTried: ['pipeline'],
+      uncertainty: ['none'],
+    })!
+
+    const selected = __testSelectFrontierAuditPaths([
+      'src/pipeline/authorizers.ts',
+      'src/pipeline/resources.ts',
+      'src/unrelated/validator.ts',
+    ], report, ['src/pipeline/validate.ts'])
+
+    expect(selected).toEqual(['src/pipeline/authorizers.ts'])
+  })
+
+  it('keeps read-confirmed feature responsibilities ahead of generic support', () => {
+    const candidate = (path: string, editKind: 'owner' | 'implementation' | 'supporting') => ({
+      path,
+      startLine: 1,
+      endLine: 20,
+      role: path,
+      editKind,
+      confidence: 'high' as const,
+      why: path,
+    })
+    const report = {
+      candidates: [
+        candidate('src/pipeline/integration.ts', 'owner'),
+        candidate('src/pipeline/index.ts', 'supporting'),
+        candidate('src/pipeline/resources.ts', 'supporting'),
+      ],
+      relationships: [],
+      rejectedHypotheses: [],
+      searchesTried: ['pipeline'],
+      uncertainty: ['none'],
+    }
+    const preliminary = {
+      ...report,
+      candidates: [...report.candidates, candidate('src/pipeline/authorization.ts', 'implementation')],
+    }
+
+    const completed = __testEnsureFeatureFrontierCandidates(report, preliminary, 'Support a new proxy integration feature')
+
+    expect(completed.candidates.map(item => item.path)).toEqual([
+      'src/pipeline/integration.ts',
+      'src/pipeline/authorization.ts',
+      'src/pipeline/index.ts',
+      'src/pipeline/resources.ts',
+    ])
   })
 })

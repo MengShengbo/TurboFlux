@@ -292,6 +292,8 @@ export interface RunSubAgentOptions {
   requestTimeoutMs?: number
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
+  requiredAuditPaths?: string[]
+  requiredCandidatePaths?: string[]
   requireGroundedReport?: boolean
   onEvent?: (event: SubAgentEvent) => void
 }
@@ -737,6 +739,28 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
   return null
 }
 
+function validateRequiredAuditPaths(report: SubmittedCodeMap, requiredPaths: string[] | undefined): string | null {
+  if (!requiredPaths?.length) return null
+  const normalize = (value: string) => value.replace(/\\/g, '/').toLowerCase()
+  const submitted = new Set(report.candidates.map(candidate => normalize(candidate.path)))
+  const rejected = report.rejectedHypotheses.map(item => normalize(item))
+  const missing = [...new Set(requiredPaths.map(normalize))]
+    .filter(path => !submitted.has(path) && !rejected.some(reason => reason.includes(path)))
+  return missing.length > 0
+    ? `high-confidence source seeds require an explicit disposition; include each candidate or name its full path with a source-grounded rejection: ${missing.join(', ')}`
+    : null
+}
+
+function validateRequiredCandidatePaths(report: SubmittedCodeMap, requiredPaths: string[] | undefined): string | null {
+  if (!requiredPaths?.length) return null
+  const normalize = (value: string) => value.replace(/\\/g, '/').toLowerCase()
+  const submitted = new Set(report.candidates.map(candidate => normalize(candidate.path)))
+  const missing = [...new Set(requiredPaths.map(normalize))].filter(path => !submitted.has(path))
+  return missing.length > 0
+    ? `the implementation-frontier contract requires these read-confirmed candidates in the ranked map: ${missing.join(', ')}`
+    : null
+}
+
 export function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
   const lines = ['RANKED_CODE_MAP']
   report.candidates.forEach((candidate, index) => {
@@ -1179,6 +1203,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       pruneUngroundedCodeMap(report, collectedEvidence)
       sortSubmittedCandidates(report)
       submissionError ||= validateSubmittedCodeMap(report, collectedEvidence) || ''
+      submissionError ||= validateRequiredAuditPaths(report, options.requiredAuditPaths) || ''
+      submissionError ||= validateRequiredCandidatePaths(report, options.requiredCandidatePaths) || ''
       if (!submissionError) {
         const finalText = renderSubmittedCodeMap(report)
         emit({ type: 'final', text: finalText })
