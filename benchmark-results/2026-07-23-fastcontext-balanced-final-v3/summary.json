@@ -1,0 +1,78 @@
+{
+  "metadata": {
+    "schemaVersion": 1,
+    "experimentId": "2026-07-22-gpt-5.5-no-reasoning-formal",
+    "createdAt": "2026-07-22T21:58:10.908Z",
+    "gitCommit": "44bfcdb5428b69e1d10edc6a6b91541dbeca653f",
+    "model": "gpt-5.5",
+    "reasoning": "disabled",
+    "endpointHost": "api.aibinghe.xyz",
+    "manifestPath": "benchmark-results/2026-07-23-fastcontext-six-new/manifest.json",
+    "manifestSha256": "bebf555ab4b5ec6e98611d2f52308f25dcaa544d74e9285debe6de005775c547",
+    "systems": [
+      "fastcontext"
+    ],
+    "caseIds": [
+      "scikit-learn__scikit-learn-25931",
+      "matplotlib__matplotlib-23299",
+      "psf__requests-2317",
+      "pytest-dev__pytest-7982",
+      "django__django-16315",
+      "sphinx-doc__sphinx-7462"
+    ],
+    "repeats": 1,
+    "concurrency": 1,
+    "timeoutMs": 180000,
+    "seed": 20260722,
+    "cliVersions": {
+      "claudeCode": "2.1.177 (Claude Code)",
+      "openCode": "1.17.18"
+    },
+    "notes": [
+      "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+      "Native reasoning is disabled; protocol differences are recorded per run.",
+      "Adaptive case-level concurrency starts at 1 and may rise to 1; FastContext uses one closed listwise model judgment and the API request ceiling is 1. Systems within one case remain sequential and rotated.",
+      "Transient failures are retried up to 5 time(s) per run invocation.",
+      "Formal repeated experiment.",
+      "Selection starts at the first balanced case."
+    ]
+  },
+  "completed": 6,
+  "expected": 6,
+  "summary": {
+    "fastcontext": {
+      "cases": 6,
+      "runs": 6,
+      "successes": 6,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.7833333333333333,
+        "low": 0.5166666666666667,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.7972222222222222,
+        "low": 0.5305555555555556,
+        "high": 1
+      },
+      "ndcgAt10": {
+        "mean": 0.8467132018086354,
+        "low": 0.6423308042201493,
+        "high": 1
+      },
+      "fullCoverageAt10": 1,
+      "latencyP50Ms": 21913.6739,
+      "latencyP95Ms": 108948.5853,
+      "averageToolCalls": 53.333333333333336,
+      "averageInputTokens": 16654.333333333332,
+      "averageOutputTokens": 1703.1666666666667,
+      "totalCostUsd": 0
+    }
+  }
+}
