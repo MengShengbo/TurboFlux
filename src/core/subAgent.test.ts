@@ -403,6 +403,51 @@ describe('runSubAgent', () => {
     }
   })
 
+  it('honors a bounded transient-attempt budget without protocol fallback', async () => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      return new Response('upstream unavailable', { status: 503, headers: { 'retry-after': '0' } })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const definition: SubAgentDefinition = {
+      id: 'fast_context',
+      label: 'FastContext',
+      description: 'test',
+      driver: 'main-model',
+      systemPrompt: 'test',
+      maxTurns: 1,
+      maxParallel: 1,
+    }
+
+    try {
+      const result = await runSubAgent({
+        definition,
+        objective: 'find the entry point',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        maxTransientAttempts: 3,
+      })
+
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('HTTP 503')
+      expect(requestCount).toBe(3)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('rewrites an empty search wave once before concluding', async () => {
     const originalFetch = globalThis.fetch
     const requestBodies: any[] = []

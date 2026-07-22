@@ -290,6 +290,7 @@ export interface RunSubAgentOptions {
   codemap?: string | null
   abortSignal?: AbortSignal
   requestTimeoutMs?: number
+  maxTransientAttempts?: number
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
   requiredAuditPaths?: string[]
@@ -479,11 +480,12 @@ async function fetchWithTransientRetry(
   parentSignal: AbortSignal | undefined,
   timeoutMs: number,
   onRetry: (attempt: number, delayMs: number, reason: string) => void,
+  maxAttempts = 4,
 ): Promise<Response> {
   const startedAt = Date.now()
   let lastError: unknown
 
-  for (let attempt = 1; attempt <= 4; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const remainingMs = timeoutMs - (Date.now() - startedAt)
     if (remainingMs < 1) {
       throw lastError || new Error(`Model request timed out after ${timeoutMs}ms`)
@@ -491,7 +493,7 @@ async function fetchWithTransientRetry(
 
     try {
       const response = await fetchWithTimeout(url, init, parentSignal, remainingMs)
-      if (attempt < 4 && TRANSIENT_HTTP_STATUSES.has(response.status)) {
+      if (attempt < maxAttempts && TRANSIENT_HTTP_STATUSES.has(response.status)) {
         const requestedDelay = Math.max(retryAfterMs(response), TRANSIENT_RETRY_DELAYS_MS[attempt - 1] || 1_800)
         const delayMs = Math.min(requestedDelay, Math.max(0, remainingMs - 1))
         onRetry(attempt + 1, delayMs, `API ${response.status}`)
@@ -504,7 +506,7 @@ async function fetchWithTransientRetry(
       lastError = error
       const isAbort = parentSignal?.aborted || (error instanceof Error && error.name === 'AbortError')
       const isTimeout = error instanceof Error && /timed out after \d+ms/i.test(error.message)
-      if (attempt === 4 || isAbort || isTimeout || !isTransientNetworkError(error)) throw error
+      if (attempt === maxAttempts || isAbort || isTimeout || !isTransientNetworkError(error)) throw error
 
       const elapsedMs = Date.now() - startedAt
       const delayMs = Math.min(TRANSIENT_RETRY_DELAYS_MS[attempt - 1] || 1_800, Math.max(0, timeoutMs - elapsedMs - 1))
@@ -1074,7 +1076,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             body: JSON.stringify(requestBody),
           }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
             emit({ type: 'model_retry', turn, attempt, delayMs, reason })
-          })
+          }, options.maxTransientAttempts ?? 4)
           if (res.ok) break
           errorText = await res.text()
           if (isReasoningEffortValueError(errorText)) {

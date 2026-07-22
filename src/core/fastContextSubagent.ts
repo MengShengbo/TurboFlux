@@ -62,6 +62,21 @@ The caller provides branch rankings, read-confirmed source excerpts, and an impl
 Use listwise comparison: evaluate candidates relative to one another, place the most probable direct owner first, retain every read-confirmed implementation that is necessary for the same change, and explicitly reject attractive false positives. Every submitted candidate and relationship must be grounded by read_file evidence available in this run. Finish only with submit_code_map.` ,
 }
 
+const FAST_CONTEXT_SINGLE_PASS_DEFINITION: SubAgentDefinition = {
+  id: 'fast_context',
+  label: 'FastContext Evidence Judge',
+  description: 'Single-pass listwise judgment over locally retrieved, read-confirmed evidence',
+  driver: 'main-model',
+  maxTurns: 1,
+  maxParallel: 1,
+  maxOutputTokens: 4096,
+  systemPrompt: `You are the final evidence judge for FastContext. A deterministic retrieval stage has already searched the repository, expanded likely implementation families, and read the strongest source candidates. You receive its complete bounded candidate field and read-confirmed excerpts.
+
+Perform one listwise decision, then call submit_code_map immediately. Rank by direct edit necessity rather than lexical similarity. Use a counterfactual edit test: the behavior owner is the file whose implementation must change for the requested semantics to become correct. Rank wrappers, callers, tests, documentation, schemas, and generic configuration below the operation that interprets or mutates behavior. For feature work, retain every read-confirmed sibling implementation required by the coordinated pipeline, but do not pad the map with merely nearby files.
+
+Every candidate and relationship must use a read-confirmed path and line range supplied in the evidence. Explicitly reject attractive false positives and state residual uncertainty. Do not ask for more tools, do not return prose, and do not invent unread files. Finish with exactly one submit_code_map call.` ,
+}
+
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 90_000
 
 interface RunParams {
@@ -455,7 +470,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     insight: `building issue map (${def.driver})`,
   })
 
-  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank') => {
+  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank' | 'judge' | 'recovery') => {
     let currentTurn = 0
     return (event: SubAgentEvent): void => {
       if (event.type === 'turn_start') {
@@ -562,101 +577,37 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     codemap: params.codemap,
     abortSignal: params.abortSignal,
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
+    maxTransientAttempts: 3,
     requireGroundedReport: true,
     retrievalContext: primer.text,
     initialEvidence: primer.seedEvidence,
   } as const
-  const coverageDefinition = {
-    ...FAST_CONTEXT_COVERAGE_DEFINITION,
-    maxTurns: /\b(?:add|feature|implement|proposal|support)\b/i.test(params.objective.slice(0, 600)) ? 5 : 4,
-  }
-  let [primaryResult, coverageResult] = await Promise.all([
-    runSubAgent({ ...commonOptions, definition: def, onEvent: createSubEventHandler('primary') }),
-    runSubAgent({ ...commonOptions, definition: coverageDefinition, onEvent: createSubEventHandler('coverage') }),
-  ])
-
-  const combinedError = `${primaryResult.error || ''} ${coverageResult.error || ''}`
-  if (!primaryResult.ok && !coverageResult.ok && /\b(?:429|500|502|503|504)\b|fetch failed|timed?\s*out|econnreset/i.test(combinedError)) {
-    emit({ type: 'insight', text: 'both retrieval branches hit a transient provider failure; retrying one branch after backoff', tone: 'warning' })
-    await new Promise<void>(resolveDelay => {
-      const timer = setTimeout(resolveDelay, 2_000)
-      params.abortSignal?.addEventListener('abort', () => {
-        clearTimeout(timer)
-        resolveDelay()
-      }, { once: true })
-    })
-    if (!params.abortSignal?.aborted) {
-      primaryResult = await runSubAgent({
+  emit({ type: 'insight', text: 'running single-pass evidence judgment', tone: 'info' })
+  let result = primer.seedEvidence.length > 0
+    ? await runSubAgent({
         ...commonOptions,
-        codemap: undefined,
-        retrievalContext: undefined,
-        definition: def,
-        onEvent: createSubEventHandler('primary'),
+        definition: FAST_CONTEXT_SINGLE_PASS_DEFINITION,
+        onEvent: createSubEventHandler('judge'),
       })
-    }
+    : await runSubAgent({
+        ...commonOptions,
+        definition: def,
+        onEvent: createSubEventHandler('recovery'),
+      })
+  const providerFailure = /\b(?:408|409|429|500|502|503|504)\b|fetch failed|timed?\s*out|econnreset|enotfound|socket/i.test(result.error || '')
+  if (!result.ok && primer.seedEvidence.length > 0 && !providerFailure && !params.abortSignal?.aborted) {
+    emit({ type: 'insight', text: `evidence judgment did not converge; starting one model-directed recovery: ${trimText(result.error || 'unknown error', 120)}`, tone: 'warning' })
+    result = await runSubAgent({
+      ...commonOptions,
+      definition: def,
+      onEvent: createSubEventHandler('recovery'),
+    })
   }
-
-  if (!primaryResult.ok && !coverageResult.ok) {
-    throw new Error(primaryResult.error || coverageResult.error || 'FastContext locator failed')
-  }
-  const primaryCodeMap = primaryResult.ok ? primaryResult.codeMap : undefined
-  const coverageCodeMap = coverageResult.ok ? coverageResult.codeMap : undefined
-  const preliminaryCodeMap = __testMergeCodeMaps(primaryCodeMap, coverageCodeMap)
-  if (!preliminaryCodeMap) throw new Error('FastContext completed without a structured evidence map')
-  const initialBranchEvidence = [
-    ...primer.seedEvidence,
-    ...(primaryResult.evidence || []),
-    ...(coverageResult.evidence || []),
-  ]
-  const frontierAuditPaths = __testSelectFrontierAuditPaths(
-    primer.candidatePaths,
-    preliminaryCodeMap,
-    initialBranchEvidence.filter(item => item.reason === 'file read').map(item => item.path),
-  )
-  const frontierEvidence = await readFrontierAuditEvidence(frontierAuditPaths, params)
-  telemetry.toolCalls += frontierAuditPaths.length
-  telemetry.readCalls += frontierAuditPaths.length
-  for (const evidence of frontierEvidence) {
-    const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
-    if (seenHitKeys.has(key)) continue
-    seenHitKeys.add(key)
-    const scanHit = toScanHit(evidence, 'frontier-audit')
-    const list = candidates.get(scanHit.path) || []
-    list.push(scanHit)
-    candidates.set(scanHit.path, list)
-    allHits.push(scanHit)
-    emit({ type: 'hit', hit: scanHit })
-    emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'frontier-audit', reason: 'implementation-family audit' })
-  }
-  const branchEvidence = [...initialBranchEvidence, ...frontierEvidence]
-  const rerankPrimer = [
-    primer.text,
-    frontierAuditPaths.length > 0 ? `Mandatory implementation-frontier candidates (read-confirmed; retain in the ranked map):\n${frontierAuditPaths.join('\n')}` : '',
-  ].filter(Boolean).join('\n\n')
-  emit({ type: 'insight', text: 'running bounded evidence reranking over the candidate pool', tone: 'info' })
-  const rerankResult = await runSubAgent({
-    ...commonOptions,
-    definition: FAST_CONTEXT_RERANK_DEFINITION,
-    retrievalContext: __testBuildRerankContext({
-      primer: rerankPrimer,
-      primary: primaryCodeMap,
-      coverage: coverageCodeMap,
-      evidence: branchEvidence,
-    }),
-    initialEvidence: branchEvidence,
-    requiredAuditPaths: [...primer.seedEvidence.map(item => item.path), ...frontierAuditPaths],
-    requiredCandidatePaths: frontierAuditPaths,
-    onEvent: createSubEventHandler('rerank'),
-  })
-  const mergedCodeMap = rerankResult.ok && rerankResult.codeMap
-    ? __testMergeCodeMaps(rerankResult.codeMap, primaryCodeMap, coverageCodeMap)
-    : preliminaryCodeMap
-  if (!mergedCodeMap) throw new Error('FastContext completed without a structured evidence map')
-  const frontierCompleteCodeMap = __testEnsureFeatureFrontierCandidates(mergedCodeMap, preliminaryCodeMap, params.objective)
-  const responsibilityRankedCodeMap = __testApplyResponsibilityRanking(frontierCompleteCodeMap, params.objective)
+  if (!result.ok || !result.codeMap) throw new Error(result.error || 'FastContext locator failed')
+  const responsibilityRankedCodeMap = __testApplyResponsibilityRanking(result.codeMap, params.objective)
   const rankedCodeMap = __testApplyCausalAnchorRanking(responsibilityRankedCodeMap, params.objective)
   const finalReport = renderSubmittedCodeMap(rankedCodeMap)
-  const maxTurns = Math.max(primaryResult.turns, coverageResult.turns, rerankResult.turns)
+  const maxTurns = result.turns
 
   emit({
     type: 'phase',
@@ -666,9 +617,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     insight: 'compiling architecture code map',
   })
 
-  const truncated = (primaryResult.ok && primaryResult.truncated === true)
-    || (coverageResult.ok && coverageResult.truncated === true)
-    || (rerankResult.ok && rerankResult.truncated === true)
+  const truncated = result.truncated === true
   const evidencePack = __testBuildEvidencePack(
     params.objective,
     candidates,
