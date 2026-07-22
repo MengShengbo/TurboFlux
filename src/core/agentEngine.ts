@@ -3899,6 +3899,7 @@ Before retrying:
         query,
         maxPaths: 6,
         maxChildrenPerPath: 4,
+        preferGraph: false,
       }) as { success: boolean; data?: { map?: CodeMapNode[] | CodeMapNode; relatedPaths?: string[] }; map?: CodeMapNode[] | CodeMapNode; relatedPaths?: string[] }
       const map = response.data?.map ?? response.map
       if (!response.success || !map) return

@@ -6,7 +6,6 @@ import type { CodeMapNode, CodeSearchHit, CodeSymbolKind } from '../../shared/co
 type CodeGraphConstructor = typeof CodeGraph
 
 const initializationLocks = new Map<string, Promise<void>>()
-const GRAPH_WARMUP_BUDGET_MS = 15_000
 const excludedPathSegments = new Set([
   '.git', '.claude', '.turboflux', '.codegraph', '.vscode', '.cache', '.next', '.turbo',
   'node_modules', 'vendor', 'venv', '.venv', 'dist', 'build', 'out', 'coverage', 'target', 'tmp', 'temp',
@@ -54,19 +53,23 @@ function toSearchHit(node: GraphNode, score: number): CodeSearchHit {
   }
 }
 
-function graphNodeToMapNode(graph: CodeGraph, node: GraphNode, depth: number): CodeMapNode {
+function graphNodeToMapNode(graph: CodeGraph, node: GraphNode, depth: number, relation?: 'caller' | 'callee'): CodeMapNode {
   const relations = depth > 0
-    ? [...graph.getCallers(node.id, 1), ...graph.getCallees(node.id, 1)]
+    ? [
+        ...graph.getCallers(node.id, 1).map(item => ({ ...item, relation: 'caller' as const })),
+        ...graph.getCallees(node.id, 1).map(item => ({ ...item, relation: 'callee' as const })),
+      ]
     : []
   const children = relations
+    .filter(item => isSearchablePath(item.node.filePath))
     .filter((relation, index, all) => all.findIndex(item => item.node.id === relation.node.id) === index)
     .slice(0, 12)
-    .map(relation => graphNodeToMapNode(graph, relation.node, depth - 1))
+    .map(item => graphNodeToMapNode(graph, item.node, depth - 1, item.relation))
   return {
     id: node.id,
     kind: 'symbol',
     title: node.name,
-    summary: `${node.kind}${node.signature ? ` ${node.signature}` : ''}`,
+    summary: `${relation ? `[${relation}] ` : ''}${node.kind}${node.signature ? ` ${node.signature}` : ''}`,
     path: normalizePath(node.filePath),
     line: node.startLine,
     startLine: node.startLine,
@@ -125,6 +128,10 @@ export class CodeGraphService {
     })
   }
 
+  async prepare(workspacePath: string): Promise<void> {
+    await this.startInitialization(resolve(workspacePath))
+  }
+
   async getCodeMap(params: {
     workspacePath: string
     query?: string
@@ -164,34 +171,23 @@ export class CodeGraphService {
   }
 
   private async ensureInitialized(root: string): Promise<void> {
-    let lock = initializationLocks.get(root)
-    if (lock) {
-      await this.withWarmupBudget(lock)
-      return
-    }
+    if (initializationLocks.has(root)) throw new Error('CodeGraph warmup continues in the background')
     if (this.CodeGraphClass.isInitialized(root)) return
-    if (!lock) {
-      const initialization = this.CodeGraphClass.init(root, { index: true }).then(graph => graph.close())
-      lock = initialization.finally(() => {
-        if (initializationLocks.get(root) === lock) initializationLocks.delete(root)
-      })
-      initializationLocks.set(root, lock)
-    }
-    await this.withWarmupBudget(lock)
+    void this.startInitialization(root).catch(() => {})
+    throw new Error('CodeGraph warmup started in the background')
   }
 
-  private async withWarmupBudget(initialization: Promise<void>): Promise<void> {
-    let timeout: NodeJS.Timeout | undefined
-    try {
-      await Promise.race([
-        initialization,
-        new Promise<void>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error('CodeGraph warmup continues in the background')), GRAPH_WARMUP_BUDGET_MS)
-          timeout.unref?.()
-        }),
-      ])
-    } finally {
-      if (timeout) clearTimeout(timeout)
-    }
+  private startInitialization(root: string): Promise<void> {
+    const active = initializationLocks.get(root)
+    if (active) return active
+    if (this.CodeGraphClass.isInitialized(root)) return Promise.resolve()
+    let initialization: Promise<void>
+    initialization = this.CodeGraphClass.init(root, { index: true })
+      .then(graph => graph.close())
+      .finally(() => {
+        if (initializationLocks.get(root) === initialization) initializationLocks.delete(root)
+      })
+    initializationLocks.set(root, initialization)
+    return initialization
   }
 }

@@ -18,6 +18,7 @@ describe('CodeGraphService', () => {
 
     try {
       const service = await CodeGraphService.load()
+      await service.prepare(workspace)
       const symbols = await service.searchSymbols({
         workspacePath: workspace,
         query: 'loadWorkspace',
@@ -34,9 +35,10 @@ describe('CodeGraphService', () => {
         expect.objectContaining({ title: 'loadWorkspace', path: 'workflow.ts', line: 4 }),
       ]))
       expect(JSON.stringify(map.map)).toContain('runWorkflow')
+      expect(JSON.stringify(map.map)).toContain('[caller]')
       expect(map.relatedPaths).toContain('workflow.ts')
     } finally {
       rmSync(workspace, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 })

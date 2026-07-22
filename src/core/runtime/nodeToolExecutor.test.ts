@@ -5,10 +5,18 @@ import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { PassThrough } from 'node:stream'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandOutput, Result } from '../../tools/executor.js'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
 import { hashText } from '../fileIO.js'
+
+const previousCodeGraphDisabled = process.env.TURBOFLUX_DISABLE_CODEGRAPH
+process.env.TURBOFLUX_DISABLE_CODEGRAPH = '1'
+
+afterAll(() => {
+  if (previousCodeGraphDisabled === undefined) delete process.env.TURBOFLUX_DISABLE_CODEGRAPH
+  else process.env.TURBOFLUX_DISABLE_CODEGRAPH = previousCodeGraphDisabled
+})
 
 function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))

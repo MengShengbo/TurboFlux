@@ -458,16 +458,17 @@ export class NodeToolExecutor implements ToolExecutor {
         : safeRootPath
       const safeWorkspacePath = this.ensureAllowedPath(requestedPath)
       const limit = query.limit || 10
+      let graphResults: CodeSearchHit[] = []
       try {
+        if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
         const graph = await CodeGraphService.load()
-        const graphResults = await graph.searchSymbols({
+        graphResults = await graph.searchSymbols({
           workspacePath: safeRootPath,
           query: query.query,
           path: relative(safeRootPath, safeWorkspacePath),
           kind: query.kind,
           limit,
         })
-        if (graphResults.length > 0) return { success: true, data: graphResults }
       } catch {}
       const escapedQuery = this.escapeRegex(query.query)
       const pattern = [
@@ -544,9 +545,10 @@ export class NodeToolExecutor implements ToolExecutor {
         : []
       return {
         success: true,
-        data: results.length > 0
-          ? results
-              .filter((hit, index, all) => all.findIndex(other => other.path === hit.path && other.line === hit.line && other.title === hit.title) === index)
+        data: results.length > 0 || graphResults.length > 0
+          ? [...results, ...graphResults]
+              .filter((hit, index, all) => all.findIndex(other => other.path.toLowerCase() === hit.path.toLowerCase()
+                && other.title.toLowerCase() === hit.title.toLowerCase()) === index)
               .sort((left, right) => (right.score || 0) - (left.score || 0) || left.path.localeCompare(right.path) || (left.line || 0) - (right.line || 0))
               .slice(0, limit)
           : fallback,
@@ -589,13 +591,15 @@ export class NodeToolExecutor implements ToolExecutor {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   }
 
-  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[] }>> {
+  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number; preferGraph?: boolean }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[] }>> {
     try {
       const basePath = this.ensureAllowedPath(query.workspacePath)
       for (const target of query.targetPaths || (query.path ? [query.path] : [])) {
         this.ensureAllowedPath(isAbsolute(target) ? target : join(basePath, target))
       }
       try {
+        if (query.preferGraph === false) throw new Error('Graph map not requested')
+        if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
         const graph = await CodeGraphService.load()
         const graphMap = await graph.getCodeMap({
           workspacePath: basePath,

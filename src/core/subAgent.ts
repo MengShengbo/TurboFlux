@@ -255,7 +255,8 @@ Strategy:
 10. Finish only by calling submit_code_map. Submit a compact set of read-confirmed architecture nodes, a grounded relationship map, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
 
 Map contract:
-- Relationship precision and architecture coverage matter more than which file is listed first. Candidate order is secondary; never stop or spend an extra model round merely to optimize rank.
+- Rank candidates strictly by direct edit necessity: the most likely behavior owner or implementation that must change is first. Put architectural context in relationships instead of ranking a consumer or supporting file above the probable edit target.
+- Before submission, audit every read file that contains behavior directly relevant to the objective. Include it as a candidate or name it in rejected_hypotheses with the concrete reason it does not require an edit.
 - Include the owner, behavior-bearing mirrors, implementations, direct consumers, contracts, state/config/persistence collaborators, and tests only when they define the execution path or change-impact frontier.
 - Set edit_kind for every candidate: owner, mirror, implementation, consumer, test, or supporting. This describes the node's role; it is not a substitute for grounded edges.
 - Every edge must explain a concrete control, data, ownership, state, configuration, persistence, compatibility, or failure relationship.
@@ -754,7 +755,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     content: [
       `Objective: ${objective}`,
       retrievalContext ? `\nCaller-supplied retrieval context (starting points, not proof):\n${retrievalContext}` : '',
-      '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Candidate order is secondary to grounded relationship precision.',
+      '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Rank the probable direct edit target first; represent supporting architecture through grounded relationships.',
     ].filter(Boolean).join('\n'),
   })
 
@@ -786,7 +787,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'trace_symbol',
-        description: 'Find a symbol declaration and its exact textual references together. Use after a likely core symbol appears to reduce search turns.',
+        description: 'Find graph-indexed symbol declarations and exact textual references together. Use after a likely core symbol appears to verify definitions and usages in one turn.',
         parameters: {
           type: 'object',
           properties: {
@@ -817,7 +818,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'search_symbols',
-        description: 'Search code symbols such as functions, classes, interfaces, types, constants, and components',
+        description: 'Search fused exact declarations and persistent graph symbols such as functions, classes, interfaces, types, constants, and components',
         parameters: {
           type: 'object',
           properties: {
@@ -833,7 +834,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'get_codemap',
-        description: 'Generate a compact project map for a feature area or path before drilling into files',
+        description: 'Generate a compact graph map with typed caller and callee relationships for a feature area or path before drilling into files',
         parameters: {
           type: 'object',
           properties: {
