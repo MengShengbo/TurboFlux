@@ -594,7 +594,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         definition: def,
         onEvent: createSubEventHandler('recovery'),
       })
-  const providerFailure = /\b(?:408|409|429|500|502|503|504)\b|fetch failed|timed?\s*out|econnreset|enotfound|socket/i.test(result.error || '')
+  const providerFailure = /all compatible model protocols failed|upstream (?:service )?temporarily unavailable|\b(?:408|409|429|500|502|503|504)\b|fetch failed|timed?\s*out|econnreset|enotfound|socket/i.test(result.error || '')
   if (!result.ok && primer.seedEvidence.length > 0 && !providerFailure && !params.abortSignal?.aborted) {
     emit({ type: 'insight', text: `evidence judgment did not converge; starting one model-directed recovery: ${trimText(result.error || 'unknown error', 120)}`, tone: 'warning' })
     result = await runSubAgent({
