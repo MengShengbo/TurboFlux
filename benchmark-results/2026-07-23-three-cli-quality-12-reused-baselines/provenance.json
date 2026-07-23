@@ -1,0 +1,8 @@
+{
+  "fastcontext": "benchmark-results/2026-07-23-fastcontext-current-quality-12/runs.jsonl",
+  "comparators": "benchmark-results/2026-07-22-gpt-5.5-dual-specialist-quality-gate-12/runs.jsonl",
+  "fastcontextGitCommit": "964c41475f7ac904f3d9f6205fc6ba5da891c272",
+  "comparatorGitCommit": "dd0c21f6e6188d0cd9433284cfbb756a202cee11",
+  "model": "gpt-5.5",
+  "reasoning": "disabled"
+}

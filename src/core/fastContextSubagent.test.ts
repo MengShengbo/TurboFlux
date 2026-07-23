@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { FastContextScanHit } from './fastContextTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { __testFirstPartyImportPatterns } from './fastContextRetrieval'
+import { __testFirstPartyImportPatterns, __testImplementationStem, __testSelectPrimerContentPatterns } from './fastContextRetrieval'
 import {
   __testApplyCausalAnchorRanking,
   __testBuildEvidencePack,
@@ -143,6 +143,17 @@ describe('FastContext retrieval', () => {
     expect(queries.behavioralSignals).toContain('recursive ignore')
   })
 
+  it('reserves retrieval budget for behavioral signals when structural identifiers are noisy', () => {
+    const selected = __testSelectPrimerContentPatterns({
+      structuralSignals: ['main', 'model', 'tensor', 'print', 'array', 'config', 'runtime', 'output'],
+      behavioralSignals: ['sliding window', 'pytorch flax', 'window inconsistency'],
+    })
+
+    expect(selected).toContain('sliding[\\s_.-]*window')
+    expect(selected).toContain('pytorch[\\s_.-]*flax')
+    expect(selected.indexOf('sliding[\\s_.-]*window')).toBeLessThan(4)
+  })
+
   it('keeps behavior queries when issue templates contain URLs and image links', () => {
     const queries = __testRetrievalPrimerQueries('Support HTTP Proxy Api Gateway Integration Type\nSee https://forum.serverless.com and ![image](https://cloud.example.com/a.png)')
 
@@ -155,6 +166,13 @@ describe('FastContext retrieval', () => {
     const queries = __testRetrievalPrimerQueries('Warning in IsolationForest\nhttps://github.com/scikit-learn/scikit-learn/blob/9aaed498/sklearn/ensemble/_iforest.py#L337')
 
     expect(queries.pathHints).toContain('sklearn/ensemble/_iforest.py')
+  })
+
+  it('keeps stack-trace paths from the tail of long issue logs', () => {
+    const noise = 'listed/file.py '.repeat(300)
+    const queries = __testRetrievalPrimerQueries(`Command output overflow\n${noise}\nFile "/workspace/project/memory/summary.py", line 42, in update`)
+
+    expect(queries.pathHints.some(path => path.endsWith('project/memory/summary.py'))).toBe(true)
   })
 
   it('does not truncate non-source extensions into header path hints', () => {
@@ -182,6 +200,26 @@ describe('FastContext retrieval', () => {
 
     expect(patterns).toContain('sphinx/pycode/ast.py')
     expect(patterns).toContain('sphinx/util/logging.py')
+  })
+
+  it('prioritizes imported modules that overlap the issue semantics', () => {
+    const imports = Array.from({ length: 14 }, (_, index) => `from project.module_${index} import Helper${index}`).join('\n')
+    const content = `${imports}\nfrom project.memory.message_history import MessageHistory\nMessageHistory(agent)`
+    const patterns = __testFirstPartyImportPatterns([{
+      path: 'project/agent.py',
+      startLine: 1,
+      endLine: 20,
+      preview: content,
+      content,
+      reason: 'file read',
+    }], ['project/agent.py'], 'messages exceed the context window')
+
+    expect(patterns).toContain('project/memory/message_history.py')
+  })
+
+  it('matches test modules to implementation modules by normalized stem', () => {
+    expect(__testImplementationStem('testing/test_skipping.py')).toBe(__testImplementationStem('src/_pytest/skipping.py'))
+    expect(__testImplementationStem('src/parser.spec.ts')).toBe(__testImplementationStem('src/parser.ts'))
   })
 
   it('builds a bounded listwise rerank pack from branch maps and read evidence', () => {

@@ -47,6 +47,10 @@ describe('ContextMaps', () => {
     expect(result.status).toBe('on')
     expect(result.primer?.text).toContain('authority="static_graph_hypotheses"')
     expect(result.primer?.text).toContain('src/workflow.ts:10')
+    expect(result.primer?.candidates).toEqual([
+      { path: 'src/workflow.ts', startLine: 10, endLine: 20 },
+      { path: 'src/workspace.ts', startLine: 4, endLine: 8 },
+    ])
     expect(getCodeMap).toHaveBeenCalledWith(expect.objectContaining({ graphOnly: true, preferGraph: true }))
   })
 

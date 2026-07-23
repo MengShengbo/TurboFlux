@@ -1,0 +1,152 @@
+{
+  "metadata": {
+    "schemaVersion": 1,
+    "experimentId": "2026-07-23-gpt-5.5-no-reasoning-formal",
+    "createdAt": "2026-07-23T07:57:55.956Z",
+    "gitCommit": "964c41475f7ac904f3d9f6205fc6ba5da891c272",
+    "model": "gpt-5.5",
+    "reasoning": "disabled",
+    "endpointHost": "api.aibinghe.xyz",
+    "manifestPath": "benchmark-results/2026-07-23-fastcontext-quality-final-12/selected-manifest.json",
+    "manifestSha256": "b719c4203526187f5a9ec08837ac00909b46db6faa7d4fb7eaf4f0a143884423",
+    "systems": [
+      "fastcontext",
+      "claude-code-readonly",
+      "opencode-explore"
+    ],
+    "caseIds": [
+      "pydata__xarray-6461",
+      "trinodb__trino-3392",
+      "django__django-12193",
+      "serverless__serverless-3534",
+      "matplotlib__matplotlib-24970",
+      "langchain-ai__langchain-20064",
+      "pylint-dev__pylint-7080",
+      "microsoft__vscode-135805",
+      "astropy__astropy-7671",
+      "google__gson-2549",
+      "pytest-dev__pytest-10051",
+      "prettier__prettier-661"
+    ],
+    "repeats": 1,
+    "concurrency": 4,
+    "timeoutMs": 300000,
+    "seed": 20260722,
+    "cliVersions": {
+      "claudeCode": "2.1.177 (Claude Code)",
+      "openCode": "1.17.18"
+    },
+    "notes": [
+      "TurboFlux FastContext records were rerun on 2026-07-23 from the current working tree.",
+      "Claude Code and OpenCode records are reused from the complete 2026-07-22 dual-specialist-quality-gate-12 matrix; neither comparator CLI was rerun.",
+      "All records use the same 12 case IDs, repository commits, gpt-5.5 model, disabled native reasoning, task contract, and gold paths.",
+      "This is a historical-baseline comparison, not a simultaneous randomized matrix."
+    ]
+  },
+  "completed": 36,
+  "expected": 36,
+  "summary": {
+    "fastcontext": {
+      "cases": 12,
+      "runs": 12,
+      "successes": 12,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.7222222222222223,
+        "low": 0.47222222222222215,
+        "high": 0.9444444444444443
+      },
+      "mrr": {
+        "mean": 0.7708333333333334,
+        "low": 0.5208333333333334,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.6149140211640212,
+        "low": 0.37566137566137564,
+        "high": 0.8475529100529101
+      },
+      "ndcgAt10": {
+        "mean": 0.6742402961400812,
+        "low": 0.4520202985112292,
+        "high": 0.8738071775074365
+      },
+      "fullCoverageAt10": 0.6666666666666666,
+      "latencyP50Ms": 133074.6551,
+      "latencyP95Ms": 159987.8812,
+      "averageToolCalls": 74.41666666666667,
+      "averageInputTokens": 19408.083333333332,
+      "averageOutputTokens": 1804.6666666666667,
+      "totalCostUsd": 0
+    },
+    "claude-code-readonly": {
+      "cases": 12,
+      "runs": 12,
+      "successes": 12,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.8333333333333335,
+        "low": 0.6388888888888888,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.8333333333333334,
+        "low": 0.625,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.74375,
+        "low": 0.5430555555555555,
+        "high": 0.9166666666666666
+      },
+      "ndcgAt10": {
+        "mean": 0.7893373226576461,
+        "low": 0.6013105547072362,
+        "high": 0.9384882922619097
+      },
+      "fullCoverageAt10": 0.75,
+      "latencyP50Ms": 59713.671500000055,
+      "latencyP95Ms": 131350.0458999999,
+      "averageToolCalls": 8.166666666666666,
+      "averageInputTokens": 33936.333333333336,
+      "averageOutputTokens": 1564.5,
+      "totalCostUsd": 0
+    },
+    "opencode-explore": {
+      "cases": 12,
+      "runs": 12,
+      "successes": 7,
+      "successRate": 0.5833333333333334,
+      "timeoutRate": 0.4166666666666667,
+      "recallAt10": {
+        "mean": 0.5555555555555555,
+        "low": 0.3055555555555555,
+        "high": 0.8333333333333331
+      },
+      "mrr": {
+        "mean": 0.5833333333333334,
+        "low": 0.3333333333333333,
+        "high": 0.8333333333333334
+      },
+      "map": {
+        "mean": 0.5224537037037037,
+        "low": 0.26157407407407407,
+        "high": 0.7833333333333333
+      },
+      "ndcgAt10": {
+        "mean": 0.5487136720977738,
+        "low": 0.28860603335210494,
+        "high": 0.8088213108434429
+      },
+      "fullCoverageAt10": 0.5,
+      "latencyP50Ms": 166211.5526,
+      "latencyP95Ms": 278015.3377,
+      "averageToolCalls": 10.428571428571429,
+      "averageInputTokens": 65217.57142857143,
+      "averageOutputTokens": 2007.142857142857,
+      "totalCostUsd": 0
+    }
+  }
+}

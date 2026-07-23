@@ -63,23 +63,23 @@ The caller provides branch rankings, read-confirmed source excerpts, and an impl
 Use listwise comparison: evaluate candidates relative to one another, place the most probable direct owner first, retain every read-confirmed implementation that is necessary for the same change, and explicitly reject attractive false positives. Every submitted candidate and relationship must be grounded by read_file evidence available in this run. Finish only with submit_code_map.` ,
 }
 
-const FAST_CONTEXT_SINGLE_PASS_DEFINITION: SubAgentDefinition = {
+const FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION: SubAgentDefinition = {
   id: 'fast_context',
   label: 'FastContext Evidence Judge',
-  description: 'Single-pass listwise judgment over locally retrieved, read-confirmed evidence',
+  description: 'Bounded listwise judgment over locally retrieved, read-confirmed evidence',
   driver: 'main-model',
-  maxTurns: 1,
-  maxParallel: 1,
+  maxTurns: 2,
+  maxParallel: 6,
   maxOutputTokens: 4096,
   systemPrompt: `You are the final evidence judge for FastContext. A deterministic retrieval stage has already searched the repository, expanded likely implementation families, and read the strongest source candidates. You receive its complete bounded candidate field and read-confirmed excerpts.
 
-Perform one listwise decision, then call submit_code_map immediately. Rank by direct edit necessity rather than lexical similarity. Use a counterfactual edit test: the behavior owner is the file whose implementation must change for the requested semantics to become correct. Rank wrappers, tests, documentation, schemas, generic configuration, and downstream output consumers below the operation that interprets or mutates behavior.
+Perform one listwise decision. If the strongest likely owner or a required frontier edge is present only as an unread candidate or graph hypothesis, use at most one narrow parallel tool round to search or read those specific gaps. Otherwise call submit_code_map immediately. After that optional tool round, submit on the next turn. Rank by direct edit necessity rather than lexical similarity. Use a counterfactual edit test: the behavior owner is the file whose implementation must change for the requested semantics to become correct. Rank wrappers, tests, documentation, schemas, generic configuration, and downstream output consumers below the operation that interprets or mutates behavior.
 
 Preserve a compact coordinated frontier. When a bug crosses a public API or orchestration stage into a compiler, parser, serializer, validator, adapter, or renderer, retain every read-confirmed behavior-bearing stage that can require a coordinated edit; do not collapse the map to only the deepest owner. Evidence labeled semantic responsibility probe is deliberately targeted: compare it directly with the primary owner and keep it when it implements the named transformation or output stage. Conversely, never pad the top ten with unrelated writers, builders, callers, or sibling domains merely because they consume the resulting data.
 
 Apply causal proximity before ranking. A file that defines an API, state transition, transformation, or emitted output explicitly named by the issue outranks environment-specific adapters, framework wiring, examples, and analogous sibling implementations. Operating system, backend, version, and provider details are reproduction context unless the issue explicitly identifies them as causal. A sibling that merely demonstrates a similar pattern belongs in rejected hypotheses and must never outrank the read-confirmed failing path.
 
-Every candidate and relationship must use a read-confirmed path and line range supplied in the evidence. Explicitly reject attractive false positives and state residual uncertainty. Do not ask for more tools, do not return prose, and do not invent unread files. Finish with exactly one submit_code_map call.` ,
+Every candidate and relationship must use a read-confirmed path and line range supplied in the evidence or obtained through the single targeted tool round. Explicitly reject attractive false positives and state residual uncertainty. Do not perform a generic repository tour, do not return prose, and do not invent unread files. Finish with exactly one submit_code_map call.` ,
 }
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 90_000
@@ -452,6 +452,36 @@ async function readFrontierAuditEvidence(paths: string[], params: RunParams): Pr
   return results.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
 }
 
+async function readContextMapEvidence(
+  contextMaps: Awaited<ReturnType<typeof buildContextMapsPrimer>>,
+  primerEvidence: SubAgentEvidence[],
+  params: RunParams,
+): Promise<SubAgentEvidence[]> {
+  const knownPaths = new Set(primerEvidence.map(item => item.path.replace(/\\/g, '/').toLowerCase()))
+  const candidates = (contextMaps.primer?.candidates || [])
+    .filter(item => !knownPaths.has(item.path.toLowerCase()))
+    .slice(0, 4)
+  const results = await Promise.allSettled(candidates.map(async candidate => {
+    const offset = Math.max(0, candidate.startLine - 41)
+    const limit = Math.min(240, Math.max(120, candidate.endLine - offset))
+    const rangeResult = params.toolExecutor.readFileRange
+      ? await params.toolExecutor.readFileRange(candidate.path, offset, limit, 96_000)
+      : undefined
+    if (rangeResult?.success && rangeResult.data?.content) {
+      return {
+        path: candidate.path,
+        startLine: rangeResult.data.startLine,
+        endLine: rangeResult.data.endLine,
+        preview: rangeResult.data.content.split('\n').slice(0, 12).join('\n'),
+        content: rangeResult.data.content.slice(0, 16_000),
+        reason: 'context map read',
+      } satisfies SubAgentEvidence
+    }
+    return undefined
+  }))
+  return results.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
+}
+
 export async function runFastContextSubagent(params: RunParams): Promise<FastContextScanResult> {
   if (!params.model?.trim()) throw new Error('Subagent FastContext Causal Owner requires an active model from the main agent.')
   const onEvent = params.onEvent
@@ -576,6 +606,9 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   } else {
     emit({ type: 'context_maps', state: 'off', elapsedMs: contextMaps.elapsedMs })
   }
+  const contextMapEvidence = await readContextMapEvidence(contextMaps, primer.seedEvidence, params)
+  telemetry.toolCalls += contextMapEvidence.length
+  telemetry.readCalls += contextMapEvidence.length
   telemetry.toolCalls += primer.calls
   telemetry.readCalls += primer.readCalls
   telemetry.searchCalls += primer.calls - primer.readCalls
@@ -591,7 +624,21 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     emit({ type: 'hit', hit: scanHit })
     emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'primer', reason: 'multi-route source seed' })
   }
+  for (const evidence of contextMapEvidence) {
+    const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
+    if (seenHitKeys.has(key)) continue
+    seenHitKeys.add(key)
+    const scanHit = toScanHit(evidence, 'context-maps')
+    const list = candidates.get(scanHit.path) || []
+    list.push(scanHit)
+    candidates.set(scanHit.path, list)
+    allHits.push(scanHit)
+    emit({ type: 'hit', hit: scanHit })
+    emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'context-maps', reason: 'graph hypothesis read and confirmed' })
+  }
   if (primer.text) emit({ type: 'insight', text: `exact primer found ${primer.text.split('\n').length - 1} starting point(s)`, tone: 'info' })
+  const initialEvidence = [...primer.seedEvidence, ...contextMapEvidence]
+    .filter((item, index, all) => all.findIndex(other => other.path.toLowerCase() === item.path.toLowerCase()) === index)
   const commonOptions = {
     objective: params.objective,
     workspacePath: params.workspacePath,
@@ -609,13 +656,13 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     maxTransientAttempts: 3,
     requireGroundedReport: true,
     retrievalContext: [contextMaps.primer?.text, primer.text].filter(Boolean).join('\n\n') || undefined,
-    initialEvidence: primer.seedEvidence,
+    initialEvidence,
   } as const
   emit({ type: 'insight', text: 'running single-pass evidence judgment', tone: 'info' })
-  let result = primer.seedEvidence.length > 0
+  let result = initialEvidence.length > 0
     ? await runSubAgent({
         ...commonOptions,
-        definition: FAST_CONTEXT_SINGLE_PASS_DEFINITION,
+        definition: FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION,
         onEvent: createSubEventHandler('judge'),
       })
     : await runSubAgent({
@@ -624,7 +671,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         onEvent: createSubEventHandler('recovery'),
       })
   const providerFailure = /all compatible model protocols failed|upstream (?:service )?temporarily unavailable|\b(?:408|409|429|500|502|503|504)\b|fetch failed|timed?\s*out|econnreset|enotfound|socket/i.test(result.error || '')
-  if (!result.ok && primer.seedEvidence.length > 0 && !providerFailure && !params.abortSignal?.aborted) {
+  if (!result.ok && initialEvidence.length > 0 && !providerFailure && !params.abortSignal?.aborted) {
     emit({ type: 'insight', text: `evidence judgment did not converge; starting one model-directed recovery: ${trimText(result.error || 'unknown error', 120)}`, tone: 'warning' })
     result = await runSubAgent({
       ...commonOptions,

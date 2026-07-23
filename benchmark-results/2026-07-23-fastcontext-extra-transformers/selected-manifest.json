@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-23T05:27:51.563Z",
+  "seed": 20260723,
+  "sources": [
+    {
+      "id": "swebench-verified",
+      "url": "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified",
+      "selected": 2
+    },
+    {
+      "id": "swepolybench-verified",
+      "url": "https://huggingface.co/datasets/AmazonScience/SWE-PolyBench_Verified",
+      "selected": 8
+    }
+  ],
+  "cases": [
+    {
+      "id": "huggingface__transformers-29519",
+      "dataset": "swepolybench-verified",
+      "repository": "huggingface/transformers",
+      "baseCommit": "b338a6c3b8eda29610d4d472cad8cd87cbfdaaed",
+      "language": "Python",
+      "category": "Bug Fix",
+      "createdAt": "2024-03-07 15:56:14+00:00",
+      "objective": "Sliding window inconsistency between PyTorch and Flax\n### System Info\r\n\r\ntransformers main (ae49b218c), Python 3.10.8\r\n\r\n### Who can help?\r\n\r\n@ArthurZucker, @sanchit-gandhi\r\n\r\n### Reproduction\r\n\r\nThe attention `sliding_window` has different interpretation for PyTorch and Flax. Here's are matching examples:\r\n\r\n**PyTorch**\r\n\r\n```python\r\nfrom transformers import MistralModel\r\nimport torch\r\n\r\nmodel = MistralModel.from_pretrained(\"hf-internal-testing/tiny-random-MistralModel\", sliding_window=2)\r\n\r\ninputs = {\r\n  \"input_ids\": torch.tensor([[10, 20, 30, 40, 50, 60, 70, 80, 0, 0]]),\r\n  \"attention_mask\": torch.tensor([[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]])\r\n}\r\n\r\noutputs = model(**inputs)\r\n\r\nprint(outputs.last_hidden_state[:, 1:4, 1:4])\r\n```\r\n\r\n**Flax**\r\n\r\n```python\r\nfrom transformers import FlaxMistralModel\r\nimport jax.numpy as jnp\r\n\r\nmodel = FlaxMistralModel.from_pretrained(\"hf-internal-testing/tiny-random-MistralModel\", sliding_window=2, from_pt=True)\r\n\r\ninputs = {\r\n  \"input_ids\": jnp.array([[10, 20, 30, 40, 50, 60, 70, 80, 0, 0]]),\r\n  \"attention_mask\": jnp.array([[1, 1, 1, 1, 1, 1, 1, 1, 0, 0]])\r\n}\r\n\r\noutputs = model(**inputs)\r\n\r\nprint(outputs.last_hidden_state[:, 1:4, 1:4])\r\n```\r\n\r\nBoth snippets return different results, however, if we use `sliding_window=3` in the PyTorch version, the results are the same.\r\n\r\nIn the Flax implementation, `sliding_window=2` means that a position will attend to self, and two previous position inclusive (which intuitively seems correct to me). It looks like in the PyTorch version it is not inclusive. Which behaviour is expected?\r\n\r\n### Expected behavior\r\n\r\nThe `sliding_window` meaning to be consistent.",
+      "goldPaths": [
+        "src/transformers/modeling_attn_mask_utils.py"
+      ],
+      "sourceGoldPaths": [
+        "src/transformers/modeling_attn_mask_utils.py"
+      ],
+      "testGoldPaths": [],
+      "changedLines": 6,
+      "leakageRisk": false,
+      "metadata": {
+        "pullNumber": 29519,
+        "modifiedNodes": "[\"src/transformers/modeling_attn_mask_utils.py->module->class_definition:AttentionMaskConverter->function_definition:_make_causal_mask\"]",
+        "nodeCount": 1
+      }
+    }
+  ]
+}

@@ -58,6 +58,18 @@ export interface RetrievalMetrics {
   fullCoverageAt10: boolean
 }
 
+export interface FastContextRunDiagnostics {
+  eventCount: number
+  hitCount: number
+  contextMaps?: {
+    state: 'off' | 'warming' | 'on'
+    confidence?: number
+    nodes?: number
+    elapsedMs?: number
+  }
+  insights: string[]
+}
+
 export type RunFailureKind =
   | 'none'
   | 'timeout'
@@ -104,6 +116,7 @@ export interface RunRecord {
   repositoryFiles: number
   repositoryBytes: number
   rawOutput: string
+  fastContextDiagnostics?: FastContextRunDiagnostics
   error?: string
   cliVersion?: string
 }

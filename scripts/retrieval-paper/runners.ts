@@ -14,6 +14,7 @@ import { scoreRanking, normalizePath } from './metrics'
 import { startClaudeProtocolBridge } from './claudeBridge'
 import type {
   BenchmarkCase,
+  FastContextRunDiagnostics,
   RepositoryStats,
   RetrievalSystemId,
   RunFailureKind,
@@ -49,6 +50,7 @@ interface RunnerOutput {
   usage: UsageMetrics
   protocol: string
   rawOutput: string
+  fastContextDiagnostics?: FastContextRunDiagnostics
   error?: string
   cliVersion?: string
 }
@@ -219,6 +221,7 @@ function finishRecord(context: RunContext, system: RetrievalSystemId, output: Ru
     repositoryFiles: context.repositoryStats.files,
     repositoryBytes: context.repositoryStats.bytes,
     rawOutput: output.rawOutput,
+    fastContextDiagnostics: output.fastContextDiagnostics,
     error,
     cliVersion: output.cliVersion,
   }
@@ -250,6 +253,25 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), context.timeoutMs)
   let observation: FetchObservation | undefined
+  const diagnostics = (): FastContextRunDiagnostics => {
+    const contextMaps = events
+      .filter((event): event is Extract<FastContextScanEvent, { type: 'context_maps' }> => event.type === 'context_maps')
+      .at(-1)
+    return {
+      eventCount: events.length,
+      hitCount: events.filter(event => event.type === 'hit').length,
+      contextMaps: contextMaps ? {
+        state: contextMaps.state,
+        confidence: contextMaps.confidence,
+        nodes: contextMaps.nodes,
+        elapsedMs: contextMaps.elapsedMs,
+      } : undefined,
+      insights: events
+        .filter((event): event is Extract<FastContextScanEvent, { type: 'insight' }> => event.type === 'insight')
+        .map(event => event.text)
+        .slice(-24),
+    }
+  }
   try {
     const observed = await observeFetch(async current => {
       observation = current
@@ -292,12 +314,14 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
       usage: observation.usage,
       protocol: observation.protocol,
       rawOutput: report,
+      fastContextDiagnostics: diagnostics(),
     }
   } catch (error) {
     const base = errorOutput(startedAt, error, observation)
     const toolCallText = events.filter(event => event.type === 'insight').map(event => event.text)
     return {
       ...base,
+      fastContextDiagnostics: diagnostics(),
       toolCalls: toolCallText.filter(text => /^(?:search_|trace_symbol|get_codemap|read_file):/i.test(text)).length,
       searchCalls: toolCallText.filter(text => /^(?:search_|trace_symbol|get_codemap):/i.test(text)).length,
       readCalls: toolCallText.filter(text => /^read_file:/i.test(text)).length,

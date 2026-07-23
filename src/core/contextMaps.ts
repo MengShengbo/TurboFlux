@@ -3,11 +3,18 @@ import type { ToolExecutor } from '../tools/executor'
 
 export interface ContextMapsPrimer {
   text: string
+  candidates: ContextMapCandidate[]
   confidence: number
   nodes: number
   relationships: number
   paths: number
   elapsedMs: number
+}
+
+export interface ContextMapCandidate {
+  path: string
+  startLine: number
+  endLine: number
 }
 
 export interface ContextMapsBuildResult {
@@ -29,6 +36,25 @@ function flattenMap(nodes: readonly CodeMapNode[]): CodeMapNode[] {
   }
   nodes.forEach(visit)
   return flattened
+}
+
+function contextMapCandidates(nodes: readonly CodeMapNode[]): ContextMapCandidate[] {
+  const candidates: ContextMapCandidate[] = []
+  const seen = new Set<string>()
+  for (const node of flattenMap(nodes)) {
+    if (!node.path) continue
+    const key = node.path.replace(/\\/g, '/').toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const startLine = Math.max(1, node.startLine || node.line || 1)
+    candidates.push({
+      path: node.path.replace(/\\/g, '/'),
+      startLine,
+      endLine: Math.max(startLine, node.endLine || startLine + 120),
+    })
+    if (candidates.length >= 6) break
+  }
+  return candidates
 }
 
 function objectiveTokens(objective: string): string[] {
@@ -122,6 +148,7 @@ export async function buildContextMapsPrimer(params: {
       elapsedMs,
       primer: {
         text: formatContextMap(nodes, assessment.confidence),
+        candidates: contextMapCandidates(nodes),
         ...assessment,
         elapsedMs,
       },
