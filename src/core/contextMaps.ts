@@ -67,7 +67,16 @@ export function compactContextMapQuery(objective: string): string {
   const title = objective.split(/\r?\n/, 1)[0]
   const titleTokens = objectiveTokens(title)
   const exactIdentifiers = title.match(/\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g) || []
-  return [...new Set([...exactIdentifiers, ...titleTokens])].slice(0, 12).join(' ')
+  const seen = new Set<string>()
+  return [...exactIdentifiers, ...titleTokens]
+    .filter(value => {
+      const key = value.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .slice(0, 12)
+    .join(' ')
 }
 
 export function scoreContextMap(nodes: readonly CodeMapNode[], objective: string): {
@@ -120,6 +129,9 @@ export function formatContextMap(nodes: readonly CodeMapNode[], confidence: numb
 export async function buildContextMapsPrimer(params: {
   workspacePath: string
   objective: string
+  query?: string
+  depth?: number
+  maxPaths?: number
   toolExecutor: ToolExecutor
   waitForGraphMs?: number
   abortSignal?: AbortSignal
@@ -130,12 +142,12 @@ export async function buildContextMapsPrimer(params: {
     return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
   }
   try {
-    const graphQuery = compactContextMapQuery(params.objective)
+    const graphQuery = compactContextMapQuery(params.query || params.objective)
     const response = await params.toolExecutor.getCodeMap({
       workspacePath: params.workspacePath,
       query: graphQuery,
-      depth: 1,
-      maxPaths: 6,
+      depth: Math.max(1, Math.min(2, params.depth ?? 2)),
+      maxPaths: Math.max(1, Math.min(10, params.maxPaths ?? 8)),
       preferGraph: true,
       graphOnly: true,
       waitForGraphMs: params.waitForGraphMs ?? 1_800,

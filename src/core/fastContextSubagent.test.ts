@@ -3,15 +3,14 @@ import type { FastContextScanHit } from './fastContextTypes'
 import type { ToolExecutor } from '../tools/executor'
 import { __testFirstPartyImportPatterns, __testImplementationStem, __testSelectPrimerContentPatterns } from './fastContextRetrieval'
 import {
-  __testApplyCausalAnchorRanking,
   __testBuildEvidencePack,
   __testBuildRerankContext,
   __testMergeCodeMaps,
   __testRetrievalPrimerQueries,
-  __testApplyResponsibilityRanking,
   __testEnsureFeatureFrontierCandidates,
   __testSelectFrontierAuditPaths,
   __testShouldRequestSemanticFeedback,
+  __testShouldAcceptSpeculativeJudge,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
@@ -153,22 +152,56 @@ describe('FastContext retrieval', () => {
     expect(merged?.searchesTried).toEqual(['primary search', 'coverage search'])
   })
 
-  it('promotes exact identifiers from an explicit causal clause', () => {
-    const report = __testMergeCodeMaps({
+  it('accepts speculative judgment only for a proven direct owner', () => {
+    const codeMap = {
       candidates: [
-        { path: 'src/wrapper.ts', startLine: 1, endLine: 3, role: 'wrapper', editKind: 'consumer', confidence: 'high', why: 'calls owner' },
-        { path: 'src/owner.ts', startLine: 4, endLine: 8, role: 'owner', editKind: 'owner', confidence: 'high', why: 'OwnerThing.update_state mutates shared attrs' },
-        { path: 'src/test.ts', startLine: 2, endLine: 5, role: 'test', editKind: 'test', confidence: 'medium', why: 'regression' },
+        { path: 'src/owner.ts', startLine: 4, endLine: 18, role: 'runtime owner', editKind: 'owner' as const, confidence: 'high' as const, why: 'directly mutates the state' },
+        { path: 'src/wrapper.ts', startLine: 1, endLine: 3, role: 'caller', editKind: 'consumer' as const, confidence: 'medium' as const, why: 'forwards the request' },
       ],
       relationships: [],
       rejectedHypotheses: [],
-      searchesTried: ['exact search'],
+      searchesTried: ['exact symbol'],
       uncertainty: ['none'],
-    })!
+    }
 
-    const ranked = __testApplyCausalAnchorRanking(report, 'The leak is caused by OwnerThing.update_state mutating shared attrs.')
+    expect(__testShouldAcceptSpeculativeJudge({
+      primerConfidence: 0.9,
+      plan: { taskShape: 'direct-owner', confidence: 0.86, needsFeedback: false },
+      codeMap,
+      readPaths: ['src/owner.ts', 'src/wrapper.ts'],
+    })).toBe(true)
+    expect(__testShouldAcceptSpeculativeJudge({
+      primerConfidence: 0.9,
+      codeMap,
+      readPaths: ['src/owner.ts', 'src/wrapper.ts'],
+    })).toBe(true)
+    expect(__testShouldAcceptSpeculativeJudge({
+      primerConfidence: 0.9,
+      codeMap: {
+        ...codeMap,
+        candidates: [{ ...codeMap.candidates[0], confidence: 'medium' as const }],
+      },
+      readPaths: ['src/owner.ts'],
+    })).toBe(true)
+  })
 
-    expect(ranked.candidates.map(candidate => candidate.path)).toEqual(['src/owner.ts', 'src/wrapper.ts', 'src/test.ts'])
+  it('continues semantic retrieval when ownership or frontier remains uncertain', () => {
+    const codeMap = {
+      candidates: [
+        { path: 'src/consumer.ts', startLine: 4, endLine: 18, role: 'symptom consumer', editKind: 'consumer' as const, confidence: 'high' as const, why: 'shows stale state' },
+      ],
+      relationships: [],
+      rejectedHypotheses: [],
+      searchesTried: ['state read'],
+      uncertainty: ['state writer has not been traced'],
+    }
+
+    expect(__testShouldAcceptSpeculativeJudge({
+      primerConfidence: 0.9,
+      plan: { taskShape: 'indirect-owner', confidence: 0.9, needsFeedback: true },
+      codeMap,
+      readPaths: ['src/consumer.ts'],
+    })).toBe(false)
   })
 
   it('derives exact symbol and compact filename variants for the local primer', () => {
@@ -302,41 +335,6 @@ describe('FastContext retrieval', () => {
     expect(context).toContain('CHANGE-FRONTIER BRANCH')
     expect(context).toContain('READ-CONFIRMED SOURCE EXCERPTS')
     expect(context).toContain('state.value = next')
-  })
-
-  it('promotes an unambiguous compact title filename match', () => {
-    const report = __testMergeCodeMaps({
-      candidates: [
-        { path: 'src/cursor.ts', startLine: 1, endLine: 3, role: 'cursor core', editKind: 'implementation', confidence: 'high', why: 'moves cursors' },
-        { path: 'src/contrib/cursorgroup/cursorgroup.ts', startLine: 4, endLine: 8, role: 'cursor group contribution', editKind: 'owner', confidence: 'high', why: 'owns cursor group command' },
-      ],
-      relationships: [],
-      rejectedHypotheses: [],
-      searchesTried: ['title filename'],
-      uncertainty: ['none'],
-    })!
-
-    const ranked = __testApplyCausalAnchorRanking(report, 'Cursor group + Word wrap')
-
-    expect(ranked.candidates[0].path).toBe('src/contrib/cursorgroup/cursorgroup.ts')
-  })
-
-  it('promotes the semantic predicate over a caller that only forwards configuration', () => {
-    const report = __testMergeCodeMaps({
-      candidates: [
-        { path: 'src/options.ts', startLine: 1, endLine: 20, role: 'configuration schema for ignore paths', editKind: 'supporting', confidence: 'medium', why: 'Defines ignore-paths as regex patterns that match paths. This is supporting configuration, not where recursive filtering fails.' },
-        { path: 'src/runner.ts', startLine: 1, endLine: 20, role: 'recursive discovery owner', editKind: 'owner', confidence: 'high', why: 'Walks directories and calls the shared ignore predicate with configured ignore paths.' },
-        { path: 'src/matcher.ts', startLine: 4, endLine: 30, role: 'shared ignore predicate and normal expansion entry filtering', editKind: 'implementation', confidence: 'high', why: 'Defines _is_ignored_file. It computes basename and path regex matches. Because recursive discovery calls this helper, semantic mismatch in ignore-paths is centralized here.' },
-      ],
-      relationships: [],
-      rejectedHypotheses: [],
-      searchesTried: ['ignore paths'],
-      uncertainty: ['none'],
-    })!
-
-    const ranked = __testApplyResponsibilityRanking(report, '--recursive ignores ignore-paths')
-
-    expect(ranked.candidates[0].path).toBe('src/matcher.ts')
   })
 
   it('selects unread responsibility siblings from an implementation family', () => {

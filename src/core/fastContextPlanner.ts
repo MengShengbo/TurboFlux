@@ -282,7 +282,7 @@ export async function planFastContextQueries(
       codemap: params.codemap?.slice(0, 12_000),
       abortSignal: controller.signal,
       requestTimeoutMs: softTimeoutMs,
-      maxTransientAttempts: 3,
+      maxTransientAttempts: 2,
       allowedTools: [],
       userPrompt: plannerPrompt(params.objective, perspective, feedbackContext),
       onEvent: params.onEvent,

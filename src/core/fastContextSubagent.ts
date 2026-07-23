@@ -79,7 +79,9 @@ const FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION: SubAgentDefinition = {
   maxOutputTokens: 4096,
   systemPrompt: `You are the final evidence judge for FastContext. A deterministic retrieval stage has already searched the repository, expanded likely implementation families, and read the strongest source candidates. You receive its complete bounded candidate field and read-confirmed excerpts.
 
-Perform one closed-list listwise decision and call submit_code_map immediately. Retrieval tools are intentionally unavailable in this stage. Rank by direct edit necessity rather than lexical similarity. Use a counterfactual edit test: the behavior owner is the file whose implementation must change for the requested semantics to become correct. Rank wrappers, tests, documentation, schemas, generic configuration, and downstream output consumers below the operation that interprets or mutates behavior.
+Perform one closed-list listwise decision and call submit_code_map immediately. Retrieval tools are intentionally unavailable in this stage. Rank by direct edit necessity rather than lexical similarity. Before choosing rank one, compare the strongest runtime-owner candidate against the strongest alternative with a BESTFIT decision: which file must change for the requested semantics to become correct? A test, document, wrapper, registry, dispatcher, schema, caller, or downstream observer must not outrank a read-confirmed implementation owner merely because its filename or prose resembles the issue.
+
+For stale, malformed, or missing state, distinguish the code that reads the symptom from the code that writes, normalizes, transforms, or invalidates that state. Prefer the causal state writer or transformer when the consumer only exposes the failure. Use high confidence only when the supplied source proves direct ownership; otherwise report uncertainty so the retrieval cascade can continue.
 
 Preserve a compact coordinated frontier. When a bug crosses a public API or orchestration stage into a compiler, parser, serializer, validator, adapter, or renderer, retain every read-confirmed behavior-bearing stage that can require a coordinated edit; do not collapse the map to only the deepest owner. Evidence labeled semantic responsibility probe is deliberately targeted: compare it directly with the primary owner and keep it when it implements the named transformation or output stage. Conversely, never pad the top ten with unrelated writers, builders, callers, or sibling domains merely because they consume the resulting data.
 
@@ -93,14 +95,14 @@ const FAST_CONTEXT_ADAPTIVE_JUDGE_DEFINITION: SubAgentDefinition = {
   label: 'FastContext Adaptive Evidence Judge',
   description: 'Targeted next-hop retrieval and grounded frontier judgment',
   driver: 'main-model',
-  maxTurns: 3,
+  maxTurns: 2,
   maxParallel: 8,
   maxOutputTokens: 4096,
   systemPrompt: `You are the adaptive evidence judge for FastContext. Two semantic planners and a concurrent local executor have already produced read-confirmed evidence, but one or more causal boundaries remain weak.
 
-On the first turn, inspect the supplied evidence and frontier coverage. Run one targeted parallel search or trace wave for missing boundaries or an indirect downstream/upstream owner. Search for causal next hops, not more files from the dominant subsystem. Treat stack-trace frames, registries, wrappers, and UI shells as possible symptoms. Ask where the malformed or missing value is next transformed, emitted, generated, serialized, dispatched, or consumed. Prefer trace_symbol when a concrete symbol exists because it fuses declarations, references, and bounded source evidence. For cross-boundary work, distinguish behavior/config source, registration or routing, transport/IPC propagation, runtime execution/code generation, persistence/state, and client/UI consumer as applicable.
+On the first turn, inspect the supplied evidence and frontier coverage. Run one targeted parallel search or trace wave for missing boundaries or an indirect downstream/upstream owner. Search for causal next hops, not more files from the dominant subsystem. Treat stack-trace frames, registries, wrappers, command handlers, and UI shells as possible symptoms. For stale or malformed state, ask both who consumes it and who writes, normalizes, transforms, or invalidates it; follow concrete identifiers upstream to the state owner. Prefer trace_symbol when a concrete symbol exists because it fuses declarations, references, and bounded source evidence. For cross-boundary work, distinguish behavior/config source, registration or routing, transport/IPC propagation, runtime execution/code generation, persistence/state, and client/UI consumer as applicable.
 
-On the second turn, read the strongest newly discovered source ranges and resolve at most one remaining causal edge. On the third turn, submit the best read-grounded code map. Every candidate and relationship must cite a read_file range. Do not perform a broad repository tour, do not repeat searches already represented in the supplied context, and fail explicitly rather than padding the map.` ,
+On the second turn, read the strongest newly discovered source ranges, resolve at most one remaining causal edge, and submit in the same turn. Make a listwise BESTFIT comparison: rank the file whose runtime implementation must change above tests, docs, wrappers, callers, registries, and symptom consumers. Every candidate and relationship must cite a read_file range. Do not perform a broad repository tour, do not repeat searches already represented in the supplied context, and fail explicitly rather than padding the map.` ,
 }
 
 const FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION: SubAgentDefinition = {
@@ -113,7 +115,7 @@ const FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION: SubAgentDefinition = {
   maxOutputTokens: 4096,
   systemPrompt: `You are the fast adaptive evidence judge for FastContext. The local executor already supplied read-confirmed evidence, but one causal edge remains uncertain.
 
-On the first turn, run one targeted parallel search or trace wave for the highest-information missing owner or boundary. Do not repeat existing searches or tour the repository. On the second turn, read the strongest newly discovered source range and then submit the grounded code map in the same turn. Every submitted candidate and relationship must cite a read_file range. Fail explicitly rather than padding the map.` ,
+On the first turn, run one targeted parallel search or trace wave for the highest-information missing owner or boundary. When state is stale or malformed, trace the concrete state identifier to its writer, normalizer, transformer, or invalidator instead of stopping at the consumer that exposes the symptom. Do not repeat existing searches or tour the repository. On the second turn, read the strongest newly discovered source range, compare the best runtime owner against the strongest alternative with a listwise BESTFIT decision, and submit the grounded code map in the same turn. Tests, docs, wrappers, registries, callers, and symptom consumers must not outrank a read-confirmed implementation owner. Every submitted candidate and relationship must cite a read_file range. Fail explicitly rather than padding the map.` ,
 }
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 90_000
@@ -156,6 +158,26 @@ export function __testShouldRequestSemanticFeedback(params: {
   return firstPassEvidenceCount === 1
     && params.needsFeedback
     && params.plannedConfidence < 0.45
+}
+
+export function __testShouldAcceptSpeculativeJudge(params: {
+  primerConfidence: number
+  plan?: {
+    taskShape: string
+    confidence: number
+    needsFeedback: boolean
+  }
+  codeMap?: SubmittedCodeMap
+  readPaths: string[]
+}): boolean {
+  const top = params.codeMap?.candidates[0]
+  if (!top || params.primerConfidence < (params.plan ? 0.8 : 0.9)) return false
+  if (params.plan && (params.plan.taskShape !== 'direct-owner' || params.plan.needsFeedback || params.plan.confidence < 0.78)) return false
+  if (params.plan ? top.confidence !== 'high' : top.confidence === 'low') return false
+  if (top.editKind !== 'owner' && top.editKind !== 'implementation') return false
+  const normalizedTop = top.path.replace(/\\/g, '/').toLowerCase()
+  if (!params.readPaths.some(path => path.replace(/\\/g, '/').toLowerCase() === normalizedTop)) return false
+  return !(params.codeMap?.uncertainty || []).some(item => !/^(?:none|no|n\/a|nil|unknown)$/i.test(item.trim()))
 }
 
 function trimText(value: string, max = 220): string {
@@ -349,66 +371,6 @@ export function __testMergeCodeMaps(primary?: SubmittedCodeMap, coverage?: Submi
   }
 }
 
-export function __testApplyCausalAnchorRanking(report: SubmittedCodeMap, objective: string): SubmittedCodeMap {
-  const causalText = objective.match(/(?:caused by|because|due to|root cause|原因是|由于|导致)([\s\S]{0,1000})/i)?.[1] || ''
-  const stopWords = new Set(['this', 'that', 'with', 'from', 'into', 'after', 'before', 'when', 'then', 'only', 'value', 'values', 'passed', 'widget', 'function', 'method', 'class'])
-  const anchors = [...new Set(causalText.match(/[A-Za-z_][A-Za-z0-9_]{2,}/g) || [])]
-    .filter(anchor => !stopWords.has(anchor.toLowerCase()))
-    .map(anchor => ({ value: anchor.toLowerCase(), weight: /[A-Z_]/.test(anchor) ? 3 : 1 }))
-  const linkedPaths = causalText.match(/(?:[A-Za-z0-9_.-]+\/){2,}[A-Za-z0-9_.-]+\.[A-Za-z0-9]+/g)
-    ?.map(path => path.toLowerCase()) || []
-  const filenameAnchors = [...new Set(__testRetrievalPrimerQueries(objective).filePatterns
-    .map(pattern => pattern.replace(/[^A-Za-z0-9]/g, '').toLowerCase())
-    .filter(anchor => anchor.length >= 6))]
-  if (anchors.length === 0 && linkedPaths.length === 0 && filenameAnchors.length === 0) return report
-  const ranked = report.candidates.map((candidate, index) => {
-    const path = candidate.path.replace(/\\/g, '/').toLowerCase()
-    const evidence = `${path} ${candidate.role} ${candidate.why}`.toLowerCase()
-    const pathScore = (linkedPaths.some(linkedPath => linkedPath.endsWith(path)) ? 20 : 0)
-      + (filenameAnchors.some(anchor => path.replace(/[^a-z0-9]/g, '').includes(anchor)) ? 8 : 0)
-    const anchorScore = anchors.reduce((score, anchor) => score + (evidence.includes(anchor.value) ? anchor.weight : 0), 0)
-    return { candidate, index, score: pathScore + anchorScore }
-  })
-  if (Math.max(...ranked.map(item => item.score)) <= 0) return report
-  ranked.sort((left, right) => right.score - left.score || left.index - right.index)
-  return { ...report, candidates: ranked.map(item => item.candidate) }
-}
-
-export function __testApplyResponsibilityRanking(report: SubmittedCodeMap, objective: string): SubmittedCodeMap {
-  const objectiveTerms = [...new Set((objective.slice(0, 1_200).toLowerCase().match(/[a-z_][a-z0-9_-]{3,}/g) || [])
-    .filter(term => !['this', 'that', 'with', 'from', 'when', 'then', 'into', 'after', 'before', 'should'].includes(term)))]
-  const scored = report.candidates.slice(0, 5).map((candidate, index) => {
-    const role = candidate.role.toLowerCase()
-    const text = `${role} ${candidate.why}`.toLowerCase()
-    const declarativeSurface = /configuration schema|option (?:schema|definition)|documentation|type declaration/i.test(role)
-    const semanticOwner = !declarativeSurface
-      && (candidate.editKind === 'owner' || candidate.editKind === 'implementation')
-      && /\b(?:defines?|implements?|owns?|performs?|applies?)\b[^.!;]{0,100}(?:predicate|match|matching|normaliz|transform|mutat|state|decision|validation|serializ|parse)/i.test(text)
-    const primitiveLanguage = /predicate|matcher|matching semantics|normaliz|transform|state transition|mutat|serializ|parse decision/i
-    const semanticPrimitive = semanticOwner
-      || primitiveLanguage.test(role)
-        && candidate.editKind !== 'consumer'
-    const delegation = !semanticPrimitive
-      && /\bcaller\b|\bwrapper\b|\bforwards?\b|\bdelegates?\b|\borchestrat|\bentry point\b|\bcalls?\b[^.!;]{0,80}\b(?:helper|predicate|implementation)/i.test(text)
-    const lexical = Math.min(3, objectiveTerms.filter(term => text.includes(term)).length)
-    const score = (semanticOwner ? 5 : 0)
-      + (semanticPrimitive ? 3 : 0)
-      + (candidate.editKind === 'owner' ? 2 : candidate.editKind === 'implementation' ? 1 : 0)
-      + lexical
-      - (declarativeSurface ? 5 : 0)
-      - (delegation ? 4 : 0)
-    return { candidate, index, score }
-  })
-  if (scored.length < 2) return report
-  const current = scored[0]
-  const best = [...scored].sort((left, right) => right.score - left.score || left.index - right.index)[0]
-  if (best.index === 0 || best.score < current.score + 2) return report
-  return {
-    ...report,
-    candidates: [best.candidate, ...report.candidates.filter(candidate => candidate !== best.candidate)],
-  }
-}
-
 export function __testSelectFrontierAuditPaths(
   primerPaths: string[],
   report: SubmittedCodeMap,
@@ -560,6 +522,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
 
   const def: SubAgentDefinition = {
     ...FAST_CONTEXT_DEFINITION,
+    maxTurns: 2,
   }
 
   const emit = (event: FastContextScanEvent): void => { onEvent?.(event) }
@@ -572,7 +535,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     insight: `building issue map (${def.driver})`,
   })
 
-  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank' | 'judge' | 'adaptive' | 'recovery' | 'owner-planner' | 'frontier-planner') => {
+  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank' | 'judge' | 'speculative' | 'adaptive' | 'recovery' | 'owner-planner' | 'frontier-planner') => {
     let currentTurn = 0
     return (event: SubAgentEvent): void => {
       if (event.type === 'turn_start') {
@@ -649,28 +612,57 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
 
   emit({ type: 'insight', text: 'starting parallel model-directed retrieval', tone: 'info' })
   emit({ type: 'context_maps', state: 'warming' })
-  const [initialPrimer, ownerPlanner, frontierPlanner] = await Promise.all([
-    buildFastContextRetrievalPrimer({ ...params, budget: 'lean' }),
-    planFastContextQueries(
-      { ...params, onEvent: createSubEventHandler('owner-planner') },
-      undefined,
-      'causal-owner',
-    ),
-    planFastContextQueries(
-      { ...params, onEvent: createSubEventHandler('frontier-planner') },
-      undefined,
-      'frontier',
-    ),
+  const initialPrimerPromise = buildFastContextRetrievalPrimer({ ...params, budget: 'lean' })
+  const ownerPlannerPromise = planFastContextQueries(
+    { ...params, onEvent: createSubEventHandler('owner-planner') },
+    undefined,
+    'causal-owner',
+  )
+  const frontierPlannerPromise = planFastContextQueries(
+    { ...params, onEvent: createSubEventHandler('frontier-planner') },
+    undefined,
+    'frontier',
+  )
+  const initialPrimer = await initialPrimerPromise
+  const speculativeJudgePromise = initialPrimer.seedEvidence.length > 0
+    ? runSubAgent({
+        objective: params.objective,
+        workspacePath: params.workspacePath,
+        toolExecutor: params.toolExecutor,
+        apiKey: params.apiKey,
+        baseUrl: params.baseUrl,
+        provider: params.provider,
+        customHeaders: params.customHeaders,
+        reasoning: params.reasoning,
+        modelCapabilities: params.modelCapabilities,
+        model: params.model,
+        codemap: params.codemap,
+        abortSignal: params.abortSignal,
+        requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
+        maxTransientAttempts: 2,
+        requireGroundedReport: true,
+        retrievalContext: initialPrimer.text,
+        initialEvidence: initialPrimer.seedEvidence,
+        definition: FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION,
+        submissionOnly: true,
+        onEvent: createSubEventHandler('speculative'),
+      })
+    : Promise.resolve(undefined)
+  const [ownerPlanner, frontierPlanner, speculativeJudge] = await Promise.all([
+    ownerPlannerPromise,
+    frontierPlannerPromise,
+    speculativeJudgePromise,
   ])
   const planner = ownerPlanner.ok && frontierPlanner.ok
     ? { ...ownerPlanner, plan: mergeFastContextQueryPlans(ownerPlanner.plan, frontierPlanner.plan), elapsedMs: Math.max(ownerPlanner.elapsedMs, frontierPlanner.elapsedMs) }
     : ownerPlanner.ok
       ? ownerPlanner
       : frontierPlanner
-  const primer = planner.ok
+  const semanticPlannersHealthy = ownerPlanner.ok && frontierPlanner.ok
+  const primer = semanticPlannersHealthy
     ? initialPrimer
     : await buildFastContextRetrievalPrimer({ ...params, budget: 'full' })
-  if (planner.ok) {
+  if (semanticPlannersHealthy) {
     const plannerViews = ownerPlanner.ok && frontierPlanner.ok
       ? 'owner + frontier'
       : ownerPlanner.ok ? 'owner only' : 'frontier only'
@@ -693,7 +685,22 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     frontierCovered: 0,
     frontierCoverage: 1,
   }
-  const planned = planner.ok
+  const speculativeAccepted = Boolean(
+    speculativeJudge?.ok
+      && speculativeJudge.codeMap
+      && __testShouldAcceptSpeculativeJudge({
+        primerConfidence: initialPrimer.confidence,
+        plan: semanticPlannersHealthy ? planner.plan : undefined,
+        codeMap: speculativeJudge.codeMap,
+        readPaths: initialPrimer.seedEvidence.map(item => item.path),
+      }),
+  )
+  if (speculativeAccepted) {
+    emit({ type: 'insight', text: 'high-confidence direct owner found; stopping before semantic expansion', tone: 'success' })
+  }
+  const planned = speculativeAccepted
+    ? emptyPlannedEvidence
+    : semanticPlannersHealthy
     ? await executeFastContextQueryPlan({
       workspacePath: params.workspacePath,
       toolExecutor: params.toolExecutor,
@@ -705,7 +712,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   telemetry.toolCalls += planned.calls
   telemetry.readCalls += planned.readCalls
   telemetry.searchCalls += planned.calls - planned.readCalls
-  const adaptiveJudgeNeeded = planner.ok && __testShouldRequestSemanticFeedback({
+  const adaptiveJudgeNeeded = semanticPlannersHealthy && __testShouldRequestSemanticFeedback({
     exactEvidenceCount: primer.seedEvidence.length,
     plannedEvidenceCount: planned.seedEvidence.length,
     plannedConfidence: planned.confidence,
@@ -725,10 +732,17 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   const retrievalConfidence = Math.max(primer.confidence, planned.confidence)
   const firstPassEvidenceCount = new Set([...primer.seedEvidence, ...planned.seedEvidence]
     .map(item => item.path.toLowerCase())).size
-  const contextMaps = retrievalConfidence < 0.62 && firstPassEvidenceCount < 2
+  const weakFrontier = semanticPlannersHealthy && planned.frontierExpected > 0 && planned.frontierCoverage < 0.75
+  const contextMapQuery = semanticPlannersHealthy
+    ? [...planner.plan.symbols.slice(0, 6), ...planner.plan.semanticQueries.slice(0, 2)].join(' ')
+    : undefined
+  const contextMaps = !speculativeAccepted && (adaptiveJudgeNeeded || weakFrontier || (retrievalConfidence < 0.62 && firstPassEvidenceCount < 2))
     ? await buildContextMapsPrimer({
       workspacePath: params.workspacePath,
       objective: params.objective,
+      query: contextMapQuery,
+      depth: 2,
+      maxPaths: 8,
       toolExecutor: params.toolExecutor,
       abortSignal: params.abortSignal,
     })
@@ -800,12 +814,27 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     maxTransientAttempts: 3,
     requireGroundedReport: true,
-    retrievalContext: [planned.text, primer.text, contextMaps.primer?.text].filter(Boolean).join('\n\n').slice(0, 64_000) || undefined,
+    retrievalContext: [
+      planned.text,
+      primer.text,
+      contextMaps.primer?.text,
+      speculativeJudge?.codeMap ? `SPECULATIVE CLOSED-LIST JUDGMENT\n${renderSubmittedCodeMap(speculativeJudge.codeMap)}` : undefined,
+    ].filter(Boolean).join('\n\n').slice(0, 64_000) || undefined,
     initialEvidence,
   } as const
-  emit({ type: 'insight', text: adaptiveJudgeNeeded ? 'running adaptive evidence judgment' : 'running single-pass evidence judgment', tone: 'info' })
+  emit({
+    type: 'insight',
+    text: speculativeAccepted
+      ? 'accepted speculative evidence judgment'
+      : !semanticPlannersHealthy
+        ? 'semantic planning unavailable; running full model-directed recovery'
+        : adaptiveJudgeNeeded ? 'running adaptive evidence judgment' : 'running final evidence judgment',
+    tone: !planner.ok ? 'warning' : 'info',
+  })
   const fullAdaptive = adaptiveJudgeNeeded && (planner.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3)
-  let result = initialEvidence.length > 0
+  let result = speculativeAccepted && speculativeJudge
+    ? speculativeJudge
+    : initialEvidence.length > 0 && semanticPlannersHealthy
     ? await runSubAgent({
         ...commonOptions,
         definition: adaptiveJudgeNeeded
@@ -829,9 +858,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     })
   }
   if (!result.ok || !result.codeMap) throw new Error(result.error || 'FastContext locator failed')
-  const responsibilityRankedCodeMap = __testApplyResponsibilityRanking(result.codeMap, params.objective)
-  const rankedCodeMap = __testApplyCausalAnchorRanking(responsibilityRankedCodeMap, params.objective)
-  const finalReport = renderSubmittedCodeMap(rankedCodeMap)
+  const finalReport = renderSubmittedCodeMap(result.codeMap)
   const maxTurns = result.turns
 
   emit({

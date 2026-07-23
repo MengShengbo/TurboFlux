@@ -50,6 +50,7 @@ ${'long reproduction log '.repeat(200)}`)
     const result = await buildContextMapsPrimer({
       workspacePath: 'C:/repo',
       objective: 'trace runWorkflow into loadWorkspace',
+      query: 'runWorkflow loadWorkspace',
       toolExecutor: { getCodeMap } as unknown as ToolExecutor,
     })
 
@@ -60,7 +61,13 @@ ${'long reproduction log '.repeat(200)}`)
       { path: 'src/workflow.ts', startLine: 10, endLine: 20 },
       { path: 'src/workspace.ts', startLine: 4, endLine: 8 },
     ])
-    expect(getCodeMap).toHaveBeenCalledWith(expect.objectContaining({ graphOnly: true, preferGraph: true }))
+    expect(getCodeMap).toHaveBeenCalledWith(expect.objectContaining({
+      query: 'runWorkflow loadWorkspace',
+      depth: 2,
+      maxPaths: 8,
+      graphOnly: true,
+      preferGraph: true,
+    }))
   })
 
   it('does not enable for filesystem fallback maps', async () => {
