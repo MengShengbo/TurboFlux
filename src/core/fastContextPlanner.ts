@@ -8,6 +8,14 @@ import { runSubAgent } from './subAgent'
 export type FastContextTaskShape = 'direct-owner' | 'indirect-owner' | 'cross-boundary' | 'multi-frontier'
 export type FastContextPlannerPerspective = 'causal-owner' | 'frontier' | 'feedback'
 
+export interface FastContextFrontierSearch {
+  role: string
+  query: string
+  symbols: string[]
+  filenameGlobs: string[]
+  subsystemHints: string[]
+}
+
 export interface FastContextQueryPlan {
   taskShape: FastContextTaskShape
   confidence: number
@@ -17,6 +25,7 @@ export interface FastContextQueryPlan {
   filenameGlobs: string[]
   subsystemHints: string[]
   frontierRoles: string[]
+  frontierSearches: FastContextFrontierSearch[]
   editableExtensions: string[]
   rationale: string
 }
@@ -34,6 +43,9 @@ export interface FastContextPlannedEvidence {
   candidatePaths: string[]
   seedEvidence: SubAgentEvidence[]
   confidence: number
+  frontierExpected: number
+  frontierCovered: number
+  frontierCoverage: number
   text?: string
 }
 
@@ -59,7 +71,7 @@ interface PlannedHit {
   line?: number
   preview: string
   score: number
-  source: 'semantic' | 'symbol' | 'filename' | 'symbol-filename'
+  source: 'semantic' | 'symbol' | 'filename' | 'symbol-filename' | 'frontier' | 'frontier-filename'
   queryIndex: number
 }
 
@@ -80,10 +92,12 @@ const PLANNER_DEFINITION: SubAgentDefinition = {
   thinking: 'disabled',
   systemPrompt: `You lead repository retrieval. Convert a software issue into a compact, high-information search plan before any repository tools run.
 
-Reason semantically: infer likely subsystems, architecture roles, morphological variants, indirect owners, configuration surfaces, and cross-boundary propagation. Do not merely repeat issue words. Do not claim that guessed paths exist. semanticQueries are executable source-search fragments, not prose: each must contain 2-5 discriminative code tokens likely to occur near one another in source. Put broader architectural hypotheses in rationale, subsystemHints, and frontierRoles. symbols must be plausible literal repository identifiers ordered from the most owner-specific to the least; do not put generic issue words in symbols unless they are likely exact code identifiers. For cross-boundary or multi-frontier tasks, allocate queries to separate boundaries such as server capability, transport/config propagation, client state, and UI consumer. Prefer 4-8 discriminative queries over broad keywords.
+Reason semantically: infer likely subsystems, architecture roles, morphological variants, indirect owners, configuration surfaces, and cross-boundary propagation. Do not merely repeat issue words. Do not claim that guessed paths exist. semanticQueries are executable source-search fragments, not prose: each must contain 2-5 discriminative code tokens likely to occur near one another in source. Put broader architectural hypotheses in rationale, subsystemHints, and frontierRoles. symbols must be plausible literal repository identifiers ordered from the most owner-specific to the least; do not put generic issue words in symbols unless they are likely exact code identifiers.
+
+frontierSearches is the coordinated edit frontier. Each item must represent a distinct causal boundary, not a synonym: examples include behavior owner, configuration/capability source, registration or routing, transport/IPC propagation, runtime execution/code generation, persistence/state, and client/UI consumer. Include only boundaries relevant to the issue. For indirect failures, trace both upstream definition/normalization and downstream runtime execution; a stack-trace frame can be a symptom rather than the edit owner. Each frontier query must be a short grep-ready fragment, with owner-specific symbols and likely subsystem hints. Prefer 2-5 high-information frontiers for cross-boundary work and 1-2 for direct-owner work.
 
 Return one JSON object only, without Markdown, with this exact shape:
-{"taskShape":"direct-owner|indirect-owner|cross-boundary|multi-frontier","confidence":0.0,"needsFeedback":true,"symbols":[],"semanticQueries":[],"filenameGlobs":[],"subsystemHints":[],"frontierRoles":[],"editableExtensions":[],"rationale":""}
+{"taskShape":"direct-owner|indirect-owner|cross-boundary|multi-frontier","confidence":0.0,"needsFeedback":true,"symbols":[],"semanticQueries":[],"filenameGlobs":[],"subsystemHints":[],"frontierRoles":[],"frontierSearches":[{"role":"","query":"","symbols":[],"filenameGlobs":[],"subsystemHints":[]}],"editableExtensions":[],"rationale":""}
 
 confidence measures confidence that this plan can expose the real edit owner, not confidence in the issue description. needsFeedback is true when repository results should be shown back once before final ranking.`,
 }
@@ -143,6 +157,7 @@ function emptyPlan(): FastContextQueryPlan {
     filenameGlobs: [],
     subsystemHints: [],
     frontierRoles: [],
+    frontierSearches: [],
     editableExtensions: [],
     rationale: '',
   }
@@ -186,6 +201,20 @@ export function parseFastContextQueryPlan(value: string): FastContextQueryPlan |
         ? shape
         : 'indirect-owner'
       const list = (item: unknown, limit: number) => unique(Array.isArray(item) ? item.map(String) : [], limit)
+      const frontierSearches = (Array.isArray(parsed.frontierSearches) ? parsed.frontierSearches : [])
+        .flatMap(item => {
+          if (!item || typeof item !== 'object') return []
+          const value = item as Record<string, unknown>
+          const role = String(value.role || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+          const query = String(value.query || '').replace(/\s+/g, ' ').trim().slice(0, 160)
+          const symbols = list(value.symbols, 4)
+          const filenameGlobs = list(value.filenameGlobs, 3)
+          const subsystemHints = list(value.subsystemHints, 3)
+          if (!role || (!query && symbols.length === 0 && filenameGlobs.length === 0)) return []
+          return [{ role, query, symbols, filenameGlobs, subsystemHints } satisfies FastContextFrontierSearch]
+        })
+        .filter((item, index, all) => all.findIndex(other => `${other.role}:${other.query}`.toLowerCase() === `${item.role}:${item.query}`.toLowerCase()) === index)
+        .slice(0, 6)
       const plan: FastContextQueryPlan = {
         taskShape,
         confidence: clampConfidence(parsed.confidence),
@@ -195,6 +224,7 @@ export function parseFastContextQueryPlan(value: string): FastContextQueryPlan |
         filenameGlobs: list(parsed.filenameGlobs, 6),
         subsystemHints: list(parsed.subsystemHints, 6),
         frontierRoles: list(parsed.frontierRoles, 6),
+        frontierSearches,
         editableExtensions: list(parsed.editableExtensions, 8),
         rationale: String(parsed.rationale || '').replace(/\s+/g, ' ').trim().slice(0, 500),
       }
@@ -291,6 +321,11 @@ export function mergeFastContextQueryPlans(owner: FastContextQueryPlan, frontier
     filenameGlobs: interleave(owner.filenameGlobs, frontier.filenameGlobs, 6),
     subsystemHints: interleave(owner.subsystemHints, frontier.subsystemHints, 8),
     frontierRoles: interleave(owner.frontierRoles, frontier.frontierRoles, 8),
+    frontierSearches: Array.from({ length: Math.max(owner.frontierSearches.length, frontier.frontierSearches.length) })
+      .flatMap((_, index) => [owner.frontierSearches[index], frontier.frontierSearches[index]])
+      .filter((item): item is FastContextFrontierSearch => Boolean(item))
+      .filter((item, index, all) => all.findIndex(other => `${other.role}:${other.query}`.toLowerCase() === `${item.role}:${item.query}`.toLowerCase()) === index)
+      .slice(0, 6),
     editableExtensions: unique([...owner.editableExtensions, ...frontier.editableExtensions], 10),
     rationale: `Owner view: ${owner.rationale} Frontier view: ${frontier.rationale}`.slice(0, 900),
   }
@@ -318,19 +353,40 @@ function symbolFileGlob(value: string): string | undefined {
   return `**/*${identifier.replace(/[?*\[\]{}]/g, '')}*.*`
 }
 
-async function runLimited<T>(tasks: Array<() => Promise<T>>, concurrency = 6): Promise<PromiseSettledResult<T>[]> {
+function fastContextAbortError(): Error {
+  const error = new Error('FastContext operation aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw fastContextAbortError()
+}
+
+async function runLimited<T>(
+  tasks: Array<() => Promise<T>>,
+  concurrency = 6,
+  signal?: AbortSignal,
+): Promise<PromiseSettledResult<T>[]> {
   const results: PromiseSettledResult<T>[] = new Array(tasks.length)
   let nextIndex = 0
   await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
     while (nextIndex < tasks.length) {
+      if (signal?.aborted) break
       const index = nextIndex++
       try {
+        throwIfAborted(signal)
         results[index] = { status: 'fulfilled', value: await tasks[index]() }
       } catch (reason) {
         results[index] = { status: 'rejected', reason }
       }
     }
   }))
+  if (signal?.aborted) {
+    for (let index = 0; index < results.length; index += 1) {
+      if (!results[index]) results[index] = { status: 'rejected', reason: fastContextAbortError() }
+    }
+  }
   return results
 }
 
@@ -344,21 +400,34 @@ function pathScore(path: string, plan: FastContextQueryPlan): number {
   return subsystem * 3 + roles * 4 + config + nonRuntime
 }
 
+function frontierPathScore(path: string, frontier: FastContextFrontierSearch): number {
+  const normalized = path.toLowerCase().replace(/\\/g, '/')
+  const compactPath = normalized.replace(/[^a-z0-9]+/g, '')
+  const subsystem = frontier.subsystemHints.filter(hint => normalized.includes(hint.toLowerCase().replace(/\\/g, '/'))).length
+  const role = frontier.role.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  return subsystem * 8 + (role && compactPath.includes(role) ? 6 : 0)
+}
+
 export async function executeFastContextQueryPlan(params: {
   workspacePath: string
   toolExecutor: ToolExecutor
   plan: FastContextQueryPlan
   coveredEvidence?: SubAgentEvidence[]
+  abortSignal?: AbortSignal
 }): Promise<FastContextPlannedEvidence> {
+  throwIfAborted(params.abortSignal)
   const semanticQueries = unique(params.plan.semanticQueries, 4)
   const symbolQueries = unique(params.plan.symbols, 8)
   const filenameGlobs = unique(params.plan.filenameGlobs, 2)
+  const frontierSearches = params.plan.frontierSearches.slice(0, 6)
   const extensionList = editableExtensions(params.plan)
   const extensionSet = new Set(extensionList)
   const sourceGlob = editableGlob(extensionList)
   const contentQueries = [
     ...semanticQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'semantic' as const })),
     ...symbolQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'symbol' as const })),
+    ...frontierSearches.flatMap((frontier, queryIndex) => unique([frontier.query, ...frontier.symbols], 2)
+      .map(query => ({ query, queryIndex, source: 'frontier' as const }))),
   ]
   const tasks: Array<() => Promise<PlannedHit[]>> = [
     ...contentQueries.map(({ query, queryIndex, source }) => async () => {
@@ -379,7 +448,10 @@ export async function executeFastContextQueryPlan(params: {
           path,
           line: hit.line,
           preview: `${path}:${hit.line} ${hit.text.replace(/\s+/g, ' ').trim().slice(0, 180)}`,
-          score: (source === 'symbol' ? 44 : 40) - queryIndex * 2 + pathScore(path, params.plan),
+          score: (source === 'symbol' ? 44 : source === 'frontier' ? 46 : 40)
+            - queryIndex * 2
+            + pathScore(path, params.plan)
+            + (source === 'frontier' ? frontierPathScore(path, frontierSearches[queryIndex]) : 0),
           source,
           queryIndex,
         }]
@@ -415,8 +487,28 @@ export async function executeFastContextQueryPlan(params: {
         }).slice(0, 12) : []
       }]
     }),
+    ...frontierSearches.flatMap((frontier, frontierIndex) => {
+      const globs = unique([
+        ...frontier.filenameGlobs,
+        ...frontier.symbols.map(symbolFileGlob).filter((glob): glob is string => Boolean(glob)),
+      ], 2)
+      return globs.map(glob => async () => {
+        const result = await params.toolExecutor.searchFiles(glob, params.workspacePath)
+        return result.success ? (result.data?.matches || []).flatMap(match => {
+          const path = relativePath(params.workspacePath, match)
+          return isEditableFile(path, extensionSet) ? [{
+            path,
+            preview: path,
+            score: 50 - frontierIndex + pathScore(path, params.plan) + frontierPathScore(path, frontier),
+            source: 'frontier-filename' as const,
+            queryIndex: frontierIndex,
+          }] : []
+        }).slice(0, 12) : []
+      })
+    }),
   ]
-  const settled = await runLimited(tasks, 12)
+  const settled = await runLimited(tasks, 12, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const coveredEvidence = params.coveredEvidence || []
   const isCovered = (hit: PlannedHit): boolean => coveredEvidence.some(evidence => {
     if (evidence.path.replace(/\\/g, '/').toLowerCase() !== hit.path.toLowerCase()) return false
@@ -461,53 +553,85 @@ export async function executeFastContextQueryPlan(params: {
   const symbolLane = ranked.filter(hit => hit.sources.has('symbol')).slice(0, 5)
   const symbolFilenameLane = ranked.filter(hit => hit.sources.has('symbol-filename')).slice(0, 3)
   const filenameLane = ranked.filter(hit => hit.sources.has('filename')).slice(0, 2)
-  const readLimit = params.plan.taskShape === 'multi-frontier' || params.plan.taskShape === 'cross-boundary' ? 10 : 8
-  const readTargets = [...symbolFilenameLane, ...symbolLane, ...semanticLane, ...filenameLane, ...configLane, ...ranked]
+  const assignedFrontierPaths = new Set<string>()
+  const frontierAssignments = frontierSearches.flatMap((_, frontierIndex) => {
+    const hit = ranked.find(candidate => !assignedFrontierPaths.has(candidate.path.toLowerCase())
+      && (candidate.queryKeys.has(`frontier:${frontierIndex}`) || candidate.queryKeys.has(`frontier-filename:${frontierIndex}`)))
+    if (!hit) return []
+    assignedFrontierPaths.add(hit.path.toLowerCase())
+    return [{ frontierIndex, hit }]
+  })
+  const frontierLane = frontierAssignments.map(assignment => assignment.hit)
+  const crossBoundary = params.plan.taskShape === 'multi-frontier' || params.plan.taskShape === 'cross-boundary'
+  const readLimit = crossBoundary ? Math.min(14, Math.max(10, frontierSearches.length + 7)) : 8
+  const readTargets = [...frontierLane, ...symbolFilenameLane, ...symbolLane, ...semanticLane, ...filenameLane, ...configLane, ...ranked]
     .filter((hit, index, all) => all.findIndex(other => other.path.toLowerCase() === hit.path.toLowerCase()) === index)
     .slice(0, readLimit)
   const readResults = await runLimited(readTargets.map(hit => async () => {
+    throwIfAborted(params.abortSignal)
     const offset = Math.max(0, (hit.line || 1) - 61)
     const range = params.toolExecutor.readFileRange
       ? await params.toolExecutor.readFileRange(hit.path, offset, 220, 96_000)
       : undefined
     if (range?.success && range.data?.content) {
       return {
-        path: hit.path,
-        startLine: range.data.startLine,
-        endLine: range.data.endLine,
-        preview: range.data.content.split('\n').slice(0, 12).join('\n'),
-        content: range.data.content.slice(0, 16_000),
-        reason: 'file read',
-        score: hit.score,
-      } satisfies SubAgentEvidence
+        hit,
+        evidence: {
+          path: hit.path,
+          startLine: range.data.startLine,
+          endLine: range.data.endLine,
+          preview: range.data.content.split('\n').slice(0, 12).join('\n'),
+          content: range.data.content.slice(0, 16_000),
+          reason: 'file read',
+          score: hit.score,
+        } satisfies SubAgentEvidence,
+      }
     }
     const file = await params.toolExecutor.readFile(hit.path)
     if (!file.success || !file.data) return undefined
     const lines = String(file.data).split('\n').slice(offset, offset + 220)
     return {
-      path: hit.path,
-      startLine: offset + 1,
-      endLine: offset + lines.length,
-      preview: lines.slice(0, 12).join('\n'),
-      content: lines.join('\n').slice(0, 16_000),
-      reason: 'file read',
-      score: hit.score,
-    } satisfies SubAgentEvidence
+      hit,
+      evidence: {
+        path: hit.path,
+        startLine: offset + 1,
+        endLine: offset + lines.length,
+        preview: lines.slice(0, 12).join('\n'),
+        content: lines.join('\n').slice(0, 16_000),
+        reason: 'file read',
+        score: hit.score,
+      } satisfies SubAgentEvidence,
+    }
+  }), 6, params.abortSignal)
+  throwIfAborted(params.abortSignal)
+  const successfulReads = readResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
+  const seedEvidence = successfulReads.map(result => result.evidence)
+  const successfullyReadPaths = new Set(successfulReads.map(result => result.evidence.path.toLowerCase()))
+  const coveredFrontierIndexes = new Set(frontierAssignments.flatMap(({ frontierIndex, hit }) => {
+    if (!successfullyReadPaths.has(hit.path.toLowerCase())) return []
+    const frontier = frontierSearches[frontierIndex]
+    const aligned = frontier.subsystemHints.length === 0 || frontierPathScore(hit.path, frontier) > 0
+    return aligned ? [frontierIndex] : []
   }))
-  const seedEvidence = readResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
+  const frontierExpected = frontierSearches.length
+  const frontierCovered = coveredFrontierIndexes.size
+  const frontierCoverage = frontierExpected > 0 ? frontierCovered / frontierExpected : 1
   const consensusPaths = ranked.filter(hit => hit.sources.size >= 2 || hit.queryKeys.size >= 2).length
   const coveredQueries = new Set(ranked.flatMap(hit => [...hit.queryKeys])).size
-  const totalQueries = Math.max(1, contentQueries.length + filenameGlobs.length)
+  const totalQueries = Math.max(1, new Set(contentQueries.map(query => `${query.source}:${query.queryIndex}`)).size + filenameGlobs.length)
   const queryCoverage = Math.min(1, coveredQueries / totalQueries)
   const confidence = Math.min(0.95, params.plan.confidence * 0.3
-    + Math.min(0.3, consensusPaths * 0.075)
-    + queryCoverage * 0.25
+    + Math.min(0.2, consensusPaths * 0.05)
+    + queryCoverage * 0.2
+    + (frontierExpected > 0 ? frontierCoverage * 0.15 : 0)
     + Math.min(0.1, seedEvidence.length * 0.0125))
   const text = [
     `Semantic planner: ${params.plan.taskShape}; confidence=${params.plan.confidence.toFixed(2)}; feedback=${params.plan.needsFeedback}`,
     `Planner rationale: ${params.plan.rationale}`,
     `Planner queries: ${[...params.plan.symbols, ...params.plan.semanticQueries].join(' | ')}`,
     `Planner subsystems: ${params.plan.subsystemHints.join(' | ')}`,
+    `Planner frontier coverage: ${frontierCovered}/${frontierExpected}`,
+    `Planner frontiers: ${frontierSearches.map(frontier => `${frontier.role}: ${frontier.query}`).join(' | ')}`,
     `Planner candidate reads:\n${seedEvidence.map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(item.content || item.preview).slice(0, 1_200)}`).join('\n---\n')}`,
   ].join('\n\n').slice(0, 36_000)
   return {
@@ -516,6 +640,9 @@ export async function executeFastContextQueryPlan(params: {
     candidatePaths: ranked.map(hit => hit.path).slice(0, 80),
     seedEvidence,
     confidence,
+    frontierExpected,
+    frontierCovered,
+    frontierCoverage,
     text,
   }
 }
@@ -529,6 +656,7 @@ export function buildFastContextFeedbackContext(params: {
     `FIRST PLAN\n${JSON.stringify(params.plan)}`,
     `LOCAL EXACT CANDIDATES\n${params.localPaths.slice(0, 60).join('\n')}`,
     `SEMANTIC PLAN CANDIDATES\n${params.planned.candidatePaths.slice(0, 60).join('\n')}`,
+    `FRONTIER COVERAGE\n${params.planned.frontierCovered}/${params.planned.frontierExpected}`,
     `READ EXCERPTS\n${params.planned.seedEvidence.slice(0, 10).map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(item.content || item.preview).slice(0, 700)}`).join('\n---\n')}`,
   ].join('\n\n').slice(0, 12_000)
 }

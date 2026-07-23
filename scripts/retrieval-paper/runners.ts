@@ -251,7 +251,12 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
   const startedAt = performance.now()
   const events: FastContextScanEvent[] = []
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), context.timeoutMs)
+  let rejectDeadline: ((reason: Error) => void) | undefined
+  const deadline = new Promise<never>((_, reject) => { rejectDeadline = reject })
+  const timer = setTimeout(() => {
+    controller.abort()
+    rejectDeadline?.(new Error(`FastContext timed out after ${context.timeoutMs}ms hard deadline`))
+  }, context.timeoutMs)
   let observation: FetchObservation | undefined
   const diagnostics = (): FastContextRunDiagnostics => {
     const contextMaps = events
@@ -273,7 +278,7 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
     }
   }
   try {
-    const observed = await observeFetch(async current => {
+    const observed = await Promise.race([observeFetch(async current => {
       observation = current
       return runFastContextSubagent({
         workspacePath: context.workspacePath,
@@ -293,7 +298,7 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
           if (event.type === 'insight' && /retrying model request/i.test(event.text)) current.retries += 1
         },
       })
-    })
+    }), deadline])
     observation = observed.observation
     const report = observed.value.evidencePack
     const telemetry = observed.value.telemetry

@@ -19,7 +19,6 @@ import {
 } from './fastContextRetrieval'
 import { buildContextMapsPrimer } from './contextMaps'
 import {
-  buildFastContextFeedbackContext,
   executeFastContextQueryPlan,
   mergeFastContextQueryPlans,
   planFastContextQueries,
@@ -89,6 +88,34 @@ Apply causal proximity before ranking. A file that defines an API, state transit
 Every candidate and relationship must use a read-confirmed path and line range supplied in the evidence or obtained through the single targeted tool round. Explicitly reject attractive false positives and state residual uncertainty. Do not perform a generic repository tour, do not return prose, and do not invent unread files. Finish with exactly one submit_code_map call.` ,
 }
 
+const FAST_CONTEXT_ADAPTIVE_JUDGE_DEFINITION: SubAgentDefinition = {
+  id: 'fast_context',
+  label: 'FastContext Adaptive Evidence Judge',
+  description: 'Targeted next-hop retrieval and grounded frontier judgment',
+  driver: 'main-model',
+  maxTurns: 3,
+  maxParallel: 8,
+  maxOutputTokens: 4096,
+  systemPrompt: `You are the adaptive evidence judge for FastContext. Two semantic planners and a concurrent local executor have already produced read-confirmed evidence, but one or more causal boundaries remain weak.
+
+On the first turn, inspect the supplied evidence and frontier coverage. Run one targeted parallel search or trace wave for missing boundaries or an indirect downstream/upstream owner. Search for causal next hops, not more files from the dominant subsystem. Treat stack-trace frames, registries, wrappers, and UI shells as possible symptoms. Ask where the malformed or missing value is next transformed, emitted, generated, serialized, dispatched, or consumed. Prefer trace_symbol when a concrete symbol exists because it fuses declarations, references, and bounded source evidence. For cross-boundary work, distinguish behavior/config source, registration or routing, transport/IPC propagation, runtime execution/code generation, persistence/state, and client/UI consumer as applicable.
+
+On the second turn, read the strongest newly discovered source ranges and resolve at most one remaining causal edge. On the third turn, submit the best read-grounded code map. Every candidate and relationship must cite a read_file range. Do not perform a broad repository tour, do not repeat searches already represented in the supplied context, and fail explicitly rather than padding the map.` ,
+}
+
+const FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION: SubAgentDefinition = {
+  id: 'fast_context',
+  label: 'FastContext Fast Evidence Judge',
+  description: 'One targeted next-hop retrieval followed by grounded judgment',
+  driver: 'main-model',
+  maxTurns: 2,
+  maxParallel: 8,
+  maxOutputTokens: 4096,
+  systemPrompt: `You are the fast adaptive evidence judge for FastContext. The local executor already supplied read-confirmed evidence, but one causal edge remains uncertain.
+
+On the first turn, run one targeted parallel search or trace wave for the highest-information missing owner or boundary. Do not repeat existing searches or tour the repository. On the second turn, read the strongest newly discovered source range and then submit the grounded code map in the same turn. Every submitted candidate and relationship must cite a read_file range. Fail explicitly rather than padding the map.` ,
+}
+
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 90_000
 
 interface RunParams {
@@ -118,9 +145,14 @@ export function __testShouldRequestSemanticFeedback(params: {
   plannedEvidenceCount: number
   plannedConfidence: number
   needsFeedback: boolean
+  taskShape?: 'direct-owner' | 'indirect-owner' | 'cross-boundary' | 'multi-frontier'
+  frontierExpected?: number
+  frontierCoverage?: number
 }): boolean {
   const firstPassEvidenceCount = params.exactEvidenceCount + params.plannedEvidenceCount
   if (firstPassEvidenceCount === 0) return true
+  const crossBoundary = params.taskShape === 'cross-boundary' || params.taskShape === 'multi-frontier'
+  if (crossBoundary && (params.frontierExpected || 0) >= 2 && (params.frontierCoverage || 0) < 0.75) return true
   return firstPassEvidenceCount === 1
     && params.needsFeedback
     && params.plannedConfidence < 0.45
@@ -540,7 +572,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     insight: `building issue map (${def.driver})`,
   })
 
-  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank' | 'judge' | 'recovery' | 'owner-planner' | 'frontier-planner' | 'feedback') => {
+  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank' | 'judge' | 'adaptive' | 'recovery' | 'owner-planner' | 'frontier-planner') => {
     let currentTurn = 0
     return (event: SubAgentEvent): void => {
       if (event.type === 'turn_start') {
@@ -657,6 +689,9 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     candidatePaths: [],
     seedEvidence: [],
     confidence: 0,
+    frontierExpected: 0,
+    frontierCovered: 0,
+    frontierCoverage: 1,
   }
   const planned = planner.ok
     ? await executeFastContextQueryPlan({
@@ -664,45 +699,30 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       toolExecutor: params.toolExecutor,
       plan: planner.plan,
       coveredEvidence: primer.seedEvidence,
+      abortSignal: params.abortSignal,
       })
     : emptyPlannedEvidence
   telemetry.toolCalls += planned.calls
   telemetry.readCalls += planned.readCalls
   telemetry.searchCalls += planned.calls - planned.readCalls
-  const feedbackNeeded = planner.ok && __testShouldRequestSemanticFeedback({
+  const adaptiveJudgeNeeded = planner.ok && __testShouldRequestSemanticFeedback({
     exactEvidenceCount: primer.seedEvidence.length,
     plannedEvidenceCount: planned.seedEvidence.length,
     plannedConfidence: planned.confidence,
     needsFeedback: planner.plan.needsFeedback,
+    taskShape: planner.plan.taskShape,
+    frontierExpected: planned.frontierExpected,
+    frontierCoverage: planned.frontierCoverage,
   })
-  let feedback = emptyPlannedEvidence
-  if (feedbackNeeded) {
-    emit({ type: 'insight', text: `retrieval confidence ${planned.confidence.toFixed(2)}; requesting one semantic delta plan`, tone: 'warning' })
-    const feedbackPlan = await planFastContextQueries(
-      { ...params, onEvent: createSubEventHandler('feedback') },
-      buildFastContextFeedbackContext({
-        plan: planner.plan,
-        localPaths: primer.candidatePaths,
-        planned,
-      }),
-      'feedback',
-    )
-    if (feedbackPlan.ok) {
-      feedback = await executeFastContextQueryPlan({
-        workspacePath: params.workspacePath,
-        toolExecutor: params.toolExecutor,
-        plan: feedbackPlan.plan,
-        coveredEvidence: [...primer.seedEvidence, ...planned.seedEvidence],
-      })
-      telemetry.toolCalls += feedback.calls
-      telemetry.readCalls += feedback.readCalls
-      telemetry.searchCalls += feedback.calls - feedback.readCalls
-      emit({ type: 'insight', text: `semantic feedback added ${feedback.seedEvidence.length} read-confirmed candidate(s)`, tone: 'success' })
-    } else {
-      emit({ type: 'insight', text: `semantic feedback unavailable: ${trimText(feedbackPlan.error || 'invalid plan', 120)}`, tone: 'warning' })
-    }
+  if (adaptiveJudgeNeeded) {
+    const fullAdaptive = planner.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3
+    emit({
+      type: 'insight',
+      text: `frontier coverage ${planned.frontierCovered}/${planned.frontierExpected}; reserving ${fullAdaptive ? 'three-turn' : 'two-turn'} adaptive model-directed retrieval`,
+      tone: 'warning',
+    })
   }
-  const retrievalConfidence = Math.max(primer.confidence, planned.confidence, feedback.confidence)
+  const retrievalConfidence = Math.max(primer.confidence, planned.confidence)
   const firstPassEvidenceCount = new Set([...primer.seedEvidence, ...planned.seedEvidence]
     .map(item => item.path.toLowerCase())).size
   const contextMaps = retrievalConfidence < 0.62 && firstPassEvidenceCount < 2
@@ -710,6 +730,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       workspacePath: params.workspacePath,
       objective: params.objective,
       toolExecutor: params.toolExecutor,
+      abortSignal: params.abortSignal,
     })
     : { status: 'unavailable' as const, elapsedMs: 0 }
   if (contextMaps.status === 'on' && contextMaps.primer) {
@@ -728,7 +749,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   } else {
     emit({ type: 'context_maps', state: 'off', elapsedMs: contextMaps.elapsedMs })
   }
-  const semanticEvidence = [...planned.seedEvidence, ...feedback.seedEvidence]
+  const semanticEvidence = planned.seedEvidence
   const contextMapEvidence = await readContextMapEvidence(contextMaps, [...primer.seedEvidence, ...semanticEvidence], params)
   telemetry.toolCalls += contextMapEvidence.length
   telemetry.readCalls += contextMapEvidence.length
@@ -779,16 +800,19 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     maxTransientAttempts: 3,
     requireGroundedReport: true,
-    retrievalContext: [planned.text, feedback.text, primer.text, contextMaps.primer?.text].filter(Boolean).join('\n\n').slice(0, 64_000) || undefined,
+    retrievalContext: [planned.text, primer.text, contextMaps.primer?.text].filter(Boolean).join('\n\n').slice(0, 64_000) || undefined,
     initialEvidence,
-    submissionOnly: true,
   } as const
-  emit({ type: 'insight', text: 'running single-pass evidence judgment', tone: 'info' })
+  emit({ type: 'insight', text: adaptiveJudgeNeeded ? 'running adaptive evidence judgment' : 'running single-pass evidence judgment', tone: 'info' })
+  const fullAdaptive = adaptiveJudgeNeeded && (planner.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3)
   let result = initialEvidence.length > 0
     ? await runSubAgent({
         ...commonOptions,
-        definition: FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION,
-        onEvent: createSubEventHandler('judge'),
+        definition: adaptiveJudgeNeeded
+          ? fullAdaptive ? FAST_CONTEXT_ADAPTIVE_JUDGE_DEFINITION : FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION
+          : FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION,
+        submissionOnly: !adaptiveJudgeNeeded,
+        onEvent: createSubEventHandler(adaptiveJudgeNeeded ? 'adaptive' : 'judge'),
       })
     : await runSubAgent({
         ...commonOptions,

@@ -17,6 +17,7 @@ const plan: FastContextQueryPlan = {
   filenameGlobs: ['**/*[mM]ock*.*'],
   subsystemHints: ['sphinx/ext/autodoc'],
   frontierRoles: ['mock', 'config'],
+  frontierSearches: [],
   editableExtensions: ['py', 'yaml'],
   rationale: 'Trace mocked inheritance metadata into autodoc rendering.',
 }
@@ -37,6 +38,28 @@ describe('FastContext semantic planner', () => {
     const parsed = parseFastContextQueryPlan(`metadata: {"request":"ok"}\nplan: ${JSON.stringify(plan)}\nend`)
 
     expect(parsed).toMatchObject({ taskShape: 'indirect-owner', symbols: ['MockObject'] })
+  })
+
+  it('parses bounded structured frontier searches', () => {
+    const parsed = parseFastContextQueryPlan(JSON.stringify({
+      ...plan,
+      taskShape: 'cross-boundary',
+      frontierSearches: [{
+        role: 'server capability',
+        query: 'AuthType route',
+        symbols: ['AuthType'],
+        filenameGlobs: ['src/node/routes/**/*'],
+        subsystemHints: ['src/node'],
+      }],
+    }))
+
+    expect(parsed?.frontierSearches).toEqual([{
+      role: 'server capability',
+      query: 'AuthType route',
+      symbols: ['AuthType'],
+      filenameGlobs: ['src/node/routes/**/*'],
+      subsystemHints: ['src/node'],
+    }])
   })
 
   it('runs the planner as a one-shot model task without exposing tools', async () => {
@@ -78,6 +101,13 @@ describe('FastContext semantic planner', () => {
       filenameGlobs: ['**/*config*.*'],
       subsystemHints: ['sphinx/config'],
       frontierRoles: ['transport', 'renderer'],
+      frontierSearches: [{
+        role: 'configuration',
+        query: 'config propagation',
+        symbols: ['ConfigLoader'],
+        filenameGlobs: ['**/*config*.*'],
+        subsystemHints: ['sphinx/config'],
+      }],
       rationale: 'Trace configuration into the runtime consumer.',
     })
 
@@ -89,6 +119,7 @@ describe('FastContext semantic planner', () => {
     ])
     expect(merged.symbols).toEqual(['MockObject', 'ConfigLoader'])
     expect(merged.frontierRoles).toEqual(['mock', 'transport', 'config', 'renderer'])
+    expect(merged.frontierSearches).toHaveLength(1)
   })
 
   it('executes semantic code and configuration lanes with read confirmation', async () => {
@@ -143,6 +174,85 @@ describe('FastContext semantic planner', () => {
 
     expect(filePattern).toContain('rego')
     expect(result.seedEvidence).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'policy/main.rego' })]))
+  })
+
+  it('reserves read evidence for each structured cross-boundary frontier', async () => {
+    const executor = {
+      searchContentPage: vi.fn(async (pattern: string) => {
+        const hit = pattern.includes('AuthType')
+          ? { file: 'C:/repo/src/node/routes/index.ts', line: 40, text: 'const authType = AuthType.None' }
+          : pattern.includes('ipc')
+            ? { file: 'C:/repo/typings/ipc.d.ts', line: 18, text: 'authType: AuthType' }
+            : { file: 'C:/repo/lib/vscode/src/vs/workbench/browser/parts/titlebar/menubarControl.ts', line: 90, text: 'logout menu action' }
+        return { success: true, data: { hits: [hit] } }
+      }),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async (path: string, offset: number) => ({
+        success: true,
+        data: { content: `source for ${path}`, startLine: offset + 1, endLine: offset + 20, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'cross-boundary',
+        symbols: [],
+        semanticQueries: [],
+        filenameGlobs: [],
+        frontierSearches: [
+          { role: 'server capability', query: 'AuthType route', symbols: [], filenameGlobs: [], subsystemHints: ['src/node'] },
+          { role: 'IPC propagation', query: 'ipc authType', symbols: [], filenameGlobs: [], subsystemHints: ['typings'] },
+          { role: 'UI consumer', query: 'logout menu', symbols: [], filenameGlobs: [], subsystemHints: ['workbench'] },
+        ],
+      },
+    })
+
+    expect(result.frontierCoverage).toBe(1)
+    expect(result.seedEvidence.map(item => item.path)).toEqual(expect.arrayContaining([
+      'src/node/routes/index.ts',
+      'typings/ipc.d.ts',
+      'lib/vscode/src/vs/workbench/browser/parts/titlebar/menubarControl.ts',
+    ]))
+  })
+
+  it('does not count one path as several independent frontier boundaries', async () => {
+    const executor = {
+      searchContentPage: vi.fn(async () => ({
+        success: true,
+        data: { hits: [{ file: 'C:/repo/src/shared.ts', line: 20, text: 'shared implementation' }] },
+      })),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async () => ({
+        success: true,
+        data: { content: 'shared implementation', startLine: 1, endLine: 40, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'cross-boundary',
+        symbols: [],
+        semanticQueries: [],
+        filenameGlobs: [],
+        frontierSearches: [
+          { role: 'server', query: 'server state', symbols: [], filenameGlobs: [], subsystemHints: [] },
+          { role: 'transport', query: 'transport state', symbols: [], filenameGlobs: [], subsystemHints: [] },
+          { role: 'client', query: 'client state', symbols: [], filenameGlobs: [], subsystemHints: [] },
+        ],
+      },
+    })
+
+    expect(result.frontierExpected).toBe(3)
+    expect(result.frontierCovered).toBe(1)
+    expect(result.frontierCoverage).toBeCloseTo(1 / 3)
   })
 
   it('preserves exact symbol searches alongside a full semantic-query lane', async () => {

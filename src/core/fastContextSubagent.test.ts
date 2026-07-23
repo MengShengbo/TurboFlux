@@ -41,6 +41,24 @@ describe('FastContext retrieval', () => {
       plannedConfidence: 0.7,
       needsFeedback: true,
     })).toBe(false)
+    expect(__testShouldRequestSemanticFeedback({
+      exactEvidenceCount: 2,
+      plannedEvidenceCount: 8,
+      plannedConfidence: 0.8,
+      needsFeedback: true,
+      taskShape: 'cross-boundary',
+      frontierExpected: 4,
+      frontierCoverage: 0.5,
+    })).toBe(true)
+    expect(__testShouldRequestSemanticFeedback({
+      exactEvidenceCount: 2,
+      plannedEvidenceCount: 8,
+      plannedConfidence: 0.8,
+      needsFeedback: true,
+      taskShape: 'cross-boundary',
+      frontierExpected: 4,
+      frontierCoverage: 0.75,
+    })).toBe(false)
   })
 
   it('starts with the model instead of eagerly scanning the workspace', async () => {

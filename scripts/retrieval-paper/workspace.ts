@@ -51,6 +51,17 @@ export class BenchmarkWorkspaceCache {
     return join(this.snapshotsRoot, `${safeName(item.repository)}__${item.baseCommit.slice(0, 12)}`)
   }
 
+  private removeSnapshotPath(snapshot: string): boolean {
+    this.assertInsideRoot(snapshot)
+    if (!existsSync(snapshot)) return true
+    try {
+      rmSync(snapshot, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 })
+      return !existsSync(snapshot)
+    } catch {
+      return false
+    }
+  }
+
   async ensureMirror(repository: string): Promise<string> {
     const mirror = this.mirrorPath(repository)
     this.assertInsideRoot(mirror)
@@ -85,19 +96,23 @@ export class BenchmarkWorkspaceCache {
         const head = (await run('git', ['rev-parse', 'HEAD'], { cwd: snapshot, timeoutMs: 30_000 })).trim()
         if (head !== item.baseCommit) throw new Error(`snapshot is at ${head}`)
       } catch {
-        rmSync(snapshot, { recursive: true, force: true })
+        if (!this.removeSnapshotPath(snapshot)) throw new Error(`Snapshot is still locked: ${snapshot}`)
         rmSync(readyMarker, { force: true })
       }
     }
-    if (existsSync(snapshot) && !existsSync(readyMarker)) rmSync(snapshot, { recursive: true, force: true })
+    if (existsSync(snapshot) && !existsSync(readyMarker) && !this.removeSnapshotPath(snapshot)) {
+      throw new Error(`Snapshot is still locked: ${snapshot}`)
+    }
     if (!existsSync(snapshot)) {
       try {
-        execFileSync('git', ['worktree', 'prune'], {
-          cwd: mirror,
-          timeout: 120_000,
-          windowsHide: true,
-          stdio: ['ignore', 'ignore', 'pipe'],
-        })
+        try {
+          execFileSync('git', ['worktree', 'prune'], {
+            cwd: mirror,
+            timeout: 120_000,
+            windowsHide: true,
+            stdio: ['ignore', 'ignore', 'pipe'],
+          })
+        } catch {}
         execFileSync('git', ['worktree', 'add', '--detach', snapshot, item.baseCommit], {
           cwd: mirror,
           timeout: 900_000,
@@ -105,7 +120,7 @@ export class BenchmarkWorkspaceCache {
           stdio: ['ignore', 'ignore', 'pipe'],
         })
       } catch (error) {
-        if (existsSync(snapshot)) rmSync(snapshot, { recursive: true, force: true })
+        this.removeSnapshotPath(snapshot)
         throw new Error(`Failed to materialize ${item.id}: ${error instanceof Error ? error.message : String(error)}`)
       }
       writeFileSync(readyMarker, `${item.repository}\n${item.baseCommit}\n`)
@@ -122,6 +137,30 @@ export class BenchmarkWorkspaceCache {
       } catch {}
     }
     return { path: snapshot, stats: { files, bytes } }
+  }
+
+  release(item: BenchmarkCase): void {
+    const mirror = this.mirrorPath(item.repository)
+    const snapshot = this.snapshotPath(item)
+    const readyMarker = `${snapshot}.ready`
+    this.assertInsideRoot(snapshot)
+    this.assertInsideRoot(readyMarker)
+    if (existsSync(mirror) && existsSync(snapshot)) {
+      try {
+        execFileSync('git', ['worktree', 'remove', '--force', snapshot], {
+          cwd: mirror,
+          timeout: 120_000,
+          windowsHide: true,
+          stdio: ['ignore', 'ignore', 'pipe'],
+        })
+      } catch {}
+    }
+    this.removeSnapshotPath(snapshot)
+    if (existsSync(readyMarker)) {
+      try {
+        rmSync(readyMarker, { force: true })
+      } catch {}
+    }
   }
 }
 

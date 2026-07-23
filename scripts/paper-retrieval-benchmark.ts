@@ -306,71 +306,76 @@ async function runExperiment(args: Args): Promise<void> {
   const concurrency = new AdaptiveConcurrency(branchAwareMaximum)
   const total = selectedCases.length * args.systems.reduce((sum, system) => sum + (system === 'bm25' ? 1 : args.repeats), 0)
   let position = 0
-  const workspaces = new Map<string, Awaited<ReturnType<BenchmarkWorkspaceCache['prepare']>>>()
-  const repositoryQueues = [...selectedCases.reduce((queues, item) => {
-    const queue = queues.get(item.repository) || []
-    queue.push(item)
-    queues.set(item.repository, queue)
-    return queues
-  }, new Map<string, typeof selectedCases>()).values()]
-  let nextRepository = 0
   let preparedCount = 0
-  const preparationWorkers = Array.from({ length: Math.min(4, repositoryQueues.length) }, async () => {
-    while (true) {
-      const queueIndex = nextRepository
-      nextRepository += 1
-      if (queueIndex >= repositoryQueues.length) return
-      for (const item of repositoryQueues[queueIndex]) {
-        preparedCount += 1
-        console.log(`Preparing workspace ${preparedCount}/${selectedCases.length}: ${item.id} (${item.repository}@${item.baseCommit.slice(0, 10)})`)
-        workspaces.set(item.id, await cache.prepare(item))
-      }
+  const repositoryTails = new Map<string, Promise<void>>()
+
+  const withRepositoryLock = async <T>(repository: string, run: () => Promise<T>): Promise<T> => {
+    const previous = repositoryTails.get(repository) || Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>(resolveGate => { release = resolveGate })
+    const tail = previous.catch(() => {}).then(() => gate)
+    repositoryTails.set(repository, tail)
+    await previous.catch(() => {})
+    try {
+      return await run()
+    } finally {
+      release()
+      if (repositoryTails.get(repository) === tail) repositoryTails.delete(repository)
     }
-  })
-  await Promise.all(preparationWorkers)
+  }
 
   const runCase = async (caseIndex: number): Promise<void> => {
     const item = selectedCases[caseIndex]
-    const workspace = workspaces.get(item.id)
-    if (!workspace) throw new Error(`Prepared workspace missing for ${item.id}`)
-    for (let repeat = 1; repeat <= args.repeats; repeat += 1) {
-      const systems = rotate(args.systems, caseIndex + repeat - 1)
-      for (let order = 0; order < systems.length; order += 1) {
-        const system = systems[order]
-        if (system === 'bm25' && repeat > 1) continue
-        const runId = `${metadata.experimentId}:${item.id}:${system}:${repeat}`
-        position += 1
-        if (completed.has(runId)) {
-          console.log(`[${position}/${total}] resume skip ${system} :: ${item.id} #${repeat}`)
-          continue
-        }
-        console.log(`[${position}/${total}] ${system} :: ${item.id} #${repeat}`)
-        const maximumAttempts = args.retryTransient ? args.transientAttempts : 1
-        for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
-          const record = safeRecord(await runRetrievalSystem(system, {
-            experimentId: metadata.experimentId,
-            item,
-            workspacePath: workspace.path,
-            repositoryStats: workspace.stats,
-            config,
-            repeat,
-            order,
-            timeoutMs: args.timeoutMs,
-          }), config.apiKey)
-          appendFileSync(journalPath, `${JSON.stringify(record)}\n`)
-          const adjustment = concurrency.observe(record)
-          if (adjustment) console.log(`  concurrency ${adjustment}`)
-          if (isTransientFailure(record) && attempt < maximumAttempts) {
-            console.log(`  transient retry ${attempt}/${maximumAttempts}`)
-            await delay(Math.min(4_000, 750 * 2 ** (attempt - 1)))
-            continue
+    await withRepositoryLock(item.repository, async () => {
+      let workspace: Awaited<ReturnType<BenchmarkWorkspaceCache['prepare']>> | undefined
+      try {
+        for (let repeat = 1; repeat <= args.repeats; repeat += 1) {
+          const systems = rotate(args.systems, caseIndex + repeat - 1)
+          for (let order = 0; order < systems.length; order += 1) {
+            const system = systems[order]
+            if (system === 'bm25' && repeat > 1) continue
+            const runId = `${metadata.experimentId}:${item.id}:${system}:${repeat}`
+            position += 1
+            if (completed.has(runId)) {
+              console.log(`[${position}/${total}] resume skip ${system} :: ${item.id} #${repeat}`)
+              continue
+            }
+            if (!workspace) {
+              preparedCount += 1
+              console.log(`Preparing workspace ${preparedCount}/${selectedCases.length}: ${item.id} (${item.repository}@${item.baseCommit.slice(0, 10)})`)
+              workspace = await cache.prepare(item)
+            }
+            console.log(`[${position}/${total}] ${system} :: ${item.id} #${repeat}`)
+            const maximumAttempts = args.retryTransient ? args.transientAttempts : 1
+            for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+              const record = safeRecord(await runRetrievalSystem(system, {
+                experimentId: metadata.experimentId,
+                item,
+                workspacePath: workspace.path,
+                repositoryStats: workspace.stats,
+                config,
+                repeat,
+                order,
+                timeoutMs: args.timeoutMs,
+              }), config.apiKey)
+              appendFileSync(journalPath, `${JSON.stringify(record)}\n`)
+              const adjustment = concurrency.observe(record)
+              if (adjustment) console.log(`  concurrency ${adjustment}`)
+              if (isTransientFailure(record) && attempt < maximumAttempts) {
+                console.log(`  transient retry ${attempt}/${maximumAttempts}`)
+                await delay(Math.min(4_000, 750 * 2 ** (attempt - 1)))
+                continue
+              }
+              completed.add(record.runId)
+              console.log(`  ${record.success ? 'ok' : record.failureKind} ${(record.latencyMs / 1000).toFixed(1)}s R@10=${record.metrics.recallAt10.toFixed(2)} MRR=${record.metrics.reciprocalRank.toFixed(2)} req=${record.apiRequests}`)
+              break
+            }
           }
-          completed.add(record.runId)
-          console.log(`  ${record.success ? 'ok' : record.failureKind} ${(record.latencyMs / 1000).toFixed(1)}s R@10=${record.metrics.recallAt10.toFixed(2)} MRR=${record.metrics.reciprocalRank.toFixed(2)} req=${record.apiRequests}`)
-          break
         }
+      } finally {
+        if (workspace) cache.release(item)
       }
-    }
+    })
   }
   let nextCaseIndex = 0
   const active = new Set<Promise<void>>()

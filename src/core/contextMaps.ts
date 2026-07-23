@@ -122,8 +122,10 @@ export async function buildContextMapsPrimer(params: {
   objective: string
   toolExecutor: ToolExecutor
   waitForGraphMs?: number
+  abortSignal?: AbortSignal
 }): Promise<ContextMapsBuildResult> {
   const startedAt = Date.now()
+  if (params.abortSignal?.aborted) return { status: 'unavailable', elapsedMs: 0 }
   if (typeof params.toolExecutor.getCodeMap !== 'function') {
     return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
   }
@@ -141,6 +143,7 @@ export async function buildContextMapsPrimer(params: {
       success: boolean
       data?: { map?: CodeMapNode[] | CodeMapNode; source?: string }
     }
+    if (params.abortSignal?.aborted) return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
     const rawMap = response.data?.map
     const nodes = rawMap ? (Array.isArray(rawMap) ? rawMap : [rawMap]) : []
     if (!response.success || response.data?.source !== 'graph' || nodes.length === 0) {

@@ -53,16 +53,36 @@ function unique(values: string[], limit: number): string[] {
   return result
 }
 
-async function runLimited<T>(tasks: Array<() => Promise<T>>, concurrency = 4): Promise<PromiseSettledResult<T>[]> {
+function fastContextAbortError(): Error {
+  const error = new Error('FastContext operation aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw fastContextAbortError()
+}
+
+async function runLimited<T>(
+  tasks: Array<() => Promise<T>>,
+  concurrency = 4,
+  signal?: AbortSignal,
+): Promise<PromiseSettledResult<T>[]> {
   const results: PromiseSettledResult<T>[] = new Array(tasks.length)
   let nextIndex = 0
   await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
     while (nextIndex < tasks.length) {
+      if (signal?.aborted) break
       const index = nextIndex
       nextIndex += 1
       try {
+        throwIfAborted(signal)
         results[index] = { status: 'fulfilled', value: await tasks[index]() }
       } catch (firstReason) {
+        if (signal?.aborted) {
+          results[index] = { status: 'rejected', reason: firstReason }
+          break
+        }
         try {
           results[index] = { status: 'fulfilled', value: await tasks[index]() }
         } catch (reason) {
@@ -71,6 +91,11 @@ async function runLimited<T>(tasks: Array<() => Promise<T>>, concurrency = 4): P
       }
     }
   }))
+  if (signal?.aborted) {
+    for (let index = 0; index < results.length; index += 1) {
+      if (!results[index]) results[index] = { status: 'rejected', reason: fastContextAbortError() }
+    }
+  }
   return results
 }
 
@@ -399,7 +424,9 @@ export async function buildFastContextRetrievalPrimer(params: {
   objective: string
   toolExecutor: ToolExecutor
   budget?: 'lean' | 'full'
+  abortSignal?: AbortSignal
 }): Promise<FastContextRetrievalPrimer> {
+  throwIfAborted(params.abortSignal)
   const lean = params.budget === 'lean'
   const queries = buildFastContextPrimerQueries(params.objective)
   const selectedContentPatterns = __testSelectPrimerContentPatterns(queries).slice(0, lean ? 2 : 10)
@@ -431,7 +458,8 @@ export async function buildFastContextRetrievalPrimer(params: {
     }),
   ]
   const initialTasks = [...contentTasks, ...filenameTasks]
-  const initialSettled = await runLimited(initialTasks)
+  const initialSettled = await runLimited(initialTasks, 4, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const initialSearchCalls = initialTasks.length
   const initialHits = [
     ...initialSettled.flatMap(result => result.status === 'fulfilled' ? result.value : []),
@@ -462,7 +490,8 @@ export async function buildFastContextRetrievalPrimer(params: {
       .filter(path => SOURCE_FILE.test(path) && !/(?:^|\/)(?:test|tests|__tests__|benchmarks?)(?:\/|$)|(?:\.test|\.spec)\.[^/]+$/i.test(path))
       .map(path => `family[${directory}] ${path}`), 32)
   })
-  const familySettled = await runLimited(familyTasks)
+  const familySettled = await runLimited(familyTasks, 4, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const familyLines = unique(familySettled.flatMap(result => result.status === 'fulfilled' ? result.value : []), 160)
   const hitLines = unique(initialHits.map(hit => hit.line), 80)
   const candidatePaths = unique([
@@ -565,7 +594,7 @@ export async function buildFastContextRetrievalPrimer(params: {
       && !featureKeys.has(item.path.toLowerCase())),
   ].filter((item, index, all) => all.findIndex(other => other.path.toLowerCase() === item.path.toLowerCase()) === index)
     .slice(0, lean ? 3 : featureRequest ? 14 : 10)
-  const seedResults = await Promise.allSettled(seedPaths.map(async item => {
+  const seedResults = await runLimited(seedPaths.map(item => async () => {
     const anchor = item.lines.length > 0 ? Math.min(...item.lines) : 1
     const offset = Math.max(0, anchor - 61)
     const limit = 220
@@ -593,13 +622,14 @@ export async function buildFastContextRetrievalPrimer(params: {
       content: lines.join('\n').slice(0, 12_000),
       reason: 'file read',
     } satisfies SubAgentEvidence
-  }))
+  }), 6, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const directSeedEvidence = seedResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
   const headerProbePaths = seedPaths
     .filter(item => /\.(?:py|pyi|[cm]?[jt]sx?)$/i.test(item.path))
     .filter(item => Math.min(...item.lines, 97) > 96)
     .slice(0, lean ? 0 : 4)
-  const headerResults = await Promise.allSettled(headerProbePaths.map(async item => {
+  const headerResults = await runLimited(headerProbePaths.map(item => async () => {
     if (!params.toolExecutor.readFileRange) return undefined
     const result = await params.toolExecutor.readFileRange(item.path, 0, 96, 48_000)
     if (!result.success || !result.data?.content) return undefined
@@ -611,14 +641,16 @@ export async function buildFastContextRetrievalPrimer(params: {
       content: result.data.content.slice(0, 12_000),
       reason: 'file read',
     } satisfies SubAgentEvidence
-  }))
+  }), 4, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const headerEvidence = headerResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
   const responsibilityRoots = [...new Set(directSeedEvidence
     .map(item => item.path.replace(/\\/g, '/').split('/')[0])
     .filter(Boolean))].slice(0, 2)
   const responsibilityPatterns = (lean ? [] : responsibilityTerms(params.objective))
     .flatMap(term => responsibilityRoots.map(root => `${root}/**/*${term}*.*`))
-  const responsibilitySearchResults = await runLimited(responsibilityPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)))
+  const responsibilitySearchResults = await runLimited(responsibilityPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)), 4, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const knownSeedPaths = new Set([...directSeedEvidence, ...headerEvidence].map(item => item.path.toLowerCase()))
   const responsibilityPathRanks = new Map<string, { path: string; patternRank: number }>()
   responsibilitySearchResults.forEach((result, patternRank) => {
@@ -657,13 +689,15 @@ export async function buildFastContextRetrievalPrimer(params: {
       content: result.data.content.slice(0, 24_000),
       reason: 'file read',
     } satisfies SubAgentEvidence
-  })()))
+  })()), 4, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const responsibilityEvidence = responsibilityReadResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
   candidatePaths.push(...responsibilityEvidence.map(item => item.path).filter(path => !candidatePaths.some(candidate => candidate.toLowerCase() === path.toLowerCase())))
   const importPatterns = lean
     ? []
     : firstPartyImportPatterns([...directSeedEvidence, ...headerEvidence, ...responsibilityEvidence], candidatePaths, params.objective)
-  const importSearchResults = await runLimited(importPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)))
+  const importSearchResults = await runLimited(importPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)), 4, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const rankedImportPaths = unique(importSearchResults.flatMap(result => result.status === 'fulfilled' && result.value.success
     ? result.value.data?.matches || []
     : []).map(path => relativePath(params.workspacePath, path)), 64)
@@ -690,7 +724,8 @@ export async function buildFastContextRetrievalPrimer(params: {
       content: result.data.content.slice(0, 12_000),
       reason: 'file read',
     } satisfies SubAgentEvidence
-  }))
+  }), 4, params.abortSignal)
+  throwIfAborted(params.abortSignal)
   const importEvidence = importReadResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
   const seedEvidence = [
     ...responsibilityEvidence,

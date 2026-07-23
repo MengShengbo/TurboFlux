@@ -1,0 +1,82 @@
+{
+  "metadata": {
+    "schemaVersion": 1,
+    "experimentId": "2026-07-23-gpt-5.5-no-reasoning-formal",
+    "createdAt": "2026-07-23T11:41:18.930Z",
+    "gitCommit": "4b1264c83e1fc7057b02d84583d3b2637ce37312",
+    "model": "gpt-5.5",
+    "reasoning": "disabled",
+    "endpointHost": "api.aibinghe.xyz",
+    "manifestPath": "benchmark-results/2026-07-23-fastcontext-random-unseen-10/manifest.json",
+    "manifestSha256": "fd07bcd5d9e354fa8c0492ff1a26de2d95495e9c5f238cc9f700a64bc866e74c",
+    "systems": [
+      "fastcontext"
+    ],
+    "caseIds": [
+      "mui__material-ui-13430",
+      "sveltejs__svelte-6525",
+      "sympy__sympy-24562",
+      "serverless__serverless-2945",
+      "langchain-ai__langchain-4009",
+      "pytest-dev__pytest-7236",
+      "sphinx-doc__sphinx-9711",
+      "scikit-learn__scikit-learn-12585",
+      "apache__rocketmq-5037",
+      "sympy__sympy-24661"
+    ],
+    "repeats": 1,
+    "concurrency": 2,
+    "timeoutMs": 300000,
+    "seed": 20260722,
+    "cliVersions": {
+      "claudeCode": "2.1.177 (Claude Code)",
+      "openCode": "1.17.18"
+    },
+    "notes": [
+      "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+      "Native reasoning is disabled; protocol differences are recorded per run.",
+      "Adaptive case-level concurrency starts at 2 and may rise to 2; FastContext uses one closed listwise model judgment and the API request ceiling is 2. Systems within one case remain sequential and rotated.",
+      "Transient failures are retried up to 5 time(s) per run invocation.",
+      "Formal repeated experiment.",
+      "Selection starts at the first balanced case."
+    ]
+  },
+  "completed": 10,
+  "expected": 10,
+  "summary": {
+    "fastcontext": {
+      "cases": 10,
+      "runs": 10,
+      "successes": 10,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 0.8733333333333334,
+        "low": 0.6866666666666668,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 0.95,
+        "low": 0.85,
+        "high": 1
+      },
+      "map": {
+        "mean": 0.79,
+        "low": 0.6166666666666666,
+        "high": 0.95
+      },
+      "ndcgAt10": {
+        "mean": 0.8484909579185981,
+        "low": 0.7151143332078087,
+        "high": 0.9663109259167244
+      },
+      "fullCoverageAt10": 0.8,
+      "latencyP50Ms": 81490.09179999994,
+      "latencyP95Ms": 146744.17589999997,
+      "averageToolCalls": 70,
+      "averageInputTokens": 25527.1,
+      "averageOutputTokens": 4549.5,
+      "totalCostUsd": 0
+    }
+  }
+}
