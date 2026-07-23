@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "2026-07-23-gpt-5.5-no-reasoning-formal",
+  "createdAt": "2026-07-23T10:27:57.272Z",
+  "gitCommit": "14f8af59a71ea85ee93f52c63db3fdbf0f18f883",
+  "model": "gpt-5.5",
+  "reasoning": "disabled",
+  "endpointHost": "api.aibinghe.xyz",
+  "manifestPath": "benchmark-results/2026-07-23-fastcontext-semantic-planner-hard-5/selected-manifest.json",
+  "manifestSha256": "18b5846c7ad199fe608c3cfeac18496821a34e516956a9cda553ae3b7816e9ba",
+  "systems": [
+    "fastcontext"
+  ],
+  "caseIds": [
+    "coder__code-server-3277",
+    "sphinx-doc__sphinx-9658",
+    "trinodb__trino-2081",
+    "psf__requests-6028",
+    "prettier__prettier-3515"
+  ],
+  "repeats": 1,
+  "concurrency": 5,
+  "timeoutMs": 300000,
+  "seed": 20260722,
+  "cliVersions": {
+    "claudeCode": "2.1.177 (Claude Code)",
+    "openCode": "1.17.18"
+  },
+  "notes": [
+    "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+    "Native reasoning is disabled; protocol differences are recorded per run.",
+    "Adaptive case-level concurrency starts at 4 and may rise to 5; FastContext uses one closed listwise model judgment and the API request ceiling is 5. Systems within one case remain sequential and rotated.",
+    "Transient failures are retried up to 5 time(s) per run invocation.",
+    "Formal repeated experiment.",
+    "Selection starts at the first balanced case."
+  ]
+}
