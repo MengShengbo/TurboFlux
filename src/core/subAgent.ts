@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { basename, isAbsolute, join, relative } from 'path'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
@@ -22,6 +23,7 @@ import {
   buildModelProtocolUrl,
   formatProtocolAttempt,
   formatProtocolFailure,
+  looksLikeResponsesPreferredModel,
   planModelProtocols,
   shouldFallbackProtocol,
   toProtocolAttempt,
@@ -522,7 +524,7 @@ async function fetchWithTransientRetry(
   throw lastError || new Error('Model request failed')
 }
 
-function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, unknown>> {
+function toAnthropicMessages(messages: SubAgentMessage[], cacheCodemap = false): Array<Record<string, unknown>> {
   const source = messages.filter(message => message.role !== 'system')
   const normalized: Array<Record<string, unknown>> = []
   for (let index = 0; index < source.length; index += 1) {
@@ -557,9 +559,32 @@ function toAnthropicMessages(messages: SubAgentMessage[]): Array<Record<string, 
       index = nextIndex - 1
       continue
     }
-    normalized.push({ role: message.role, content: message.content })
+    normalized.push(cacheCodemap && message.role === 'user' && message.content.startsWith('Workspace structure:')
+      ? { role: message.role, content: [{ type: 'text', text: message.content, cache_control: { type: 'ephemeral' } }] }
+      : { role: message.role, content: message.content })
   }
   return normalized
+}
+
+function subAgentPromptCacheKey(params: {
+  definition: SubAgentDefinition
+  model: string
+  workspacePath: string
+  codemap?: string | null
+  tools: Array<Record<string, any>>
+}): string {
+  const toolNames = params.tools.map(tool => String(tool.function?.name || '')).join(',')
+  const digest = createHash('sha256')
+    .update([
+      params.definition.id,
+      params.definition.systemPrompt,
+      params.workspacePath.replace(/\\/g, '/').toLowerCase(),
+      params.codemap || '',
+      toolNames,
+    ].join('\0'))
+    .digest('hex')
+    .slice(0, 24)
+  return `tf:subagent:${params.model}:${params.definition.id}:${digest}`.slice(0, 240)
 }
 
 function stringList(value: unknown, maxItems: number, maxLength = 240): string[] {
@@ -704,24 +729,6 @@ function pruneUngroundedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvid
   }
 }
 
-function sortSubmittedCandidates(report: SubmittedCodeMap): void {
-  const priority: Record<SubmittedCandidate['editKind'], number> = {
-    owner: 0,
-    mirror: 1,
-    implementation: 2,
-    consumer: 3,
-    test: 4,
-    supporting: 5,
-  }
-  const confidencePriority: Record<SubmittedCandidate['confidence'], number> = { high: 0, medium: 1, low: 2 }
-  report.candidates = report.candidates
-    .map((candidate, index) => ({ candidate, index }))
-    .sort((left, right) => priority[left.candidate.editKind] - priority[right.candidate.editKind]
-      || confidencePriority[left.candidate.confidence] - confidencePriority[right.candidate.confidence]
-      || left.index - right.index)
-    .map(item => item.candidate)
-}
-
 function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
   if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
   for (const candidate of report.candidates) {
@@ -738,7 +745,10 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
       return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by a read_file result; covered ranges for this path: ${readRangesForPath(relationship.evidencePath, evidence)}`
     }
   }
-  if (report.relationships.length === 0) return 'FastContext requires at least one grounded architecture relationship'
+  const minimalDirectOwner = report.candidates.length === 1
+    && report.candidates[0].confidence === 'high'
+    && (report.candidates[0].editKind === 'owner' || report.candidates[0].editKind === 'implementation')
+  if (report.relationships.length === 0 && !minimalDirectOwner) return 'FastContext requires at least one grounded architecture relationship'
   if (report.searchesTried.length === 0) return 'searches_tried must describe at least one query strategy'
   if (report.uncertainty.length === 0) return 'uncertainty must contain residual uncertainty or "none"'
   return null
@@ -1031,8 +1041,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
               model: modelId,
-              system: activeSystemPrompt,
-              messages: toAnthropicMessages(activeMessages),
+              system: [{ type: 'text', text: activeSystemPrompt, cache_control: { type: 'ephemeral' } }],
+              messages: toAnthropicMessages(activeMessages, Boolean(codemap)),
               tools: requestTools.map(tool => ({
                 name: tool.function.name,
                 description: tool.function.description,
@@ -1077,6 +1087,18 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           delete requestBody.tools
           delete requestBody.tool_choice
           delete requestBody.parallel_tool_calls
+        }
+        if (protocol !== 'anthropic_messages' && (provider === 'openai' || looksLikeResponsesPreferredModel(modelId))) {
+          requestBody.prompt_cache_key = subAgentPromptCacheKey({
+            definition,
+            model: modelId,
+            workspacePath,
+            codemap,
+            tools: requestTools,
+          })
+          if (protocol === 'openai_responses' && /gpt-5\.5/i.test(modelId)) {
+            requestBody.prompt_cache_retention = '24h'
+          }
         }
         if (reasoningRequest?.omitTemperature) delete requestBody.temperature
         const headers: Record<string, string> = createTurboFluxRequestHeaders(protocol === 'anthropic_messages'
@@ -1224,7 +1246,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       const report = parseSubmittedCodeMap(submissionArgs, workspacePath)
       normalizeSubmittedCodeMap(report, collectedEvidence)
       pruneUngroundedCodeMap(report, collectedEvidence)
-      sortSubmittedCandidates(report)
       submissionError ||= validateSubmittedCodeMap(report, collectedEvidence) || ''
       submissionError ||= validateRequiredAuditPaths(report, options.requiredAuditPaths) || ''
       submissionError ||= validateRequiredCandidatePaths(report, options.requiredCandidatePaths) || ''

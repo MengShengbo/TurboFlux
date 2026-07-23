@@ -45,6 +45,45 @@ describe('runSubAgent', () => {
       expect(result).toMatchObject({ ok: true, finalText: 'done' })
       expect(requestBody?.reasoning).toBeUndefined()
       expect(requestBody?.reasoning_effort).toBeUndefined()
+      expect(requestBody?.prompt_cache_key).toMatch(/^tf:subagent:gpt-5\.6:/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('marks stable Anthropic system and workspace prefixes for prompt caching', async () => {
+    const originalFetch = globalThis.fetch
+    let requestBody: Record<string, any> | undefined
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: 'done' }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'planner-cache-test',
+          label: 'Planner cache test',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'stable system prompt',
+          maxTurns: 1,
+          maxParallel: 1,
+        },
+        objective: 'locate owner',
+        workspacePath: 'C:/repo',
+        toolExecutor: {} as ToolExecutor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        provider: 'anthropic',
+        model: 'claude-sonnet-test',
+        codemap: '- src\n  - core',
+        allowedTools: [],
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'done' })
+      expect(requestBody?.system?.[0]?.cache_control).toEqual({ type: 'ephemeral' })
+      expect(requestBody?.messages?.[0]?.content?.[0]?.cache_control).toEqual({ type: 'ephemeral' })
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1062,7 +1101,7 @@ describe('runSubAgent', () => {
 
       expect(result.error).toBeUndefined()
       expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L2-L5') })
-      expect(result.finalText).toContain('1. src/core.ts L1-L2 kind=mirror')
+      expect(result.finalText).toContain('1. src/core.ts L2-L5 kind=implementation')
       expect(result.finalText).not.toContain('src/unread.ts')
       expect(result.finalText).toContain('evidence gate excluded 1 ungrounded candidate')
     } finally {

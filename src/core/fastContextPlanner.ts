@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { isAbsolute, relative } from 'node:path'
 import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { SubAgentDefinition, SubAgentEvidence } from '../shared/subAgentTypes'
@@ -34,6 +35,7 @@ export interface FastContextPlannerResult {
   ok: boolean
   plan: FastContextQueryPlan
   elapsedMs: number
+  cacheHit?: boolean
   error?: string
 }
 
@@ -64,6 +66,41 @@ interface PlannerParams {
   abortSignal?: AbortSignal
   requestTimeoutMs?: number
   onEvent?: Parameters<typeof runSubAgent>[0]['onEvent']
+}
+
+const PLANNER_CACHE_TTL_MS = 5 * 60_000
+const PLANNER_CACHE_MAX_ENTRIES = 64
+const plannerCache = new Map<string, { result: FastContextPlannerResult; expiresAt: number }>()
+const plannerInFlight = new Map<string, Promise<FastContextPlannerResult>>()
+
+function plannerCacheKey(params: PlannerParams, perspective: FastContextPlannerPerspective, feedbackContext?: string): string {
+  return createHash('sha256')
+    .update([
+      params.workspacePath.replace(/\\/g, '/').toLowerCase(),
+      params.provider || '',
+      params.model || '',
+      perspective,
+      params.codemap || '',
+      feedbackContext || '',
+      params.objective.replace(/\s+/g, ' ').trim().slice(0, 8_000),
+    ].join('\0'))
+    .digest('hex')
+}
+
+function rememberPlannerResult(key: string, result: FastContextPlannerResult): void {
+  if (!result.ok) return
+  plannerCache.delete(key)
+  plannerCache.set(key, { result, expiresAt: Date.now() + PLANNER_CACHE_TTL_MS })
+  while (plannerCache.size > PLANNER_CACHE_MAX_ENTRIES) {
+    const oldest = plannerCache.keys().next().value
+    if (!oldest) break
+    plannerCache.delete(oldest)
+  }
+}
+
+export function __testClearFastContextPlannerCache(): void {
+  plannerCache.clear()
+  plannerInFlight.clear()
 }
 
 interface PlannedHit {
@@ -250,7 +287,7 @@ function plannerPrompt(objective: string, perspective: FastContextPlannerPerspec
   ].filter(Boolean).join('\n\n')
 }
 
-export async function planFastContextQueries(
+async function runFastContextQueryPlanner(
   params: PlannerParams,
   feedbackContext?: string,
   perspective: FastContextPlannerPerspective = 'causal-owner',
@@ -301,6 +338,36 @@ export async function planFastContextQueries(
     clearTimeout(timer)
     params.abortSignal?.removeEventListener('abort', abort)
   }
+}
+
+export async function planFastContextQueries(
+  params: PlannerParams,
+  feedbackContext?: string,
+  perspective: FastContextPlannerPerspective = 'causal-owner',
+): Promise<FastContextPlannerResult> {
+  const key = plannerCacheKey(params, perspective, feedbackContext)
+  const cached = plannerCache.get(key)
+  if (cached) {
+    if (cached.expiresAt > Date.now()) {
+      plannerCache.delete(key)
+      plannerCache.set(key, cached)
+      return { ...cached.result, elapsedMs: 0, cacheHit: true }
+    }
+    plannerCache.delete(key)
+  }
+  const canShareInFlight = !params.abortSignal
+  const pending = canShareInFlight ? plannerInFlight.get(key) : undefined
+  if (pending) return pending.then(result => ({ ...result, elapsedMs: 0, cacheHit: true }))
+  const request = runFastContextQueryPlanner(params, feedbackContext, perspective)
+    .then(result => {
+      rememberPlannerResult(key, result)
+      return result
+    })
+    .finally(() => {
+      if (canShareInFlight) plannerInFlight.delete(key)
+    })
+  if (canShareInFlight) plannerInFlight.set(key, request)
+  return request
 }
 
 function interleave(left: string[], right: string[], limit: number): string[] {

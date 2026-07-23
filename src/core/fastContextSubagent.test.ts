@@ -176,6 +176,11 @@ describe('FastContext retrieval', () => {
       readPaths: ['src/owner.ts', 'src/wrapper.ts'],
     })).toBe(true)
     expect(__testShouldAcceptSpeculativeJudge({
+      primerConfidence: 0.7,
+      codeMap,
+      readPaths: ['src/owner.ts'],
+    })).toBe(true)
+    expect(__testShouldAcceptSpeculativeJudge({
       primerConfidence: 0.9,
       codeMap: {
         ...codeMap,
@@ -183,6 +188,14 @@ describe('FastContext retrieval', () => {
       },
       readPaths: ['src/owner.ts'],
     })).toBe(true)
+    expect(__testShouldAcceptSpeculativeJudge({
+      primerConfidence: 0.7,
+      codeMap: {
+        ...codeMap,
+        candidates: [{ ...codeMap.candidates[0], confidence: 'medium' as const }],
+      },
+      readPaths: ['src/owner.ts'],
+    })).toBe(false)
   })
 
   it('continues semantic retrieval when ownership or frontier remains uncertain', () => {

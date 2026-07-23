@@ -5,6 +5,7 @@ import {
   mergeFastContextQueryPlans,
   parseFastContextQueryPlan,
   planFastContextQueries,
+  __testClearFastContextPlannerCache,
   type FastContextQueryPlan,
 } from './fastContextPlanner'
 
@@ -87,6 +88,36 @@ describe('FastContext semantic planner', () => {
       expect(requestBody?.tools).toBeUndefined()
       expect(JSON.stringify(requestBody?.messages)).toContain('Return JSON only')
     } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('reuses a successful planner result for the same workspace objective', async () => {
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    try {
+      __testClearFastContextPlannerCache()
+      const params = {
+        objective: 'planner cache unique objective',
+        workspacePath: 'C:/cache-test',
+        toolExecutor: {} as ToolExecutor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+      }
+      const first = await planFastContextQueries(params)
+      const second = await planFastContextQueries(params)
+
+      expect(first.ok).toBe(true)
+      expect(second).toMatchObject({ ok: true, cacheHit: true, elapsedMs: 0 })
+      expect(calls).toBe(1)
+    } finally {
+      __testClearFastContextPlannerCache()
       globalThis.fetch = originalFetch
     }
   })

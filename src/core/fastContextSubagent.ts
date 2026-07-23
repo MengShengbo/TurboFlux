@@ -22,6 +22,7 @@ import {
   executeFastContextQueryPlan,
   mergeFastContextQueryPlans,
   planFastContextQueries,
+  type FastContextPlannerResult,
   type FastContextPlannedEvidence,
 } from './fastContextPlanner'
 
@@ -118,7 +119,7 @@ const FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION: SubAgentDefinition = {
 On the first turn, run one targeted parallel search or trace wave for the highest-information missing owner or boundary. When state is stale or malformed, trace the concrete state identifier to its writer, normalizer, transformer, or invalidator instead of stopping at the consumer that exposes the symptom. Do not repeat existing searches or tour the repository. On the second turn, read the strongest newly discovered source range, compare the best runtime owner against the strongest alternative with a listwise BESTFIT decision, and submit the grounded code map in the same turn. Tests, docs, wrappers, registries, callers, and symptom consumers must not outrank a read-confirmed implementation owner. Every submitted candidate and relationship must cite a read_file range. Fail explicitly rather than padding the map.` ,
 }
 
-export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 90_000
+export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 60_000
 
 interface RunParams {
   workspacePath: string
@@ -171,7 +172,10 @@ export function __testShouldAcceptSpeculativeJudge(params: {
   readPaths: string[]
 }): boolean {
   const top = params.codeMap?.candidates[0]
-  if (!top || params.primerConfidence < (params.plan ? 0.8 : 0.9)) return false
+  const minimumPrimerConfidence = params.plan
+    ? 0.8
+    : top?.confidence === 'high' ? 0.65 : 0.9
+  if (!top || params.primerConfidence < minimumPrimerConfidence) return false
   if (params.plan && (params.plan.taskShape !== 'direct-owner' || params.plan.needsFeedback || params.plan.confidence < 0.78)) return false
   if (params.plan ? top.confidence !== 'high' : top.confidence === 'low') return false
   if (top.editKind !== 'owner' && top.editKind !== 'implementation') return false
@@ -613,17 +617,36 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   emit({ type: 'insight', text: 'starting parallel model-directed retrieval', tone: 'info' })
   emit({ type: 'context_maps', state: 'warming' })
   const initialPrimerPromise = buildFastContextRetrievalPrimer({ ...params, budget: 'lean' })
+  const plannerAbortController = new AbortController()
+  const forwardPlannerAbort = () => plannerAbortController.abort()
+  if (params.abortSignal?.aborted) plannerAbortController.abort()
+  else params.abortSignal?.addEventListener('abort', forwardPlannerAbort, { once: true })
   const ownerPlannerPromise = planFastContextQueries(
-    { ...params, onEvent: createSubEventHandler('owner-planner') },
+    { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('owner-planner') },
     undefined,
     'causal-owner',
   )
   const frontierPlannerPromise = planFastContextQueries(
-    { ...params, onEvent: createSubEventHandler('frontier-planner') },
+    { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('frontier-planner') },
     undefined,
     'frontier',
   )
+  const plannersPromise = Promise.all([ownerPlannerPromise, frontierPlannerPromise])
   const initialPrimer = await initialPrimerPromise
+  const speculativeReadPaths = initialPrimer.seedEvidence.map(item => item.path)
+  const canAcceptSpeculative = (codeMap: SubmittedCodeMap, plan?: FastContextPlannerResult['plan']): boolean => (
+    __testShouldAcceptSpeculativeJudge({
+      primerConfidence: initialPrimer.confidence,
+      codeMap,
+      readPaths: speculativeReadPaths,
+    })
+    || Boolean(plan && __testShouldAcceptSpeculativeJudge({
+      primerConfidence: initialPrimer.confidence,
+      plan,
+      codeMap,
+      readPaths: speculativeReadPaths,
+    }))
+  )
   const speculativeJudgePromise = initialPrimer.seedEvidence.length > 0
     ? runSubAgent({
         objective: params.objective,
@@ -648,18 +671,34 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         onEvent: createSubEventHandler('speculative'),
       })
     : Promise.resolve(undefined)
-  const [ownerPlanner, frontierPlanner, speculativeJudge] = await Promise.all([
-    ownerPlannerPromise,
-    frontierPlannerPromise,
-    speculativeJudgePromise,
+  const firstDecision = await Promise.race([
+    plannersPromise.then(value => ({ kind: 'planners' as const, value })),
+    speculativeJudgePromise.then(value => ({ kind: 'speculative' as const, value })),
   ])
-  const planner = ownerPlanner.ok && frontierPlanner.ok
-    ? { ...ownerPlanner, plan: mergeFastContextQueryPlans(ownerPlanner.plan, frontierPlanner.plan), elapsedMs: Math.max(ownerPlanner.elapsedMs, frontierPlanner.elapsedMs) }
-    : ownerPlanner.ok
-      ? ownerPlanner
-      : frontierPlanner
-  const semanticPlannersHealthy = ownerPlanner.ok && frontierPlanner.ok
-  const primer = semanticPlannersHealthy
+  let speculativeJudge: Awaited<ReturnType<typeof runSubAgent>> | undefined
+  let planner: FastContextPlannerResult | undefined
+  let ownerPlanner: Awaited<typeof ownerPlannerPromise>
+  let frontierPlanner: Awaited<typeof frontierPlannerPromise>
+  let speculativeAccepted = false
+  if (firstDecision.kind === 'speculative' && firstDecision.value?.ok && firstDecision.value.codeMap
+    && canAcceptSpeculative(firstDecision.value.codeMap)) {
+    speculativeJudge = firstDecision.value
+    speculativeAccepted = true
+    plannerAbortController.abort()
+    ;[ownerPlanner, frontierPlanner] = await plannersPromise
+  } else {
+    speculativeJudge = firstDecision.kind === 'speculative' ? firstDecision.value : await speculativeJudgePromise
+    ;[ownerPlanner, frontierPlanner] = firstDecision.kind === 'planners' ? firstDecision.value : await plannersPromise
+    planner = ownerPlanner.ok && frontierPlanner.ok
+      ? { ...ownerPlanner, plan: mergeFastContextQueryPlans(ownerPlanner.plan, frontierPlanner.plan), elapsedMs: Math.max(ownerPlanner.elapsedMs, frontierPlanner.elapsedMs) }
+      : ownerPlanner.ok
+        ? ownerPlanner
+        : frontierPlanner
+  }
+  plannerAbortController.abort()
+  params.abortSignal?.removeEventListener('abort', forwardPlannerAbort)
+  const semanticPlannersHealthy = Boolean(planner && ownerPlanner.ok && frontierPlanner.ok)
+  const primer = speculativeAccepted || semanticPlannersHealthy
     ? initialPrimer
     : await buildFastContextRetrievalPrimer({ ...params, budget: 'full' })
   if (semanticPlannersHealthy) {
@@ -668,12 +707,15 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       : ownerPlanner.ok ? 'owner only' : 'frontier only'
     emit({
       type: 'insight',
-      text: `semantic plan (${plannerViews}): ${planner.plan.taskShape}, confidence ${planner.plan.confidence.toFixed(2)}, ${planner.plan.semanticQueries.length + planner.plan.symbols.length} query anchor(s)`,
+      text: `semantic plan (${plannerViews}): ${planner?.plan.taskShape}, confidence ${planner?.plan.confidence.toFixed(2)}, ${(planner?.plan.semanticQueries.length || 0) + (planner?.plan.symbols.length || 0)} query anchor(s)`,
       tone: 'success',
     })
   } else {
     const errors = [ownerPlanner.error, frontierPlanner.error].filter(Boolean).join('; ')
     emit({ type: 'insight', text: `semantic planners unavailable; exact scout will only seed the main model: ${trimText(errors || 'invalid plans', 120)}`, tone: 'warning' })
+  }
+  if (ownerPlanner.cacheHit || frontierPlanner.cacheHit) {
+    emit({ type: 'insight', text: 'semantic planner cache hit', tone: 'success' })
   }
   const emptyPlannedEvidence: FastContextPlannedEvidence = {
     calls: 0,
@@ -685,15 +727,10 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     frontierCovered: 0,
     frontierCoverage: 1,
   }
-  const speculativeAccepted = Boolean(
+  speculativeAccepted = speculativeAccepted || Boolean(
     speculativeJudge?.ok
       && speculativeJudge.codeMap
-      && __testShouldAcceptSpeculativeJudge({
-        primerConfidence: initialPrimer.confidence,
-        plan: semanticPlannersHealthy ? planner.plan : undefined,
-        codeMap: speculativeJudge.codeMap,
-        readPaths: initialPrimer.seedEvidence.map(item => item.path),
-      }),
+      && canAcceptSpeculative(speculativeJudge.codeMap, ownerPlanner.ok ? ownerPlanner.plan : undefined),
   )
   if (speculativeAccepted) {
     emit({ type: 'insight', text: 'high-confidence direct owner found; stopping before semantic expansion', tone: 'success' })
@@ -704,7 +741,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     ? await executeFastContextQueryPlan({
       workspacePath: params.workspacePath,
       toolExecutor: params.toolExecutor,
-      plan: planner.plan,
+      plan: planner!.plan,
       coveredEvidence: primer.seedEvidence,
       abortSignal: params.abortSignal,
       })
@@ -716,16 +753,16 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     exactEvidenceCount: primer.seedEvidence.length,
     plannedEvidenceCount: planned.seedEvidence.length,
     plannedConfidence: planned.confidence,
-    needsFeedback: planner.plan.needsFeedback,
-    taskShape: planner.plan.taskShape,
+    needsFeedback: planner!.plan.needsFeedback,
+    taskShape: planner!.plan.taskShape,
     frontierExpected: planned.frontierExpected,
     frontierCoverage: planned.frontierCoverage,
   })
   if (adaptiveJudgeNeeded) {
-    const fullAdaptive = planner.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3
+    const fullAdaptive = planner!.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3
     emit({
       type: 'insight',
-      text: `frontier coverage ${planned.frontierCovered}/${planned.frontierExpected}; reserving ${fullAdaptive ? 'three-turn' : 'two-turn'} adaptive model-directed retrieval`,
+      text: `frontier coverage ${planned.frontierCovered}/${planned.frontierExpected}; reserving two-wave adaptive model-directed retrieval`,
       tone: 'warning',
     })
   }
@@ -734,7 +771,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     .map(item => item.path.toLowerCase())).size
   const weakFrontier = semanticPlannersHealthy && planned.frontierExpected > 0 && planned.frontierCoverage < 0.75
   const contextMapQuery = semanticPlannersHealthy
-    ? [...planner.plan.symbols.slice(0, 6), ...planner.plan.semanticQueries.slice(0, 2)].join(' ')
+    ? [...planner!.plan.symbols.slice(0, 6), ...planner!.plan.semanticQueries.slice(0, 2)].join(' ')
     : undefined
   const contextMaps = !speculativeAccepted && (adaptiveJudgeNeeded || weakFrontier || (retrievalConfidence < 0.62 && firstPassEvidenceCount < 2))
     ? await buildContextMapsPrimer({
@@ -812,7 +849,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     codemap: params.codemap,
     abortSignal: params.abortSignal,
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
-    maxTransientAttempts: 3,
+    maxTransientAttempts: 2,
     requireGroundedReport: true,
     retrievalContext: [
       planned.text,
@@ -829,9 +866,9 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       : !semanticPlannersHealthy
         ? 'semantic planning unavailable; running full model-directed recovery'
         : adaptiveJudgeNeeded ? 'running adaptive evidence judgment' : 'running final evidence judgment',
-    tone: !planner.ok ? 'warning' : 'info',
+    tone: !semanticPlannersHealthy ? 'warning' : 'info',
   })
-  const fullAdaptive = adaptiveJudgeNeeded && (planner.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3)
+  const fullAdaptive = adaptiveJudgeNeeded && (planner!.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3)
   let result = speculativeAccepted && speculativeJudge
     ? speculativeJudge
     : initialEvidence.length > 0 && semanticPlannersHealthy
@@ -856,6 +893,11 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       definition: def,
       onEvent: createSubEventHandler('recovery'),
     })
+  }
+  if (!result.ok && speculativeJudge?.ok && speculativeJudge.codeMap && !params.abortSignal?.aborted
+    && canAcceptSpeculative(speculativeJudge.codeMap, ownerPlanner.ok ? ownerPlanner.plan : undefined)) {
+    emit({ type: 'insight', text: 'using retained speculative result after downstream model failure', tone: 'warning' })
+    result = speculativeJudge
   }
   if (!result.ok || !result.codeMap) throw new Error(result.error || 'FastContext locator failed')
   const finalReport = renderSubmittedCodeMap(result.codeMap)
