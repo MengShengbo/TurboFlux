@@ -36,6 +36,7 @@ describe('CodeGraphService', () => {
       ]))
       expect(JSON.stringify(map.map)).toContain('runWorkflow')
       expect(JSON.stringify(map.map)).toContain('[caller]')
+      expect(map.map[0]?.title).toBe('loadWorkspace')
       expect(map.relatedPaths).toContain('workflow.ts')
     } finally {
       rmSync(workspace, { recursive: true, force: true })

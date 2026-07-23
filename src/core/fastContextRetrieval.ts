@@ -177,13 +177,12 @@ export const __testFirstPartyImportPatterns = firstPartyImportPatterns
 function titleWords(objective: string): string[] {
   const title = objective.split(/\r?\n/, 1)[0]
   return unique((title.toLowerCase().match(/[a-z][a-z0-9]{2,}/g) || [])
-    .map(word => word === 'multiple' ? 'multi' : word.endsWith('s') && word.length > 4 ? word.slice(0, -1) : word)
+    .map(word => word.endsWith('s') && word.length > 4 ? word.slice(0, -1) : word)
     .filter(word => !STOP_WORDS.has(word)), 8)
 }
 
 function responsibilityTerms(objective: string): string[] {
   const terms: string[] = []
-  if (/\b(?:sql|query|database|column|insert|update|conflict|upsert|orm)\b/i.test(objective)) terms.push('compiler')
   if (/\b(?:parse|parser|syntax|annotation|ast|unparse)\b/i.test(objective)) terms.push('ast', 'parser')
   if (/\b(?:serializ|deserializ|json|encode|decode)\b/i.test(objective)) terms.push('serializer', 'encoder')
   if (/\b(?:validat|invalid|schema|constraint)\b/i.test(objective)) terms.push('validator')
@@ -211,7 +210,7 @@ function identifierVariants(value: string): string[] {
 
 export function buildFastContextPrimerQueries(objective: string): FastContextPrimerQueries {
   const title = objective.split(/\r?\n/, 1)[0]
-  const linkedSourcePaths = [...objective.matchAll(/https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/blob\/[^/\s]+\/([^#?\s)]+\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte))/gi)]
+  const linkedSourcePaths = [...objective.matchAll(/https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/blob\/[^/\s]+\/([^#?\s)]+\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte))(?=$|[#?\s)"',])/gi)]
     .map(match => {
       try { return decodeURIComponent(match[1]) } catch { return match[1] }
     })
@@ -233,7 +232,7 @@ export function buildFastContextPrimerQueries(objective: string): FastContextPri
     ...dottedIdentifiers.flatMap(value => value.split(/[.-]/)).filter(value => /^[A-Za-z_$][\w$]{3,}$/.test(value)),
   ]
   const symbols = unique(rawSymbols.flatMap(identifierVariants), 10)
-  const pathHints = unique([...linkedSourcePaths, ...(focusedObjective.match(/(?:[A-Za-z0-9_.-]+[\\/]){1,}[A-Za-z0-9_.-]+\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte|rst|md)/gi) || [])]
+  const pathHints = unique([...linkedSourcePaths, ...(focusedObjective.match(/(?:[A-Za-z0-9_.-]+[\\/]){1,}[A-Za-z0-9_.-]+\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte|rst|md)(?=$|[#?\s)"',])/gi) || [])]
     .map(path => path.replace(/\\/g, '/').replace(/^\/+/, ''))
     .map(path => path.includes('site-packages/') ? path.slice(path.indexOf('site-packages/') + 'site-packages/'.length) : path), 8)
   const words = titleWords(objective)
@@ -310,32 +309,45 @@ export async function buildFastContextRetrievalPrimer(params: {
   const structuralPatterns = unique(queries.structuralSignals.slice(0, 8).map(regexPhrase), 8)
   const behavioralPatterns = unique(queries.behavioralSignals.map(regexPhrase), 4)
   const selectedContentPatterns = unique([...structuralPatterns, ...behavioralPatterns], 8)
-  const tasks: Array<() => Promise<PrimerHit[]>> = [
-    ...queries.filePatterns.slice(0, 10).map(pattern => async () => {
+  const contentTasks = selectedContentPatterns.map((pattern, index) => async () => {
+    const result = params.toolExecutor.searchContentPage
+      ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 200 })
+      : await params.toolExecutor.searchContent(pattern, params.workspacePath, SOURCE_FILE_GLOB, true)
+    const hits = Array.isArray(result.data) ? result.data : result.data?.hits || []
+    const weight = index < 2 ? 3 : index < 4 ? 2 : 1
+    return result.success ? normalizeContentHits(params.workspacePath, pattern, hits, 16, weight) : []
+  })
+  const priorityTasks = contentTasks.slice(0, 4)
+  const prioritySettled = await runLimited(priorityTasks)
+  const priorityHits = prioritySettled.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+  const hasStrongRuntimeHit = priorityHits.some(hit => hit.source === 'content'
+    && (hit.weight || 1) >= 2
+    && SOURCE_FILE.test(hit.path)
+    && !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)/i.test(hit.path))
+  const expansionTasks: Array<() => Promise<PrimerHit[]>> = hasStrongRuntimeHit ? [] : [
+    ...contentTasks.slice(4),
+    ...queries.filePatterns.slice(0, 6).map(pattern => async () => {
       const result = await params.toolExecutor.searchFiles(pattern, params.workspacePath)
       return result.success ? (result.data?.matches || []).slice(0, 8).map(path => {
         const workspaceRelative = relativePath(params.workspacePath, path)
         return { path: workspaceRelative, line: `filename[${pattern}] ${workspaceRelative}`, source: 'filename' as const }
       }) : []
     }),
-    ...selectedContentPatterns.map((pattern, index) => async () => {
-      const result = params.toolExecutor.searchContentPage
-        ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 200 })
-        : await params.toolExecutor.searchContent(pattern, params.workspacePath, SOURCE_FILE_GLOB, true)
-      const hits = Array.isArray(result.data) ? result.data : result.data?.hits || []
-      const weight = index < 2 ? 3 : index < 4 ? 2 : 1
-      return result.success ? normalizeContentHits(params.workspacePath, pattern, hits, 16, weight) : []
-    }),
   ]
-  if (tasks.length === 0) return { calls: 0, readCalls: 0, candidatePaths: [], seedEvidence: [], queries }
-  const settled = await runLimited(tasks)
+  const expansionSettled = await runLimited(expansionTasks)
+  const initialSearchCalls = priorityTasks.length + expansionTasks.length
   const explicitHits: PrimerHit[] = queries.pathHints.map(path => ({
     path,
     line: `explicit[path] ${path}`,
     source: 'explicit',
     weight: 4,
   }))
-  const initialHits = [...explicitHits, ...settled.flatMap(result => result.status === 'fulfilled' ? result.value : [])]
+  const initialHits = [
+    ...explicitHits,
+    ...priorityHits,
+    ...expansionSettled.flatMap(result => result.status === 'fulfilled' ? result.value : []),
+  ]
+  if (initialHits.length === 0) return { calls: initialSearchCalls, readCalls: 0, candidatePaths: [], seedEvidence: [], queries }
   const directoryScores = new Map<string, number>()
   for (const hit of initialHits) {
     const weight = (hit.source === 'explicit' ? 8 : hit.source === 'content' ? 3 : hit.source === 'symbol' ? 2 : 1) * (hit.weight || 1)
@@ -563,7 +575,7 @@ export async function buildFastContextRetrievalPrimer(params: {
     seedLines.length > 0 ? `High-confidence read-confirmed source seeds:\n${seedLines.join('\n---\n')}` : '',
   ].filter(Boolean)
   return {
-    calls: tasks.length + familyTasks.length + seedPaths.length + headerProbePaths.length + responsibilityPatterns.length + responsibilityPaths.length + importPatterns.length + importPaths.length,
+    calls: initialSearchCalls + familyTasks.length + seedPaths.length + headerProbePaths.length + responsibilityPatterns.length + responsibilityPaths.length + importPatterns.length + importPaths.length,
     readCalls: seedPaths.length + headerProbePaths.length + responsibilityPaths.length + importPaths.length,
     candidatePaths,
     seedEvidence,

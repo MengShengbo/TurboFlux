@@ -3,6 +3,7 @@ export type FastContextScanPhase = 'mapping' | 'ranking' | 'synthesizing' | 'com
 export type FastContextScanWorkerStatus = 'queued' | 'running' | 'completed' | 'error'
 export type FastContextEvidenceKind = 'entry' | 'implementation' | 'caller' | 'config' | 'schema' | 'test' | 'root_cause' | 'supporting'
 export type FastContextConfidence = 'high' | 'medium' | 'low'
+export type ContextMapsState = 'off' | 'warming' | 'on'
 
 export interface FastContextTuning {
   maxTurns: number
@@ -38,6 +39,7 @@ export type FastContextScanEvent =
   | { type: 'file'; path: string; status: FastContextScanFileStatus; workerId?: string; reason?: string; kind?: FastContextEvidenceKind; score?: number; confidence?: FastContextConfidence }
   | { type: 'hit'; hit: FastContextScanHit }
   | { type: 'insight'; text: string; tone?: 'info' | 'success' | 'warning' }
+  | { type: 'context_maps'; state: ContextMapsState; confidence?: number; nodes?: number; elapsedMs?: number }
 
 export interface FastContextScanResult {
   objective: string

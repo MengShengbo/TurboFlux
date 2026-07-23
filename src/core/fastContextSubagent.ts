@@ -17,6 +17,7 @@ import {
   buildFastContextPrimerQueries,
   buildFastContextRetrievalPrimer,
 } from './fastContextRetrieval'
+import { buildContextMapsPrimer } from './contextMaps'
 
 const FAST_CONTEXT_DEFINITION: SubAgentDefinition = {
   id: 'fast_context',
@@ -75,6 +76,8 @@ const FAST_CONTEXT_SINGLE_PASS_DEFINITION: SubAgentDefinition = {
 Perform one listwise decision, then call submit_code_map immediately. Rank by direct edit necessity rather than lexical similarity. Use a counterfactual edit test: the behavior owner is the file whose implementation must change for the requested semantics to become correct. Rank wrappers, tests, documentation, schemas, generic configuration, and downstream output consumers below the operation that interprets or mutates behavior.
 
 Preserve a compact coordinated frontier. When a bug crosses a public API or orchestration stage into a compiler, parser, serializer, validator, adapter, or renderer, retain every read-confirmed behavior-bearing stage that can require a coordinated edit; do not collapse the map to only the deepest owner. Evidence labeled semantic responsibility probe is deliberately targeted: compare it directly with the primary owner and keep it when it implements the named transformation or output stage. Conversely, never pad the top ten with unrelated writers, builders, callers, or sibling domains merely because they consume the resulting data.
+
+Apply causal proximity before ranking. A file that defines an API, state transition, transformation, or emitted output explicitly named by the issue outranks environment-specific adapters, framework wiring, examples, and analogous sibling implementations. Operating system, backend, version, and provider details are reproduction context unless the issue explicitly identifies them as causal. A sibling that merely demonstrates a similar pattern belongs in rejected hypotheses and must never outrank the read-confirmed failing path.
 
 Every candidate and relationship must use a read-confirmed path and line range supplied in the evidence. Explicitly reject attractive false positives and state residual uncertainty. Do not ask for more tools, do not return prose, and do not invent unread files. Finish with exactly one submit_code_map call.` ,
 }
@@ -548,7 +551,31 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   }
 
   emit({ type: 'insight', text: 'starting parallel model-directed retrieval', tone: 'info' })
-  const primer = await buildFastContextRetrievalPrimer(params)
+  emit({ type: 'context_maps', state: 'warming' })
+  const [primer, contextMaps] = await Promise.all([
+    buildFastContextRetrievalPrimer(params),
+    buildContextMapsPrimer({
+      workspacePath: params.workspacePath,
+      objective: params.objective,
+      toolExecutor: params.toolExecutor,
+    }),
+  ])
+  if (contextMaps.status === 'on' && contextMaps.primer) {
+    emit({
+      type: 'context_maps',
+      state: 'on',
+      confidence: contextMaps.primer.confidence,
+      nodes: contextMaps.primer.nodes,
+      elapsedMs: contextMaps.elapsedMs,
+    })
+    emit({
+      type: 'insight',
+      text: `ContextMaps enabled with ${contextMaps.primer.nodes} graph node(s) at ${contextMaps.primer.confidence.toFixed(2)} confidence`,
+      tone: 'success',
+    })
+  } else {
+    emit({ type: 'context_maps', state: 'off', elapsedMs: contextMaps.elapsedMs })
+  }
   telemetry.toolCalls += primer.calls
   telemetry.readCalls += primer.readCalls
   telemetry.searchCalls += primer.calls - primer.readCalls
@@ -581,7 +608,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     maxTransientAttempts: 3,
     requireGroundedReport: true,
-    retrievalContext: primer.text,
+    retrievalContext: [contextMaps.primer?.text, primer.text].filter(Boolean).join('\n\n') || undefined,
     initialEvidence: primer.seedEvidence,
   } as const
   emit({ type: 'insight', text: 'running single-pass evidence judgment', tone: 'info' })

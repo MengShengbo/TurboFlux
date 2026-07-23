@@ -78,6 +78,21 @@ const MAX_SEARCH_LIMIT = 500
 const DEFAULT_READ_RANGE_LINES = 180
 const DEFAULT_READ_RANGE_BYTES = 256 * 1024
 
+async function waitForPromise<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  if (timeoutMs <= 0) return promise
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('CodeGraph warmup continues in the background')), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
   private localHistoryService: LocalHistoryService
@@ -591,7 +606,7 @@ export class NodeToolExecutor implements ToolExecutor {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   }
 
-  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number; preferGraph?: boolean }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[] }>> {
+  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number; preferGraph?: boolean; graphOnly?: boolean; waitForGraphMs?: number }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[]; source?: 'graph' | 'filesystem' | 'unavailable' }>> {
     try {
       const basePath = this.ensureAllowedPath(query.workspacePath)
       for (const target of query.targetPaths || (query.path ? [query.path] : [])) {
@@ -601,6 +616,9 @@ export class NodeToolExecutor implements ToolExecutor {
         if (query.preferGraph === false) throw new Error('Graph map not requested')
         if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
         const graph = await CodeGraphService.load()
+        if ((query.waitForGraphMs || 0) > 0) {
+          await waitForPromise(graph.prepare(basePath), query.waitForGraphMs || 0)
+        }
         const graphMap = await graph.getCodeMap({
           workspacePath: basePath,
           query: query.query,
@@ -609,8 +627,9 @@ export class NodeToolExecutor implements ToolExecutor {
           depth: query.depth || 2,
           maxPaths: query.maxPaths || 8,
         })
-        if (graphMap.map.length > 0) return { success: true, data: graphMap }
+        if (graphMap.map.length > 0) return { success: true, data: { ...graphMap, source: 'graph' } }
       } catch {}
+      if (query.graphOnly) return { success: true, data: { map: [], source: 'unavailable' } }
       const targetPaths = this.resolveCodeMapTargets(basePath, query)
       const map: CodeMapNode[] = []
 
@@ -621,7 +640,7 @@ export class NodeToolExecutor implements ToolExecutor {
         if (node) map.push(node)
       }
 
-      return { success: true, data: { map } }
+      return { success: true, data: { map, source: 'filesystem' } }
     } catch (e) {
       return { success: false, error: String(e), data: { map: [] } }
     }

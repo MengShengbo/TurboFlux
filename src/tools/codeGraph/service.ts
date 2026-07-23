@@ -53,18 +53,30 @@ function toSearchHit(node: GraphNode, score: number): CodeSearchHit {
   }
 }
 
-function graphNodeToMapNode(graph: CodeGraph, node: GraphNode, depth: number, relation?: 'caller' | 'callee'): CodeMapNode {
-  const relations = depth > 0
-    ? [
-        ...graph.getCallers(node.id, 1).map(item => ({ ...item, relation: 'caller' as const })),
-        ...graph.getCallees(node.id, 1).map(item => ({ ...item, relation: 'callee' as const })),
-      ]
+function graphNodeToMapNode(
+  graph: CodeGraph,
+  node: GraphNode,
+  depth: number,
+  relation?: 'caller' | 'callee',
+  ancestors: ReadonlySet<string> = new Set(),
+): CodeMapNode {
+  const visited = new Set(ancestors)
+  visited.add(node.id)
+  const callers = depth > 0
+    ? graph.getCallers(node.id, 1).map(item => ({ ...item, relation: 'caller' as const }))
     : []
+  const callees = depth > 0
+    ? graph.getCallees(node.id, 1).map(item => ({ ...item, relation: 'callee' as const }))
+    : []
+  const relations = Array.from({ length: Math.max(callers.length, callees.length) })
+    .flatMap((_, index) => [callers[index], callees[index]])
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
   const children = relations
     .filter(item => isSearchablePath(item.node.filePath))
+    .filter(item => !visited.has(item.node.id))
     .filter((relation, index, all) => all.findIndex(item => item.node.id === relation.node.id) === index)
-    .slice(0, 12)
-    .map(item => graphNodeToMapNode(graph, item.node, depth - 1, item.relation))
+    .slice(0, 6)
+    .map(item => graphNodeToMapNode(graph, item.node, depth - 1, item.relation, visited))
   return {
     id: node.id,
     kind: 'symbol',
@@ -77,6 +89,24 @@ function graphNodeToMapNode(graph: CodeGraph, node: GraphNode, depth: number, re
     score: children.length,
     children,
   }
+}
+
+function graphQueryTokens(query: string): string[] {
+  return [...new Set((query.toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g) || [])
+    .filter(token => !['and', 'for', 'from', 'into', 'the', 'this', 'trace', 'with'].includes(token)))]
+    .slice(0, 12)
+}
+
+function graphRootRelevance(node: GraphNode, tokens: readonly string[]): number {
+  const title = node.name.toLowerCase()
+  const qualifiedName = (node.qualifiedName || '').toLowerCase()
+  const signature = (node.signature || '').toLowerCase()
+  const path = normalizePath(node.filePath).toLowerCase()
+  return tokens.reduce((score, token) => score
+    + (title === token ? 12 : title.includes(token) ? 7 : 0)
+    + (qualifiedName.includes(token) ? 4 : 0)
+    + (signature.includes(token) ? 2 : 0)
+    + (path.includes(token) ? 3 : 0), 0)
 }
 
 function subgraphRoots(subgraph: Subgraph): GraphNode[] {
@@ -148,9 +178,13 @@ export class CodeGraphService {
         maxNodes: Math.max(24, params.maxPaths * 8),
       })
       const requestedPaths = params.targetPaths?.length ? params.targetPaths : params.path ? [params.path] : []
+      const queryTokens = graphQueryTokens(query)
       const roots = subgraphRoots(subgraph)
         .filter(node => isSearchablePath(node.filePath))
         .filter(node => requestedPaths.length === 0 || requestedPaths.some(path => isWithinPath(node.filePath, path)))
+        .sort((left, right) => graphRootRelevance(right, queryTokens) - graphRootRelevance(left, queryTokens)
+          || left.filePath.localeCompare(right.filePath)
+          || left.startLine - right.startLine)
         .slice(0, params.maxPaths)
       return {
         map: roots.map(node => graphNodeToMapNode(graph, node, Math.min(params.depth, 2))),

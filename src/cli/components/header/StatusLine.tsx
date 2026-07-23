@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
@@ -7,6 +7,13 @@ import { getSafeFrameWidth } from '../../terminalLayout'
 import type { TurboFluxConfig } from '../../../core/config'
 import { formatNativeReasoningSetting } from '../../../core/modelRegistry'
 import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
+import type { ContextMapsState } from '../../../core/fastContextTypes'
+
+export interface ContextMapsIndicator {
+  state: ContextMapsState
+  changedAt: number
+  confidence?: number
+}
 
 interface StatusLineProps {
   config: TurboFluxConfig
@@ -16,6 +23,7 @@ interface StatusLineProps {
   gitEnabled?: boolean
   mcpCount?: number
   terminalCount?: number
+  contextMaps?: ContextMapsIndicator
 }
 
 const MODE_LABELS: Record<AgentMode, string> = {
@@ -31,6 +39,7 @@ export function StatusLine({
   gitEnabled = false,
   mcpCount = 0,
   terminalCount = 0,
+  contextMaps,
 }: StatusLineProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
@@ -39,6 +48,16 @@ export function StatusLine({
   const contextWindow = config.contextWindow || 200_000
   const ratio = Math.min(1, total / contextWindow)
   const percentage = Math.round(ratio * 100)
+  const [, setAnimationFrame] = useState(0)
+
+  useEffect(() => {
+    if (!contextMaps || contextMaps.state === 'off') return
+    const targetLength = contextMaps.state === 'on' ? 3 : 'ContextMaps'.length
+    const elapsed = Date.now() - contextMaps.changedAt
+    if (elapsed >= targetLength * 38) return
+    const timer = setInterval(() => setAnimationFrame(frame => frame + 1), 38)
+    return () => clearInterval(timer)
+  }, [contextMaps?.state, contextMaps?.changedAt])
 
   const formatTokens = (n = 0) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`
 
@@ -76,7 +95,14 @@ export function StatusLine({
     ...(columns >= 112 ? secondaryParts : []),
   ]
   const usageWidth = hasProviderUsage && total > 0 ? barWidth + 7 : 0
-  const textWidth = Math.max(12, frameWidth - 9 - usageWidth)
+  const contextMapsTarget = contextMaps?.state === 'on' ? 'ContextMaps ON' : contextMaps?.state === 'warming' ? 'ContextMaps' : ''
+  const contextMapsElapsed = contextMaps ? Math.max(0, Date.now() - contextMaps.changedAt) : 0
+  const contextMapsCharacters = contextMaps?.state === 'on'
+    ? Math.min(contextMapsTarget.length, 'ContextMaps'.length + Math.ceil(contextMapsElapsed / 70))
+    : Math.min(contextMapsTarget.length, Math.max(1, Math.ceil(contextMapsElapsed / 38)))
+  const contextMapsLabel = contextMapsTarget.slice(0, contextMapsCharacters)
+  const contextMapsWidth = contextMapsTarget ? 17 : 0
+  const textWidth = Math.max(12, frameWidth - 9 - usageWidth - contextMapsWidth)
   const statusText = cliTruncate(parts.join(' | '), textWidth, { position: 'middle' })
 
   return (
@@ -95,6 +121,12 @@ export function StatusLine({
         {hasProviderUsage && total > 0 && <Text color={barColor}>{bar}</Text>}
         {hasProviderUsage && total > 0 && <Text color={theme.statusLine}> {percentage}%</Text>}
       </Box>
+      {contextMapsTarget && (
+        <Box width={contextMapsWidth} flexShrink={0} justifyContent="flex-end">
+          <Text color={theme.divider}> | </Text>
+          <Text color={contextMaps?.state === 'on' ? theme.success : theme.info} bold={contextMaps?.state === 'on'}>{contextMapsLabel}</Text>
+        </Box>
+      )}
     </Box>
   )
 }

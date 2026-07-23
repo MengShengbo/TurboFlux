@@ -14,7 +14,7 @@ import { PermissionDialog, type PermissionDecision } from './permissions/Permiss
 import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
-import type { FastContextScanEvent } from '../../core/fastContextTypes'
+import type { ContextMapsState, FastContextScanEvent } from '../../core/fastContextTypes'
 import type { AgentAttachment, AgentRunState, AgentTurn, ApprovalPolicy, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
 import type { ContextReservoirEntry, ContextSegment } from '../../state/types'
@@ -229,6 +229,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
   const [fcSummary, setFcSummary] = useState(createFastContextUiSummary)
   const [fcActive, setFcActive] = useState(false)
+  const [contextMaps, setContextMaps] = useState<{ state: ContextMapsState; changedAt: number; confidence?: number }>({ state: 'off', changedAt: Date.now() })
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
   const [activeObjective, setActiveObjective] = useState<{ prompt: string; startedAt: number } | null>(null)
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
@@ -445,6 +446,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setStreamThinkingText('')
     resetFastContextUi()
     setFcActive(false)
+    setContextMaps({ state: 'off', changedAt: Date.now() })
     setActiveTask(null)
     setActiveObjective(null)
     setTerminalSessions([])
@@ -648,6 +650,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'fast_context:event':
           queueFastContextUiEvent(event.event)
+          if (event.event.type === 'context_maps') {
+            setContextMaps({
+              state: event.event.state,
+              changedAt: Date.now(),
+              confidence: event.event.confidence,
+            })
+          }
           if (!fcActiveRef.current) {
             fcActiveRef.current = true
             setFcActive(true)
@@ -657,6 +666,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           flushFastContextUi()
           fcActiveRef.current = false
           setFcActive(false)
+          setContextMaps(current => current.state === 'warming'
+            ? { state: 'off', changedAt: Date.now() }
+            : current)
           break
         case 'active:task':
           setActiveTask(event.context)
@@ -869,6 +881,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setStreamingToolDraft(null)
     resetFastContextUi()
     setFcActive(false)
+    setContextMaps({ state: 'off', changedAt: Date.now() })
     setActiveTask(null)
     setChangeSummaries([])
     setPendingAsk(null)
@@ -1542,6 +1555,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   gitEnabled={gitEnabled}
                   mcpCount={mcpCount}
                   terminalCount={activeTerminalCount}
+                  contextMaps={contextMaps}
                 />
               ) : <StatusPlaceholder />}
             </Box>
@@ -1601,7 +1615,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
         {/* Status line at bottom */}
-        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
+        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} contextMaps={contextMaps} />
         <AgentActivityLine active={isRunning} />
       </Box>
     </ThemeProvider>

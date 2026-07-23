@@ -126,12 +126,12 @@ describe('FastContext retrieval', () => {
   })
 
   it('derives exact symbol and compact filename variants for the local primer', () => {
-    const queries = __testRetrievalPrimerQueries('Multiple cursors + Word wrap\nCheckboxInput calls get_context')
+    const queries = __testRetrievalPrimerQueries('Cursor groups + Word wrap\nCheckboxInput calls get_context')
 
     expect(queries.symbols).toContain('CheckboxInput')
     expect(queries.symbols).toContain('get_context')
-    expect(queries.filePatterns).toContain('**/*multicursor*.*')
-    expect(queries.contentPatterns).toContain('multi[\\s_.-]*cursor')
+    expect(queries.filePatterns).toContain('**/*cursor*group*.*')
+    expect(queries.contentPatterns).toContain('cursor[\\s_.-]*group')
   })
 
   it('separates structural configuration anchors from behavioral phrases', () => {
@@ -155,6 +155,12 @@ describe('FastContext retrieval', () => {
     const queries = __testRetrievalPrimerQueries('Warning in IsolationForest\nhttps://github.com/scikit-learn/scikit-learn/blob/9aaed498/sklearn/ensemble/_iforest.py#L337')
 
     expect(queries.pathHints).toContain('sklearn/ensemble/_iforest.py')
+  })
+
+  it('does not truncate non-source extensions into header path hints', () => {
+    const queries = __testRetrievalPrimerQueries("templateUrl: './app.component.html'")
+
+    expect(queries.pathHints).not.toContain('./app.component.h')
   })
 
   it('expands Python from-import modules into concrete first-party files', () => {
@@ -210,7 +216,7 @@ describe('FastContext retrieval', () => {
     const report = __testMergeCodeMaps({
       candidates: [
         { path: 'src/cursor.ts', startLine: 1, endLine: 3, role: 'cursor core', editKind: 'implementation', confidence: 'high', why: 'moves cursors' },
-        { path: 'src/contrib/multicursor/multicursor.ts', startLine: 4, endLine: 8, role: 'multi cursor contribution', editKind: 'owner', confidence: 'high', why: 'owns multi cursor command' },
+        { path: 'src/contrib/cursorgroup/cursorgroup.ts', startLine: 4, endLine: 8, role: 'cursor group contribution', editKind: 'owner', confidence: 'high', why: 'owns cursor group command' },
       ],
       relationships: [],
       rejectedHypotheses: [],
@@ -218,9 +224,9 @@ describe('FastContext retrieval', () => {
       uncertainty: ['none'],
     })!
 
-    const ranked = __testApplyCausalAnchorRanking(report, 'Multiple cursors + Word wrap')
+    const ranked = __testApplyCausalAnchorRanking(report, 'Cursor group + Word wrap')
 
-    expect(ranked.candidates[0].path).toBe('src/contrib/multicursor/multicursor.ts')
+    expect(ranked.candidates[0].path).toBe('src/contrib/cursorgroup/cursorgroup.ts')
   })
 
   it('promotes the semantic predicate over a caller that only forwards configuration', () => {

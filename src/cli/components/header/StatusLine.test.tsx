@@ -90,4 +90,26 @@ describe('StatusLine', () => {
     expect(output).toContain('mcp:2')
     expect(output).toContain('term:1')
   })
+
+  it('places an enabled ContextMaps indicator at the far right', () => {
+    const output = renderStatus(
+      <StatusLine
+        config={{
+          provider: 'openai',
+          apiKey: 'test',
+          baseUrl: 'https://api.openai.com/v1',
+          model: 'gpt-5.6',
+          contextWindow: 200_000,
+          maxTokens: 16_384,
+          approvalPolicy: 'agent',
+        }}
+        tokenUsage={{ source: 'unknown' }}
+        contextMaps={{ state: 'on', changedAt: Date.now() - 1_000, confidence: 0.82 }}
+      />,
+      120,
+    )
+
+    expect(output).toContain('ContextMaps ON')
+    expect(output.trimEnd().endsWith('ContextMaps ON')).toBe(true)
+  })
 })
