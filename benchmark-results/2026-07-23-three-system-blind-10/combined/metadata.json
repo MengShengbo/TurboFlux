@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "experimentId": "2026-07-23-gpt-5.5-no-reasoning-formal",
+  "createdAt": "2026-07-23T05:35:33.780Z",
+  "gitCommit": "bb3b77b32b51405ee230b07d6f7ef2f18804ead8",
+  "model": "gpt-5.5",
+  "reasoning": "disabled",
+  "endpointHost": "api.aibinghe.xyz",
+  "manifestPath": "benchmark-results/2026-07-23-three-system-blind-10/manifest.json",
+  "manifestSha256": "a78acc519758204671c95cf2a11950abdbb24fad86a9697b995be3614942f690",
+  "systems": [
+    "fastcontext",
+    "claude-code-readonly",
+    "opencode-explore"
+  ],
+  "caseIds": [
+    "mrdoob__three.js-20991",
+    "sveltejs__svelte-738",
+    "tailwindlabs__tailwindcss-550",
+    "coder__code-server-6278",
+    "huggingface__transformers-29519",
+    "Significant-Gravitas__AutoGPT-4652",
+    "pallets__flask-5014",
+    "pytest-dev__pytest-7490",
+    "apache__dubbo-3855",
+    "apache__rocketmq-7420"
+  ],
+  "repeats": 1,
+  "concurrency": 4,
+  "timeoutMs": 240000,
+  "seed": 20260722,
+  "cliVersions": {
+    "claudeCode": "2.1.177 (Claude Code)",
+    "openCode": "1.17.18"
+  },
+  "notes": [
+    "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+    "Native reasoning is disabled; protocol differences are recorded per run.",
+    "Adaptive case-level concurrency starts at 4 and may rise to 4; FastContext uses one closed listwise model judgment and the API request ceiling is 4. Systems within one case remain sequential and rotated.",
+    "Transient failures are retried up to 5 time(s) per run invocation.",
+    "Formal repeated experiment.",
+    "Selection starts at the first balanced case.",
+    "Three system runners launched concurrently in isolated output directories.",
+    "FastContext used an isolated workspace snapshot cache so .codegraph artifacts were invisible to Claude Code and OpenCode.",
+    "The outer 30-minute harness timed out after all journals and reports were written; unique run records are complete."
+  ]
+}

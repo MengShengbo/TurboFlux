@@ -1,0 +1,17 @@
+{
+  "frozenAt": "2026-07-23T05:27:51.567Z",
+  "selectionPolicy": "Absent from every historical runs.jsonl and benchmark-results manifest; leakageRisk=false; ten unique repositories; language-balanced.",
+  "caseIds": [
+    "mrdoob__three.js-20991",
+    "sveltejs__svelte-738",
+    "tailwindlabs__tailwindcss-550",
+    "coder__code-server-6278",
+    "huggingface__transformers-29519",
+    "Significant-Gravitas__AutoGPT-4652",
+    "pallets__flask-5014",
+    "pytest-dev__pytest-7490",
+    "apache__dubbo-3855",
+    "apache__rocketmq-7420"
+  ],
+  "manifestSha256": "a78acc519758204671c95cf2a11950abdbb24fad86a9697b995be3614942f690"
+}
