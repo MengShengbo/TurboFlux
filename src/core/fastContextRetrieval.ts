@@ -21,6 +21,14 @@ export interface FastContextRetrievalPrimer {
   queries: FastContextPrimerQueries
 }
 
+export interface FastContextDependencyExpansion {
+  calls: number
+  readCalls: number
+  candidatePaths: string[]
+  seedEvidence: SubAgentEvidence[]
+  text?: string
+}
+
 interface PrimerHit {
   path: string
   line: string
@@ -35,8 +43,8 @@ const STOP_WORDS = new Set([
   'the', 'their', 'there', 'these', 'this', 'value', 'values', 'when', 'where', 'whether', 'which', 'with', 'would',
 ])
 
-const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte)$/i
-const SOURCE_FILE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,pyi,rs,go,java,kt,kts,cs,c,cc,cpp,cxx,h,hpp,swift,scala,rb,php,vue,svelte}'
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|cxx|c|h|hpp|php|scala|vue|svelte|html?|hbs|handlebars|ejs|njk|twig|jsonc?|ya?ml|toml|xml|properties)$/i
+const SOURCE_FILE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,pyi,rs,go,java,kt,kts,cs,c,cc,cpp,cxx,h,hpp,swift,scala,rb,php,vue,svelte,html,htm,hbs,handlebars,ejs,njk,twig,json,jsonc,yaml,yml,toml,xml,properties}'
 
 function unique(values: string[], limit: number): string[] {
   if (limit <= 0) return []
@@ -78,16 +86,9 @@ async function runLimited<T>(
       try {
         throwIfAborted(signal)
         results[index] = { status: 'fulfilled', value: await tasks[index]() }
-      } catch (firstReason) {
-        if (signal?.aborted) {
-          results[index] = { status: 'rejected', reason: firstReason }
-          break
-        }
-        try {
-          results[index] = { status: 'fulfilled', value: await tasks[index]() }
-        } catch (reason) {
-          results[index] = { status: 'rejected', reason: reason || firstReason }
-        }
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason }
+        if (signal?.aborted) break
       }
     }
   }))
@@ -102,10 +103,11 @@ async function runLimited<T>(
 function regexPhrase(value: string): string {
   return value
     .trim()
-    .split(/[^A-Za-z0-9_$]+/)
-    .filter(Boolean)
+    .match(/[A-Za-z0-9_$]+|[\u4e00-\u9fff]+/g)
+    ?.filter(Boolean)
     .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('[\\s_.-]*')
+    || ''
 }
 
 export function __testSelectPrimerContentPatterns(queries: Pick<FastContextPrimerQueries, 'structuralSignals' | 'behavioralSignals'>): string[] {
@@ -137,7 +139,7 @@ function parentDirectories(path: string): string[] {
 }
 
 function semanticPathScore(path: string, objective: string): number {
-  const objectiveTerms = new Set((objective.slice(0, 2_400).toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) || [])
+  const objectiveTerms = new Set((objective.slice(0, 2_400).toLowerCase().match(/[a-z][a-z0-9_]{2,}|[\u4e00-\u9fff]{2,}/g) || [])
     .flatMap(term => term.split('_'))
     .map(term => term.endsWith('s') && term.length > 4 ? term.slice(0, -1) : term)
     .filter(term => !STOP_WORDS.has(term)))
@@ -175,6 +177,15 @@ function resolvePythonModulePath(moduleName: string, knownPaths: string[]): stri
   return `${prefixed.slice(0, prefixed.indexOf(marker) + 1)}${modulePath}`
 }
 
+function resolveRelativePythonModulePath(sourcePath: string, moduleName: string): string {
+  const leadingDots = moduleName.match(/^\.+/)?.[0].length || 0
+  if (leadingDots === 0) return moduleName.replace(/\./g, '/')
+  const sourceDirectory = sourcePath.replace(/\\/g, '/').split('/').slice(0, -1)
+  const base = sourceDirectory.slice(0, Math.max(0, sourceDirectory.length - Math.max(0, leadingDots - 1)))
+  const suffix = moduleName.slice(leadingDots).split('.').filter(Boolean)
+  return [...base, ...suffix].join('/')
+}
+
 function firstPartyImportPatterns(evidence: SubAgentEvidence[], candidatePaths: string[], objective = ''): string[] {
   const knownPaths = candidatePaths.map(path => path.replace(/\\/g, '/').toLowerCase())
   const objectiveTerms = new Set((objective.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) || [])
@@ -194,11 +205,14 @@ function firstPartyImportPatterns(evidence: SubAgentEvidence[], candidatePaths: 
     const path = item.path
     const content = item.contents.join('\n')
     if (/\.py$/i.test(path)) {
-      for (const match of content.matchAll(/^\s*from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import\s+([^\n#]+)/gm)) {
-        const rawModulePath = match[1].replace(/\./g, '/')
+      for (const match of content.matchAll(/^\s*from\s+(\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import\s+([^\n#]+)/gm)) {
+        const relativeImport = match[1].startsWith('.')
+        const rawModulePath = relativeImport
+          ? resolveRelativePythonModulePath(path, match[1])
+          : match[1].replace(/\./g, '/')
         const root = rawModulePath.split('/')[0].toLowerCase()
-        if (!knownPaths.some(candidate => candidate === `${root}.py` || candidate.startsWith(`${root}/`) || candidate.includes(`/${root}/`))) continue
-        const modulePath = resolvePythonModulePath(match[1], knownPaths)
+        if (!relativeImport && !knownPaths.some(candidate => candidate === `${root}.py` || candidate.startsWith(`${root}/`) || candidate.includes(`/${root}/`))) continue
+        const modulePath = relativeImport ? rawModulePath : resolvePythonModulePath(match[1], knownPaths)
         const importedNames = match[2]
           .replace(/[()]/g, '')
           .split(',')
@@ -257,6 +271,47 @@ function firstPartyImportPatterns(evidence: SubAgentEvidence[], candidatePaths: 
         scored.set(`${base}/index.{ts,tsx,js,jsx,mjs,cjs}`, Math.max(scored.get(`${base}/index.{ts,tsx,js,jsx,mjs,cjs}`) || 0, references))
       }
     }
+    if (/\.(?:html?|hbs|handlebars|ejs|njk|twig)$/i.test(path)) {
+      const directory = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+      const root = path.split('/')[0]
+      for (const match of content.matchAll(/(?:src|href|templateUrl|template-url)\s*=\s*['"](\.\.?\/[^'"]+|[^'"]+\.(?:[cm]?js|html?))['"]/gi)) {
+        const reference = match[1].replace(/^\.\//, '')
+        const resolved = reference.startsWith('../')
+          ? `${directory}/${reference}`.split('/').reduce<string[]>((parts, part) => {
+            if (!part || part === '.') return parts
+            if (part === '..') parts.pop()
+            else parts.push(part)
+            return parts
+          }, []).join('/')
+          : `${directory}/${reference}`.replace(/\/+/g, '/')
+        scored.set(resolved, Math.max(scored.get(resolved) || 0, 8))
+      }
+      for (const match of content.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*(?:Controller|Service|Provider|Store))\b/gi)) {
+        const symbol = match[1]
+        const flexibleSymbol = `[${symbol[0].toLowerCase()}${symbol[0].toUpperCase()}]${symbol.slice(1)}`
+        scored.set(`**/*${flexibleSymbol}*.{js,jsx,ts,tsx}`, Math.max(scored.get(`**/*${flexibleSymbol}*.{js,jsx,ts,tsx}`) || 0, 10))
+      }
+      scored.set(`${root}/**/i18n/*.{json,jsonc}`, Math.max(scored.get(`${root}/**/i18n/*.{json,jsonc}`) || 0, 8))
+      scored.set(`${root}/**/locales/*.{json,jsonc}`, Math.max(scored.get(`${root}/**/locales/*.{json,jsonc}`) || 0, 8))
+    }
+    if (/\.(?:jsonc?)$/i.test(path) && /(?:^|\/)(?:i18n|locales?|translations?)(?:\/|$)/i.test(path)) {
+      const directory = path.slice(0, path.lastIndexOf('/'))
+      scored.set(`${directory}/*.{json,jsonc}`, Math.max(scored.get(`${directory}/*.{json,jsonc}`) || 0, 6))
+    }
+    if (/\.java$/i.test(path)) {
+      for (const match of content.matchAll(/^\s*import\s+(?:static\s+)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*;/gm)) {
+        const imported = match[1]
+        if (imported.endsWith('.*')) continue
+        const modulePath = imported.replace(/\./g, '/')
+        const root = modulePath.split('/')[0].toLowerCase()
+        const marker = `/${root}/`
+        const prefixed = knownPaths.find(candidate => candidate.includes(marker))
+        const resolved = prefixed ? `${prefixed.slice(0, prefixed.indexOf(marker) + 1)}${modulePath}.java` : `${modulePath}.java`
+        const name = modulePath.slice(modulePath.lastIndexOf('/') + 1)
+        const references = content.match(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'))?.length || 1
+        scored.set(resolved, Math.max(scored.get(resolved) || 0, references + 4))
+      }
+    }
   }
   const semanticScore = (pattern: string): number => pattern.toLowerCase()
     .split(/[^a-z0-9]+/)
@@ -273,10 +328,96 @@ function firstPartyImportPatterns(evidence: SubAgentEvidence[], candidatePaths: 
 
 export const __testFirstPartyImportPatterns = firstPartyImportPatterns
 
+export async function expandFastContextDependencies(params: {
+  workspacePath: string
+  objective: string
+  evidence: SubAgentEvidence[]
+  candidatePaths: string[]
+  toolExecutor: ToolExecutor
+  maxPatterns?: number
+  maxReads?: number
+  abortSignal?: AbortSignal
+}): Promise<FastContextDependencyExpansion> {
+  throwIfAborted(params.abortSignal)
+  const patterns = firstPartyImportPatterns(params.evidence, params.candidatePaths, params.objective)
+    .slice(0, params.maxPatterns ?? 8)
+  if (patterns.length === 0) return { calls: 0, readCalls: 0, candidatePaths: [], seedEvidence: [] }
+  const searchResults = await runLimited(patterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)), 6, params.abortSignal)
+  throwIfAborted(params.abortSignal)
+  const reverseQueries = unique(params.evidence
+    .filter(item => /\.(?:html?|hbs|handlebars|ejs|njk|twig)$/i.test(item.path))
+    .map(item => item.path.slice(item.path.lastIndexOf('/') + 1)), 2)
+  const reverseResults = await runLimited(reverseQueries.map(query => async () => {
+    const result = params.toolExecutor.searchContentPage
+      ? await params.toolExecutor.searchContentPage(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 80 })
+      : await params.toolExecutor.searchContent(query, params.workspacePath, SOURCE_FILE_GLOB, true)
+    const hits = Array.isArray(result.data) ? result.data : result.data?.hits || []
+    return result.success ? hits.map(hit => relativePath(params.workspacePath, hit.file)) : []
+  }), 2, params.abortSignal)
+  throwIfAborted(params.abortSignal)
+  const alreadyRead = new Set(params.evidence.map(item => item.path.toLowerCase()))
+  const rankedPaths = unique([
+    ...reverseResults.flatMap(result => result.status === 'fulfilled' ? result.value : []),
+    ...searchResults.flatMap(result => result.status === 'fulfilled' && result.value.success
+      ? result.value.data?.matches || []
+      : []).map(path => relativePath(params.workspacePath, path)),
+  ], 80)
+    .filter(path => SOURCE_FILE.test(path) && !alreadyRead.has(path.toLowerCase()))
+    .filter(path => !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)|(?:\.test|\.spec)\.[^/]+$/i.test(path))
+    .sort((left, right) => semanticPathScore(right, params.objective) - semanticPathScore(left, params.objective)
+      || left.localeCompare(right))
+  const directoryCounts = new Map<string, number>()
+  const readPaths = rankedPaths.filter(path => {
+    const directory = path.includes('/') ? path.slice(0, path.lastIndexOf('/')).toLowerCase() : ''
+    const limit = /(?:^|\/)(?:i18n|locales?|translations?)(?:\/|$)/i.test(path) ? 2 : 1
+    const count = directoryCounts.get(directory) || 0
+    if (count >= limit) return false
+    directoryCounts.set(directory, count + 1)
+    return true
+  }).slice(0, params.maxReads ?? 4)
+  const readResults = await runLimited(readPaths.map(path => async () => {
+    const result = params.toolExecutor.readFileRange
+      ? await params.toolExecutor.readFileRange(path, 0, 240, 96_000)
+      : undefined
+    if (!result?.success || !result.data?.content) return undefined
+    return {
+      path,
+      startLine: result.data.startLine,
+      endLine: result.data.endLine,
+      preview: result.data.content.split('\n').slice(0, 12).join('\n'),
+      content: result.data.content.slice(0, 16_000),
+      reason: 'file read',
+    } satisfies SubAgentEvidence
+  }), 4, params.abortSignal)
+  const seedEvidence = readResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
+  return {
+    calls: patterns.length + reverseQueries.length + readPaths.length,
+    readCalls: readPaths.length,
+    candidatePaths: rankedPaths,
+    seedEvidence,
+    text: seedEvidence.length > 0
+      ? `Read-confirmed dependency frontier:\n${seedEvidence.map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(item.content || item.preview).slice(0, 1_000)}`).join('\n---\n')}`.slice(0, 12_000)
+      : undefined,
+  }
+}
+
+function wordVariants(word: string): string[] {
+  const variants = [word]
+  if (word.endsWith('ment') && word.length > 7) variants.push(word.slice(0, -4))
+  if (word.endsWith('ies') && word.length > 5) variants.push(`${word.slice(0, -3)}y`)
+  if (word.endsWith('ing') && word.length > 6) {
+    const stem = word.slice(0, -3)
+    variants.push(stem, `${stem}e`)
+  }
+  if (word.endsWith('ed') && word.length > 5) variants.push(word.slice(0, -2))
+  return variants
+}
+
 function titleWords(objective: string): string[] {
   const title = objective.split(/\r?\n/, 1)[0]
-  return unique((title.toLowerCase().match(/[a-z][a-z0-9]{2,}/g) || [])
+  return unique((title.toLowerCase().match(/[a-z][a-z0-9]{2,}|[\u4e00-\u9fff]{2,}/g) || [])
     .map(word => word.endsWith('s') && word.length > 4 ? word.slice(0, -1) : word)
+    .flatMap(wordVariants)
     .filter(word => !STOP_WORDS.has(word)), 8)
 }
 
@@ -357,6 +498,10 @@ export function buildFastContextPrimerQueries(objective: string): FastContextPri
   const filePatterns = unique([
     ...pathHints.flatMap(path => [`**/${path}`, `**/${path.split('/').slice(-2).join('/')}`]),
     ...roleFilePatterns,
+    ...words.slice(0, 5).map(word => {
+      const flexibleWord = `[${word[0]?.toLowerCase() || ''}${word[0]?.toUpperCase() || ''}]${word.slice(1)}`
+      return `**/*${flexibleWord}*.*`
+    }),
     ...words.slice(0, -1).flatMap((word, index) => {
       const next = words[index + 1]
       const camel = `${word}${next[0]?.toUpperCase() || ''}${next.slice(1)}`
@@ -483,8 +628,16 @@ export async function buildFastContextRetrievalPrimer(params: {
       .map(([directory]) => directory),
   ], lean ? 0 : 6)
   const familyTasks = familyDirectories.map(directory => async () => {
-    const result = await params.toolExecutor.searchFiles(`${directory}/**/*`, params.workspacePath)
-    const matches = result.success ? result.data?.matches || [] : []
+    const pattern = `${directory}/**/*`
+    const result = await params.toolExecutor.searchFiles(pattern, params.workspacePath)
+    let matches = result.success ? result.data?.matches || [] : []
+    if (result.success && result.data?.truncated) {
+      const nextPage = await params.toolExecutor.searchFiles(pattern, params.workspacePath, {
+        offset: matches.length,
+        limit: 100,
+      })
+      if (nextPage.success) matches = [...matches, ...(nextPage.data?.matches || [])]
+    }
     return unique(matches
       .map(path => relativePath(params.workspacePath, path))
       .filter(path => SOURCE_FILE.test(path) && !/(?:^|\/)(?:test|tests|__tests__|benchmarks?)(?:\/|$)|(?:\.test|\.spec)\.[^/]+$/i.test(path))
@@ -563,6 +716,7 @@ export async function buildFastContextRetrievalPrimer(params: {
   const frontierSeedPaths = [contentFrontier, mirroredImplementation, roleFrontier]
     .filter((item): item is NonNullable<typeof item> => Boolean(item))
   const featureRequest = /\b(?:add|feature|implement|proposal|support)\b/i.test(params.objective.slice(0, 800))
+  const uiRequest = /\b(?:page|screen|form|button|table|dialog|frontend|front-end|user interface|ui)\b|(?:页面|界面|按钮|表单)/i.test(params.objective.slice(0, 1_600))
   const featureDirectories = new Set(coreSeedPaths.slice(0, 5)
     .flatMap(item => parentDirectories(item.path))
     .map(directory => directory.toLowerCase()))
@@ -583,9 +737,23 @@ export async function buildFastContextRetrievalPrimer(params: {
       .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
       .slice(0, lean ? 1 : 6)
     : []
+  const uiSurfacePaths = uiRequest
+    ? candidatePaths
+      .filter(path => /\.(?:html?|[cm]?[jt]sx?|vue|svelte)$/i.test(path))
+      .filter(path => !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)|(?:\.test|\.spec)\.[^/]+$/i.test(path))
+      .map(path => ({
+        path,
+        score: semanticPathScore(path, params.objective),
+        sources: new Set<PrimerHit['source']>(['filename']),
+        lines: [],
+      }))
+      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+      .slice(0, lean ? 1 : 3)
+    : []
   const frontierKeys = new Set(frontierSeedPaths.map(item => item.path.toLowerCase()))
   const featureKeys = new Set(featureFrontierPaths.map(item => item.path.toLowerCase()))
   const seedPaths = [
+    ...uiSurfacePaths,
     ...coreSeedPaths,
     ...featureFrontierPaths.filter(item => !coreKeys.has(item.path.toLowerCase())),
     ...frontierSeedPaths,

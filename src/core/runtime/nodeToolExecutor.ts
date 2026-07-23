@@ -11,6 +11,7 @@ import type {
   Result,
   SearchContentHit,
   SearchContentOptions,
+  SearchFilesOptions,
   SearchContentPage,
   FileRangeResult,
   CommandOutput,
@@ -256,7 +257,7 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async searchFiles(pattern: string, basePath: string): Promise<Result<{ matches: string[]; truncated?: boolean }>> {
+  async searchFiles(pattern: string, basePath: string, options: SearchFilesOptions = {}): Promise<Result<{ matches: string[]; truncated?: boolean; offset?: number; limit?: number }>> {
     let safeBasePath: string
     try {
       safeBasePath = this.ensureAllowedPath(basePath)
@@ -266,6 +267,8 @@ export class NodeToolExecutor implements ToolExecutor {
 
     const normalizedPattern = String(pattern || '').trim().replace(/\\/g, '/')
     if (!normalizedPattern) return { success: false, error: 'File search pattern is required' }
+    const offset = Math.max(0, Math.floor(options.offset || 0))
+    const limit = Math.max(1, Math.min(500, Math.floor(options.limit || 100)))
 
     try {
       const args = [
@@ -294,14 +297,14 @@ export class NodeToolExecutor implements ToolExecutor {
           const depthDelta = leftRelative.split('/').length - rightRelative.split('/').length
           return depthDelta || leftRelative.localeCompare(rightRelative)
         })
-      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
+      return { success: true, data: { matches: matches.slice(offset, offset + limit), offset, limit, truncated: matches.length > offset + limit } }
     } catch (e: any) {
       if (e.code === 1 || e.exitCode === 1) return { success: true, data: { matches: [] } }
       if (e.code !== 'ENOENT') {
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
       const matches = this.globSync(normalizedPattern, safeBasePath)
-      return { success: true, data: { matches: matches.slice(0, 100), truncated: matches.length > 100 } }
+      return { success: true, data: { matches: matches.slice(offset, offset + limit), offset, limit, truncated: matches.length > offset + limit } }
     }
   }
 
@@ -344,6 +347,7 @@ export class NodeToolExecutor implements ToolExecutor {
         '--glob=!.env.*.local',
       ]
       if (caseInsensitive) args.push('--ignore-case')
+      if (limit >= 100 && offset === 0) args.push('--max-count=24')
       if (options.multiline) args.push('-U', '--multiline-dotall')
       if (contextBefore > 0) args.push('-B', String(contextBefore))
       if (contextAfter > 0) args.push('-A', String(contextAfter))
@@ -471,7 +475,9 @@ export class NodeToolExecutor implements ToolExecutor {
       const requestedPath = typeof (query as any).path === 'string' && (query as any).path.trim()
         ? resolveNativePath(safeRootPath, (query as any).path)
         : safeRootPath
-      const safeWorkspacePath = this.ensureAllowedPath(requestedPath)
+      const requestedFile = existsSync(requestedPath) && statSync(requestedPath).isFile()
+      const safeWorkspacePath = this.ensureAllowedPath(requestedFile ? dirname(requestedPath) : requestedPath)
+      const exactRequestedFile = requestedFile ? resolveNativePath(requestedPath).toLowerCase() : undefined
       const limit = query.limit || 10
       let graphResults: CodeSearchHit[] = []
       try {
@@ -480,7 +486,7 @@ export class NodeToolExecutor implements ToolExecutor {
         graphResults = await graph.searchSymbols({
           workspacePath: safeRootPath,
           query: query.query,
-          path: relative(safeRootPath, safeWorkspacePath),
+          path: relative(safeRootPath, requestedPath),
           kind: query.kind,
           limit,
         })
@@ -517,6 +523,7 @@ export class NodeToolExecutor implements ToolExecutor {
             const match = line.match(/^(.+?):(\d+):(.*)$/)
             if (!match) continue
             const filePath = resolveNativePath(safeWorkspacePath, match[1])
+            if (exactRequestedFile && filePath.toLowerCase() !== exactRequestedFile) continue
             const lineNum = parseInt(match[2])
             const text = match[3].trim()
             const declaration = this.extractSymbolDeclaration(text)
@@ -557,7 +564,11 @@ export class NodeToolExecutor implements ToolExecutor {
       }
       const fallback = ripgrepUnavailable
         ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit, safeRootPath)
+            .filter(hit => !exactRequestedFile || resolveNativePath(safeRootPath, hit.path).toLowerCase() === exactRequestedFile)
         : []
+      if (exactRequestedFile) {
+        graphResults = graphResults.filter(hit => resolveNativePath(safeRootPath, hit.path).toLowerCase() === exactRequestedFile)
+      }
       return {
         success: true,
         data: results.length > 0 || graphResults.length > 0
@@ -616,13 +627,16 @@ export class NodeToolExecutor implements ToolExecutor {
         if (query.preferGraph === false) throw new Error('Graph map not requested')
         if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
         const graph = await CodeGraphService.load()
+        if ((query.waitForGraphMs || 0) > 0) {
+          try {
+            await waitForPromise(graph.prepare(basePath), query.waitForGraphMs || 0)
+          } catch {}
+        }
         if (query.graphOnly && !graph.isInitialized(basePath)) {
+          void graph.prepare(basePath).catch(() => {})
           return { success: true, data: { map: [], source: 'unavailable' } }
         }
-        if ((query.waitForGraphMs || 0) > 0) {
-          await waitForPromise(graph.prepare(basePath), query.waitForGraphMs || 0)
-        }
-        const graphMap = await graph.getCodeMap({
+        const graphRequest = graph.getCodeMap({
           workspacePath: basePath,
           query: query.query,
           path: query.path,
@@ -630,6 +644,9 @@ export class NodeToolExecutor implements ToolExecutor {
           depth: query.depth || 2,
           maxPaths: query.maxPaths || 8,
         })
+        const graphMap = query.graphOnly
+          ? await waitForPromise(graphRequest, 1_200)
+          : await graphRequest
         if (graphMap.map.length > 0) return { success: true, data: { ...graphMap, source: 'graph' } }
       } catch {}
       if (query.graphOnly) return { success: true, data: { map: [], source: 'unavailable' } }

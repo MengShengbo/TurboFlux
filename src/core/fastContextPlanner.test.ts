@@ -5,6 +5,7 @@ import {
   mergeFastContextQueryPlans,
   parseFastContextQueryPlan,
   planFastContextQueries,
+  __testLiteralPattern,
   __testClearFastContextPlannerCache,
   type FastContextQueryPlan,
 } from './fastContextPlanner'
@@ -24,6 +25,13 @@ const plan: FastContextQueryPlan = {
 }
 
 describe('FastContext semantic planner', () => {
+  it('keeps Unicode query terms when building local search patterns', () => {
+    const pattern = __testLiteralPattern('界面 加载动画')
+
+    expect(pattern).toContain('界面')
+    expect(pattern).toContain('加载动画')
+  })
+
   it('parses fenced planner JSON and bounds every field', () => {
     const parsed = parseFastContextQueryPlan(`result:\n\`\`\`json\n${JSON.stringify({
       ...plan,
@@ -61,6 +69,19 @@ describe('FastContext semantic planner', () => {
       filenameGlobs: ['src/node/routes/**/*'],
       subsystemHints: ['src/node'],
     }])
+  })
+
+  it('parses repository-wide census plans without inventing ownership frontiers', () => {
+    const parsed = parseFastContextQueryPlan(JSON.stringify({
+      ...plan,
+      taskShape: 'repository-census',
+      symbols: ['Description'],
+      semanticQueries: ['@Description'],
+      frontierSearches: [],
+    }))
+
+    expect(parsed?.taskShape).toBe('repository-census')
+    expect(parsed?.semanticQueries).toContain('@Description')
   })
 
   it('runs the planner as a one-shot model task without exposing tools', async () => {
@@ -151,6 +172,23 @@ describe('FastContext semantic planner', () => {
     expect(merged.symbols).toEqual(['MockObject', 'ConfigLoader'])
     expect(merged.frontierRoles).toEqual(['mock', 'transport', 'config', 'renderer'])
     expect(merged.frontierSearches).toHaveLength(1)
+  })
+
+  it('does not let one planner escalate a direct owner into a multi-frontier cascade', () => {
+    const merged = mergeFastContextQueryPlans({ ...plan, taskShape: 'direct-owner' }, {
+      ...plan,
+      taskShape: 'multi-frontier',
+      frontierSearches: Array.from({ length: 6 }, (_, index) => ({
+        role: `boundary ${index}`,
+        query: `query ${index}`,
+        symbols: [],
+        filenameGlobs: [],
+        subsystemHints: [],
+      })),
+    })
+
+    expect(merged.taskShape).toBe('cross-boundary')
+    expect(merged.frontierSearches).toHaveLength(4)
   })
 
   it('executes semantic code and configuration lanes with read confirmation', async () => {
@@ -248,6 +286,79 @@ describe('FastContext semantic planner', () => {
       'typings/ipc.d.ts',
       'lib/vscode/src/vs/workbench/browser/parts/titlebar/menubarControl.ts',
     ]))
+  })
+
+  it('counts a read-confirmed frontier query even when a guessed subsystem hint is wrong', async () => {
+    const executor = {
+      searchContentPage: vi.fn(async () => ({
+        success: true,
+        data: { hits: [{ file: 'C:/repo/src/runtime/owner.ts', line: 20, text: 'applyBoundaryState()' }] },
+      })),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async () => ({
+        success: true,
+        data: { content: 'applyBoundaryState()', startLine: 1, endLine: 40, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'cross-boundary',
+        symbols: [],
+        semanticQueries: [],
+        filenameGlobs: [],
+        frontierSearches: [{
+          role: 'runtime boundary',
+          query: 'applyBoundaryState',
+          symbols: [],
+          filenameGlobs: [],
+          subsystemHints: ['wrong/subsystem'],
+        }],
+      },
+    })
+
+    expect(result.frontierCovered).toBe(1)
+    expect(result.frontierCoverage).toBe(1)
+  })
+
+  it('caps repository census reads after combining all candidate lanes', async () => {
+    const executor = {
+      searchContentPage: vi.fn(async () => ({
+        success: true,
+        data: { hits: Array.from({ length: 80 }, (_, index) => ({
+          file: `C:/repo/src/Function${index}.java`,
+          line: 10,
+          text: `@Description("lowercase description ${index}")`,
+        })) },
+      })),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async (path: string) => ({
+        success: true,
+        data: { content: `source for ${path}`, startLine: 1, endLine: 40, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'repository-census',
+        symbols: ['Description'],
+        semanticQueries: ['@Description("[a-z]'],
+        filenameGlobs: [],
+        frontierSearches: [],
+      },
+    })
+
+    expect(result.readCalls).toBe(14)
+    expect(result.seedEvidence).toHaveLength(14)
+    expect(executor.readFileRange).toHaveBeenCalledTimes(14)
   })
 
   it('does not count one path as several independent frontier boundaries', async () => {

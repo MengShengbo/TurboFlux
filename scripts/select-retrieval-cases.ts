@@ -92,7 +92,8 @@ const manifestPath = resolve(option('--manifest') || 'benchmark-data/retrieval-p
 const outputPath = resolve(option('--output') || 'benchmark-results/selected-manifest.json')
 const count = Math.max(1, Number(option('--count')) || 10)
 const seed = Number(option('--seed')) || 20260723
-const mode = option('--mode') === 'hard' ? 'hard' : 'random'
+const requestedMode = option('--mode')
+const mode = requestedMode === 'hard' || requestedMode === 'hard-random' ? requestedMode : 'random'
 const includedIds = new Set((option('--include') || '').split(',').map(value => value.trim()).filter(Boolean))
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as RetrievalManifest
 const used = process.argv.includes('--exclude-results') ? collectUsedCaseIds(resolve('benchmark-results')) : new Set<string>()
@@ -101,9 +102,16 @@ const selected = includedIds.size > 0
   ? [...includedIds].flatMap(id => eligible.find(item => item.id === id) || [])
   : mode === 'random'
     ? shuffled(eligible, seed).slice(0, count)
-    : shuffled(eligible, seed)
-      .sort((left, right) => difficulty(right) - difficulty(left))
-      .slice(0, count)
+    : mode === 'hard-random'
+      ? shuffled(
+          [...eligible]
+            .sort((left, right) => difficulty(right) - difficulty(left))
+            .slice(0, Math.max(count, Math.ceil(eligible.length * 0.25))),
+          seed,
+        ).slice(0, count)
+      : shuffled(eligible, seed)
+        .sort((left, right) => difficulty(right) - difficulty(left))
+        .slice(0, count)
 
 if (selected.length < Math.min(count, includedIds.size || count)) {
   throw new Error(`Requested ${includedIds.size || count} cases but only selected ${selected.length}`)

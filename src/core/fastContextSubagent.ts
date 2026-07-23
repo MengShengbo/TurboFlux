@@ -16,6 +16,7 @@ import { FAST_CONTEXT_TUNING } from './fastContextTypes'
 import {
   buildFastContextPrimerQueries,
   buildFastContextRetrievalPrimer,
+  expandFastContextDependencies,
 } from './fastContextRetrieval'
 import { buildContextMapsPrimer } from './contextMaps'
 import {
@@ -77,7 +78,7 @@ const FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION: SubAgentDefinition = {
   driver: 'main-model',
   maxTurns: 1,
   maxParallel: 6,
-  maxOutputTokens: 4096,
+  maxOutputTokens: 3072,
   systemPrompt: `You are the final evidence judge for FastContext. A deterministic retrieval stage has already searched the repository, expanded likely implementation families, and read the strongest source candidates. You receive its complete bounded candidate field and read-confirmed excerpts.
 
 Perform one closed-list listwise decision and call submit_code_map immediately. Retrieval tools are intentionally unavailable in this stage. Rank by direct edit necessity rather than lexical similarity. Before choosing rank one, compare the strongest runtime-owner candidate against the strongest alternative with a BESTFIT decision: which file must change for the requested semantics to become correct? A test, document, wrapper, registry, dispatcher, schema, caller, or downstream observer must not outrank a read-confirmed implementation owner merely because its filename or prose resembles the issue.
@@ -98,7 +99,7 @@ const FAST_CONTEXT_ADAPTIVE_JUDGE_DEFINITION: SubAgentDefinition = {
   driver: 'main-model',
   maxTurns: 2,
   maxParallel: 8,
-  maxOutputTokens: 4096,
+  maxOutputTokens: 3072,
   systemPrompt: `You are the adaptive evidence judge for FastContext. Two semantic planners and a concurrent local executor have already produced read-confirmed evidence, but one or more causal boundaries remain weak.
 
 On the first turn, inspect the supplied evidence and frontier coverage. Run one targeted parallel search or trace wave for missing boundaries or an indirect downstream/upstream owner. Search for causal next hops, not more files from the dominant subsystem. Treat stack-trace frames, registries, wrappers, command handlers, and UI shells as possible symptoms. For stale or malformed state, ask both who consumes it and who writes, normalizes, transforms, or invalidates it; follow concrete identifiers upstream to the state owner. Prefer trace_symbol when a concrete symbol exists because it fuses declarations, references, and bounded source evidence. For cross-boundary work, distinguish behavior/config source, registration or routing, transport/IPC propagation, runtime execution/code generation, persistence/state, and client/UI consumer as applicable.
@@ -117,6 +118,21 @@ const FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION: SubAgentDefinition = {
   systemPrompt: `You are the fast adaptive evidence judge for FastContext. The local executor already supplied read-confirmed evidence, but one causal edge remains uncertain.
 
 On the first turn, run one targeted parallel search or trace wave for the highest-information missing owner or boundary. When state is stale or malformed, trace the concrete state identifier to its writer, normalizer, transformer, or invalidator instead of stopping at the consumer that exposes the symptom. Do not repeat existing searches or tour the repository. On the second turn, read the strongest newly discovered source range, compare the best runtime owner against the strongest alternative with a listwise BESTFIT decision, and submit the grounded code map in the same turn. Tests, docs, wrappers, registries, callers, and symptom consumers must not outrank a read-confirmed implementation owner. Every submitted candidate and relationship must cite a read_file range. Fail explicitly rather than padding the map.` ,
+}
+
+const FAST_CONTEXT_CENSUS_JUDGE_DEFINITION: SubAgentDefinition = {
+  id: 'fast_context',
+  label: 'FastContext Repository Census Judge',
+  description: 'Grounded ranking of repeated repository-wide edit occurrences',
+  driver: 'main-model',
+  maxTurns: 1,
+  maxParallel: 1,
+  maxOutputTokens: 3072,
+  systemPrompt: `You are the repository-census judge for FastContext. The requested change applies one repeated rule to many independent source occurrences.
+
+Use only the supplied read-confirmed evidence. Rank up to ten concrete files whose literals, annotations, calls, declarations, or configuration entries directly violate or require the requested repeated change. Prefer direct occurrences over central metadata machinery, annotation definitions, registries, tests, and analogous files. Do not invent a single architectural owner when the change is intentionally distributed. Do not pad with files that merely define the surrounding framework.
+
+Relationships are optional for census work. Every candidate must cite a supplied read_file range. State the repeated rule in searches_tried or uncertainty and finish with exactly one submit_code_map call.` ,
 }
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 60_000
@@ -148,14 +164,15 @@ export function __testShouldRequestSemanticFeedback(params: {
   plannedEvidenceCount: number
   plannedConfidence: number
   needsFeedback: boolean
-  taskShape?: 'direct-owner' | 'indirect-owner' | 'cross-boundary' | 'multi-frontier'
+  taskShape?: 'direct-owner' | 'indirect-owner' | 'cross-boundary' | 'multi-frontier' | 'repository-census'
   frontierExpected?: number
   frontierCoverage?: number
 }): boolean {
   const firstPassEvidenceCount = params.exactEvidenceCount + params.plannedEvidenceCount
+  if (params.taskShape === 'repository-census') return firstPassEvidenceCount === 0
   if (firstPassEvidenceCount === 0) return true
   const crossBoundary = params.taskShape === 'cross-boundary' || params.taskShape === 'multi-frontier'
-  if (crossBoundary && (params.frontierExpected || 0) >= 2 && (params.frontierCoverage || 0) < 0.75) return true
+  if (crossBoundary && (params.frontierExpected || 0) >= 2 && (params.frontierCoverage || 0) < 0.5) return true
   return firstPassEvidenceCount === 1
     && params.needsFeedback
     && params.plannedConfidence < 0.45
@@ -182,6 +199,56 @@ export function __testShouldAcceptSpeculativeJudge(params: {
   const normalizedTop = top.path.replace(/\\/g, '/').toLowerCase()
   if (!params.readPaths.some(path => path.replace(/\\/g, '/').toLowerCase() === normalizedTop)) return false
   return !(params.codeMap?.uncertainty || []).some(item => !/^(?:none|no|n\/a|nil|unknown)$/i.test(item.trim()))
+}
+
+export function __testShouldStartSpeculativeJudge(params: {
+  objective: string
+  primerConfidence: number
+  evidenceCount: number
+}): boolean {
+  const request = params.objective.slice(0, 1_600)
+  if (params.primerConfidence < 0.9 || params.evidenceCount < 1 || params.evidenceCount > 3) return false
+  if (/\b(?:add|feature|implement|proposal|support|provide|introduce|migrate)\b/i.test(request)) return false
+  if (/\b(?:format|normalize|normalise|consisten|all occurrences|repository[- ]wide|deprecat|replace every)\b/i.test(request)) return false
+  return true
+}
+
+export function __testHasTaskSurfaceEvidence(objective: string, evidence: SubAgentEvidence[]): boolean {
+  const request = objective.slice(0, 2_400)
+  const requiresUi = /\b(?:page|screen|form|button|table|dialog|frontend|front-end|user interface|ui)\b|(?:页面|界面|按钮|表单)/i.test(request)
+  if (!requiresUi) return false
+  const uiEvidence = evidence.some(item => /(?:^|\/)(?:static|public|web|frontend|client|components?|pages?)(?:\/|$)|\.(?:html?|[cm]?[jt]sx?|vue|svelte)$/i.test(item.path))
+  return uiEvidence && evidence.length >= 6
+}
+
+export function __testBuildExplicitCensusPlan(objective: string): FastContextPlannerResult | undefined {
+  const request = objective.slice(0, 1_600)
+  const annotation = request.match(/@[A-Za-z_$][\w$]*/)?.[0]
+  const censusLike = /\b(?:format|normalize|normalise|consisten|all occurrences|repository[- ]wide|deprecat|replace every)\b/i.test(request)
+  if (!annotation || !censusLike) return undefined
+  const examples = [...request.matchAll(/`([^`\r\n]{2,80})`/g)]
+    .map(match => match[1].trim())
+    .filter(value => /^[A-Za-z_$][A-Za-z0-9_$.-]*$/.test(value))
+    .filter(value => value.length >= 5 || /[_.$-]/.test(value))
+    .filter((value, index, all) => all.findIndex(other => other.toLowerCase() === value.toLowerCase()) === index)
+    .slice(0, 3)
+  return {
+    ok: true,
+    elapsedMs: 0,
+    plan: {
+      taskShape: 'repository-census',
+      confidence: 0.82,
+      needsFeedback: false,
+      symbols: [annotation.slice(1), ...examples],
+      semanticQueries: [annotation, ...examples],
+      filenameGlobs: [],
+      subsystemHints: [],
+      frontierRoles: [],
+      frontierSearches: [],
+      editableExtensions: [],
+      rationale: 'Explicit repeated annotation normalization contract detected from the issue text.',
+    },
+  }
 }
 
 function trimText(value: string, max = 220): string {
@@ -579,7 +646,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         else if (event.tool !== 'submit_code_map') telemetry.searchCalls += 1
         const argSummary = (() => {
           const obj = (event.args && typeof event.args === 'object') ? (event.args as Record<string, unknown>) : {}
-          const pattern = obj.pattern ?? obj.path ?? ''
+          const pattern = obj.pattern ?? obj.query ?? obj.path ?? ''
           return typeof pattern === 'string' ? trimText(pattern, 84) : ''
         })()
         emit({ type: 'insight', text: `${event.tool}: ${argSummary}`, tone: 'info' })
@@ -617,20 +684,31 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   emit({ type: 'insight', text: 'starting parallel model-directed retrieval', tone: 'info' })
   emit({ type: 'context_maps', state: 'warming' })
   const initialPrimerPromise = buildFastContextRetrievalPrimer({ ...params, budget: 'lean' })
+  const explicitCensusPlan = __testBuildExplicitCensusPlan(params.objective)
   const plannerAbortController = new AbortController()
+  const speculativeAbortController = new AbortController()
   const forwardPlannerAbort = () => plannerAbortController.abort()
+  const forwardSpeculativeAbort = () => speculativeAbortController.abort()
   if (params.abortSignal?.aborted) plannerAbortController.abort()
-  else params.abortSignal?.addEventListener('abort', forwardPlannerAbort, { once: true })
-  const ownerPlannerPromise = planFastContextQueries(
-    { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('owner-planner') },
-    undefined,
-    'causal-owner',
-  )
-  const frontierPlannerPromise = planFastContextQueries(
-    { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('frontier-planner') },
-    undefined,
-    'frontier',
-  )
+  if (params.abortSignal?.aborted) speculativeAbortController.abort()
+  else {
+    params.abortSignal?.addEventListener('abort', forwardPlannerAbort, { once: true })
+    params.abortSignal?.addEventListener('abort', forwardSpeculativeAbort, { once: true })
+  }
+  const ownerPlannerPromise = explicitCensusPlan
+    ? Promise.resolve(explicitCensusPlan)
+    : planFastContextQueries(
+      { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('owner-planner') },
+      undefined,
+      'causal-owner',
+    )
+  const frontierPlannerPromise = explicitCensusPlan
+    ? Promise.resolve(explicitCensusPlan)
+    : planFastContextQueries(
+      { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('frontier-planner') },
+      undefined,
+      'frontier',
+    )
   const plannersPromise = Promise.all([ownerPlannerPromise, frontierPlannerPromise])
   const initialPrimer = await initialPrimerPromise
   const speculativeReadPaths = initialPrimer.seedEvidence.map(item => item.path)
@@ -647,7 +725,11 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       readPaths: speculativeReadPaths,
     }))
   )
-  const speculativeJudgePromise = initialPrimer.seedEvidence.length > 0
+  const speculativeJudgePromise = __testShouldStartSpeculativeJudge({
+    objective: params.objective,
+    primerConfidence: initialPrimer.confidence,
+    evidenceCount: initialPrimer.seedEvidence.length,
+  })
     ? runSubAgent({
         objective: params.objective,
         workspacePath: params.workspacePath,
@@ -660,7 +742,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         modelCapabilities: params.modelCapabilities,
         model: params.model,
         codemap: params.codemap,
-        abortSignal: params.abortSignal,
+        abortSignal: speculativeAbortController.signal,
         requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
         maxTransientAttempts: 2,
         requireGroundedReport: true,
@@ -687,6 +769,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     plannerAbortController.abort()
     ;[ownerPlanner, frontierPlanner] = await plannersPromise
   } else {
+    speculativeAbortController.abort()
     speculativeJudge = firstDecision.kind === 'speculative' ? firstDecision.value : await speculativeJudgePromise
     ;[ownerPlanner, frontierPlanner] = firstDecision.kind === 'planners' ? firstDecision.value : await plannersPromise
     planner = ownerPlanner.ok && frontierPlanner.ok
@@ -697,7 +780,12 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   }
   plannerAbortController.abort()
   params.abortSignal?.removeEventListener('abort', forwardPlannerAbort)
-  const semanticPlannersHealthy = Boolean(planner && ownerPlanner.ok && frontierPlanner.ok)
+  speculativeAbortController.abort()
+  params.abortSignal?.removeEventListener('abort', forwardSpeculativeAbort)
+  const semanticPlannersHealthy = Boolean(planner?.ok && (ownerPlanner.ok || frontierPlanner.ok || planner.plan.taskShape === 'repository-census'))
+  if (explicitCensusPlan) {
+    emit({ type: 'insight', text: 'explicit repository-census contract detected; skipped semantic planner requests', tone: 'success' })
+  }
   const primer = speculativeAccepted || semanticPlannersHealthy
     ? initialPrimer
     : await buildFastContextRetrievalPrimer({ ...params, budget: 'full' })
@@ -707,7 +795,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       : ownerPlanner.ok ? 'owner only' : 'frontier only'
     emit({
       type: 'insight',
-      text: `semantic plan (${plannerViews}): ${planner?.plan.taskShape}, confidence ${planner?.plan.confidence.toFixed(2)}, ${(planner?.plan.semanticQueries.length || 0) + (planner?.plan.symbols.length || 0)} query anchor(s)`,
+      text: `semantic plan (${plannerViews}): ${planner?.plan.taskShape}, confidence ${planner?.plan.confidence.toFixed(2)}, ${(planner?.plan.semanticQueries.length || 0) + (planner?.plan.symbols.length || 0)} query anchor(s), ${planner?.elapsedMs || 0}ms`,
       tone: 'success',
     })
   } else {
@@ -735,6 +823,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   if (speculativeAccepted) {
     emit({ type: 'insight', text: 'high-confidence direct owner found; stopping before semantic expansion', tone: 'success' })
   }
+  const plannedStartedAt = Date.now()
   const planned = speculativeAccepted
     ? emptyPlannedEvidence
     : semanticPlannersHealthy
@@ -749,15 +838,55 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   telemetry.toolCalls += planned.calls
   telemetry.readCalls += planned.readCalls
   telemetry.searchCalls += planned.calls - planned.readCalls
-  const adaptiveJudgeNeeded = semanticPlannersHealthy && __testShouldRequestSemanticFeedback({
+  if (!speculativeAccepted && semanticPlannersHealthy) {
+    emit({
+      type: 'insight',
+      text: `planned retrieval completed in ${Date.now() - plannedStartedAt}ms with ${planned.calls} tool operation(s), ${planned.seedEvidence.length} read-confirmed range(s), frontier ${planned.frontierCovered}/${planned.frontierExpected}`,
+      tone: 'info',
+    })
+  }
+  const dependencyExpansion = !speculativeAccepted && semanticPlannersHealthy
+    && planner!.plan.taskShape !== 'repository-census'
+    && planned.seedEvidence.length > 0
+    ? await expandFastContextDependencies({
+      workspacePath: params.workspacePath,
+      objective: params.objective,
+      evidence: [...primer.seedEvidence, ...planned.seedEvidence],
+      candidatePaths: [...primer.candidatePaths, ...planned.candidatePaths],
+      toolExecutor: params.toolExecutor,
+      maxPatterns: 10,
+      maxReads: 6,
+      abortSignal: params.abortSignal,
+    })
+    : { calls: 0, readCalls: 0, candidatePaths: [], seedEvidence: [] }
+  telemetry.toolCalls += dependencyExpansion.calls
+  telemetry.readCalls += dependencyExpansion.readCalls
+  telemetry.searchCalls += dependencyExpansion.calls - dependencyExpansion.readCalls
+  if (dependencyExpansion.seedEvidence.length > 0) {
+    emit({
+      type: 'insight',
+      text: `dependency frontier added ${dependencyExpansion.seedEvidence.length} read-confirmed range(s) with ${dependencyExpansion.calls} bounded operation(s)`,
+      tone: 'success',
+    })
+  }
+  const firstPassEvidence = [...primer.seedEvidence, ...planned.seedEvidence, ...dependencyExpansion.seedEvidence]
+  const taskSurfaceCovered = __testHasTaskSurfaceEvidence(params.objective, firstPassEvidence)
+  const adaptiveJudgeNeeded = semanticPlannersHealthy && !taskSurfaceCovered && __testShouldRequestSemanticFeedback({
     exactEvidenceCount: primer.seedEvidence.length,
-    plannedEvidenceCount: planned.seedEvidence.length,
+    plannedEvidenceCount: planned.seedEvidence.length + dependencyExpansion.seedEvidence.length,
     plannedConfidence: planned.confidence,
     needsFeedback: planner!.plan.needsFeedback,
     taskShape: planner!.plan.taskShape,
     frontierExpected: planned.frontierExpected,
     frontierCoverage: planned.frontierCoverage,
   })
+  if (taskSurfaceCovered && planned.frontierCoverage < 0.5) {
+    emit({
+      type: 'insight',
+      text: 'task-required UI surface is read-confirmed; skipping low-information adaptive expansion',
+      tone: 'success',
+    })
+  }
   if (adaptiveJudgeNeeded) {
     const fullAdaptive = planner!.plan.taskShape === 'multi-frontier' || planned.frontierExpected >= 3
     emit({
@@ -767,13 +896,14 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     })
   }
   const retrievalConfidence = Math.max(primer.confidence, planned.confidence)
-  const firstPassEvidenceCount = new Set([...primer.seedEvidence, ...planned.seedEvidence]
+  const firstPassEvidenceCount = new Set([...primer.seedEvidence, ...planned.seedEvidence, ...dependencyExpansion.seedEvidence]
     .map(item => item.path.toLowerCase())).size
   const weakFrontier = semanticPlannersHealthy && planned.frontierExpected > 0 && planned.frontierCoverage < 0.75
   const contextMapQuery = semanticPlannersHealthy
     ? [...planner!.plan.symbols.slice(0, 6), ...planner!.plan.semanticQueries.slice(0, 2)].join(' ')
     : undefined
-  const contextMaps = !speculativeAccepted && (adaptiveJudgeNeeded || weakFrontier || (retrievalConfidence < 0.62 && firstPassEvidenceCount < 2))
+  const contextMaps = !speculativeAccepted && planner?.plan.taskShape !== 'repository-census'
+    && (adaptiveJudgeNeeded || weakFrontier || (retrievalConfidence < 0.62 && firstPassEvidenceCount < 2))
     ? await buildContextMapsPrimer({
       workspacePath: params.workspacePath,
       objective: params.objective,
@@ -801,7 +931,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     emit({ type: 'context_maps', state: 'off', elapsedMs: contextMaps.elapsedMs })
   }
   const semanticEvidence = planned.seedEvidence
-  const contextMapEvidence = await readContextMapEvidence(contextMaps, [...primer.seedEvidence, ...semanticEvidence], params)
+  const contextMapEvidence = await readContextMapEvidence(contextMaps, [...primer.seedEvidence, ...semanticEvidence, ...dependencyExpansion.seedEvidence], params)
   telemetry.toolCalls += contextMapEvidence.length
   telemetry.readCalls += contextMapEvidence.length
   telemetry.toolCalls += primer.calls
@@ -821,6 +951,18 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     emit({ type: 'hit', hit: scanHit })
     emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId, reason: semantic ? 'model-planned source seed' : 'exact source seed' })
   }
+  for (const evidence of dependencyExpansion.seedEvidence) {
+    const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
+    if (seenHitKeys.has(key)) continue
+    seenHitKeys.add(key)
+    const scanHit = toScanHit(evidence, 'dependency-frontier')
+    const list = candidates.get(scanHit.path) || []
+    list.push(scanHit)
+    candidates.set(scanHit.path, list)
+    allHits.push(scanHit)
+    emit({ type: 'hit', hit: scanHit })
+    emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'dependency-frontier', reason: 'read-confirmed dependency edge' })
+  }
   for (const evidence of contextMapEvidence) {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
     if (seenHitKeys.has(key)) continue
@@ -834,7 +976,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'context-maps', reason: 'graph hypothesis read and confirmed' })
   }
   if (primer.text) emit({ type: 'insight', text: `exact primer found ${primer.text.split('\n').length - 1} starting point(s)`, tone: 'info' })
-  const initialEvidence = distinctEvidenceRanges([...primer.seedEvidence, ...semanticEvidence, ...contextMapEvidence])
+  const initialEvidence = distinctEvidenceRanges([...primer.seedEvidence, ...semanticEvidence, ...dependencyExpansion.seedEvidence, ...contextMapEvidence])
   const commonOptions = {
     objective: params.objective,
     workspacePath: params.workspacePath,
@@ -853,6 +995,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requireGroundedReport: true,
     retrievalContext: [
       planned.text,
+      dependencyExpansion.text,
       primer.text,
       contextMaps.primer?.text,
       speculativeJudge?.codeMap ? `SPECULATIVE CLOSED-LIST JUDGMENT\n${renderSubmittedCodeMap(speculativeJudge.codeMap)}` : undefined,
@@ -874,10 +1017,13 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     : initialEvidence.length > 0 && semanticPlannersHealthy
     ? await runSubAgent({
         ...commonOptions,
-        definition: adaptiveJudgeNeeded
-          ? fullAdaptive ? FAST_CONTEXT_ADAPTIVE_JUDGE_DEFINITION : FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION
-          : FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION,
-        submissionOnly: !adaptiveJudgeNeeded,
+        definition: planner!.plan.taskShape === 'repository-census'
+          ? FAST_CONTEXT_CENSUS_JUDGE_DEFINITION
+          : adaptiveJudgeNeeded
+            ? fullAdaptive ? FAST_CONTEXT_ADAPTIVE_JUDGE_DEFINITION : FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION
+            : FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION,
+        submissionOnly: planner!.plan.taskShape === 'repository-census' || !adaptiveJudgeNeeded,
+        allowRelationshiplessReport: planner!.plan.taskShape === 'repository-census',
         onEvent: createSubEventHandler(adaptiveJudgeNeeded ? 'adaptive' : 'judge'),
       })
     : await runSubAgent({
@@ -900,6 +1046,11 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     result = speculativeJudge
   }
   if (!result.ok || !result.codeMap) throw new Error(result.error || 'FastContext locator failed')
+  emit({
+    type: 'insight',
+    text: `evidence judgment completed in ${result.elapsedMs}ms across ${result.turns} model turn(s)`,
+    tone: 'success',
+  })
   const finalReport = renderSubmittedCodeMap(result.codeMap)
   const maxTurns = result.turns
 

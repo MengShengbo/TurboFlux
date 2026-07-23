@@ -92,7 +92,7 @@ function graphNodeToMapNode(
 }
 
 function graphQueryTokens(query: string): string[] {
-  return [...new Set((query.toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g) || [])
+  return [...new Set((query.toLowerCase().match(/[a-z_][a-z0-9_]{2,}|[\u4e00-\u9fff]{2,}/g) || [])
     .filter(token => !['and', 'for', 'from', 'into', 'the', 'this', 'trace', 'with'].includes(token)))]
     .slice(0, 12)
 }

@@ -37,6 +37,11 @@ export interface SearchContentPage {
   truncated: boolean
 }
 
+export interface SearchFilesOptions {
+  offset?: number
+  limit?: number
+}
+
 export interface FileRangeResult {
   content: string
   startLine: number
@@ -84,7 +89,7 @@ export interface ToolExecutor {
   listTree(path: string): Promise<Result<TreeNode>>
 
   // Search operations
-  searchFiles(pattern: string, basePath: string): Promise<Result<{ matches: string[]; truncated?: boolean }>>
+  searchFiles(pattern: string, basePath: string, options?: SearchFilesOptions): Promise<Result<{ matches: string[]; truncated?: boolean; offset?: number; limit?: number }>>
   searchContent(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean): Promise<Result<SearchContentHit[]>>
   searchContentPage?(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean, options?: SearchContentOptions): Promise<Result<SearchContentPage>>
   webSearch?(query: Record<string, any>): Promise<Result<{ results: WebSearchResult[]; provider: string; query: string }>>

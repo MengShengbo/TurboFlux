@@ -45,6 +45,25 @@ ${'long reproduction log '.repeat(200)}`)
     expect(score.confidence).toBeGreaterThanOrEqual(0.55)
   })
 
+  it('does not enable a single lexical graph anchor without a relationship', async () => {
+    const result = await buildContextMapsPrimer({
+      workspacePath: 'C:/repo',
+      objective: 'trace runWorkflow',
+      query: 'runWorkflow',
+      toolExecutor: {
+        getCodeMap: vi.fn(async () => ({
+          success: true,
+          data: {
+            map: [{ ...graphMap[0], children: [] }],
+            source: 'graph',
+          },
+        })),
+      } as unknown as ToolExecutor,
+    })
+
+    expect(result.status).toBe('unavailable')
+  })
+
   it('accepts only graph-backed maps and labels them as hypotheses', async () => {
     const getCodeMap = vi.fn(async () => ({ success: true, data: { map: graphMap, source: 'graph' } }))
     const result = await buildContextMapsPrimer({

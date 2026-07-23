@@ -301,6 +301,7 @@ export interface RunSubAgentOptions {
   requiredAuditPaths?: string[]
   requiredCandidatePaths?: string[]
   requireGroundedReport?: boolean
+  allowRelationshiplessReport?: boolean
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -729,7 +730,7 @@ function pruneUngroundedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvid
   }
 }
 
-function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
+function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[], allowRelationshipless = false): string | null {
   if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
@@ -748,7 +749,7 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
   const minimalDirectOwner = report.candidates.length === 1
     && report.candidates[0].confidence === 'high'
     && (report.candidates[0].editKind === 'owner' || report.candidates[0].editKind === 'implementation')
-  if (report.relationships.length === 0 && !minimalDirectOwner) return 'FastContext requires at least one grounded architecture relationship'
+  if (report.relationships.length === 0 && !minimalDirectOwner && !allowRelationshipless) return 'FastContext requires at least one grounded architecture relationship'
   if (report.searchesTried.length === 0) return 'searches_tried must describe at least one query strategy'
   if (report.uncertainty.length === 0) return 'uncertainty must contain residual uncertainty or "none"'
   return null
@@ -860,7 +861,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'trace_symbol',
-        description: 'Inspect graph-indexed declarations and exact references together with bounded source evidence for the strongest definitions and callers. Prefer this after a likely core symbol appears.',
+        description: 'Inspect declarations and exact references together with bounded source evidence. query must be a symbol or identifier; path may narrow to either a directory or a specific file.',
         parameters: {
           type: 'object',
           properties: {
@@ -1246,7 +1247,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       const report = parseSubmittedCodeMap(submissionArgs, workspacePath)
       normalizeSubmittedCodeMap(report, collectedEvidence)
       pruneUngroundedCodeMap(report, collectedEvidence)
-      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence) || ''
+      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence, options.allowRelationshiplessReport === true) || ''
       submissionError ||= validateRequiredAuditPaths(report, options.requiredAuditPaths) || ''
       submissionError ||= validateRequiredCandidatePaths(report, options.requiredCandidatePaths) || ''
       if (!submissionError) {
@@ -1642,14 +1643,17 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
     case 'trace_symbol': {
       const query = String(args.query || '').trim()
       if (!query) return { ok: false, output: 'Symbol query is required.', summary: 'trace skipped: missing symbol', evidence }
-      const basePath = args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath
+      const pathFilter = typeof args.path === 'string' ? args.path.replace(/\\/g, '/').replace(/^\.\//, '') : ''
+      const pathIsFile = /\.[A-Za-z0-9]{1,12}$/.test(pathFilter.split('/').pop() || '')
+      const basePath = pathFilter && !pathIsFile ? resolveWorkspacePath(workspacePath, pathFilter) : workspacePath
+      const filePattern = pathIsFile ? pathFilter : undefined
       const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const pattern = /^[A-Za-z_$][\w$]*$/.test(query) ? `\\b${escaped}\\b` : escaped
       const [symbolResult, referenceResult] = await Promise.all([
         executor.searchCodeSymbols({ workspacePath, query, path: typeof args.path === 'string' ? args.path : undefined, limit: 12 }),
         executor.searchContentPage
-          ? executor.searchContentPage(pattern, basePath, undefined, false, { limit: 30, contextBefore: 1, contextAfter: 1 })
-          : executor.searchContent(pattern, basePath, undefined, false),
+          ? executor.searchContentPage(pattern, basePath, filePattern, false, { limit: 30, contextBefore: 1, contextAfter: 1 })
+          : executor.searchContent(pattern, basePath, filePattern, false),
       ])
       const symbolHits = normalizeCodeSearchHits(symbolResult.data).slice(0, 10)
       const referencePage = referenceResult.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }> } | Array<{ file: string; line: number; text: string; context?: string }> | undefined

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { FastContextScanHit } from './fastContextTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { __testFirstPartyImportPatterns, __testImplementationStem, __testSelectPrimerContentPatterns } from './fastContextRetrieval'
+import { buildFastContextRetrievalPrimer, __testFirstPartyImportPatterns, __testImplementationStem, __testSelectPrimerContentPatterns } from './fastContextRetrieval'
 import {
   __testBuildEvidencePack,
   __testBuildRerankContext,
@@ -11,10 +11,55 @@ import {
   __testSelectFrontierAuditPaths,
   __testShouldRequestSemanticFeedback,
   __testShouldAcceptSpeculativeJudge,
+  __testShouldStartSpeculativeJudge,
+  __testHasTaskSurfaceEvidence,
+  __testBuildExplicitCensusPlan,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
 describe('FastContext retrieval', () => {
+  it('starts speculative judgment only for compact high-confidence direct defects', () => {
+    expect(__testShouldStartSpeculativeJudge({
+      objective: 'Crash when parseConfig receives an empty value',
+      primerConfidence: 0.9,
+      evidenceCount: 2,
+    })).toBe(true)
+    expect(__testShouldStartSpeculativeJudge({
+      objective: 'Add a user management page',
+      primerConfidence: 0.95,
+      evidenceCount: 2,
+    })).toBe(false)
+    expect(__testShouldStartSpeculativeJudge({
+      objective: 'Fix format for every @Description value',
+      primerConfidence: 0.95,
+      evidenceCount: 2,
+    })).toBe(false)
+  })
+
+  it('recognizes when a requested UI surface is already read-confirmed', () => {
+    const evidence = [
+      'web/user-manage.html',
+      'web/UserController.js',
+      'src/UserController.java',
+      'src/UserService.java',
+      'src/UserPO.java',
+      'web/i18n/en.json',
+    ].map(path => ({ path, startLine: 1, endLine: 20, preview: path, reason: 'file read' }))
+
+    expect(__testHasTaskSurfaceEvidence('Add a user management page with an Edit button', evidence)).toBe(true)
+    expect(__testHasTaskSurfaceEvidence('Fix database transaction retries', evidence)).toBe(false)
+  })
+
+  it('builds a local census plan only for explicit repeated annotation normalization', () => {
+    expect(__testBuildExplicitCensusPlan('Fix format for @Description value across inconsistent functions')).toMatchObject({
+      ok: true,
+      plan: { taskShape: 'repository-census', semanticQueries: ['@Description'] },
+    })
+    expect(__testBuildExplicitCensusPlan('Fix format for @Description values: `word_stem` differs from `zip`')?.plan.semanticQueries)
+      .toEqual(['@Description', 'word_stem'])
+    expect(__testBuildExplicitCensusPlan('Fix @Description lookup crash')).toBeUndefined()
+  })
+
   it('requests serial semantic feedback only when first-pass evidence is scarce', () => {
     expect(__testShouldRequestSemanticFeedback({
       exactEvidenceCount: 0,
@@ -48,6 +93,15 @@ describe('FastContext retrieval', () => {
       taskShape: 'cross-boundary',
       frontierExpected: 4,
       frontierCoverage: 0.5,
+    })).toBe(false)
+    expect(__testShouldRequestSemanticFeedback({
+      exactEvidenceCount: 2,
+      plannedEvidenceCount: 8,
+      plannedConfidence: 0.8,
+      needsFeedback: true,
+      taskShape: 'cross-boundary',
+      frontierExpected: 4,
+      frontierCoverage: 0.25,
     })).toBe(true)
     expect(__testShouldRequestSemanticFeedback({
       exactEvidenceCount: 2,
@@ -300,6 +354,74 @@ describe('FastContext retrieval', () => {
 
     expect(patterns).toContain('sphinx/pycode/ast.py')
     expect(patterns).toContain('sphinx/util/logging.py')
+  })
+
+  it('resolves relative Python imports from newly read pipeline files', () => {
+    const patterns = __testFirstPartyImportPatterns([{
+      path: 'src/transformers/pipelines/zero_shot_object_detection.py',
+      startLine: 1,
+      endLine: 40,
+      preview: 'from .pt_utils import PipelineIterator',
+      content: 'from .pt_utils import PipelineIterator\nPipelineIterator(items)',
+      reason: 'file read',
+    }], [
+      'src/transformers/pipelines/zero_shot_object_detection.py',
+      'src/transformers/pipelines/pt_utils.py',
+    ])
+
+    expect(patterns).toContain('src/transformers/pipelines/pt_utils.py')
+  })
+
+  it('resolves Java imports into repository source paths', () => {
+    const patterns = __testFirstPartyImportPatterns([{
+      path: 'apollo-portal/src/main/java/com/example/UserController.java',
+      startLine: 1,
+      endLine: 40,
+      preview: 'import com.example.repository.UserRepository;',
+      content: 'import com.example.repository.UserRepository;\nprivate UserRepository repository;',
+      reason: 'file read',
+    }], [
+      'apollo-portal/src/main/java/com/example/UserController.java',
+      'apollo-portal/src/main/java/com/example/repository/UserRepository.java',
+    ])
+
+    expect(patterns).toContain('apollo-portal/src/main/java/com/example/repository/UserRepository.java')
+  })
+
+  it('includes HTML and JSON surfaces in the deterministic source primer', async () => {
+    let sourceGlob = ''
+    const executor = {
+      searchContentPage: vi.fn(async (_pattern: string, _path: string, filePattern: string) => {
+        sourceGlob = filePattern
+        return {
+          success: true,
+          data: { hits: [
+            { file: 'C:/repo/web/user-manage.html', line: 8, text: 'user management' },
+            { file: 'C:/repo/web/i18n/en.json', line: 4, text: '"users": "Users"' },
+          ] },
+        }
+      }),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async (path: string) => ({
+        success: true,
+        data: { content: `content for ${path}`, startLine: 1, endLine: 20, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const primer = await buildFastContextRetrievalPrimer({
+      workspacePath: 'C:/repo',
+      objective: 'Add a user management page and translated labels',
+      toolExecutor: executor,
+      budget: 'lean',
+    })
+
+    expect(sourceGlob).toContain('html')
+    expect(sourceGlob).toContain('json')
+    expect(primer.seedEvidence.map(item => item.path)).toEqual(expect.arrayContaining([
+      'web/user-manage.html',
+      'web/i18n/en.json',
+    ]))
   })
 
   it('prioritizes imported modules that overlap the issue semantics', () => {

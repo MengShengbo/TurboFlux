@@ -262,6 +262,11 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
     const contextMaps = events
       .filter((event): event is Extract<FastContextScanEvent, { type: 'context_maps' }> => event.type === 'context_maps')
       .at(-1)
+    const insightTexts = events
+      .filter((event): event is Extract<FastContextScanEvent, { type: 'insight' }> => event.type === 'insight')
+      .map(event => event.text)
+    const milestones = insightTexts.filter(text => /semantic plan|planned retrieval completed|dependency frontier|frontier coverage|contextmaps|evidence judgment completed|speculative evidence/i.test(text))
+    const insights = [...new Set([...milestones, ...insightTexts.slice(-24)])].slice(-48)
     return {
       eventCount: events.length,
       hitCount: events.filter(event => event.type === 'hit').length,
@@ -271,10 +276,7 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
         nodes: contextMaps.nodes,
         elapsedMs: contextMaps.elapsedMs,
       } : undefined,
-      insights: events
-        .filter((event): event is Extract<FastContextScanEvent, { type: 'insight' }> => event.type === 'insight')
-        .map(event => event.text)
-        .slice(-24),
+      insights,
     }
   }
   try {

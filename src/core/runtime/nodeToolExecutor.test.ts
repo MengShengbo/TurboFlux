@@ -382,6 +382,23 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.data?.map(hit => hit.title)).toEqual(expect.arrayContaining(['flux_worker', 'flux_runner', 'FluxGateway']))
   }))
 
+  it('accepts a concrete file path when narrowing symbol search', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'src'), { recursive: true })
+    writeFileSync(join(workspace, 'src', 'Target.ts'), 'export function fluxTarget() {}\n', 'utf-8')
+    writeFileSync(join(workspace, 'src', 'Sibling.ts'), 'export function fluxSibling() {}\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.searchCodeSymbols({
+      query: 'flux',
+      workspacePath: workspace,
+      path: 'src/Target.ts',
+      limit: 10,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.data?.map(hit => hit.path)).toEqual(['src/Target.ts'])
+  }))
+
   it('creates local history checkpoints for workspace files', async () => withWorkspace(async ({ workspace }) => {
     const filePath = join(workspace, 'inside.txt')
     writeFileSync(filePath, 'after', 'utf-8')

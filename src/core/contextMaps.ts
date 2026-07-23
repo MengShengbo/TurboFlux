@@ -58,7 +58,7 @@ function contextMapCandidates(nodes: readonly CodeMapNode[]): ContextMapCandidat
 }
 
 function objectiveTokens(objective: string): string[] {
-  return [...new Set((objective.toLowerCase().match(/[a-z_][a-z0-9_]{2,}/g) || [])
+  return [...new Set((objective.toLowerCase().match(/[a-z_][a-z0-9_]{2,}|[\u4e00-\u9fff]{2,}/gu) || [])
     .filter(token => !QUERY_STOP_WORDS.has(token)))]
     .slice(0, 16)
 }
@@ -94,12 +94,12 @@ export function scoreContextMap(nodes: readonly CodeMapNode[], objective: string
     .join('\n')
   const matchedTokens = tokens.filter(token => searchable.includes(token)).length
   const rootSignal = Math.min(1, nodes.filter(node => node.kind === 'symbol' && node.path).length / 4)
-  const relationshipSignal = flattened.length > 0 ? Math.min(1, relationships / flattened.length) : 0
+  const relationshipSignal = flattened.length > 1 ? Math.min(1, relationships / (flattened.length - 1)) : 0
   const pathSignal = Math.min(1, paths / 6)
   const lexicalSignal = tokens.length > 0 ? Math.min(1, matchedTokens / Math.min(tokens.length, 4)) : 0
-  const confidence = Math.min(0.99, 0.35
+  const confidence = Math.min(0.99, 0.2
     + rootSignal * 0.12
-    + relationshipSignal * 0.15
+    + relationshipSignal * 0.3
     + pathSignal * 0.08
     + lexicalSignal * 0.25)
   return {
@@ -150,7 +150,7 @@ export async function buildContextMapsPrimer(params: {
       maxPaths: Math.max(1, Math.min(10, params.maxPaths ?? 8)),
       preferGraph: true,
       graphOnly: true,
-      waitForGraphMs: params.waitForGraphMs ?? 1_800,
+      waitForGraphMs: params.waitForGraphMs ?? 0,
     }) as {
       success: boolean
       data?: { map?: CodeMapNode[] | CodeMapNode; source?: string }
@@ -162,7 +162,7 @@ export async function buildContextMapsPrimer(params: {
       return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
     }
     const assessment = scoreContextMap(nodes, graphQuery)
-    if (assessment.confidence < 0.55) {
+    if (assessment.confidence < 0.55 || (assessment.relationships === 0 && assessment.paths < 2)) {
       return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
     }
     const elapsedMs = Date.now() - startedAt
