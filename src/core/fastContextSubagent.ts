@@ -144,6 +144,21 @@ function toScanHit(hit: SubAgentEvidence, workerId?: string): FastContextScanHit
   }
 }
 
+function distinctEvidenceRanges(evidence: SubAgentEvidence[]): SubAgentEvidence[] {
+  const selected: SubAgentEvidence[] = []
+  for (const item of evidence) {
+    const duplicateIndex = selected.findIndex(current => current.path.toLowerCase() === item.path.toLowerCase()
+      && current.startLine <= item.endLine
+      && item.startLine <= current.endLine)
+    if (duplicateIndex < 0) {
+      selected.push(item)
+    } else if ((item.score ?? 0) > (selected[duplicateIndex].score ?? 0)) {
+      selected[duplicateIndex] = item
+    }
+  }
+  return selected
+}
+
 export function __testBuildEvidencePack(
   objective: string,
   candidates: Map<string, FastContextScanHit[]>,
@@ -645,10 +660,10 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   }
   const planned = planner.ok
     ? await executeFastContextQueryPlan({
-        workspacePath: params.workspacePath,
-        toolExecutor: params.toolExecutor,
-        plan: planner.plan,
-        excludePaths: primer.seedEvidence.map(item => item.path),
+      workspacePath: params.workspacePath,
+      toolExecutor: params.toolExecutor,
+      plan: planner.plan,
+      coveredEvidence: primer.seedEvidence,
       })
     : emptyPlannedEvidence
   telemetry.toolCalls += planned.calls
@@ -677,7 +692,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         workspacePath: params.workspacePath,
         toolExecutor: params.toolExecutor,
         plan: feedbackPlan.plan,
-        excludePaths: [...primer.seedEvidence, ...planned.seedEvidence].map(item => item.path),
+        coveredEvidence: [...primer.seedEvidence, ...planned.seedEvidence],
       })
       telemetry.toolCalls += feedback.calls
       telemetry.readCalls += feedback.readCalls
@@ -747,8 +762,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'context-maps', reason: 'graph hypothesis read and confirmed' })
   }
   if (primer.text) emit({ type: 'insight', text: `exact primer found ${primer.text.split('\n').length - 1} starting point(s)`, tone: 'info' })
-  const initialEvidence = [...primer.seedEvidence, ...semanticEvidence, ...contextMapEvidence]
-    .filter((item, index, all) => all.findIndex(other => other.path.toLowerCase() === item.path.toLowerCase()) === index)
+  const initialEvidence = distinctEvidenceRanges([...primer.seedEvidence, ...semanticEvidence, ...contextMapEvidence])
   const commonOptions = {
     objective: params.objective,
     workspacePath: params.workspacePath,

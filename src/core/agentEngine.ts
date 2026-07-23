@@ -292,6 +292,21 @@ interface FastContextBackgroundStart {
   taskId?: string
 }
 
+interface PendingFastContextPack {
+  content: string
+  objective: string
+  generation: number
+  sourceUserTurnId: string | null
+}
+
+export function isFastContextPackCurrent(
+  pack: Pick<PendingFastContextPack, 'generation' | 'sourceUserTurnId'>,
+  generation: number,
+  currentUserTurnId: string | null,
+): boolean {
+  return pack.generation === generation && pack.sourceUserTurnId === currentUserTurnId
+}
+
 export class AgentEngine {
   private session: AgentSession
   private taskManager: TaskManager
@@ -311,7 +326,7 @@ export class AgentEngine {
   private filePreimages: Map<string, string | null> = new Map()
   private runtimeAppendSystemPrompt: string | null = null
   private fastContextObjective: string | null = null
-  private fastContextPack: string | null = null
+  private fastContextPack: PendingFastContextPack | null = null
   private fastContextRunPromise: Promise<FastContextScanResult | null> | null = null
   private fastContextRunObjective: string | null = null
   private fastContextAbortController: AbortController | null = null
@@ -523,6 +538,7 @@ export class AgentEngine {
     this.fastContextAbortController = controller
 
     const generation = ++this.fastContextGeneration
+    const sourceUserTurnId = [...this.session.turns].reverse().find(turn => turn.role === 'user')?.id || null
     const started = this.subAgentTaskManager.startTask<FastContextScanResult | null>({
       kind: 'fast_context',
       agentType: 'fast_context',
@@ -536,6 +552,7 @@ export class AgentEngine {
         signal,
         injectPack: true,
         generation,
+        sourceUserTurnId,
         agentId: taskId,
         recordEvent: event => recordEvent(event),
       }),
@@ -2082,6 +2099,7 @@ Before retrying:
     signal?: AbortSignal
     injectPack: boolean
     generation?: number
+    sourceUserTurnId?: string | null
     agentId?: string
     recordEvent?: (event: FastContextScanEvent) => void
   }): Promise<FastContextScanResult | null> {
@@ -2129,11 +2147,19 @@ Before retrying:
         },
         modelCapabilities: fastContextConfig?.modelCapabilities,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
+        codemap: this.codemapSummary || undefined,
         abortSignal: options.signal,
         onEvent,
       })
       if (options.injectPack && !options.signal?.aborted && isCurrent()) {
-        this.fastContextPack = result.filesScanned > 0 && result.hits.length > 0 ? result.evidencePack : null
+        this.fastContextPack = result.filesScanned > 0 && result.hits.length > 0
+          ? {
+              content: result.evidencePack,
+              objective,
+              generation: options.generation ?? this.fastContextGeneration,
+              sourceUserTurnId: options.sourceUserTurnId ?? null,
+            }
+          : null
       }
       emitIfCurrent({ type: 'fast_context:complete', result })
       emitIfCurrent({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: true, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
@@ -2190,7 +2216,16 @@ Before retrying:
     // Long-conversation persona drift reminder — empty string when below threshold.
     const voiceReminderContext: string | null = null
     const strategyContext = this.turnStrategyPlanner.buildStrategyContext(turnStrategy)
-    const fastContextPackForTurn = this.fastContextPack
+    const currentUserTurnId = [...this.session.turns].reverse().find(turn => turn.role === 'user')?.id || null
+    const pendingFastContextPack = this.fastContextPack
+    const fastContextPackForTurn = pendingFastContextPack
+      && isFastContextPackCurrent(pendingFastContextPack, this.fastContextGeneration, currentUserTurnId)
+      ? pendingFastContextPack
+      : null
+    if (pendingFastContextPack && !fastContextPackForTurn) {
+      this.fastContextPack = null
+      if (this.fastContextObjective === pendingFastContextPack.objective) this.fastContextObjective = null
+    }
     const dynamicRuntimeContext = [
       this.config.workspacePath
         ? this.wrapRuntimeContextSection('current_workspace', [
@@ -2202,22 +2237,13 @@ Before retrying:
         : null,
       this.config.appendSystemPrompt,
       strategyContext,
-      fastContextPackForTurn,
+      fastContextPackForTurn?.content,
       this.runtimeAppendSystemPrompt,
       voiceReminderContext,
       this.cachedGitStatus ? this.wrapRuntimeContextSection('git_status', this.cachedGitStatus) : null,
       !skipHeavyContext && this.workspaceMemoryText ? this.wrapRuntimeContextSection('workspace_memory', this.workspaceMemoryText) : null,
       !skipHeavyContext && this.codemapSummary ? this.wrapRuntimeContextSection('codebase_map', this.codemapSummary) : null,
     ].filter(Boolean).join('\n\n') || undefined
-
-    // FastContext pack is only useful for the FIRST model call in a run —
-    // after that the model has already seen the evidence and subsequent turns
-    // should rely on the conversation history instead. Keeping it in every
-    // turn wastes tokens proportional to pack size × number of turns.
-    if (fastContextPackForTurn && this.fastContextPack === fastContextPackForTurn) {
-      this.fastContextPack = null
-      this.fastContextObjective = null
-    }
 
     const systemPrompt = buildSystemPrompt(this.config.mode, {
       workspacePath: this.config.workspacePath,
@@ -2264,6 +2290,10 @@ Before retrying:
             turn = await this.callOpenAICompatibleAPI(activeConfig, activeModel, messagesFor('openai'), startTime, turnStrategy)
           }
           this.emit({ type: 'model:protocol', phase: 'success', protocol, url })
+          if (fastContextPackForTurn && this.fastContextPack === fastContextPackForTurn) {
+            this.fastContextPack = null
+            if (this.fastContextObjective === fastContextPackForTurn.objective) this.fastContextObjective = null
+          }
           return turn
         } catch (error) {
           if ((error as { aborted?: boolean })?.aborted === true || this.abortController?.signal.aborted) {

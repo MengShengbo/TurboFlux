@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, isFastContextPackCurrent, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -39,6 +39,16 @@ describe('appendRuntimeContextToLatestUserMessage', () => {
       { type: 'text', text: 'continue' },
       { type: 'text', text: '<runtime_context>internal</runtime_context>' },
     ])
+  })
+})
+
+describe('FastContext pack lifecycle', () => {
+  it('accepts a pack only for the user turn and generation that produced it', () => {
+    const pack = { generation: 7, sourceUserTurnId: 'user-2' }
+
+    expect(isFastContextPackCurrent(pack, 7, 'user-2')).toBe(true)
+    expect(isFastContextPackCurrent(pack, 8, 'user-2')).toBe(false)
+    expect(isFastContextPackCurrent(pack, 7, 'user-3')).toBe(false)
   })
 })
 

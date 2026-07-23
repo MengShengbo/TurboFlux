@@ -33,6 +33,12 @@ describe('FastContext semantic planner', () => {
     expect(parsed?.semanticQueries).toHaveLength(8)
   })
 
+  it('ignores unrelated JSON objects around the planner payload', () => {
+    const parsed = parseFastContextQueryPlan(`metadata: {"request":"ok"}\nplan: ${JSON.stringify(plan)}\nend`)
+
+    expect(parsed).toMatchObject({ taskShape: 'indirect-owner', symbols: ['MockObject'] })
+  })
+
   it('runs the planner as a one-shot model task without exposing tools', async () => {
     const originalFetch = globalThis.fetch
     let requestBody: Record<string, any> | undefined
@@ -114,6 +120,31 @@ describe('FastContext semantic planner', () => {
     expect(result.calls).toBeGreaterThan(result.readCalls)
   })
 
+  it('uses model-proposed editable extensions in content search and reads', async () => {
+    let filePattern = ''
+    const executor = {
+      searchContentPage: vi.fn(async (_pattern: string, _path: string, pattern: string) => {
+        filePattern = pattern
+        return { success: true, data: { hits: [{ file: 'C:/repo/policy/main.rego', line: 12, text: 'allow {' }] } }
+      }),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async () => ({
+        success: true,
+        data: { content: 'allow {}', startLine: 1, endLine: 20, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: { ...plan, editableExtensions: ['rego'] },
+    })
+
+    expect(filePattern).toContain('rego')
+    expect(result.seedEvidence).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'policy/main.rego' })]))
+  })
+
   it('preserves exact symbol searches alongside a full semantic-query lane', async () => {
     const searchedPatterns: string[] = []
     const searchedGlobs: string[] = []
@@ -160,7 +191,7 @@ describe('FastContext semantic planner', () => {
     expect(executor.readFileRange).toHaveBeenCalledWith('pylint/lint/pylinter.py', expect.any(Number), 220, 96_000)
   })
 
-  it('does not reread paths already covered by the exact scout', async () => {
+  it('does not reread a range already covered by the exact scout', async () => {
     const executor = {
       searchContentPage: vi.fn(async () => ({
         success: true,
@@ -175,10 +206,48 @@ describe('FastContext semantic planner', () => {
       workspacePath: 'C:/repo',
       toolExecutor: executor,
       plan,
-      excludePaths: ['sphinx/ext/autodoc/mock.py'],
+      coveredEvidence: [{
+        path: 'sphinx/ext/autodoc/mock.py',
+        startLine: 1,
+        endLine: 80,
+        preview: 'covered',
+        reason: 'file read',
+      }],
     })
 
     expect(result.seedEvidence).toHaveLength(0)
     expect(executor.readFileRange).not.toHaveBeenCalled()
+  })
+
+  it('rereads a different range in a path covered by the exact scout', async () => {
+    const executor = {
+      searchContentPage: vi.fn(async () => ({
+        success: true,
+        data: { hits: [{ file: 'C:/repo/src/large.ts', line: 900, text: 'function trueOwner() {' }] },
+      })),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async (_path: string, offset: number) => ({
+        success: true,
+        data: { content: 'function trueOwner() {}', startLine: offset + 1, endLine: offset + 20, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan,
+      coveredEvidence: [{
+        path: 'src/large.ts',
+        startLine: 1,
+        endLine: 220,
+        preview: 'header',
+        reason: 'file read',
+      }],
+    })
+
+    expect(result.seedEvidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'src/large.ts', startLine: 840 }),
+    ]))
   })
 })

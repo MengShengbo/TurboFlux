@@ -9,6 +9,47 @@ function delay(ms: number): Promise<void> {
 }
 
 describe('runSubAgent', () => {
+  it('honors a definition-level disabled thinking policy', async () => {
+    const originalFetch = globalThis.fetch
+    let requestBody: Record<string, unknown> | undefined
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'planner',
+          label: 'Planner',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'plan',
+          maxTurns: 1,
+          maxParallel: 1,
+          thinking: 'disabled',
+        },
+        objective: 'locate owner',
+        workspacePath: 'C:/repo',
+        toolExecutor: {} as ToolExecutor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        provider: 'openai',
+        model: 'gpt-5.6',
+        reasoning: { enabled: true, effort: 'high' },
+        allowedTools: [],
+      })
+
+      expect(result).toMatchObject({ ok: true, finalText: 'done' })
+      expect(requestBody?.reasoning).toBeUndefined()
+      expect(requestBody?.reasoning_effort).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('reports model wait progress and enforces a caller-specific timeout', async () => {
     const originalFetch = globalThis.fetch
     const events: SubAgentEvent[] = []

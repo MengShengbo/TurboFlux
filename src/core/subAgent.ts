@@ -980,6 +980,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let resolvedProtocol: ModelProtocol | null = null
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
   let turnLimit = definition.maxTurns
+  const effectiveReasoning: NativeReasoningConfig | undefined = definition.thinking === 'disabled'
+    ? { enabled: false, effort: 'none' }
+    : definition.thinking === 'high' || definition.thinking === 'max'
+      ? { ...reasoning, enabled: true, effort: definition.thinking }
+      : reasoning
 
   const addEvidence = (evidence: SubAgentEvidence): void => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
@@ -1054,17 +1059,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                 max_tokens: definition.maxOutputTokens || 4096,
                 stream: false,
               }
-        const reasoningRequest = resolveNativeReasoningRequest(modelId, reasoning, provider, modelCapabilities)
+        const reasoningRequest = resolveNativeReasoningRequest(modelId, effectiveReasoning, provider, modelCapabilities)
         const reasoningEffort = reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort
         if (protocol === 'anthropic_messages') {
           if (reasoningRequest?.thinking) requestBody.thinking = reasoningRequest.thinking
           if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
         } else if (protocol === 'openai_responses') {
-          if (reasoningEffort) requestBody.reasoning = { effort: reasoningEffort }
+          if (reasoningEffort && reasoningEffort !== 'none') requestBody.reasoning = { effort: reasoningEffort }
           requestBody.parallel_tool_calls = true
         } else {
           if (reasoningRequest?.thinking) requestBody.thinking = reasoningRequest.thinking
-          if (reasoningRequest?.reasoningEffort) requestBody.reasoning_effort = reasoningRequest.reasoningEffort
+          if (reasoningRequest?.reasoningEffort && reasoningRequest.reasoningEffort !== 'none') requestBody.reasoning_effort = reasoningRequest.reasoningEffort
           if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
           requestBody.parallel_tool_calls = true
         }
