@@ -18,6 +18,13 @@ import {
   buildFastContextRetrievalPrimer,
 } from './fastContextRetrieval'
 import { buildContextMapsPrimer } from './contextMaps'
+import {
+  buildFastContextFeedbackContext,
+  executeFastContextQueryPlan,
+  mergeFastContextQueryPlans,
+  planFastContextQueries,
+  type FastContextPlannedEvidence,
+} from './fastContextPlanner'
 
 const FAST_CONTEXT_DEFINITION: SubAgentDefinition = {
   id: 'fast_context',
@@ -105,6 +112,19 @@ interface RunParams {
 }
 
 export const __testRetrievalPrimerQueries = buildFastContextPrimerQueries
+
+export function __testShouldRequestSemanticFeedback(params: {
+  exactEvidenceCount: number
+  plannedEvidenceCount: number
+  plannedConfidence: number
+  needsFeedback: boolean
+}): boolean {
+  const firstPassEvidenceCount = params.exactEvidenceCount + params.plannedEvidenceCount
+  if (firstPassEvidenceCount === 0) return true
+  return firstPassEvidenceCount === 1
+    && params.needsFeedback
+    && params.plannedConfidence < 0.45
+}
 
 function trimText(value: string, max = 220): string {
   const flat = value.replace(/\s+/g, ' ').trim()
@@ -505,7 +525,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     insight: `building issue map (${def.driver})`,
   })
 
-  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank' | 'judge' | 'recovery') => {
+  const createSubEventHandler = (branch: 'primary' | 'coverage' | 'rerank' | 'judge' | 'recovery' | 'owner-planner' | 'frontier-planner' | 'feedback') => {
     let currentTurn = 0
     return (event: SubAgentEvent): void => {
       if (event.type === 'turn_start') {
@@ -582,8 +602,95 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
 
   emit({ type: 'insight', text: 'starting parallel model-directed retrieval', tone: 'info' })
   emit({ type: 'context_maps', state: 'warming' })
-  const primer = await buildFastContextRetrievalPrimer(params)
-  const contextMaps = primer.confidence < 0.7
+  const [initialPrimer, ownerPlanner, frontierPlanner] = await Promise.all([
+    buildFastContextRetrievalPrimer({ ...params, budget: 'lean' }),
+    planFastContextQueries(
+      { ...params, onEvent: createSubEventHandler('owner-planner') },
+      undefined,
+      'causal-owner',
+    ),
+    planFastContextQueries(
+      { ...params, onEvent: createSubEventHandler('frontier-planner') },
+      undefined,
+      'frontier',
+    ),
+  ])
+  const planner = ownerPlanner.ok && frontierPlanner.ok
+    ? { ...ownerPlanner, plan: mergeFastContextQueryPlans(ownerPlanner.plan, frontierPlanner.plan), elapsedMs: Math.max(ownerPlanner.elapsedMs, frontierPlanner.elapsedMs) }
+    : ownerPlanner.ok
+      ? ownerPlanner
+      : frontierPlanner
+  const primer = planner.ok
+    ? initialPrimer
+    : await buildFastContextRetrievalPrimer({ ...params, budget: 'full' })
+  if (planner.ok) {
+    const plannerViews = ownerPlanner.ok && frontierPlanner.ok
+      ? 'owner + frontier'
+      : ownerPlanner.ok ? 'owner only' : 'frontier only'
+    emit({
+      type: 'insight',
+      text: `semantic plan (${plannerViews}): ${planner.plan.taskShape}, confidence ${planner.plan.confidence.toFixed(2)}, ${planner.plan.semanticQueries.length + planner.plan.symbols.length} query anchor(s)`,
+      tone: 'success',
+    })
+  } else {
+    const errors = [ownerPlanner.error, frontierPlanner.error].filter(Boolean).join('; ')
+    emit({ type: 'insight', text: `semantic planners unavailable; exact scout will only seed the main model: ${trimText(errors || 'invalid plans', 120)}`, tone: 'warning' })
+  }
+  const emptyPlannedEvidence: FastContextPlannedEvidence = {
+    calls: 0,
+    readCalls: 0,
+    candidatePaths: [],
+    seedEvidence: [],
+    confidence: 0,
+  }
+  const planned = planner.ok
+    ? await executeFastContextQueryPlan({
+        workspacePath: params.workspacePath,
+        toolExecutor: params.toolExecutor,
+        plan: planner.plan,
+        excludePaths: primer.seedEvidence.map(item => item.path),
+      })
+    : emptyPlannedEvidence
+  telemetry.toolCalls += planned.calls
+  telemetry.readCalls += planned.readCalls
+  telemetry.searchCalls += planned.calls - planned.readCalls
+  const feedbackNeeded = planner.ok && __testShouldRequestSemanticFeedback({
+    exactEvidenceCount: primer.seedEvidence.length,
+    plannedEvidenceCount: planned.seedEvidence.length,
+    plannedConfidence: planned.confidence,
+    needsFeedback: planner.plan.needsFeedback,
+  })
+  let feedback = emptyPlannedEvidence
+  if (feedbackNeeded) {
+    emit({ type: 'insight', text: `retrieval confidence ${planned.confidence.toFixed(2)}; requesting one semantic delta plan`, tone: 'warning' })
+    const feedbackPlan = await planFastContextQueries(
+      { ...params, onEvent: createSubEventHandler('feedback') },
+      buildFastContextFeedbackContext({
+        plan: planner.plan,
+        localPaths: primer.candidatePaths,
+        planned,
+      }),
+      'feedback',
+    )
+    if (feedbackPlan.ok) {
+      feedback = await executeFastContextQueryPlan({
+        workspacePath: params.workspacePath,
+        toolExecutor: params.toolExecutor,
+        plan: feedbackPlan.plan,
+        excludePaths: [...primer.seedEvidence, ...planned.seedEvidence].map(item => item.path),
+      })
+      telemetry.toolCalls += feedback.calls
+      telemetry.readCalls += feedback.readCalls
+      telemetry.searchCalls += feedback.calls - feedback.readCalls
+      emit({ type: 'insight', text: `semantic feedback added ${feedback.seedEvidence.length} read-confirmed candidate(s)`, tone: 'success' })
+    } else {
+      emit({ type: 'insight', text: `semantic feedback unavailable: ${trimText(feedbackPlan.error || 'invalid plan', 120)}`, tone: 'warning' })
+    }
+  }
+  const retrievalConfidence = Math.max(primer.confidence, planned.confidence, feedback.confidence)
+  const firstPassEvidenceCount = new Set([...primer.seedEvidence, ...planned.seedEvidence]
+    .map(item => item.path.toLowerCase())).size
+  const contextMaps = retrievalConfidence < 0.62 && firstPassEvidenceCount < 2
     ? await buildContextMapsPrimer({
       workspacePath: params.workspacePath,
       objective: params.objective,
@@ -606,23 +713,26 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   } else {
     emit({ type: 'context_maps', state: 'off', elapsedMs: contextMaps.elapsedMs })
   }
-  const contextMapEvidence = await readContextMapEvidence(contextMaps, primer.seedEvidence, params)
+  const semanticEvidence = [...planned.seedEvidence, ...feedback.seedEvidence]
+  const contextMapEvidence = await readContextMapEvidence(contextMaps, [...primer.seedEvidence, ...semanticEvidence], params)
   telemetry.toolCalls += contextMapEvidence.length
   telemetry.readCalls += contextMapEvidence.length
   telemetry.toolCalls += primer.calls
   telemetry.readCalls += primer.readCalls
   telemetry.searchCalls += primer.calls - primer.readCalls
-  for (const evidence of primer.seedEvidence) {
+  for (const evidence of [...primer.seedEvidence, ...semanticEvidence]) {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
     if (seenHitKeys.has(key)) continue
     seenHitKeys.add(key)
-    const scanHit = toScanHit(evidence, 'primer')
+    const semantic = semanticEvidence.includes(evidence)
+    const workerId = semantic ? 'semantic-planner' : 'primer'
+    const scanHit = toScanHit(evidence, workerId)
     const list = candidates.get(scanHit.path) || []
     list.push(scanHit)
     candidates.set(scanHit.path, list)
     allHits.push(scanHit)
     emit({ type: 'hit', hit: scanHit })
-    emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'primer', reason: 'multi-route source seed' })
+    emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId, reason: semantic ? 'model-planned source seed' : 'exact source seed' })
   }
   for (const evidence of contextMapEvidence) {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
@@ -637,7 +747,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     emit({ type: 'file', path: scanHit.path, status: 'absorbed', workerId: 'context-maps', reason: 'graph hypothesis read and confirmed' })
   }
   if (primer.text) emit({ type: 'insight', text: `exact primer found ${primer.text.split('\n').length - 1} starting point(s)`, tone: 'info' })
-  const initialEvidence = [...primer.seedEvidence, ...contextMapEvidence]
+  const initialEvidence = [...primer.seedEvidence, ...semanticEvidence, ...contextMapEvidence]
     .filter((item, index, all) => all.findIndex(other => other.path.toLowerCase() === item.path.toLowerCase()) === index)
   const commonOptions = {
     objective: params.objective,
@@ -655,7 +765,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     maxTransientAttempts: 3,
     requireGroundedReport: true,
-    retrievalContext: [contextMaps.primer?.text, primer.text].filter(Boolean).join('\n\n') || undefined,
+    retrievalContext: [planned.text, feedback.text, primer.text, contextMaps.primer?.text].filter(Boolean).join('\n\n').slice(0, 64_000) || undefined,
     initialEvidence,
     submissionOnly: true,
   } as const

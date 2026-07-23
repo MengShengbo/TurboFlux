@@ -11,10 +11,38 @@ import {
   __testApplyResponsibilityRanking,
   __testEnsureFeatureFrontierCandidates,
   __testSelectFrontierAuditPaths,
+  __testShouldRequestSemanticFeedback,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
 describe('FastContext retrieval', () => {
+  it('requests serial semantic feedback only when first-pass evidence is scarce', () => {
+    expect(__testShouldRequestSemanticFeedback({
+      exactEvidenceCount: 0,
+      plannedEvidenceCount: 0,
+      plannedConfidence: 0.8,
+      needsFeedback: false,
+    })).toBe(true)
+    expect(__testShouldRequestSemanticFeedback({
+      exactEvidenceCount: 0,
+      plannedEvidenceCount: 1,
+      plannedConfidence: 0.4,
+      needsFeedback: true,
+    })).toBe(true)
+    expect(__testShouldRequestSemanticFeedback({
+      exactEvidenceCount: 1,
+      plannedEvidenceCount: 1,
+      plannedConfidence: 0.3,
+      needsFeedback: true,
+    })).toBe(false)
+    expect(__testShouldRequestSemanticFeedback({
+      exactEvidenceCount: 0,
+      plannedEvidenceCount: 1,
+      plannedConfidence: 0.7,
+      needsFeedback: true,
+    })).toBe(false)
+  })
+
   it('starts with the model instead of eagerly scanning the workspace', async () => {
     const executor = {
       searchFiles: vi.fn(),

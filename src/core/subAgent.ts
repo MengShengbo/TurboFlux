@@ -294,6 +294,8 @@ export interface RunSubAgentOptions {
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
   submissionOnly?: boolean
+  userPrompt?: string
+  allowedTools?: string[]
   requiredAuditPaths?: string[]
   requiredCandidatePaths?: string[]
   requireGroundedReport?: boolean
@@ -813,7 +815,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const retrievalContext = options.retrievalContext?.trim()
   messages.push({
     role: 'user',
-    content: [
+    content: options.userPrompt || [
       `Objective: ${objective}`,
       retrievalContext ? `\nCaller-supplied retrieval context (starting points, not proof):\n${retrievalContext}` : '',
       '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Rank the probable direct edit target first; represent supporting architecture through grounded relationships.',
@@ -957,6 +959,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       },
     })
   }
+  const allowedToolNames = options.allowedTools ? new Set(options.allowedTools) : undefined
+  const availableTools = allowedToolNames
+    ? tools.filter(tool => allowedToolNames.has(tool.function.name))
+    : tools
 
   const modelId = model?.trim()
   if (!modelId) {
@@ -1014,7 +1020,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = compactToolHistory(messages, collectedEvidence, finalizationOnly)
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
-        const requestTools = finalizationOnly ? tools.filter(tool => tool.function.name === 'submit_code_map') : tools
+        const requestTools = finalizationOnly
+          ? availableTools.filter(tool => tool.function.name === 'submit_code_map')
+          : availableTools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
               model: modelId,
@@ -1059,6 +1067,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           if (reasoningRequest?.reasoningEffort) requestBody.reasoning_effort = reasoningRequest.reasoningEffort
           if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
           requestBody.parallel_tool_calls = true
+        }
+        if (requestTools.length === 0) {
+          delete requestBody.tools
+          delete requestBody.tool_choice
+          delete requestBody.parallel_tool_calls
         }
         if (reasoningRequest?.omitTemperature) delete requestBody.temperature
         const headers: Record<string, string> = createTurboFluxRequestHeaders(protocol === 'anthropic_messages'
@@ -1442,7 +1455,8 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       const contextAfter = Math.max(0, Math.min(12, Math.floor(Number(args.context_after) || 0)))
       const usingPagedSearch = typeof executor.searchContentPage === 'function'
       const retrievalLimit = Math.min(200, headLimit * 4)
-      const res = usingPagedSearch
+      let effectivePattern = pattern
+      let res = usingPagedSearch
         ? await executor.searchContentPage!(pattern, basePath, filePattern, caseInsensitive, {
             offset,
             limit: retrievalLimit,
@@ -1452,6 +1466,19 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
             fileType: typeof args.file_type === 'string' ? args.file_type : undefined,
           })
         : await executor.searchContent(pattern, basePath, filePattern, caseInsensitive)
+      if (!res.success && /regex parse error|invalid regular expression|unclosed (?:group|class)|unterminated/i.test(res.error || '')) {
+        effectivePattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        res = usingPagedSearch
+          ? await executor.searchContentPage!(effectivePattern, basePath, filePattern, caseInsensitive, {
+              offset,
+              limit: retrievalLimit,
+              contextBefore,
+              contextAfter,
+              multiline: false,
+              fileType: typeof args.file_type === 'string' ? args.file_type : undefined,
+            })
+          : await executor.searchContent(effectivePattern, basePath, filePattern, caseInsensitive)
+      }
       if (!res.success) {
         const error = res.error || 'unknown search error'
         return { ok: false, output: `Search failed: ${error}`, summary: `grep "${pattern}" failed: ${error}`, evidence }
@@ -1474,7 +1501,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
           startLine: Math.max(1, hit.line - 2),
           endLine: hit.line + 2,
           preview: hit.text,
-          reason: `grep: ${pattern}`,
+          reason: `grep: ${effectivePattern}`,
         })
       }
       if (page.truncated) lines.push(`[More matches available. Continue with offset=${offset + pageHits.length}.]`)

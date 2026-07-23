@@ -39,6 +39,7 @@ const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|py|rb|rs|go|java|kt|kts|swift|cs|cpp|cc|c
 const SOURCE_FILE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,pyi,rs,go,java,kt,kts,cs,c,cc,cpp,cxx,h,hpp,swift,scala,rb,php,vue,svelte}'
 
 function unique(values: string[], limit: number): string[] {
+  if (limit <= 0) return []
   const seen = new Set<string>()
   const result: string[] = []
   for (const value of values) {
@@ -397,9 +398,11 @@ export async function buildFastContextRetrievalPrimer(params: {
   workspacePath: string
   objective: string
   toolExecutor: ToolExecutor
+  budget?: 'lean' | 'full'
 }): Promise<FastContextRetrievalPrimer> {
+  const lean = params.budget === 'lean'
   const queries = buildFastContextPrimerQueries(params.objective)
-  const selectedContentPatterns = __testSelectPrimerContentPatterns(queries)
+  const selectedContentPatterns = __testSelectPrimerContentPatterns(queries).slice(0, lean ? 2 : 10)
   const explicitPathPatterns = new Set(queries.pathHints
     .flatMap(path => [`**/${path}`, `**/${path.split('/').slice(-2).join('/')}`])
     .map(pattern => pattern.toLowerCase()))
@@ -412,7 +415,7 @@ export async function buildFastContextRetrievalPrimer(params: {
     return result.success ? normalizeContentHits(params.workspacePath, pattern, hits, 16, weight) : []
   })
   const filenameTasks: Array<() => Promise<PrimerHit[]>> = [
-    ...queries.filePatterns.slice(0, 18).map(pattern => async () => {
+    ...queries.filePatterns.slice(0, lean ? 3 : 18).map(pattern => async () => {
       const result = await params.toolExecutor.searchFiles(pattern, params.workspacePath)
       return result.success ? (result.data?.matches || []).slice(0, 8).map(path => {
         const workspaceRelative = relativePath(params.workspacePath, path)
@@ -450,7 +453,7 @@ export async function buildFastContextRetrievalPrimer(params: {
     ...[...directoryScores.entries()]
     .sort((left, right) => right[1] - left[1] || left[0].length - right[0].length)
       .map(([directory]) => directory),
-  ], 6)
+  ], lean ? 0 : 6)
   const familyTasks = familyDirectories.map(directory => async () => {
     const result = await params.toolExecutor.searchFiles(`${directory}/**/*`, params.workspacePath)
     const matches = result.success ? result.data?.matches || [] : []
@@ -498,7 +501,7 @@ export async function buildFastContextRetrievalPrimer(params: {
         || right.sources.size - left.sources.size
         || left.path.localeCompare(right.path)
     })
-  const coreSeedPaths = rankedSeedPaths.slice(0, 8)
+  const coreSeedPaths = rankedSeedPaths.slice(0, lean ? 3 : 8)
   const coreKeys = new Set(coreSeedPaths.map(item => item.path.toLowerCase()))
   const coreDirectories = new Set(rankedSeedPaths.slice(0, 12).flatMap(item => parentDirectories(item.path)).map(value => value.toLowerCase()))
   const frontierFilenamePaths = candidatePaths
@@ -549,7 +552,7 @@ export async function buildFastContextRetrievalPrimer(params: {
         lines: [],
       }))
       .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
-      .slice(0, 6)
+      .slice(0, lean ? 1 : 6)
     : []
   const frontierKeys = new Set(frontierSeedPaths.map(item => item.path.toLowerCase()))
   const featureKeys = new Set(featureFrontierPaths.map(item => item.path.toLowerCase()))
@@ -561,7 +564,7 @@ export async function buildFastContextRetrievalPrimer(params: {
       && !frontierKeys.has(item.path.toLowerCase())
       && !featureKeys.has(item.path.toLowerCase())),
   ].filter((item, index, all) => all.findIndex(other => other.path.toLowerCase() === item.path.toLowerCase()) === index)
-    .slice(0, featureRequest ? 14 : 10)
+    .slice(0, lean ? 3 : featureRequest ? 14 : 10)
   const seedResults = await Promise.allSettled(seedPaths.map(async item => {
     const anchor = item.lines.length > 0 ? Math.min(...item.lines) : 1
     const offset = Math.max(0, anchor - 61)
@@ -595,7 +598,7 @@ export async function buildFastContextRetrievalPrimer(params: {
   const headerProbePaths = seedPaths
     .filter(item => /\.(?:py|pyi|[cm]?[jt]sx?)$/i.test(item.path))
     .filter(item => Math.min(...item.lines, 97) > 96)
-    .slice(0, 4)
+    .slice(0, lean ? 0 : 4)
   const headerResults = await Promise.allSettled(headerProbePaths.map(async item => {
     if (!params.toolExecutor.readFileRange) return undefined
     const result = await params.toolExecutor.readFileRange(item.path, 0, 96, 48_000)
@@ -613,7 +616,7 @@ export async function buildFastContextRetrievalPrimer(params: {
   const responsibilityRoots = [...new Set(directSeedEvidence
     .map(item => item.path.replace(/\\/g, '/').split('/')[0])
     .filter(Boolean))].slice(0, 2)
-  const responsibilityPatterns = responsibilityTerms(params.objective)
+  const responsibilityPatterns = (lean ? [] : responsibilityTerms(params.objective))
     .flatMap(term => responsibilityRoots.map(root => `${root}/**/*${term}*.*`))
   const responsibilitySearchResults = await runLimited(responsibilityPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)))
   const knownSeedPaths = new Set([...directSeedEvidence, ...headerEvidence].map(item => item.path.toLowerCase()))
@@ -657,7 +660,9 @@ export async function buildFastContextRetrievalPrimer(params: {
   })()))
   const responsibilityEvidence = responsibilityReadResults.flatMap(result => result.status === 'fulfilled' && result.value ? [result.value] : [])
   candidatePaths.push(...responsibilityEvidence.map(item => item.path).filter(path => !candidatePaths.some(candidate => candidate.toLowerCase() === path.toLowerCase())))
-  const importPatterns = firstPartyImportPatterns([...directSeedEvidence, ...headerEvidence, ...responsibilityEvidence], candidatePaths, params.objective)
+  const importPatterns = lean
+    ? []
+    : firstPartyImportPatterns([...directSeedEvidence, ...headerEvidence, ...responsibilityEvidence], candidatePaths, params.objective)
   const importSearchResults = await runLimited(importPatterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)))
   const rankedImportPaths = unique(importSearchResults.flatMap(result => result.status === 'fulfilled' && result.value.success
     ? result.value.data?.matches || []
