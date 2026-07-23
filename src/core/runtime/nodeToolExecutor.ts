@@ -616,6 +616,9 @@ export class NodeToolExecutor implements ToolExecutor {
         if (query.preferGraph === false) throw new Error('Graph map not requested')
         if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
         const graph = await CodeGraphService.load()
+        if (query.graphOnly && !graph.isInitialized(basePath)) {
+          return { success: true, data: { map: [], source: 'unavailable' } }
+        }
         if ((query.waitForGraphMs || 0) > 0) {
           await waitForPromise(graph.prepare(basePath), query.waitForGraphMs || 0)
         }

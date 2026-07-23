@@ -13,6 +13,7 @@ export interface FastContextPrimerQueries {
 
 export interface FastContextRetrievalPrimer {
   text?: string
+  confidence: number
   calls: number
   readCalls: number
   candidatePaths: string[]
@@ -84,9 +85,13 @@ function regexPhrase(value: string): string {
 export function __testSelectPrimerContentPatterns(queries: Pick<FastContextPrimerQueries, 'structuralSignals' | 'behavioralSignals'>): string[] {
   const structuralPatterns = unique(queries.structuralSignals.slice(0, 8).map(regexPhrase), 8)
   const behavioralPatterns = unique(queries.behavioralSignals.map(regexPhrase), 4)
-  return unique(Array.from({ length: Math.max(structuralPatterns.length, behavioralPatterns.length) })
-    .flatMap((_, index) => [structuralPatterns[index], behavioralPatterns[index]])
-    .filter((pattern): pattern is string => Boolean(pattern)), 10)
+  return unique([
+    ...structuralPatterns.slice(0, 2),
+    ...Array.from({ length: 4 })
+      .flatMap((_, index) => [behavioralPatterns[index], structuralPatterns[index + 2]])
+      .filter((pattern): pattern is string => Boolean(pattern)),
+    ...structuralPatterns.slice(6),
+  ], 10)
 }
 
 function relativePath(workspacePath: string, filePath: string): string {
@@ -297,7 +302,13 @@ export function buildFastContextPrimerQueries(objective: string): FastContextPri
   const callAndAnnotationSymbols = [...focusedObjective.matchAll(/(?:@|\b)([A-Za-z_$][\w$]{2,})(?=\s*\()/g)]
     .map(match => match[1])
     .concat([...focusedObjective.matchAll(/@([A-Za-z_$][\w$]{2,})/g)].map(match => match[1]))
+  const titleSymbols = [
+    ...[...title.matchAll(/(?:@|\b)([A-Za-z_$][\w$]{2,})(?=\s*\()/g)].map(match => match[1]),
+    ...(title.match(/\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g) || [])
+      .filter(token => /[a-z][A-Z]|_|[A-Z].*[A-Z]/.test(token)),
+  ]
   const rawSymbols = [
+    ...titleSymbols,
     ...callAndAnnotationSymbols,
     ...(focusedObjective.match(/\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g) || [])
       .filter(token => /[a-z][A-Z]|_|[A-Z].*[A-Z]/.test(token)),
@@ -308,8 +319,18 @@ export function buildFastContextPrimerQueries(objective: string): FastContextPri
     .map(path => path.replace(/\\/g, '/').replace(/^\/+/, ''))
     .map(path => path.includes('site-packages/') ? path.slice(path.indexOf('site-packages/') + 'site-packages/'.length) : path), 12)
   const words = titleWords(objective)
+  const titleRoles = unique(title.toLowerCase().match(/\b(?:functions?|parsers?|serializers?|deserializers?|validators?|handlers?|adapters?|providers?|renderers?|compilers?|resolvers?|dispatchers?|widgets?|registries?)\b/g) || [], 3)
+  const roleFilePatterns = titleRoles.flatMap(role => [...words]
+    .reverse()
+    .slice(0, 6)
+    .flatMap(word => {
+      const flexibleWord = `[${word[0]?.toLowerCase() || ''}${word[0]?.toUpperCase() || ''}]${word.slice(1)}`
+      const flexibleRole = `[${role[0]?.toLowerCase() || ''}${role[0]?.toUpperCase() || ''}]${role.slice(1)}`
+      return [`**/*${flexibleWord}*${flexibleRole}*.*`]
+    }))
   const filePatterns = unique([
     ...pathHints.flatMap(path => [`**/${path}`, `**/${path.split('/').slice(-2).join('/')}`]),
+    ...roleFilePatterns,
     ...words.slice(0, -1).flatMap((word, index) => {
       const next = words[index + 1]
       const camel = `${word}${next[0]?.toUpperCase() || ''}${next.slice(1)}`
@@ -396,11 +417,12 @@ export async function buildFastContextRetrievalPrimer(params: {
       return result.success ? (result.data?.matches || []).slice(0, 8).map(path => {
         const workspaceRelative = relativePath(params.workspacePath, path)
         const explicit = explicitPathPatterns.has(pattern.toLowerCase())
+        const semanticRolePattern = /unction|arser|erializ|alidat|andler|dapter|rovider|enderer|ompiler|esolver|ispatch|idget|egistr/i.test(pattern)
         return {
           path: workspaceRelative,
-          line: `${explicit ? 'resolved-path' : 'filename'}[${pattern}] ${workspaceRelative}`,
-          source: explicit ? 'explicit' as const : 'filename' as const,
-          weight: explicit ? 4 : 1,
+          line: `${explicit ? 'resolved-path' : semanticRolePattern ? 'role-filename' : 'filename'}[${pattern}] ${workspaceRelative}`,
+          source: explicit ? 'explicit' as const : semanticRolePattern ? 'symbol' as const : 'filename' as const,
+          weight: explicit || semanticRolePattern ? 4 : 1,
         }
       }) : []
     }),
@@ -411,7 +433,7 @@ export async function buildFastContextRetrievalPrimer(params: {
   const initialHits = [
     ...initialSettled.flatMap(result => result.status === 'fulfilled' ? result.value : []),
   ]
-  if (initialHits.length === 0) return { calls: initialSearchCalls, readCalls: 0, candidatePaths: [], seedEvidence: [], queries }
+  if (initialHits.length === 0) return { confidence: 0, calls: initialSearchCalls, readCalls: 0, candidatePaths: [], seedEvidence: [], queries }
   const directoryScores = new Map<string, number>()
   for (const hit of initialHits) {
     const weight = (hit.source === 'explicit' ? 8 : hit.source === 'content' ? 3 : hit.source === 'symbol' ? 2 : 1) * (hit.weight || 1)
@@ -468,9 +490,9 @@ export async function buildFastContextRetrievalPrimer(params: {
     pathSignals.set(key, current)
   }
   const rankedSeedPaths = [...pathSignals.values()]
-    .filter(item => item.sources.has('explicit') || item.sources.has('content') || item.sources.size >= 2)
+    .filter(item => item.sources.has('explicit') || item.sources.has('content') || item.sources.size >= 2 || item.score >= 8)
     .sort((left, right) => {
-      const sourceRank = (item: typeof left) => item.sources.has('explicit') ? 3 : item.sources.has('content') ? 2 : item.sources.has('symbol') ? 1 : 0
+      const sourceRank = (item: typeof left) => item.sources.has('explicit') ? 4 : item.sources.has('symbol') ? 3 : item.sources.has('content') ? 2 : 0
       return sourceRank(right) - sourceRank(left)
         || right.score - left.score
         || right.sources.size - left.sources.size
@@ -508,12 +530,38 @@ export async function buildFastContextRetrievalPrimer(params: {
     .sort((left, right) => right.score - left.score || right.item.score - left.item.score || left.item.path.localeCompare(right.item.path))[0]?.item
   const frontierSeedPaths = [contentFrontier, mirroredImplementation, roleFrontier]
     .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  const featureRequest = /\b(?:add|feature|implement|proposal|support)\b/i.test(params.objective.slice(0, 800))
+  const featureDirectories = new Set(coreSeedPaths.slice(0, 5)
+    .flatMap(item => parentDirectories(item.path))
+    .map(directory => directory.toLowerCase()))
+  const featureFrontierPaths = featureRequest
+    ? candidatePaths
+      .filter(path => SOURCE_FILE.test(path))
+      .filter(path => !coreKeys.has(path.toLowerCase()))
+      .filter(path => !/(?:^|\/)(?:docs?|documentation|test|tests|__tests__|examples?|benchmarks?)(?:\/|$)|(?:\.test|\.spec)\.[^/]+$/i.test(path))
+      .filter(path => responsibilityName.test(path.slice(path.lastIndexOf('/') + 1)))
+      .filter(path => parentDirectories(path).some(directory => featureDirectories.has(directory.toLowerCase())))
+      .map(path => ({
+        path,
+        score: semanticPathScore(path, params.objective)
+          + Math.max(...coreSeedPaths.slice(0, 5).map(item => commonPathPrefix(path, item.path))),
+        sources: new Set<PrimerHit['source']>(['filename']),
+        lines: [],
+      }))
+      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+      .slice(0, 6)
+    : []
   const frontierKeys = new Set(frontierSeedPaths.map(item => item.path.toLowerCase()))
+  const featureKeys = new Set(featureFrontierPaths.map(item => item.path.toLowerCase()))
   const seedPaths = [
     ...coreSeedPaths,
+    ...featureFrontierPaths.filter(item => !coreKeys.has(item.path.toLowerCase())),
     ...frontierSeedPaths,
-    ...rankedSeedPaths.filter(item => !coreKeys.has(item.path.toLowerCase()) && !frontierKeys.has(item.path.toLowerCase())),
-  ].slice(0, 10)
+    ...rankedSeedPaths.filter(item => !coreKeys.has(item.path.toLowerCase())
+      && !frontierKeys.has(item.path.toLowerCase())
+      && !featureKeys.has(item.path.toLowerCase())),
+  ].filter((item, index, all) => all.findIndex(other => other.path.toLowerCase() === item.path.toLowerCase()) === index)
+    .slice(0, featureRequest ? 14 : 10)
   const seedResults = await Promise.allSettled(seedPaths.map(async item => {
     const anchor = item.lines.length > 0 ? Math.min(...item.lines) : 1
     const offset = Math.max(0, anchor - 61)
@@ -650,6 +698,16 @@ export async function buildFastContextRetrievalPrimer(params: {
     .slice(0, 22)
   candidatePaths.push(...importEvidence.map(item => item.path).filter(path => !candidatePaths.some(candidate => candidate.toLowerCase() === path.toLowerCase())))
   const seedLines = seedEvidence.map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(item.content || item.preview).slice(0, 1_400)}`)
+  const strongestSeed = seedPaths[0]
+  const confidence = strongestSeed?.sources.has('explicit') || strongestSeed?.sources.has('symbol')
+    ? 0.9
+    : strongestSeed?.sources.has('content') && (featureFrontierPaths.length >= 2 || strongestSeed.score >= 40)
+      ? 0.8
+      : strongestSeed?.sources.has('content')
+        ? 0.7
+        : seedEvidence.length >= 4
+          ? 0.55
+          : 0.3
   const sections = [
     queries.structuralSignals.length > 0 ? `Structural query signals:\n${queries.structuralSignals.map(value => `- ${value}`).join('\n')}` : '',
     queries.behavioralSignals.length > 0 ? `Behavioral query signals:\n${queries.behavioralSignals.map(value => `- ${value}`).join('\n')}` : '',
@@ -658,6 +716,7 @@ export async function buildFastContextRetrievalPrimer(params: {
     seedLines.length > 0 ? `High-confidence read-confirmed source seeds:\n${seedLines.join('\n---\n')}` : '',
   ].filter(Boolean)
   return {
+    confidence,
     calls: initialSearchCalls + familyTasks.length + seedPaths.length + headerProbePaths.length + responsibilityPatterns.length + responsibilityPaths.length + importPatterns.length + importPaths.length,
     readCalls: seedPaths.length + headerProbePaths.length + responsibilityPaths.length + importPaths.length,
     candidatePaths,

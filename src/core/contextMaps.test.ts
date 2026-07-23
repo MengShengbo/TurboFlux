@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ToolExecutor } from '../tools/executor'
-import { buildContextMapsPrimer, scoreContextMap } from './contextMaps'
+import { buildContextMapsPrimer, compactContextMapQuery, scoreContextMap } from './contextMaps'
 
 const graphMap = [{
   id: 'run',
@@ -27,6 +27,15 @@ const graphMap = [{
 }]
 
 describe('ContextMaps', () => {
+  it('keeps graph queries bounded to title entities', () => {
+    const query = compactContextMapQuery(`BooleanOutputParser expected output error
+${'long reproduction log '.repeat(200)}`)
+
+    expect(query).toContain('BooleanOutputParser')
+    expect(query).not.toContain('reproduction')
+    expect(query.split(' ').length).toBeLessThanOrEqual(12)
+  })
+
   it('scores symbol anchors and call relationships without repository-specific rules', () => {
     const score = scoreContextMap(graphMap, 'trace runWorkflow into loadWorkspace')
 

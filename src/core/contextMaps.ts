@@ -63,6 +63,13 @@ function objectiveTokens(objective: string): string[] {
     .slice(0, 16)
 }
 
+export function compactContextMapQuery(objective: string): string {
+  const title = objective.split(/\r?\n/, 1)[0]
+  const titleTokens = objectiveTokens(title)
+  const exactIdentifiers = title.match(/\b[A-Za-z_][A-Za-z0-9_]{3,}\b/g) || []
+  return [...new Set([...exactIdentifiers, ...titleTokens])].slice(0, 12).join(' ')
+}
+
 export function scoreContextMap(nodes: readonly CodeMapNode[], objective: string): {
   confidence: number
   nodes: number
@@ -121,9 +128,10 @@ export async function buildContextMapsPrimer(params: {
     return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
   }
   try {
+    const graphQuery = compactContextMapQuery(params.objective)
     const response = await params.toolExecutor.getCodeMap({
       workspacePath: params.workspacePath,
-      query: params.objective,
+      query: graphQuery,
       depth: 1,
       maxPaths: 6,
       preferGraph: true,
@@ -138,7 +146,7 @@ export async function buildContextMapsPrimer(params: {
     if (!response.success || response.data?.source !== 'graph' || nodes.length === 0) {
       return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
     }
-    const assessment = scoreContextMap(nodes, params.objective)
+    const assessment = scoreContextMap(nodes, graphQuery)
     if (assessment.confidence < 0.55) {
       return { status: 'unavailable', elapsedMs: Date.now() - startedAt }
     }

@@ -134,6 +134,14 @@ describe('FastContext retrieval', () => {
     expect(queries.contentPatterns).toContain('cursor[\\s_.-]*group')
   })
 
+  it('prioritizes title entities and case-flexible architecture-role filenames', () => {
+    const queries = __testRetrievalPrimerQueries('Add the starts_with function to determine whether a string starts with a pattern\nposition(path) = 1')
+
+    expect(queries.symbols.slice(0, 2)).toEqual(['startsWith', 'starts_with'])
+    expect(queries.filePatterns).toContain('**/*[sS]tring*[fF]unction*.*')
+    expect(__testSelectPrimerContentPatterns(queries).slice(0, 2)).toEqual(['startsWith', 'starts_with'])
+  })
+
   it('separates structural configuration anchors from behavioral phrases', () => {
     const queries = __testRetrievalPrimerQueries('`--recursive=y` ignores `ignore-paths`\nExpected generated files to be skipped')
 

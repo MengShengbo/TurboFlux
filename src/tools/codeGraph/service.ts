@@ -162,6 +162,10 @@ export class CodeGraphService {
     await this.startInitialization(resolve(workspacePath))
   }
 
+  isInitialized(workspacePath: string): boolean {
+    return this.CodeGraphClass.isInitialized(resolve(workspacePath))
+  }
+
   async getCodeMap(params: {
     workspacePath: string
     query?: string

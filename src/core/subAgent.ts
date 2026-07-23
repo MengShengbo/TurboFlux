@@ -293,6 +293,7 @@ export interface RunSubAgentOptions {
   maxTransientAttempts?: number
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
+  submissionOnly?: boolean
   requiredAuditPaths?: string[]
   requiredCandidatePaths?: string[]
   requireGroundedReport?: boolean
@@ -1007,7 +1008,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
         const url = buildModelProtocolUrl(baseUrl, protocol)
-        const finalizationOnly = strictFastContext && turn === turnLimit && hasModelReadEvidence()
+        const finalizationOnly = strictFastContext
+          && hasModelReadEvidence()
+          && (options.submissionOnly === true || turn === turnLimit)
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = compactToolHistory(messages, collectedEvidence, finalizationOnly)
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>

@@ -68,12 +68,12 @@ const FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION: SubAgentDefinition = {
   label: 'FastContext Evidence Judge',
   description: 'Bounded listwise judgment over locally retrieved, read-confirmed evidence',
   driver: 'main-model',
-  maxTurns: 2,
+  maxTurns: 1,
   maxParallel: 6,
   maxOutputTokens: 4096,
   systemPrompt: `You are the final evidence judge for FastContext. A deterministic retrieval stage has already searched the repository, expanded likely implementation families, and read the strongest source candidates. You receive its complete bounded candidate field and read-confirmed excerpts.
 
-Perform one listwise decision. If the strongest likely owner or a required frontier edge is present only as an unread candidate or graph hypothesis, use at most one narrow parallel tool round to search or read those specific gaps. Otherwise call submit_code_map immediately. After that optional tool round, submit on the next turn. Rank by direct edit necessity rather than lexical similarity. Use a counterfactual edit test: the behavior owner is the file whose implementation must change for the requested semantics to become correct. Rank wrappers, tests, documentation, schemas, generic configuration, and downstream output consumers below the operation that interprets or mutates behavior.
+Perform one closed-list listwise decision and call submit_code_map immediately. Retrieval tools are intentionally unavailable in this stage. Rank by direct edit necessity rather than lexical similarity. Use a counterfactual edit test: the behavior owner is the file whose implementation must change for the requested semantics to become correct. Rank wrappers, tests, documentation, schemas, generic configuration, and downstream output consumers below the operation that interprets or mutates behavior.
 
 Preserve a compact coordinated frontier. When a bug crosses a public API or orchestration stage into a compiler, parser, serializer, validator, adapter, or renderer, retain every read-confirmed behavior-bearing stage that can require a coordinated edit; do not collapse the map to only the deepest owner. Evidence labeled semantic responsibility probe is deliberately targeted: compare it directly with the primary owner and keep it when it implements the named transformation or output stage. Conversely, never pad the top ten with unrelated writers, builders, callers, or sibling domains merely because they consume the resulting data.
 
@@ -582,14 +582,14 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
 
   emit({ type: 'insight', text: 'starting parallel model-directed retrieval', tone: 'info' })
   emit({ type: 'context_maps', state: 'warming' })
-  const [primer, contextMaps] = await Promise.all([
-    buildFastContextRetrievalPrimer(params),
-    buildContextMapsPrimer({
+  const primer = await buildFastContextRetrievalPrimer(params)
+  const contextMaps = primer.confidence < 0.7
+    ? await buildContextMapsPrimer({
       workspacePath: params.workspacePath,
       objective: params.objective,
       toolExecutor: params.toolExecutor,
-    }),
-  ])
+    })
+    : { status: 'unavailable' as const, elapsedMs: 0 }
   if (contextMaps.status === 'on' && contextMaps.primer) {
     emit({
       type: 'context_maps',
@@ -657,6 +657,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requireGroundedReport: true,
     retrievalContext: [contextMaps.primer?.text, primer.text].filter(Boolean).join('\n\n') || undefined,
     initialEvidence,
+    submissionOnly: true,
   } as const
   emit({ type: 'insight', text: 'running single-pass evidence judgment', tone: 'info' })
   let result = initialEvidence.length > 0
