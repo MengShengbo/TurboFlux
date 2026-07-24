@@ -1,0 +1,112 @@
+{
+  "metadata": {
+    "schemaVersion": 1,
+    "experimentId": "2026-07-24-gpt-5.5-no-reasoning-formal",
+    "createdAt": "2026-07-24T06:46:03.701Z",
+    "gitCommit": "d1d2c64334ead3f03232c343fc1ab5794bc6955e",
+    "model": "gpt-5.5",
+    "reasoning": "disabled",
+    "endpointHost": "api.aibinghe.xyz",
+    "manifestPath": "benchmark-results/2026-07-24-cc-vs-tf-unseen-hard-5-v2/manifest.json",
+    "manifestSha256": "08d57c4fd9bbba1fc41b567b4b09fc0a16d0dc949f21daf1f7217346245cb70c",
+    "systems": [
+      "fastcontext",
+      "claude-code-readonly"
+    ],
+    "caseIds": [
+      "psf__requests-2931",
+      "yt-dlp__yt-dlp-10390",
+      "mui__material-ui-36353",
+      "sphinx-doc__sphinx-8721",
+      "pydata__xarray-4695"
+    ],
+    "repeats": 1,
+    "concurrency": 5,
+    "timeoutMs": 300000,
+    "seed": 20260722,
+    "cliVersions": {
+      "claudeCode": "2.1.177 (Claude Code)",
+      "openCode": "1.17.18"
+    },
+    "notes": [
+      "All LLM systems use the active TurboFlux endpoint and gpt-5.5.",
+      "Native reasoning is disabled; protocol differences are recorded per run.",
+      "Adaptive case-level concurrency starts at 4 and may rise to 5; FastContext uses one closed listwise model judgment and the API request ceiling is 5. Systems within one case remain sequential and rotated.",
+      "Transient failures are retried up to 3 time(s) per run invocation.",
+      "Formal repeated experiment.",
+      "Selection starts at the first balanced case."
+    ]
+  },
+  "completed": 10,
+  "expected": 10,
+  "summary": {
+    "fastcontext": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 5,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "map": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "ndcgAt10": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "fullCoverageAt10": 1,
+      "latencyP50Ms": 86939.98019999999,
+      "latencyP95Ms": 111346.21960000001,
+      "averageToolCalls": 57.6,
+      "averageInputTokens": 18854.8,
+      "averageOutputTokens": 3948,
+      "totalCostUsd": 0
+    },
+    "claude-code-readonly": {
+      "cases": 5,
+      "runs": 5,
+      "successes": 5,
+      "successRate": 1,
+      "timeoutRate": 0,
+      "recallAt10": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "mrr": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "map": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "ndcgAt10": {
+        "mean": 1,
+        "low": 1,
+        "high": 1
+      },
+      "fullCoverageAt10": 1,
+      "latencyP50Ms": 63397.01799999998,
+      "latencyP95Ms": 149693.8014,
+      "averageToolCalls": 8.8,
+      "averageInputTokens": 44018.8,
+      "averageOutputTokens": 1441.2,
+      "totalCostUsd": 0
+    }
+  }
+}
