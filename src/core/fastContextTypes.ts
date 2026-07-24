@@ -13,7 +13,7 @@ export interface FastContextTuning {
 }
 
 export const FAST_CONTEXT_TUNING: Readonly<FastContextTuning> = {
-  maxTurns: 6,
+  maxTurns: 8,
   maxParallel: 8,
   taskTimeoutMs: 600_000,
   reasoningEffort: 'high',

@@ -176,7 +176,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       return
     }
     if (event.type === 'tool_call') {
-      if (event.tool === 'request_more_search') return
       telemetry.toolCalls += 1
       if (event.tool === 'read_file') telemetry.readCalls += 1
       else if (event.tool !== 'submit_code_map') telemetry.searchCalls += 1
@@ -221,13 +220,12 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     maxTransientAttempts: 3,
     requireGroundedReport: true,
-    adaptiveSubmissionTurn: 3,
     maxCandidates: 10,
-    allowedTools: ['search_content', 'search_files', 'trace_symbol', 'read_file', 'submit_code_map', 'request_more_search'],
+    allowedTools: ['search_content', 'search_files', 'trace_symbol', 'read_file', 'submit_code_map'],
     userPrompt: [
       `Objective: ${params.objective}`,
       '',
-      'Run FastContext now. Take the three-turn fast path when possible; otherwise use the bounded rescue turns to return a complete read-grounded edit frontier.',
+      'Run FastContext as an adaptive model-led retrieval loop. Use the fewest evidence waves that fully close the edit frontier: finish simple tasks immediately after grounding the owner, and continue complex tasks while a concrete unresolved hypothesis can change the edit set.',
     ].join('\n'),
     onEvent: onSubAgentEvent,
   })
