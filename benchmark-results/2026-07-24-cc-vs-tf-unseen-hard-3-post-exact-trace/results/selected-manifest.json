@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-24T08:22:06.536Z",
+  "seed": 20260725,
+  "sources": [
+    {
+      "id": "swebench-verified",
+      "url": "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified",
+      "requested": 100,
+      "selected": 50
+    },
+    {
+      "id": "swepolybench-verified",
+      "url": "https://huggingface.co/datasets/AmazonScience/SWE-PolyBench_Verified",
+      "requested": 100,
+      "selected": 50
+    }
+  ],
+  "cases": [
+    {
+      "id": "serverless__serverless-4192",
+      "dataset": "swepolybench-verified",
+      "repository": "serverless/serverless",
+      "baseCommit": "a43ffcb4de11f56637b3e85683d78ea5d53d0c4d",
+      "language": "JavaScript",
+      "category": "Feature",
+      "createdAt": "2017-09-01 10:26:23+00:00",
+      "objective": "UX Improvement: Make deploy function easier\nCan't tell you how many times I type  `sls deploy -f functionName` and forget the word function... and then have to wait for the whole stack to update.\r\n\r\nCan we alias `sls deploy -f functionName` to `sls deploy function -f functionName` as a quick UX win?\r\n\r\nSo if a user types `sls deploy -f lolCatz` it will only deply the `lolCatz` function?",
+      "goldPaths": [
+        "docs/providers/aws/cli-reference/deploy.md",
+        "docs/providers/azure/cli-reference/deploy.md",
+        "docs/providers/kubeless/cli-reference/deploy.md",
+        "docs/providers/openwhisk/cli-reference/deploy.md",
+        "lib/classes/PluginManager.js",
+        "lib/plugins/deploy/deploy.js"
+      ],
+      "sourceGoldPaths": [
+        "lib/classes/PluginManager.js",
+        "lib/plugins/deploy/deploy.js"
+      ],
+      "testGoldPaths": [],
+      "changedLines": 62,
+      "leakageRisk": false,
+      "metadata": {
+        "pullNumber": 4192,
+        "modifiedNodes": "[\"lib/plugins/deploy/deploy.js->program->class_declaration:Deploy->method_definition:constructor->pair:[]\", \"lib/classes/PluginManager.js->program->class_declaration:TerminateHookChain->method_definition:constructor\", \"lib/classes/PluginManager.js->program->class_declaration:PluginManager->method_definition:spawn\", \"lib/classes/PluginManager.js->program->class_declaration:PluginManager->method_definition:invoke\", \"lib/plugins/deploy/deploy.js->program->class_declaration:Deploy->method_definition:constructor\", \"lib/classes/PluginManager.js->program->class_declaration:TerminateHookChain\"]",
+        "nodeCount": 6
+      }
+    },
+    {
+      "id": "pylint-dev__pylint-4551",
+      "dataset": "swebench-verified",
+      "repository": "pylint-dev/pylint",
+      "baseCommit": "99589b08de8c5a2c6cc61e13a37420a868c80599",
+      "language": "Python",
+      "category": "issue-resolution",
+      "createdAt": "2021-06-07T15:14:31Z",
+      "objective": "Use Python type hints for UML generation\nIt seems that pyreverse does not read python type hints (as defined by [PEP 484](https://www.python.org/dev/peps/pep-0484/)), and this does not help when you use `None` as a default value :\r\n\r\n### Code example\r\n```\r\nclass C(object):\r\n    def __init__(self, a: str = None):\r\n        self.a = a\r\n```\r\n\r\n### Current behavior\r\n\r\nOutput of pyreverse :\r\n\r\n![classes_test](https://user-images.githubusercontent.com/22218701/27432305-f10fe03e-574f-11e7-81fa-e2b59e493360.png)\r\n\r\n### Expected behavior\r\n\r\nI would like to see something like : `a : String` in the output.\r\n\r\n### pylint --version output\r\npylint-script.py 1.6.5,\r\nastroid 1.4.9\r\nPython 3.6.0 |Anaconda custom (64-bit)| (default, Dec 23 2016, 11:57:41) [MSC v.1900 64 bit (AMD64)]",
+      "goldPaths": [
+        "pylint/pyreverse/diagrams.py",
+        "pylint/pyreverse/inspector.py",
+        "pylint/pyreverse/utils.py",
+        "pylint/pyreverse/writer.py"
+      ],
+      "sourceGoldPaths": [
+        "pylint/pyreverse/diagrams.py",
+        "pylint/pyreverse/inspector.py",
+        "pylint/pyreverse/utils.py",
+        "pylint/pyreverse/writer.py"
+      ],
+      "testGoldPaths": [],
+      "changedLines": 126,
+      "leakageRisk": false,
+      "metadata": {}
+    },
+    {
+      "id": "sveltejs__svelte-6564",
+      "dataset": "swepolybench-verified",
+      "repository": "sveltejs/svelte",
+      "baseCommit": "63f592e7133bbb5730ceb61ca8184854fed52edb",
+      "language": "JavaScript",
+      "category": "Feature",
+      "createdAt": "2021-07-24 03:17:12+00:00",
+      "objective": "feature request: `{#await promise then}`\n<!--\r\nIf you'd like to propose an implementation for a large new feature or change then please create an RFC:\r\nhttps://github.com/sveltejs/rfcs\r\n-->\r\n\r\n**Is your feature request related to a problem? Please describe.**\r\nIf you have a promise whose resolve value you don't care about, you can currently do:\r\n\r\n```\r\n{#await promise}\r\n  loading...\r\n{:then}\r\n  resolved\r\n{/await}\r\n```\r\n\r\nbut with the shorthand you can't do:\r\n\r\n```\r\n{#await promise then}\r\n  resolved\r\n{/await}\r\n```\r\n\r\nWhen you don't need to show a loading state, there is no way to omit the variable for the promise's resolve value. This is a fairly common situation, and it would be good to handle it.\r\n\r\n**Describe the solution you'd like**\r\nSupport the above syntax where the variable is omitted.\r\n\r\n**Describe alternatives you've considered**\r\nYou can work around this by including a variable that you don't use:\r\n\r\n```\r\n{#await promise then done}\r\n  resolved\r\n{/await}\r\n```\r\n\r\nBut this is awkward style and may also cause issues with linters.\r\n\r\n**How important is this feature to you?**\r\nModerate. It's not a show-stopper because there's a workaround, but it also seems like something Svelte should support, and it shouldn't be very difficult.",
+      "goldPaths": [
+        "src/compiler/parse/state/mustache.ts"
+      ],
+      "sourceGoldPaths": [
+        "src/compiler/parse/state/mustache.ts"
+      ],
+      "testGoldPaths": [],
+      "changedLines": 20,
+      "leakageRisk": false,
+      "metadata": {
+        "pullNumber": 6564,
+        "modifiedNodes": "[\"src/compiler/parse/state/mustache.ts->program->function_declaration:mustache\"]",
+        "nodeCount": 1
+      }
+    }
+  ],
+  "selection": {
+    "mode": "hard-random",
+    "sourceManifest": "C:\\Users\\Administrator\\Desktop\\TurboFlux-legacy-backup-20260612-045013\\benchmark-data\\retrieval-paper-v1\\splits\\holdout-test-manifest.json",
+    "excludedHistoricalCases": 122,
+    "leakageRiskExcluded": true
+  }
+}
