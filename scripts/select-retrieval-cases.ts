@@ -97,7 +97,8 @@ const mode = requestedMode === 'hard' || requestedMode === 'hard-random' ? reque
 const includedIds = new Set((option('--include') || '').split(',').map(value => value.trim()).filter(Boolean))
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as RetrievalManifest
 const used = process.argv.includes('--exclude-results') ? collectUsedCaseIds(resolve('benchmark-results')) : new Set<string>()
-const eligible = manifest.cases.filter(item => !item.leakageRisk && (!used.has(item.id) || includedIds.has(item.id)))
+const allowLeakage = process.argv.includes('--allow-leakage')
+const eligible = manifest.cases.filter(item => (allowLeakage || !item.leakageRisk) && (!used.has(item.id) || includedIds.has(item.id)))
 const selected = includedIds.size > 0
   ? [...includedIds].flatMap(id => eligible.find(item => item.id === id) || [])
   : mode === 'random'
@@ -126,7 +127,7 @@ writeFileSync(outputPath, JSON.stringify({
     mode,
     sourceManifest: manifestPath,
     excludedHistoricalCases: used.size,
-    leakageRiskExcluded: true,
+    leakageRiskExcluded: !allowLeakage,
   },
   cases: selected,
 }, null, 2))
