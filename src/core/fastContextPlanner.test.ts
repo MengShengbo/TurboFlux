@@ -425,6 +425,96 @@ describe('FastContext semantic planner', () => {
     expect(result.frontierCoverage).toBe(1)
   })
 
+  it('counts primer evidence as frontier coverage without reading the same range twice', async () => {
+    const readFileRange = vi.fn()
+    const executor = {
+      searchContentPage: vi.fn(async () => ({
+        success: true,
+        data: { hits: [{ file: 'C:/repo/src/runtime/owner.ts', line: 20, text: 'applyBoundaryState()' }] },
+      })),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange,
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      coveredEvidence: [{
+        path: 'src/runtime/owner.ts',
+        startLine: 1,
+        endLine: 40,
+        preview: 'applyBoundaryState()',
+        reason: 'file read',
+      }],
+      plan: {
+        ...plan,
+        taskShape: 'cross-boundary',
+        symbols: [],
+        semanticQueries: [],
+        filenameGlobs: [],
+        frontierSearches: [{
+          role: 'runtime boundary',
+          query: 'applyBoundaryState',
+          symbols: [],
+          filenameGlobs: [],
+          subsystemHints: ['src/runtime'],
+        }],
+      },
+    })
+
+    expect(result.frontierCovered).toBe(1)
+    expect(result.frontierCoverage).toBe(1)
+    expect(result.readCalls).toBe(0)
+    expect(readFileRange).not.toHaveBeenCalled()
+  })
+
+  it('falls back from a frontier phrase to its strongest exact symbol', async () => {
+    const searchContentPage = vi.fn(async (pattern: string) => ({
+      success: true,
+      data: {
+        hits: pattern.includes('applyBoundaryState')
+          ? [{ file: 'C:/repo/src/runtime/owner.ts', line: 20, text: 'applyBoundaryState()' }]
+          : [],
+      },
+    }))
+    const executor = {
+      searchContentPage,
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async () => ({
+        success: true,
+        data: { content: 'applyBoundaryState()', startLine: 1, endLine: 40, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'cross-boundary',
+        symbols: ['applyBoundaryState'],
+        semanticQueries: [],
+        filenameGlobs: [],
+        frontierSearches: [{
+          role: 'runtime boundary',
+          query: 'unmatched semantic phrase',
+          symbols: ['applyBoundaryState'],
+          filenameGlobs: [],
+          subsystemHints: ['src/runtime'],
+        }],
+      },
+    })
+
+    expect(searchContentPage).toHaveBeenCalledTimes(2)
+    expect(result.frontierCovered).toBe(1)
+    expect(result.frontierCoverage).toBe(1)
+    expect(result.seedEvidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'src/runtime/owner.ts' }),
+    ]))
+  })
+
   it('caps broad repository census reads after combining all candidate lanes', async () => {
     const executor = {
       searchContentPage: vi.fn(async () => ({

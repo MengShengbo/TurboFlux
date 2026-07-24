@@ -52,5 +52,14 @@ export interface FastContextScanResult {
     toolCalls: number
     searchCalls: number
     readCalls: number
+    stageDurationsMs?: {
+      planner: number
+      primer: number
+      plannedRetrieval: number
+      dependencyExpansion: number
+      contextMaps: number
+      judge: number
+      total: number
+    }
   }
 }

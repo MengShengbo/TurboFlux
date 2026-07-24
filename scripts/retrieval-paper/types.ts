@@ -67,6 +67,15 @@ export interface FastContextRunDiagnostics {
     nodes?: number
     elapsedMs?: number
   }
+  stageDurationsMs?: {
+    planner: number
+    primer: number
+    plannedRetrieval: number
+    dependencyExpansion: number
+    contextMaps: number
+    judge: number
+    total: number
+  }
   insights: string[]
 }
 

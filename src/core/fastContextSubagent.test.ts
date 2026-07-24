@@ -10,7 +10,10 @@ import {
   __testEnsureFeatureFrontierCandidates,
   __testSelectFrontierAuditPaths,
   __testShouldRequestSemanticFeedback,
+  __testShouldExpandDependencyFrontier,
   __testShouldAcceptSpeculativeJudge,
+  __testShouldAttemptBoundedJudge,
+  __testShouldAcceptBoundedJudge,
   __testShouldStartSpeculativeJudge,
   __testHasTaskSurfaceEvidence,
   __testIsActionableCensusPlanner,
@@ -127,6 +130,23 @@ describe('FastContext retrieval', () => {
       frontierExpected: 4,
       frontierCoverage: 0.75,
     })).toBe(false)
+  })
+
+  it('expands dependencies only for unresolved or genuinely broad frontiers', () => {
+    const base = {
+      taskShape: 'cross-boundary' as const,
+      plannedConfidence: 0.82,
+      plannedEvidenceCount: 8,
+      frontierExpected: 4,
+      frontierCoverage: 1,
+      needsFeedback: true,
+    }
+
+    expect(__testShouldExpandDependencyFrontier(base)).toBe(false)
+    expect(__testShouldExpandDependencyFrontier({ ...base, frontierCoverage: 0.5 })).toBe(true)
+    expect(__testShouldExpandDependencyFrontier({ ...base, taskShape: 'multi-frontier' })).toBe(true)
+    expect(__testShouldExpandDependencyFrontier({ ...base, taskShape: 'repository-census' })).toBe(false)
+    expect(__testShouldExpandDependencyFrontier({ ...base, plannedEvidenceCount: 0 })).toBe(false)
   })
 
   it('starts with the model instead of eagerly scanning the workspace', async () => {
@@ -286,6 +306,52 @@ describe('FastContext retrieval', () => {
       codeMap,
       readPaths: ['src/consumer.ts'],
     })).toBe(false)
+  })
+
+  it('lets the model close a bounded cross-boundary search only with grounded confidence', () => {
+    const codeMap = {
+      candidates: [{
+        path: 'src/owner.ts',
+        startLine: 10,
+        endLine: 30,
+        role: 'runtime owner',
+        editKind: 'owner' as const,
+        confidence: 'high' as const,
+        why: 'directly owns the behavior',
+      }],
+      relationships: [],
+      searchesTried: [],
+      uncertainty: ['none'],
+    }
+    const base = {
+      taskShape: 'cross-boundary' as const,
+      planConfidence: 0.82,
+      frontierCoverage: 0.25,
+      codeMap,
+      readPaths: ['src/owner.ts'],
+    }
+
+    expect(__testShouldAcceptBoundedJudge(base)).toBe(true)
+    expect(__testShouldAcceptBoundedJudge({ ...base, frontierCoverage: 0 })).toBe(false)
+    expect(__testShouldAcceptBoundedJudge({ ...base, taskShape: 'multi-frontier' })).toBe(false)
+    expect(__testShouldAcceptBoundedJudge({ ...base, readPaths: [] })).toBe(false)
+    expect(__testShouldAcceptBoundedJudge({
+      ...base,
+      codeMap: { ...codeMap, uncertainty: ['writer boundary remains unclear'] },
+    })).toBe(false)
+  })
+
+  it('does not charge a bounded probe when it cannot be accepted', () => {
+    const base = {
+      taskShape: 'cross-boundary' as const,
+      planConfidence: 0.82,
+      frontierCoverage: 0.25,
+    }
+
+    expect(__testShouldAttemptBoundedJudge(base)).toBe(true)
+    expect(__testShouldAttemptBoundedJudge({ ...base, frontierCoverage: 0 })).toBe(false)
+    expect(__testShouldAttemptBoundedJudge({ ...base, planConfidence: 0.6 })).toBe(false)
+    expect(__testShouldAttemptBoundedJudge({ ...base, taskShape: 'multi-frontier' })).toBe(false)
   })
 
   it('derives exact symbol and compact filename variants for the local primer', () => {

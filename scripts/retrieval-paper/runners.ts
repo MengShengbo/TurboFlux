@@ -60,6 +60,7 @@ interface FetchObservation {
   retries: number
   protocol: string
   usage: UsageMetrics
+  durationMs: number
 }
 
 const fetchObservationContext = new AsyncLocalStorage<FetchObservation>()
@@ -104,7 +105,7 @@ function protocolFromUrl(value: string): string {
 }
 
 async function observeFetch<T>(run: (observation: FetchObservation) => Promise<T>): Promise<{ value: T; observation: FetchObservation }> {
-  const observation: FetchObservation = { requests: 0, retries: 0, protocol: 'unknown', usage: emptyUsage() }
+  const observation: FetchObservation = { requests: 0, retries: 0, protocol: 'unknown', usage: emptyUsage(), durationMs: 0 }
   if (!fetchObserverInstalled) {
     const originalFetch = globalThis.fetch.bind(globalThis)
     globalThis.fetch = async (...args) => {
@@ -115,14 +116,19 @@ async function observeFetch<T>(run: (observation: FetchObservation) => Promise<T
         const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
         current.protocol = protocolFromUrl(url)
       }
-      const response = await originalFetch(...args)
-      if (current) {
-        try {
-          const payload = await response.clone().json() as Record<string, any>
-          addUsage(current.usage, payload.usage)
-        } catch {}
+      const requestStartedAt = performance.now()
+      try {
+        const response = await originalFetch(...args)
+        if (current) {
+          try {
+            const payload = await response.clone().json() as Record<string, any>
+            addUsage(current.usage, payload.usage)
+          } catch {}
+        }
+        return response
+      } finally {
+        if (current) current.durationMs += performance.now() - requestStartedAt
       }
-      return response
     }
     fetchObserverInstalled = true
   }
@@ -311,6 +317,7 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
       success: /authority:\s*llm_verified_code_map/i.test(report),
       timedOut: controller.signal.aborted,
       latencyMs: performance.now() - startedAt,
+      apiDurationMs: observation.durationMs,
       apiRequests: observation.requests,
       apiRetries: observation.retries,
       toolCalls: telemetry?.toolCalls || 0,
@@ -321,7 +328,10 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
       usage: observation.usage,
       protocol: observation.protocol,
       rawOutput: report,
-      fastContextDiagnostics: diagnostics(),
+      fastContextDiagnostics: {
+        ...diagnostics(),
+        stageDurationsMs: telemetry?.stageDurationsMs,
+      },
     }
   } catch (error) {
     const base = errorOutput(startedAt, error, observation)

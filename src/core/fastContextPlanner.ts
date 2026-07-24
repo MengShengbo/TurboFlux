@@ -348,7 +348,7 @@ async function runFastContextQueryPlanner(
   const abort = () => controller.abort()
   if (params.abortSignal?.aborted) controller.abort()
   else params.abortSignal?.addEventListener('abort', abort, { once: true })
-  const softTimeoutMs = Math.min(params.requestTimeoutMs ?? 35_000, 35_000)
+  const softTimeoutMs = Math.min(params.requestTimeoutMs ?? 45_000, 45_000)
   const timer = setTimeout(() => {
     timedOut = true
     controller.abort()
@@ -691,10 +691,10 @@ export async function executeFastContextQueryPlan(params: {
   const rawContentQueries = repositoryCensus && censusSearches.length > 0
     ? [...censusContractQueries, ...censusFallbackQueries]
     : [
+      ...frontierSearches.flatMap((frontier, queryIndex) => unique([frontier.query, ...frontier.symbols], 2)
+        .map(query => ({ query, queryIndex, source: 'frontier' as const, censusRole: undefined, mode: 'literal' as const, caseSensitive: false, multiline: false, fileGlob: undefined }))),
       ...semanticQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'semantic' as const, censusRole: undefined, mode: 'literal' as const, caseSensitive: false, multiline: false, fileGlob: undefined })),
       ...symbolQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'symbol' as const, censusRole: undefined, mode: 'literal' as const, caseSensitive: false, multiline: false, fileGlob: undefined })),
-      ...frontierSearches.flatMap((frontier, queryIndex) => unique([frontier.query, ...frontier.symbols], 1)
-        .map(query => ({ query, queryIndex, source: 'frontier' as const, censusRole: undefined, mode: 'literal' as const, caseSensitive: false, multiline: false, fileGlob: undefined }))),
     ]
   const contentQueries = rawContentQueries.filter((query, index, all) => all.findIndex(other => [
     other.mode,
@@ -838,21 +838,18 @@ export async function executeFastContextQueryPlan(params: {
       .map(hit => directoryBucket(hit.path))
     : [])
   const bestByPath = new Map<string, AggregatedHit>()
-  for (const originalHit of settledHits) {
-    const hit = repositoryCensus && censusViolationDirectories.has(directoryBucket(originalHit.path))
-      ? { ...originalHit, score: originalHit.score + (originalHit.censusRole === 'violation' ? 12 : 4) }
-      : originalHit
+  const coveredBestByPath = new Map<string, AggregatedHit>()
+  const addAggregatedHit = (target: Map<string, AggregatedHit>, hit: PlannedHit): void => {
     const key = hit.path.toLowerCase()
-    if (isCovered(hit)) continue
-    const current = bestByPath.get(key)
+    const current = target.get(key)
     const queryKey = `${hit.source}:${hit.queryIndex}`
     if (!current) {
-      bestByPath.set(key, {
+      target.set(key, {
         ...hit,
         sources: new Set([hit.source]),
         queryKeys: new Set([queryKey]),
       })
-      continue
+      return
     }
     current.sources.add(hit.source)
     current.queryKeys.add(queryKey)
@@ -865,22 +862,32 @@ export async function executeFastContextQueryPlan(params: {
     }
     if (current.line === undefined && hit.line !== undefined) current.line = hit.line
   }
-  const ranked = [...bestByPath.values()]
+  for (const originalHit of settledHits) {
+    const hit = repositoryCensus && censusViolationDirectories.has(directoryBucket(originalHit.path))
+      ? { ...originalHit, score: originalHit.score + (originalHit.censusRole === 'violation' ? 12 : 4) }
+      : originalHit
+    addAggregatedHit(isCovered(hit) ? coveredBestByPath : bestByPath, hit)
+  }
+  const rankHits = (hits: AggregatedHit[]): AggregatedHit[] => hits
     .map(hit => ({
       ...hit,
       score: hit.score + Math.min(12, (hit.sources.size - 1) * 3 + (hit.queryKeys.size - 1) * 1.5),
     }))
     .sort((left, right) => right.score - left.score || Number(right.source !== 'filename') - Number(left.source !== 'filename') || left.path.localeCompare(right.path))
-  const configLane = ranked.filter(hit => /\.(?:json|ya?ml|toml|ini|cfg|conf|xml|gradle|properties)$/i.test(hit.path)).slice(0, 1)
-  const semanticLane = semanticQueries.flatMap((_, queryIndex) => ranked
+  const unreadRanked = rankHits([...bestByPath.values()])
+  const coveredRanked = rankHits([...coveredBestByPath.values()])
+  const ranked = [...unreadRanked, ...coveredRanked]
+    .sort((left, right) => right.score - left.score || Number(right.source !== 'filename') - Number(left.source !== 'filename') || left.path.localeCompare(right.path))
+  const configLane = unreadRanked.filter(hit => /\.(?:json|ya?ml|toml|ini|cfg|conf|xml|gradle|properties)$/i.test(hit.path)).slice(0, 1)
+  const semanticLane = semanticQueries.flatMap((_, queryIndex) => unreadRanked
     .filter(hit => hit.queryKeys.has(`semantic:${queryIndex}`))
     .slice(0, repositoryCensus ? 8 : 1))
-  const censusViolationLane = repositoryCensus ? diversifyByDirectory(ranked.filter(hit => hit.censusRole === 'violation'), 40) : []
-  const censusAnchorLane = repositoryCensus ? diversifyByDirectory(ranked.filter(hit => hit.censusRole === 'anchor'), 40) : []
-  const censusExampleLane = repositoryCensus ? ranked.filter(hit => hit.censusRole === 'example').slice(0, 8) : []
-  const symbolLane = ranked.filter(hit => hit.sources.has('symbol')).slice(0, 5)
-  const symbolFilenameLane = ranked.filter(hit => hit.sources.has('symbol-filename')).slice(0, 3)
-  const filenameLane = ranked.filter(hit => hit.sources.has('filename')).slice(0, 2)
+  const censusViolationLane = repositoryCensus ? diversifyByDirectory(unreadRanked.filter(hit => hit.censusRole === 'violation'), 40) : []
+  const censusAnchorLane = repositoryCensus ? diversifyByDirectory(unreadRanked.filter(hit => hit.censusRole === 'anchor'), 40) : []
+  const censusExampleLane = repositoryCensus ? unreadRanked.filter(hit => hit.censusRole === 'example').slice(0, 8) : []
+  const symbolLane = unreadRanked.filter(hit => hit.sources.has('symbol')).slice(0, 5)
+  const symbolFilenameLane = unreadRanked.filter(hit => hit.sources.has('symbol-filename')).slice(0, 3)
+  const filenameLane = unreadRanked.filter(hit => hit.sources.has('filename')).slice(0, 2)
   const assignedFrontierPaths = new Set<string>()
   const frontierAssignments = frontierSearches.flatMap((_, frontierIndex) => {
     const hit = ranked.find(candidate => !assignedFrontierPaths.has(candidate.path.toLowerCase())
@@ -889,15 +896,15 @@ export async function executeFastContextQueryPlan(params: {
     assignedFrontierPaths.add(hit.path.toLowerCase())
     return [{ frontierIndex, hit }]
   })
-  const frontierLane = frontierAssignments.map(assignment => assignment.hit)
-  const diverseLane = diversifyByDirectory(ranked, repositoryCensus ? 32 : crossBoundary ? 6 : 3)
+  const frontierLane = frontierAssignments.filter(assignment => !isCovered(assignment.hit)).map(assignment => assignment.hit)
+  const diverseLane = diversifyByDirectory(unreadRanked, repositoryCensus ? 32 : crossBoundary ? 6 : 3)
   const censusDirectCount = censusViolationLane.length
   const readLimit = repositoryCensus
     ? Math.min(40, Math.max(censusDirectCount > 0 ? censusDirectCount : 24, Math.min(32, ranked.length)))
     : crossBoundary ? Math.min(12, Math.max(9, frontierSearches.length + 7)) : 8
   const readTargets = (repositoryCensus
     ? [...censusViolationLane, ...diverseLane, ...censusAnchorLane, ...censusExampleLane, ...semanticLane, ...ranked]
-    : [...frontierLane, ...diverseLane, ...symbolFilenameLane, ...symbolLane, ...semanticLane, ...filenameLane, ...configLane, ...ranked])
+    : [...frontierLane, ...diverseLane, ...symbolFilenameLane, ...symbolLane, ...semanticLane, ...filenameLane, ...configLane, ...unreadRanked])
     .filter((hit, index, all) => all.findIndex(other => other.path.toLowerCase() === hit.path.toLowerCase()) === index)
     .slice(0, readLimit)
   const readResults = await runLimited(readTargets.map(hit => async () => {
@@ -946,7 +953,7 @@ export async function executeFastContextQueryPlan(params: {
   const seedEvidence = successfulReads.map(result => result.evidence)
   const successfullyReadPaths = new Set(successfulReads.map(result => result.evidence.path.toLowerCase()))
   const coveredFrontierIndexes = new Set(frontierAssignments.flatMap(({ frontierIndex, hit }) => {
-    if (!successfullyReadPaths.has(hit.path.toLowerCase())) return []
+    if (!isCovered(hit) && !successfullyReadPaths.has(hit.path.toLowerCase())) return []
     const frontier = frontierSearches[frontierIndex]
     const contentMatched = hit.queryKeys.has(`frontier:${frontierIndex}`)
     const aligned = contentMatched || frontier.subsystemHints.length === 0 || frontierPathScore(hit.path, frontier) > 0
