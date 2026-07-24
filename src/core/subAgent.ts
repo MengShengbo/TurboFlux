@@ -175,14 +175,14 @@ export function syncAgentSkills(skillRuntime: SkillRuntime): void {
 const DEFINITIONS: Record<string, SubAgentDefinition> = {
   fast_context: {
     id: 'fast_context',
-    label: 'Fast Context',
-    description: 'Architecture-level code map for large repositories with grounded ownership, execution relationships, and change-impact candidates.',
+    label: 'FastContext',
+    description: 'Low-latency causal code retrieval with parallel tools and read-grounded edit targets.',
     driver: 'main-model',
     systemPrompt: buildFastContextSystemPrompt(),
     maxTurns: FAST_CONTEXT_TUNING.maxTurns,
     maxParallel: FAST_CONTEXT_TUNING.maxParallel,
     temperature: 0,
-    thinking: 'disabled',
+    thinking: 'high',
   },
   explorer: {
     id: 'explorer',
@@ -231,9 +231,7 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
 }
 
 export function buildFastContextSystemPrompt(): string {
-  return `You are FastContext, a read-only architecture intelligence subagent for large repositories. You own all semantic query planning, evidence selection, relationship tracing, and role assignment; local tools only execute the exact searches and reads you request. Your job is to produce an architecture-level code map grounded in files and line ranges, not merely locate one likely implementation.
-
-Completion contract: trace the caller-to-core-to-state/config/persistence flow, map the change-impact frontier across modules and implementation families, inspect behavior-bearing mirrors and contracts, verify failure paths, and actively search for evidence that disproves the leading interpretation. Finding the first core file is the start of exploration, never the stopping condition.
+  return `You are FastContext, a read-only causal code-retrieval controller. You own uncertain semantic decisions; deterministic local tools only execute searches, symbol traces, code-map lookups, and file reads. Find the smallest complete edit frontier, not a broad repository tour.
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
@@ -244,35 +242,22 @@ Tools:
 - read_file(path, offset?, limit?)
 - submit_code_map(candidates, relationships, rejected_hypotheses, searches_tried, uncertainty)
 
-Strategy:
-1. Before the first tool wave, rewrite the objective into independent query groups: exact lexical anchors, likely ownership modules, runtime/state relationships, and change-impact propagation paths.
-2. Run independent searches in parallel. Use search_symbols for declarations, trace_symbol for a definition plus references in one call, search_content for literals, search_files for naming hypotheses, and get_codemap only as orientation.
-3. Start with your own search wave, refine it from returned evidence, and read the strongest source slices yourself before ranking candidates.
-4. Trace relationships, not just mentions: entry/caller -> implementation -> state/config/persistence -> output/error path. Identify ownership boundaries and explain how data and control cross them.
-5. As soon as a search reveals the probable execution core, read that implementation before spending more turns on peripheral files. A search-confirmed core is not enough when it can still be read.
-6. After confirming a likely implementation, check exact-filename and symbol twins across package, platform, generated, vendored, or compatibility source trees. Read and rank each behavior-bearing mirror that would require the same change; reject stubs or generated copies explicitly.
-7. Census the implementation family. When behavior is split across a pipeline or one directory contains phase modules, inspect sibling filenames plus the dispatcher/index that wires them. Do not stop after one stage when validation, authorization, integration, response, permission, serialization, or platform adapters may require coordinated edits.
-8. Estimate the change-impact frontier before submission. For each confirmed owner or implementation, inspect its direct callers, contracts/interfaces, schema/config sources, platform/package variants, and state or persistence collaborators. Explicitly reject edges that do not require edits.
-9. Disprove attractive false positives. Documentation, index barrels, tests, and generic entry files rank below concrete runtime implementations unless the objective specifically asks for them.
-10. Audit residual uncertainty. If a search result or relationship points to a named likely owner, mirror, contract, implementation, or direct collaborator that you have not read, read it now. Residual uncertainty is for ambiguity that cannot be removed with an available targeted read, not for known high-signal paths you skipped.
-11. Finish only by calling submit_code_map. Submit up to ten read-confirmed architecture nodes, a grounded relationship map, rejected hypotheses, searches tried, and residual uncertainty. Do not return a prose report instead.
-
-Map contract:
-- Rank candidates strictly by direct edit necessity: the most likely behavior owner or implementation that must change is first. Put architectural context in relationships instead of ranking a consumer or supporting file above the probable edit target.
-- Before submission, audit every read file that contains behavior directly relevant to the objective. Include it as a candidate or name it in rejected_hypotheses with the concrete reason it does not require an edit.
-- Include the owner, behavior-bearing mirrors, implementations, direct consumers, contracts, state/config/persistence collaborators, and tests only when they define the execution path or change-impact frontier.
-- Set edit_kind for every candidate: owner, mirror, implementation, consumer, test, or supporting. This describes the node's role; it is not a substitute for grounded edges.
-- Every edge must explain a concrete control, data, ownership, state, configuration, persistence, compatibility, or failure relationship.
+Protocol:
+1. Form a small set of competing ownership hypotheses from the objective. On every turn choose the action with the highest expected information gain.
+2. Batch independent tool calls in parallel when each has information value, usually 2-8 at a time; never invent calls to fill a batch. Use exact text and symbols first, trace_symbol for definition/reference hops, and get_codemap only as a cheap orientation hint.
+3. Follow causal next hops from wrapper or caller to the behavior owner. Once an owner is probable, read it immediately and inspect only direct contracts, state/config/persistence collaborators, behavior-bearing mirrors, or tests that may share the edit.
+4. Apply the counterfactual edit test: include a file only when the requested behavior could not be changed correctly without inspecting or editing it. Reject documentation, barrels, generated copies, and incidental mentions unless the objective requires them.
+5. Stop when the owner and minimal change-impact frontier are read-grounded, or when another turn has lower expected value than submitting the remaining uncertainty.
+6. Finish only with submit_code_map. Rank up to ten candidates by direct edit necessity. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
 
 Rules:
 - Never describe files you have not read.
 - Every candidate and relationship must cite a path and line range covered by a read_file result from this run.
-- Prioritize source, entry, schema/config, and failing-path files over README-style context.
-- Include files that implement, configure, propagate, persist, or verify the behavior only when they add a necessary node or edge to the map.
+- Read every submitted candidate. Search hits and code-map nodes are hypotheses, never evidence by themselves.
+- Prefer runtime source, contracts, state/config, and failure paths over documentation or generic entry files.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
-- Keep the result within ten candidates, but never omit a read-confirmed behavior-bearing mirror or pipeline stage merely to make the map shorter.
-- Use search_content pagination and context windows when a broad query is truncated or crowded.
-- If the objective contains Chinese or mixed UI text, search both exact text and nearby component/style naming guesses.
+- Do not repeat an equivalent search after it fails; change the semantic hypothesis or follow a concrete next hop.
+- Do not enumerate the repository, expand generic synonyms, or collect peripheral context for completeness.
 - If you cannot produce a grounded submission, fail explicitly. No local semantic fallback exists.
 - Do NOT expose hidden reasoning. Call tools and return concise, evidence-backed findings.`
 }
@@ -301,7 +286,6 @@ export interface RunSubAgentOptions {
   requiredAuditPaths?: string[]
   requiredCandidatePaths?: string[]
   requireGroundedReport?: boolean
-  allowRelationshiplessReport?: boolean
   maxCandidates?: number
   onEvent?: (event: SubAgentEvent) => void
 }
@@ -782,7 +766,7 @@ function pruneUngroundedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvid
   }
 }
 
-function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[], allowRelationshipless = false): string | null {
+function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
   if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
@@ -798,12 +782,6 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
       return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by a read_file result; covered ranges for this path: ${readRangesForPath(relationship.evidencePath, evidence)}`
     }
   }
-  const minimalDirectOwner = report.candidates.length === 1
-    && report.candidates[0].confidence === 'high'
-    && (report.candidates[0].editKind === 'owner' || report.candidates[0].editKind === 'implementation')
-  if (report.relationships.length === 0 && !minimalDirectOwner && !allowRelationshipless) return 'FastContext requires at least one grounded architecture relationship'
-  if (report.searchesTried.length === 0) return 'searches_tried must describe at least one query strategy'
-  if (report.uncertainty.length === 0) return 'uncertainty must contain residual uncertainty or "none"'
   return null
 }
 
@@ -839,8 +817,8 @@ export function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
   report.relationships.forEach(item => lines.push(`- ${item.from} -> ${item.to} [${item.relationship}] (${item.evidencePath}:L${item.startLine}-L${item.endLine})`))
   lines.push('', 'REJECTED_HYPOTHESES')
   lines.push(...(report.rejectedHypotheses.length > 0 ? report.rejectedHypotheses.map(item => `- ${item}`) : ['- none']))
-  lines.push('', 'SEARCHES_TRIED', ...report.searchesTried.map(item => `- ${item}`))
-  lines.push('', 'UNCERTAINTY', ...report.uncertainty.map(item => `- ${item}`))
+  lines.push('', 'SEARCHES_TRIED', ...(report.searchesTried.length > 0 ? report.searchesTried.map(item => `- ${item}`) : ['- not reported']))
+  lines.push('', 'UNCERTAINTY', ...(report.uncertainty.length > 0 ? report.uncertainty.map(item => `- ${item}`) : ['- none reported']))
   return lines.join('\n')
 }
 
@@ -1308,7 +1286,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       const report = parseSubmittedCodeMap(submissionArgs, workspacePath, options.maxCandidates)
       normalizeSubmittedCodeMap(report, collectedEvidence)
       pruneUngroundedCodeMap(report, collectedEvidence)
-      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence, options.allowRelationshiplessReport === true) || ''
+      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence) || ''
       submissionError ||= validateRequiredAuditPaths(report, options.requiredAuditPaths) || ''
       submissionError ||= validateRequiredCandidatePaths(report, options.requiredCandidatePaths) || ''
       if (!submissionError) {
@@ -1320,7 +1298,15 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       if (submissionRecoveryUsed) {
         const error = `FastContext submission rejected: ${submissionError}`
         emit({ type: 'error', message: error })
-        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
+        return {
+          ok: false,
+          turns: turn,
+          elapsedMs: Date.now() - startedAt,
+          evidence: collectedEvidence,
+          codeMap: report.candidates.length > 0 ? report : undefined,
+          truncated: true,
+          error,
+        }
       }
       if (turn >= turnLimit) turnLimit += 1
       messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })

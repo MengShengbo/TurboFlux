@@ -1157,7 +1157,6 @@ describe('runSubAgent', () => {
         model: 'census-model',
         requireGroundedReport: true,
         submissionOnly: true,
-        allowRelationshiplessReport: true,
         maxCandidates: 15,
         initialEvidence: candidates.map(candidate => ({
           path: candidate.path,
