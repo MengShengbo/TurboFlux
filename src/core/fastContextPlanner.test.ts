@@ -449,6 +449,7 @@ describe('FastContext semantic planner', () => {
       plan: {
         ...plan,
         taskShape: 'repository-census',
+        confidence: 0.85,
         symbols: ['Description'],
         semanticQueries: ['@Description("[a-z]'],
         censusSearches: [{ role: 'violation', mode: 'regex', query: '@Description\\s*\\(\\s*"[a-z]' }],
@@ -461,6 +462,7 @@ describe('FastContext semantic planner', () => {
     expect(result.seedEvidence).toHaveLength(40)
     expect(executor.readFileRange).toHaveBeenCalledTimes(40)
     expect(result.census).toMatchObject({ candidateFiles: 80, directViolationFiles: 80, readFiles: 40, truncated: true })
+    expect(result.text!.indexOf('Planner candidate reads:')).toBeLessThan(result.text!.indexOf('Census inventory'))
   })
 
   it('uses a model-authored census contract for generic API migrations', async () => {
@@ -510,6 +512,81 @@ describe('FastContext semantic planner', () => {
     ])
     expect(result.census).toMatchObject({ candidateFiles: 3, directViolationFiles: 2, readFiles: 3, truncated: false })
     expect(result.text).toContain('violation/regex/case-sensitive: legacyClient\\.(?:send|request)\\s*\\(')
+  })
+
+  it.each([
+    { anchorHits: 6, fallbackExpected: false },
+    { anchorHits: 1, fallbackExpected: true },
+  ])('runs census fallback only after weak contract yield: $anchorHits anchor hit(s)', async ({ anchorHits, fallbackExpected }) => {
+    const searched: string[] = []
+    const executor = {
+      searchContentPage: vi.fn(async (pattern: string) => {
+        searched.push(pattern)
+        const count = pattern.includes('fallback') ? 2 : anchorHits
+        return { success: true, data: { hits: Array.from({ length: count }, (_, index) => ({
+          file: `C:/repo/src/group${index}/Use${index}.ts`,
+          line: 10,
+          text: pattern,
+        })) } }
+      }),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async (path: string) => ({
+        success: true,
+        data: { content: `source for ${path}`, startLine: 1, endLine: 30, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'repository-census',
+        confidence: 0.85,
+        symbols: [],
+        semanticQueries: ['fallback phrase'],
+        filenameGlobs: [],
+        frontierSearches: [],
+        censusSearches: [{ role: 'anchor', mode: 'literal', query: 'legacyClient' }],
+      },
+    })
+
+    expect(searched.some(pattern => pattern.includes('fallback'))).toBe(fallbackExpected)
+    expect(result.census?.fallbackUsed).toBe(fallbackExpected)
+  })
+
+  it('centers census evidence on the matched line before LLM judgment', async () => {
+    const lines = Array.from({ length: 60 }, (_, index) => index === 20 ? 'legacyClient.send(payload) // MATCH' : `line ${index + 30}`)
+    const executor = {
+      searchContentPage: vi.fn(async () => ({
+        success: true,
+        data: { hits: [{ file: 'C:/repo/src/client.ts', line: 50, text: 'legacyClient.send(payload)' }] },
+      })),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async () => ({
+        success: true,
+        data: { content: lines.join('\n'), startLine: 30, endLine: 89, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'repository-census',
+        symbols: [],
+        semanticQueries: [],
+        filenameGlobs: [],
+        frontierSearches: [],
+        censusSearches: [{ role: 'violation', mode: 'literal', query: 'legacyClient.send' }],
+      },
+    })
+
+    expect(result.seedEvidence[0].preview).toContain('50: legacyClient.send(payload) // MATCH')
+    expect(result.text).toContain('50: legacyClient.send(payload) // MATCH')
   })
 
   it('does not count one path as several independent frontier boundaries', async () => {

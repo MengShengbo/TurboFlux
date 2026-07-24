@@ -285,6 +285,7 @@ export class NodeToolExecutor implements ToolExecutor {
         cwd: safeBasePath,
         timeout: 10_000,
         maxBuffer: 1024 * 1024,
+        signal: options.signal,
       })
       const matches = stdout
         .split(/\r?\n/)
@@ -299,6 +300,10 @@ export class NodeToolExecutor implements ToolExecutor {
         })
       return { success: true, data: { matches: matches.slice(offset, offset + limit), offset, limit, truncated: matches.length > offset + limit } }
     } catch (e: any) {
+      if (this.isAbortError(e) || e.code === 'ABORT_ERR') {
+        await this.delay(50)
+        return { success: false, error: 'File search aborted' }
+      }
       if (e.code === 1 || e.exitCode === 1) return { success: true, data: { matches: [] } }
       if (e.code !== 'ENOENT') {
         return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -334,6 +339,9 @@ export class NodeToolExecutor implements ToolExecutor {
     const contextBefore = Math.max(0, Math.min(20, Math.floor(options.contextBefore || 0)))
     const contextAfter = Math.max(0, Math.min(20, Math.floor(options.contextAfter || 0)))
     const maxColumns = Math.max(120, Math.min(2_000, Math.floor(options.maxColumns || 500)))
+    const maxMatchesPerFile = options.maxMatchesPerFile === undefined
+      ? (limit >= 100 && offset === 0 ? 24 : 0)
+      : Math.max(1, Math.min(100, Math.floor(options.maxMatchesPerFile)))
 
     try {
       const args = [
@@ -347,7 +355,7 @@ export class NodeToolExecutor implements ToolExecutor {
         '--glob=!.env.*.local',
       ]
       if (caseInsensitive) args.push('--ignore-case')
-      if (limit >= 100 && offset === 0) args.push('--max-count=24')
+      if (maxMatchesPerFile > 0) args.push(`--max-count=${maxMatchesPerFile}`)
       if (options.multiline) args.push('-U', '--multiline-dotall')
       if (contextBefore > 0) args.push('-B', String(contextBefore))
       if (contextAfter > 0) args.push('-A', String(contextAfter))
@@ -356,7 +364,7 @@ export class NodeToolExecutor implements ToolExecutor {
         args.push(`--glob=${filePattern}`)
       }
       args.push('--', pattern, '.')
-      const { stdout } = await execFileAsync('rg', args, { cwd: safeBasePath, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 })
+      const { stdout } = await execFileAsync('rg', args, { cwd: safeBasePath, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, signal: options.signal })
       const output = stdout.trim()
       if (!output) return { success: true, data: { hits: [], totalMatches: 0, offset, limit, truncated: false } }
 
@@ -403,6 +411,10 @@ export class NodeToolExecutor implements ToolExecutor {
         },
       }
     } catch (e: any) {
+      if (this.isAbortError(e) || e.code === 'ABORT_ERR') {
+        await this.delay(50)
+        return { success: false, error: 'Content search aborted', data: { hits: [], totalMatches: 0, offset, limit, truncated: false } }
+      }
       if (e.code === 1 || e.exitCode === 1) return { success: true, data: { hits: [], totalMatches: 0, offset, limit, truncated: false } }
       if (e.code === 'ENOENT') {
         const matches = this.searchContentFallback(pattern, safeBasePath, filePattern, caseInsensitive)

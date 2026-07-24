@@ -125,17 +125,37 @@ const FAST_CONTEXT_CENSUS_JUDGE_DEFINITION: SubAgentDefinition = {
   label: 'FastContext Repository Census Judge',
   description: 'Grounded ranking of repeated repository-wide edit occurrences',
   driver: 'main-model',
-  maxTurns: 1,
-  maxParallel: 1,
+  maxTurns: 2,
+  maxParallel: 8,
   maxOutputTokens: 6144,
   systemPrompt: `You are the repository-census judge for FastContext. The requested change applies one repeated rule to many independent source occurrences.
 
-Use the supplied census contract, candidate inventory, and read-confirmed evidence. Return up to forty concrete files whose literals, annotations, calls, declarations, configuration entries, generated forms, or language-specific equivalents directly require the repeated change. A violation match is strong evidence but still inspect its excerpt; an anchor match must be classified semantically. Examples disambiguate the rule and must never become broad search terms or rank merely related consumers. Prefer direct occurrences over central metadata machinery, registries, tests, docs, fixtures, and files that only mention an example. Keep each role and why concise so broad censuses remain compact.
+Use the supplied census contract, candidate inventory, coverage summary, and read-confirmed evidence. Return up to forty concrete files whose literals, annotations, calls, declarations, configuration entries, generated forms, or language-specific equivalents directly require the repeated change. A violation match is strong evidence but still inspect its excerpt; an anchor match must be classified semantically. Examples disambiguate the rule and must never become broad search terms or rank merely related consumers. Prefer direct occurrences over central metadata machinery, registries, tests, docs, fixtures, and files that only mention an example. Keep each role and why concise so broad censuses remain compact.
+
+If the supplied evidence already covers the candidate field, submit immediately. If coverage is truncated and the inventory contains likely direct occurrences that the local bounded sampler did not read, use the first turn for one parallel read_file wave of at most eight exact inventory paths. Do not search again or tour directories. The second turn must submit. This targeted rescue is the semantic control point over local sampling; use it only when the unread candidates could materially change the edit set.
 
 Relationships are optional for census work. Every candidate must cite a supplied read_file range. State the repeated rule, searched construct families, and any uninspected remainder in searches_tried or uncertainty, then finish with exactly one submit_code_map call.` ,
 }
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 60_000
+
+function emptyRetrievalPrimer(objective: string): Awaited<ReturnType<typeof buildFastContextRetrievalPrimer>> {
+  return {
+    confidence: 0,
+    calls: 0,
+    readCalls: 0,
+    candidatePaths: [],
+    seedEvidence: [],
+    queries: buildFastContextPrimerQueries(objective),
+  }
+}
+
+export function __testIsActionableCensusPlanner(result: FastContextPlannerResult): boolean {
+  return result.ok
+    && result.plan.taskShape === 'repository-census'
+    && result.plan.confidence >= 0.78
+    && (result.plan.censusSearches?.some(search => search.role === 'anchor' || search.role === 'violation') || false)
+}
 
 function unavailablePlannerResult(error: unknown): FastContextPlannerResult {
   return {
@@ -676,14 +696,17 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
 
   emit({ type: 'insight', text: 'starting parallel model-directed retrieval', tone: 'info' })
   emit({ type: 'context_maps', state: 'warming' })
-  const initialPrimerPromise = buildFastContextRetrievalPrimer({ ...params, budget: 'lean' })
+  const primerAbortController = new AbortController()
   const plannerAbortController = new AbortController()
   const speculativeAbortController = new AbortController()
+  const forwardPrimerAbort = () => primerAbortController.abort()
   const forwardPlannerAbort = () => plannerAbortController.abort()
   const forwardSpeculativeAbort = () => speculativeAbortController.abort()
+  if (params.abortSignal?.aborted) primerAbortController.abort()
   if (params.abortSignal?.aborted) plannerAbortController.abort()
   if (params.abortSignal?.aborted) speculativeAbortController.abort()
   else {
+    params.abortSignal?.addEventListener('abort', forwardPrimerAbort, { once: true })
     params.abortSignal?.addEventListener('abort', forwardPlannerAbort, { once: true })
     params.abortSignal?.addEventListener('abort', forwardSpeculativeAbort, { once: true })
   }
@@ -697,8 +720,40 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       undefined,
       'frontier',
     ).catch(unavailablePlannerResult)
-  const plannersPromise = Promise.all([ownerPlannerPromise, frontierPlannerPromise])
-  const initialPrimer = await initialPrimerPromise
+  const ownerTagged = ownerPlannerPromise.then(result => ({ side: 'owner' as const, result }))
+  const frontierTagged = frontierPlannerPromise.then(result => ({ side: 'frontier' as const, result }))
+  const plannersPromise = (async (): Promise<[FastContextPlannerResult, FastContextPlannerResult]> => {
+    const first = await Promise.race([ownerTagged, frontierTagged])
+    if (__testIsActionableCensusPlanner(first.result)) {
+      plannerAbortController.abort()
+      const canceled = unavailablePlannerResult('Canceled after decisive census plan')
+      return first.side === 'owner' ? [first.result, canceled] : [canceled, first.result]
+    }
+    const second = await (first.side === 'owner' ? frontierTagged : ownerTagged)
+    return first.side === 'owner'
+      ? [first.result, second.result]
+      : [second.result, first.result]
+  })()
+  const initialPrimerPromise = buildFastContextRetrievalPrimer({
+    ...params,
+    abortSignal: primerAbortController.signal,
+    budget: 'lean',
+  }).catch(error => {
+    if (primerAbortController.signal.aborted && !params.abortSignal?.aborted) return emptyRetrievalPrimer(params.objective)
+    throw error
+  })
+  const preparation = await Promise.race([
+    initialPrimerPromise.then(value => ({ kind: 'primer' as const, value })),
+    plannersPromise.then(value => ({ kind: 'planners' as const, value })),
+  ])
+  const decisivePlanner = preparation.kind === 'planners'
+    ? preparation.value.find(__testIsActionableCensusPlanner)
+    : undefined
+  if (decisivePlanner) primerAbortController.abort()
+  const initialPrimer = decisivePlanner
+    ? emptyRetrievalPrimer(params.objective)
+    : preparation.kind === 'primer' ? preparation.value : await initialPrimerPromise
+  params.abortSignal?.removeEventListener('abort', forwardPrimerAbort)
   const speculativeReadPaths = initialPrimer.seedEvidence.map(item => item.path)
   const canAcceptSpeculative = (codeMap: SubmittedCodeMap, plan?: FastContextPlannerResult['plan']): boolean => (
     __testShouldAcceptSpeculativeJudge({
@@ -994,6 +1049,8 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     ].filter(Boolean).join('\n\n').slice(0, 64_000) || undefined,
     initialEvidence,
     maxCandidates: repositoryCensus ? 40 : undefined,
+    allowRelationshiplessReport: repositoryCensus,
+    allowedTools: repositoryCensus ? ['read_file', 'submit_code_map'] : undefined,
   } as const
   emit({
     type: 'insight',
@@ -1015,8 +1072,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
           : adaptiveJudgeNeeded
             ? fullAdaptive ? FAST_CONTEXT_ADAPTIVE_JUDGE_DEFINITION : FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION
             : FAST_CONTEXT_BOUNDED_JUDGE_DEFINITION,
-        submissionOnly: planner!.plan.taskShape === 'repository-census' || !adaptiveJudgeNeeded,
-        allowRelationshiplessReport: planner!.plan.taskShape === 'repository-census',
+        submissionOnly: planner!.plan.taskShape !== 'repository-census' && !adaptiveJudgeNeeded,
         onEvent: createSubEventHandler(adaptiveJudgeNeeded ? 'adaptive' : 'judge'),
       })
     : await runSubAgent({

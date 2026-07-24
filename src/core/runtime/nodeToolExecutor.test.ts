@@ -369,6 +369,35 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.data?.hits[0]?.context).toContain('6: after one')
   }))
 
+  it('can cap census search to one anchor per file', async () => withWorkspace(async ({ workspace }) => {
+    writeFileSync(join(workspace, 'first.ts'), 'needle one\nneedle two\nneedle three\n', 'utf-8')
+    writeFileSync(join(workspace, 'second.ts'), 'needle four\nneedle five\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.searchContentPage('needle', workspace, '*.ts', false, {
+      limit: 500,
+      maxMatchesPerFile: 1,
+    })
+
+    expect(result).toMatchObject({ success: true, data: { totalMatches: 2, truncated: false } })
+    expect(result.data?.hits.map(hit => hit.file)).toHaveLength(2)
+  }))
+
+  it('propagates cancellation into ripgrep searches', async () => withWorkspace(async ({ workspace }) => {
+    writeFileSync(join(workspace, 'source.ts'), 'needle\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+    const controller = new AbortController()
+    controller.abort()
+
+    const [content, files] = await Promise.all([
+      executor.searchContentPage('needle', workspace, '*.ts', false, { signal: controller.signal }),
+      executor.searchFiles('**/*.ts', workspace, { signal: controller.signal }),
+    ])
+
+    expect(content.success).toBe(false)
+    expect(files.success).toBe(false)
+  }))
+
   it('finds symbols across Python, Rust, and Go declaration syntax', async () => withWorkspace(async ({ workspace }) => {
     mkdirSync(join(workspace, 'src'), { recursive: true })
     writeFileSync(join(workspace, 'src', 'worker.py'), 'async def flux_worker():\n    return True\n', 'utf-8')

@@ -342,14 +342,14 @@ export async function expandFastContextDependencies(params: {
   const patterns = firstPartyImportPatterns(params.evidence, params.candidatePaths, params.objective)
     .slice(0, params.maxPatterns ?? 8)
   if (patterns.length === 0) return { calls: 0, readCalls: 0, candidatePaths: [], seedEvidence: [] }
-  const searchResults = await runLimited(patterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath)), 6, params.abortSignal)
+  const searchResults = await runLimited(patterns.map(pattern => () => params.toolExecutor.searchFiles(pattern, params.workspacePath, { signal: params.abortSignal })), 6, params.abortSignal)
   throwIfAborted(params.abortSignal)
   const reverseQueries = unique(params.evidence
     .filter(item => /\.(?:html?|hbs|handlebars|ejs|njk|twig)$/i.test(item.path))
     .map(item => item.path.slice(item.path.lastIndexOf('/') + 1)), 2)
   const reverseResults = await runLimited(reverseQueries.map(query => async () => {
     const result = params.toolExecutor.searchContentPage
-      ? await params.toolExecutor.searchContentPage(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 80 })
+      ? await params.toolExecutor.searchContentPage(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 80, signal: params.abortSignal })
       : await params.toolExecutor.searchContent(query, params.workspacePath, SOURCE_FILE_GLOB, true)
     const hits = Array.isArray(result.data) ? result.data : result.data?.hits || []
     return result.success ? hits.map(hit => relativePath(params.workspacePath, hit.file)) : []
@@ -580,7 +580,7 @@ export async function buildFastContextRetrievalPrimer(params: {
     .map(pattern => pattern.toLowerCase()))
   const contentTasks = selectedContentPatterns.map((pattern, index) => async () => {
     const result = params.toolExecutor.searchContentPage
-      ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 200 })
+      ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, SOURCE_FILE_GLOB, true, { limit: 200, signal: params.abortSignal })
       : await params.toolExecutor.searchContent(pattern, params.workspacePath, SOURCE_FILE_GLOB, true)
     const hits = Array.isArray(result.data) ? result.data : result.data?.hits || []
     const weight = index < 2 ? 3 : index < 4 ? 2 : 1
@@ -588,7 +588,7 @@ export async function buildFastContextRetrievalPrimer(params: {
   })
   const filenameTasks: Array<() => Promise<PrimerHit[]>> = [
     ...queries.filePatterns.slice(0, lean ? 3 : 18).map(pattern => async () => {
-      const result = await params.toolExecutor.searchFiles(pattern, params.workspacePath)
+      const result = await params.toolExecutor.searchFiles(pattern, params.workspacePath, { signal: params.abortSignal })
       return result.success ? (result.data?.matches || []).slice(0, 8).map(path => {
         const workspaceRelative = relativePath(params.workspacePath, path)
         const explicit = explicitPathPatterns.has(pattern.toLowerCase())

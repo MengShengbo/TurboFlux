@@ -63,6 +63,7 @@ export interface FastContextPlannedEvidence {
     directViolationFiles: number
     readFiles: number
     truncated: boolean
+    fallbackUsed: boolean
   }
   text?: string
 }
@@ -627,6 +628,14 @@ function diversifyByDirectory<T extends { path: string; score: number }>(hits: T
   return selected
 }
 
+function centeredEvidencePreview(content: string, startLine: number, anchorLine?: number, radius = 7): string {
+  const lines = content.split('\n')
+  const anchorIndex = Math.max(0, Math.min(lines.length - 1, (anchorLine || startLine) - startLine))
+  const from = Math.max(0, anchorIndex - radius)
+  const to = Math.min(lines.length, anchorIndex + radius + 1)
+  return lines.slice(from, to).map((line, index) => `${startLine + from + index}: ${line}`).join('\n')
+}
+
 export async function executeFastContextQueryPlan(params: {
   workspacePath: string
   toolExecutor: ToolExecutor
@@ -700,14 +709,18 @@ export async function executeFastContextQueryPlan(params: {
     String(query.caseSensitive),
     String(query.multiline),
   ].join('\0').toLowerCase()) === index)
-  const tasks: Array<() => Promise<PlannedHit[]>> = [
-    ...contentQueries.map(({ query, queryIndex, source, censusRole, mode, caseSensitive, multiline, fileGlob }) => async () => {
+  const contentTaskEntries = contentQueries.map(contentQuery => ({
+    query: contentQuery,
+    task: async (): Promise<PlannedHit[]> => {
+      const { query, queryIndex, source, censusRole, mode, caseSensitive, multiline, fileGlob } = contentQuery
       const pattern = repositoryCensus && mode === 'regex' ? query : literalPattern(query)
       if (!pattern) return []
       const result = params.toolExecutor.searchContentPage
         ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, fileGlob || sourceGlob, repositoryCensus ? !caseSensitive : true, {
           limit: repositoryCensus ? 500 : 160,
           multiline: repositoryCensus && multiline,
+          maxMatchesPerFile: repositoryCensus ? 1 : undefined,
+          signal: params.abortSignal,
         })
         : await params.toolExecutor.searchContent(pattern, params.workspacePath, fileGlob || sourceGlob, repositoryCensus ? !caseSensitive : true)
       const page = result.data as SearchContentHit[] | { hits?: SearchContentHit[] } | undefined
@@ -734,9 +747,11 @@ export async function executeFastContextQueryPlan(params: {
         }]
       }) : []
       return diversifyByDirectory(queryHits, repositoryCensus ? 120 : 18)
-    }),
+    },
+  }))
+  const supportingTasks: Array<() => Promise<PlannedHit[]>> = [
     ...filenameGlobs.map((glob, globIndex) => async () => {
-      const result = await params.toolExecutor.searchFiles(glob, params.workspacePath)
+      const result = await params.toolExecutor.searchFiles(glob, params.workspacePath, { signal: params.abortSignal })
       return result.success ? (result.data?.matches || []).flatMap(match => {
         const path = relativePath(params.workspacePath, match)
         return isEditableFile(path, extensionSet) ? [{
@@ -752,7 +767,7 @@ export async function executeFastContextQueryPlan(params: {
       const glob = symbolFileGlob(symbol)
       if (!glob) return []
       return [async () => {
-        const result = await params.toolExecutor.searchFiles(glob, params.workspacePath)
+        const result = await params.toolExecutor.searchFiles(glob, params.workspacePath, { signal: params.abortSignal })
         return result.success ? (result.data?.matches || []).flatMap(match => {
           const path = relativePath(params.workspacePath, match)
           return isEditableFile(path, extensionSet) ? [{
@@ -771,7 +786,7 @@ export async function executeFastContextQueryPlan(params: {
         ...frontier.symbols.map(symbolFileGlob).filter((glob): glob is string => Boolean(glob)),
       ], 1)
       return globs.map(glob => async () => {
-        const result = await params.toolExecutor.searchFiles(glob, params.workspacePath)
+        const result = await params.toolExecutor.searchFiles(glob, params.workspacePath, { signal: params.abortSignal })
         return result.success ? (result.data?.matches || []).flatMap(match => {
           const path = relativePath(params.workspacePath, match)
           return isEditableFile(path, extensionSet) ? [{
@@ -785,7 +800,30 @@ export async function executeFastContextQueryPlan(params: {
       })
     }),
   ]
-  const settled = await runLimited(tasks, 12, params.abortSignal)
+  const contractEntries = repositoryCensus && censusSearches.length > 0
+    ? contentTaskEntries.filter(entry => entry.query.censusRole !== undefined)
+    : contentTaskEntries
+  const fallbackEntries = repositoryCensus && censusSearches.length > 0
+    ? contentTaskEntries.filter(entry => entry.query.censusRole === undefined)
+    : []
+  const primaryTasks = [...contractEntries.map(entry => entry.task), ...supportingTasks]
+  let settled = await runLimited(primaryTasks, 12, params.abortSignal)
+  let executedContentQueries = contractEntries.map(entry => entry.query)
+  let executedSearchCalls = primaryTasks.length
+  let censusFallbackUsed = false
+  if (repositoryCensus && fallbackEntries.length > 0) {
+    const contractHits = settled.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+    const violationPaths = new Set(contractHits.filter(hit => hit.censusRole === 'violation').map(hit => hit.path.toLowerCase()))
+    const anchorPaths = new Set(contractHits.filter(hit => hit.censusRole === 'anchor').map(hit => hit.path.toLowerCase()))
+    const anchorCoverageTrusted = params.plan.confidence >= 0.78 && anchorPaths.size >= 4
+    if (violationPaths.size === 0 && !anchorCoverageTrusted) {
+      const fallbackSettled = await runLimited(fallbackEntries.map(entry => entry.task), 4, params.abortSignal)
+      settled = [...settled, ...fallbackSettled]
+      executedContentQueries = [...executedContentQueries, ...fallbackEntries.map(entry => entry.query)]
+      executedSearchCalls += fallbackEntries.length
+      censusFallbackUsed = true
+    }
+  }
   throwIfAborted(params.abortSignal)
   const coveredEvidence = params.coveredEvidence || []
   const isCovered = (hit: PlannedHit): boolean => coveredEvidence.some(evidence => {
@@ -876,7 +914,9 @@ export async function executeFastContextQueryPlan(params: {
           path: hit.path,
           startLine: range.data.startLine,
           endLine: range.data.endLine,
-          preview: range.data.content.split('\n').slice(0, 12).join('\n'),
+          preview: repositoryCensus
+            ? centeredEvidencePreview(range.data.content, range.data.startLine, hit.line)
+            : range.data.content.split('\n').slice(0, 12).join('\n'),
           content: range.data.content.slice(0, repositoryCensus ? 6_000 : 16_000),
           reason: 'file read',
           score: hit.score,
@@ -892,7 +932,9 @@ export async function executeFastContextQueryPlan(params: {
         path: hit.path,
         startLine: offset + 1,
         endLine: offset + lines.length,
-        preview: lines.slice(0, 12).join('\n'),
+        preview: repositoryCensus
+          ? centeredEvidencePreview(lines.join('\n'), offset + 1, hit.line)
+          : lines.slice(0, 12).join('\n'),
         content: lines.join('\n').slice(0, repositoryCensus ? 6_000 : 16_000),
         reason: 'file read',
         score: hit.score,
@@ -915,26 +957,35 @@ export async function executeFastContextQueryPlan(params: {
   const frontierCoverage = frontierExpected > 0 ? frontierCovered / frontierExpected : 1
   const consensusPaths = ranked.filter(hit => hit.sources.size >= 2 || hit.queryKeys.size >= 2).length
   const coveredQueries = new Set(ranked.flatMap(hit => [...hit.queryKeys])).size
-  const totalQueries = Math.max(1, new Set(contentQueries.map(query => `${query.source}:${query.queryIndex}`)).size + filenameGlobs.length)
+  const totalQueries = Math.max(1, new Set(executedContentQueries.map(query => `${query.source}:${query.queryIndex}`)).size + filenameGlobs.length)
   const queryCoverage = Math.min(1, coveredQueries / totalQueries)
   const confidence = Math.min(0.95, params.plan.confidence * 0.3
     + Math.min(0.2, consensusPaths * 0.05)
     + queryCoverage * 0.2
     + (frontierExpected > 0 ? frontierCoverage * 0.15 : 0)
     + Math.min(0.1, seedEvidence.length * 0.0125))
+  const candidateReadsText = `Planner candidate reads:\n${seedEvidence.map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(repositoryCensus ? item.preview : item.content || item.preview).slice(0, repositoryCensus ? 650 : 1_200)}`).join('\n---\n')}`
+  const censusInventoryText = repositoryCensus
+    ? `Census inventory (${ranked.length} candidate file(s); showing ${Math.min(160, ranked.length)}):\n${ranked.slice(0, 160).map(hit => {
+      const separator = hit.preview.indexOf(' ')
+      const snippet = separator >= 0 ? hit.preview.slice(separator + 1) : hit.preview
+      return `${hit.path}:${hit.line || 1} [${hit.censusRole || 'fallback'}] ${snippet.slice(0, 100)}`
+    }).join('\n')}`
+    : ''
   const text = [
     `Semantic planner: ${params.plan.taskShape}; confidence=${params.plan.confidence.toFixed(2)}; feedback=${params.plan.needsFeedback}`,
     `Planner rationale: ${params.plan.rationale}`,
     `Planner queries: ${[...params.plan.symbols, ...params.plan.semanticQueries].join(' | ')}`,
     repositoryCensus ? `Census contract: ${censusSearches.map(search => `${search.role}/${search.mode}${search.caseSensitive ? '/case-sensitive' : ''}${search.multiline ? '/multiline' : ''}${search.fileGlob ? `/${search.fileGlob}` : ''}: ${search.query}`).join(' | ')}` : '',
-    repositoryCensus ? `Census inventory (${ranked.length} candidate file(s)):\n${ranked.slice(0, 120).map(hit => `${hit.path}:${hit.line || 1} [${hit.censusRole || 'fallback'}] ${hit.preview.slice(0, 220)}`).join('\n')}` : '',
+    repositoryCensus ? `Census fallback: ${censusFallbackUsed ? 'activated after weak contract yield' : 'not needed'}` : '',
     `Planner subsystems: ${params.plan.subsystemHints.join(' | ')}`,
     `Planner frontier coverage: ${frontierCovered}/${frontierExpected}`,
     `Planner frontiers: ${frontierSearches.map(frontier => `${frontier.role}: ${frontier.query}`).join(' | ')}`,
-    `Planner candidate reads:\n${seedEvidence.map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(item.content || item.preview).slice(0, repositoryCensus ? 700 : 1_200)}`).join('\n---\n')}`,
+    candidateReadsText,
+    censusInventoryText,
   ].filter(Boolean).join('\n\n').slice(0, repositoryCensus ? 60_000 : 36_000)
   return {
-    calls: tasks.length + readTargets.length,
+    calls: executedSearchCalls + readTargets.length,
     readCalls: readTargets.length,
     candidatePaths: ranked.map(hit => hit.path).slice(0, repositoryCensus ? 160 : 80),
     seedEvidence,
@@ -947,6 +998,7 @@ export async function executeFastContextQueryPlan(params: {
       directViolationFiles: ranked.filter(hit => hit.censusRole === 'violation').length,
       readFiles: seedEvidence.length,
       truncated: ranked.length > seedEvidence.length,
+      fallbackUsed: censusFallbackUsed,
     } : undefined,
     text,
   }

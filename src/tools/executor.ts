@@ -27,6 +27,8 @@ export interface SearchContentOptions {
   multiline?: boolean
   fileType?: string
   maxColumns?: number
+  maxMatchesPerFile?: number
+  signal?: AbortSignal
 }
 
 export interface SearchContentPage {
@@ -40,6 +42,7 @@ export interface SearchContentPage {
 export interface SearchFilesOptions {
   offset?: number
   limit?: number
+  signal?: AbortSignal
 }
 
 export interface FileRangeResult {

@@ -13,10 +13,36 @@ import {
   __testShouldAcceptSpeculativeJudge,
   __testShouldStartSpeculativeJudge,
   __testHasTaskSurfaceEvidence,
+  __testIsActionableCensusPlanner,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
 describe('FastContext retrieval', () => {
+  it('lets only a high-confidence LLM census contract end dual planning early', () => {
+    const result = (confidence: number, role: 'anchor' | 'example') => ({
+      ok: true,
+      elapsedMs: 10,
+      plan: {
+        taskShape: 'repository-census' as const,
+        confidence,
+        needsFeedback: false,
+        symbols: [],
+        semanticQueries: [],
+        filenameGlobs: [],
+        subsystemHints: [],
+        frontierRoles: [],
+        frontierSearches: [],
+        censusSearches: [{ role, mode: 'literal' as const, query: 'legacyClient' }],
+        editableExtensions: ['ts'],
+        rationale: 'Repeated API migration.',
+      },
+    })
+
+    expect(__testIsActionableCensusPlanner(result(0.82, 'anchor'))).toBe(true)
+    expect(__testIsActionableCensusPlanner(result(0.7, 'anchor'))).toBe(false)
+    expect(__testIsActionableCensusPlanner(result(0.9, 'example'))).toBe(false)
+  })
+
   it('starts speculative judgment only for compact high-confidence direct defects', () => {
     expect(__testShouldStartSpeculativeJudge({
       objective: 'Crash when parseConfig receives an empty value',
