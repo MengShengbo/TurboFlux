@@ -154,6 +154,159 @@ describe('FastContext adaptive controller', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('lets the model stop after an empty wave without forcing an alternate search', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestCount += 1
+      const body = JSON.parse(String(init?.body))
+      requestBodies.push(body)
+      const toolCall = requestCount === 1
+        ? call('read-owner', 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
+        : requestCount === 2
+          ? call('search-missing', 'search_content', { pattern: 'DefinitelyMissingSymbol' })
+          : call('submit-owner', 'submit_code_map', {
+              candidates: [candidate('src/owner.ts', 'runtime owner', 'owner', 'resolve', 0.96, 0)],
+              relationships: [],
+              frontier_complete: true,
+              unresolved_edit_paths: [],
+              rejected_hypotheses: ['DefinitelyMissingSymbol has no repository matches'],
+              searches_tried: ['DefinitelyMissingSymbol'],
+              uncertainty: [],
+            })
+      return response(toolCall)
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await runFastContextSubagent({
+        workspacePath: 'C:/repo',
+        objective: 'locate the runtime owner and reject a named alternate owner when absent',
+        toolExecutor: executor(),
+        apiKey: 'test',
+        baseUrl: 'http://adaptive-empty-wave-fastcontext.test',
+        provider: 'openai-compatible',
+        model: 'gpt-5.5',
+      })
+
+      expect(requestCount).toBe(3)
+      expect(JSON.stringify(requestBodies[2])).toContain('empty_results: 1')
+      expect(JSON.stringify(requestBodies[2])).not.toContain('do not conclude until one alternate search has run')
+      expect(result.evidencePack).toContain('src/owner.ts')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('reuses an exact repeated read and reports zero novelty to the model', async () => {
+    const originalFetch = globalThis.fetch
+    const requestBodies: any[] = []
+    const toolExecutor = executor()
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestCount += 1
+      const body = JSON.parse(String(init?.body))
+      requestBodies.push(body)
+      const toolCall = requestCount <= 2
+        ? call(`read-owner-${requestCount}`, 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
+        : call('submit-owner', 'submit_code_map', {
+            candidates: [candidate('src/owner.ts', 'runtime owner', 'owner', 'resolve', 0.96, 0)],
+            relationships: [],
+            frontier_complete: true,
+            unresolved_edit_paths: [],
+            rejected_hypotheses: [],
+            searches_tried: [],
+            uncertainty: [],
+          })
+      return response(toolCall)
+    }) as unknown as typeof fetch
+
+    try {
+      await runFastContextSubagent({
+        workspacePath: 'C:/repo',
+        objective: 'locate the exact runtime owner',
+        toolExecutor,
+        apiKey: 'test',
+        baseUrl: 'http://adaptive-repeat-fastcontext.test',
+        provider: 'openai-compatible',
+        model: 'gpt-5.5',
+      })
+
+      expect(toolExecutor.readFileRange).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(requestBodies[2])).toContain('exact_repeated_calls: 1')
+      expect(JSON.stringify(requestBodies[2])).toContain('new_evidence_ranges: 0')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('traces several concrete next-hop symbols concurrently in one wave', async () => {
+    const originalFetch = globalThis.fetch
+    let activeSymbolSearches = 0
+    let maxActiveSymbolSearches = 0
+    const toolExecutor = executor()
+    toolExecutor.searchCodeSymbols = vi.fn(async ({ query }: { query: string }) => {
+      activeSymbolSearches += 1
+      maxActiveSymbolSearches = Math.max(maxActiveSymbolSearches, activeSymbolSearches)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      activeSymbolSearches -= 1
+      return {
+        success: true,
+        data: [{
+          path: `C:/repo/src/${query}.ts`,
+          line: 1,
+          startLine: 1,
+          endLine: 2,
+          title: query,
+          symbolName: query,
+          symbolKind: 'function',
+          source: 'index',
+          preview: `export function ${query}() {}`,
+        }],
+      }
+    }) as ToolExecutor['searchCodeSymbols']
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      const toolCall = requestCount === 1
+        ? call('read-entry', 'read_file', { path: 'src/entry.ts', offset: 1, limit: 10 })
+        : requestCount === 2
+          ? call('trace-next-hops', 'trace_symbols', { queries: ['FirstOwner', 'SecondOwner'] })
+          : call('submit-chain', 'submit_code_map', {
+              candidates: [
+                candidate('src/FirstOwner.ts', 'first causal owner', 'owner', 'resolve', 0.92, 0),
+                candidate('src/SecondOwner.ts', 'second causal owner', 'implementation', 'propagate', 0.78, 1),
+              ],
+              relationships: [],
+              frontier_complete: true,
+              unresolved_edit_paths: [],
+              rejected_hypotheses: [],
+              searches_tried: ['FirstOwner', 'SecondOwner'],
+              uncertainty: [],
+            })
+      return response(toolCall)
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await runFastContextSubagent({
+        workspacePath: 'C:/repo',
+        objective: 'trace the entry through FirstOwner and SecondOwner',
+        toolExecutor,
+        apiKey: 'test',
+        baseUrl: 'http://adaptive-batch-trace-fastcontext.test',
+        provider: 'openai-compatible',
+        model: 'gpt-5.5',
+      })
+
+      expect(requestCount).toBe(3)
+      expect(maxActiveSymbolSearches).toBe(2)
+      expect(result.evidencePack).toContain('src/FirstOwner.ts')
+      expect(result.evidencePack).toContain('src/SecondOwner.ts')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
 
 function toolNames(body: any): string[] {

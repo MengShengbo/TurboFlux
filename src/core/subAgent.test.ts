@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { __testClearSubAgentProtocolCache, __testTraceDefinitionReadLimit, buildFastContextSystemPrompt, runSubAgent } from './subAgent'
+import { __testClearSubAgentProtocolCache, __testCompactBatchTraceOutput, __testTraceDefinitionReadLimit, buildFastContextSystemPrompt, runSubAgent } from './subAgent'
 import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
@@ -13,6 +13,17 @@ describe('runSubAgent', () => {
     expect(__testTraceDefinitionReadLimit({ startLine: 754, endLine: 759, symbolKind: 'class' })).toBe(160)
     expect(__testTraceDefinitionReadLimit({ startLine: 20, endLine: 25, symbolKind: 'function' })).toBe(40)
     expect(__testTraceDefinitionReadLimit({ startLine: 1, endLine: 400, symbolKind: 'class' })).toBe(220)
+  })
+
+  it('bounds batch trace history while retaining discovery and source evidence', () => {
+    const content = `DEFINITIONS\n${'definition\n'.repeat(300)}\nSOURCE_EVIDENCE\n${'source line\n'.repeat(500)}`
+    const compacted = __testCompactBatchTraceOutput(content)
+
+    expect(compacted.length).toBeLessThanOrEqual(3_300)
+    expect(compacted).toContain('DEFINITIONS')
+    expect(compacted).toContain('SOURCE_EVIDENCE')
+    expect(compacted).toContain('trace references compacted')
+    expect(compacted).toContain('trace source compacted')
   })
 
   it('honors a definition-level disabled thinking policy', async () => {
@@ -649,7 +660,7 @@ describe('runSubAgent', () => {
     }
   })
 
-  it('rewrites an empty search wave once before concluding', async () => {
+  it('does not force an alternate search after an empty wave', async () => {
     const originalFetch = globalThis.fetch
     const requestBodies: any[] = []
     let requestCount = 0
@@ -704,7 +715,7 @@ describe('runSubAgent', () => {
 
       expect(result.ok).toBe(true)
       expect(requestBodies).toHaveLength(2)
-      expect(JSON.stringify(requestBodies[1].messages)).toContain('last search wave returned no matches')
+      expect(JSON.stringify(requestBodies[1].messages)).not.toContain('last search wave returned no matches')
     } finally {
       globalThis.fetch = originalFetch
     }
