@@ -326,12 +326,13 @@ describe('FastContext retrieval', () => {
     const base = {
       taskShape: 'cross-boundary' as const,
       planConfidence: 0.82,
-      frontierCoverage: 0.25,
+      frontierCoverage: 0.5,
       codeMap,
       readPaths: ['src/owner.ts'],
     }
 
     expect(__testShouldAcceptBoundedJudge(base)).toBe(true)
+    expect(__testShouldAcceptBoundedJudge({ ...base, frontierCoverage: 0.25 })).toBe(false)
     expect(__testShouldAcceptBoundedJudge({ ...base, frontierCoverage: 0 })).toBe(false)
     expect(__testShouldAcceptBoundedJudge({ ...base, taskShape: 'multi-frontier' })).toBe(false)
     expect(__testShouldAcceptBoundedJudge({ ...base, readPaths: [] })).toBe(false)
@@ -345,10 +346,11 @@ describe('FastContext retrieval', () => {
     const base = {
       taskShape: 'cross-boundary' as const,
       planConfidence: 0.82,
-      frontierCoverage: 0.25,
+      frontierCoverage: 0.5,
     }
 
     expect(__testShouldAttemptBoundedJudge(base)).toBe(true)
+    expect(__testShouldAttemptBoundedJudge({ ...base, frontierCoverage: 0.25 })).toBe(false)
     expect(__testShouldAttemptBoundedJudge({ ...base, frontierCoverage: 0 })).toBe(false)
     expect(__testShouldAttemptBoundedJudge({ ...base, planConfidence: 0.6 })).toBe(false)
     expect(__testShouldAttemptBoundedJudge({ ...base, taskShape: 'multi-frontier' })).toBe(false)

@@ -87,6 +87,8 @@ For stale, malformed, or missing state, distinguish the code that reads the symp
 
 For serialization failures, distinguish an outer object's serialization hook from the nested container or value representation that introduces the unpicklable state. Rank the representation owner first when its implementation directly stores the failing weak reference, closure, handle, or runtime object; rank the outer serializer first only when exclusion or reconstruction is clearly the narrower contract.
 
+For an existing command or option, treat generic argument parsing as ingress. Rank the behavior-bearing command plugin and the dispatcher that routes the option above the CLI surface unless the CLI layer itself transforms or validates the requested semantics.
+
 Preserve a compact coordinated frontier. When a bug crosses a public API or orchestration stage into a compiler, parser, serializer, validator, adapter, or renderer, retain every read-confirmed behavior-bearing stage that can require a coordinated edit; do not collapse the map to only the deepest owner. Evidence labeled semantic responsibility probe is deliberately targeted: compare it directly with the primary owner and keep it when it implements the named transformation or output stage. Conversely, never pad the top ten with unrelated writers, builders, callers, or sibling domains merely because they consume the resulting data.
 
 Apply causal proximity before ranking. A file that defines an API, state transition, transformation, or emitted output explicitly named by the issue outranks environment-specific adapters, framework wiring, examples, and analogous sibling implementations. Operating system, backend, version, and provider details are reproduction context unless the issue explicitly identifies them as causal. A sibling that merely demonstrates a similar pattern belongs in rejected hypotheses and must never outrank the read-confirmed failing path.
@@ -108,6 +110,8 @@ On the first turn, inspect the supplied evidence and frontier coverage. Run one 
 
 For serialization failures, trace the exact nested value that cannot be serialized. Prefer the reusable container or representation that stores the unpicklable weak reference, closure, handle, or runtime object over an outer serializer that merely traverses it, unless the outer type explicitly owns exclusion and reconstruction.
 
+For an existing command or option, treat generic argument parsing as ingress. Rank the behavior-bearing command plugin and the dispatcher that routes the option above the CLI surface unless the CLI layer itself transforms or validates the requested semantics.
+
 On the second turn, read the strongest newly discovered source ranges, resolve at most one remaining causal edge, and submit in the same turn. Make a listwise BESTFIT comparison: rank the file whose runtime implementation must change above tests, docs, wrappers, callers, registries, and symptom consumers. Every candidate and relationship must cite a read_file range. Do not perform a broad repository tour, do not repeat searches already represented in the supplied context, and fail explicitly rather than padding the map.` ,
 }
 
@@ -121,7 +125,7 @@ const FAST_CONTEXT_ADAPTIVE_FAST_JUDGE_DEFINITION: SubAgentDefinition = {
   maxOutputTokens: 4096,
   systemPrompt: `You are the fast adaptive evidence judge for FastContext. The local executor already supplied read-confirmed evidence, but one causal edge remains uncertain.
 
-On the first turn, run one targeted parallel search or trace wave for the highest-information missing owner or boundary. When state is stale or malformed, trace the concrete state identifier to its writer, normalizer, transformer, or invalidator instead of stopping at the consumer that exposes the symptom. Do not repeat existing searches or tour the repository. On the second turn, read the strongest newly discovered source range, compare the best runtime owner against the strongest alternative with a listwise BESTFIT decision, and submit the grounded code map in the same turn. Tests, docs, wrappers, registries, callers, and symptom consumers must not outrank a read-confirmed implementation owner. Every submitted candidate and relationship must cite a read_file range. Fail explicitly rather than padding the map.` ,
+On the first turn, run one targeted parallel search or trace wave for the highest-information missing owner or boundary. When state is stale or malformed, trace the concrete state identifier to its writer, normalizer, transformer, or invalidator instead of stopping at the consumer that exposes the symptom. For an existing command or option, treat generic argument parsing as ingress; rank the behavior-bearing command plugin and dispatcher above it unless the CLI layer transforms or validates the requested semantics. Do not repeat existing searches or tour the repository. On the second turn, read the strongest newly discovered source range, compare the best runtime owner against the strongest alternative with a listwise BESTFIT decision, and submit the grounded code map in the same turn. Tests, docs, wrappers, registries, callers, and symptom consumers must not outrank a read-confirmed implementation owner. Every submitted candidate and relationship must cite a read_file range. Fail explicitly rather than padding the map.` ,
 }
 
 const FAST_CONTEXT_CENSUS_JUDGE_DEFINITION: SubAgentDefinition = {
@@ -268,7 +272,7 @@ export function __testShouldAttemptBoundedJudge(params: {
 }): boolean {
   if (params.taskShape === 'repository-census' || params.taskShape === 'multi-frontier') return false
   if (params.planConfidence < 0.72) return false
-  return params.taskShape !== 'cross-boundary' || params.frontierCoverage >= 0.25
+  return params.taskShape !== 'cross-boundary' || params.frontierCoverage >= 0.5
 }
 
 export function __testShouldAcceptBoundedJudge(params: {
