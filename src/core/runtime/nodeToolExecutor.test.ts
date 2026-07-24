@@ -411,6 +411,19 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.data?.map(hit => hit.title)).toEqual(expect.arrayContaining(['flux_worker', 'flux_runner', 'FluxGateway']))
   }))
 
+  it('can require an exact symbol instead of a similarly named test declaration', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'lib', 'tests'), { recursive: true })
+    writeFileSync(join(workspace, 'lib', 'cbook.py'), 'class Grouper:\n    pass\n', 'utf-8')
+    writeFileSync(join(workspace, 'lib', 'tests', 'test_cbook.py'), 'def test_grouper_private():\n    pass\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.searchCodeSymbols({ query: 'Grouper', workspacePath: workspace, limit: 10, exact: true })
+
+    expect(result.success).toBe(true)
+    expect(result.data?.map(hit => hit.title)).toEqual(['Grouper'])
+    expect(result.data?.[0]?.path).toBe('lib/cbook.py')
+  }))
+
   it('accepts a concrete file path when narrowing symbol search', async () => withWorkspace(async ({ workspace }) => {
     mkdirSync(join(workspace, 'src'), { recursive: true })
     writeFileSync(join(workspace, 'src', 'Target.ts'), 'export function fluxTarget() {}\n', 'utf-8')

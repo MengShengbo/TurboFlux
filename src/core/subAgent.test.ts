@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { __testClearSubAgentProtocolCache, buildFastContextSystemPrompt, runSubAgent } from './subAgent'
+import { __testClearSubAgentProtocolCache, __testTraceDefinitionReadLimit, buildFastContextSystemPrompt, runSubAgent } from './subAgent'
 import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
@@ -9,6 +9,12 @@ function delay(ms: number): Promise<void> {
 }
 
 describe('runSubAgent', () => {
+  it('reads structural symbol definitions deeply enough to expose their stored representation', () => {
+    expect(__testTraceDefinitionReadLimit({ startLine: 754, endLine: 759, symbolKind: 'class' })).toBe(160)
+    expect(__testTraceDefinitionReadLimit({ startLine: 20, endLine: 25, symbolKind: 'function' })).toBe(40)
+    expect(__testTraceDefinitionReadLimit({ startLine: 1, endLine: 400, symbolKind: 'class' })).toBe(220)
+  })
+
   it('honors a definition-level disabled thinking policy', async () => {
     const originalFetch = globalThis.fetch
     let requestBody: Record<string, unknown> | undefined
@@ -1028,6 +1034,7 @@ describe('runSubAgent', () => {
         expect.objectContaining({ path: 'src/app.ts', reason: 'file read' }),
       ]))
       expect(executor.searchCodeSymbols).toHaveBeenCalledTimes(1)
+      expect(executor.searchCodeSymbols).toHaveBeenCalledWith(expect.objectContaining({ query: 'startRuntime', exact: true }))
       expect(executor.searchContentPage).toHaveBeenCalledTimes(1)
       expect(executor.readFileRange).toHaveBeenCalledTimes(2)
     } finally {

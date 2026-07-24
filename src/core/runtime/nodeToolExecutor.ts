@@ -481,7 +481,7 @@ export class NodeToolExecutor implements ToolExecutor {
       : { success: true, data: { results: [], provider: 'none', query: effectiveQuery } }
   }
 
-  async searchCodeSymbols(query: { query: string; workspacePath: string; kind?: string; limit?: number }): Promise<Result<CodeSearchHit[]>> {
+  async searchCodeSymbols(query: { query: string; workspacePath: string; kind?: string; limit?: number; exact?: boolean }): Promise<Result<CodeSearchHit[]>> {
     try {
       const safeRootPath = this.ensureAllowedPath(query.workspacePath)
       const requestedPath = typeof (query as any).path === 'string' && (query as any).path.trim()
@@ -504,12 +504,13 @@ export class NodeToolExecutor implements ToolExecutor {
         })
       } catch {}
       const escapedQuery = this.escapeRegex(query.query)
+      const symbolPattern = query.exact ? escapedQuery : `\\w*${escapedQuery}\\w*`
       const pattern = [
-        `(?:function|class|interface|type|enum|const|let|var)\\s+\\w*${escapedQuery}\\w*`,
-        `(?:async\\s+)?def\\s+\\w*${escapedQuery}\\w*`,
-        `(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+\\w*${escapedQuery}\\w*`,
-        `func\\s+(?:\\([^)]*\\)\\s*)?\\w*${escapedQuery}\\w*`,
-        `(?:class|interface|record|struct|enum|trait|protocol|object)\\s+\\w*${escapedQuery}\\w*`,
+        `(?:function|class|interface|type|enum|const|let|var)\\s+${symbolPattern}\\b`,
+        `(?:async\\s+)?def\\s+${symbolPattern}\\b`,
+        `(?:pub(?:\\([^)]*\\))?\\s+)?(?:async\\s+)?fn\\s+${symbolPattern}\\b`,
+        `func\\s+(?:\\([^)]*\\)\\s*)?${symbolPattern}\\b`,
+        `(?:class|interface|record|struct|enum|trait|protocol|object)\\s+${symbolPattern}\\b`,
       ].map(value => `(?:${value})`).join('|')
       const results: CodeSearchHit[] = []
       let ripgrepUnavailable = false
@@ -575,9 +576,13 @@ export class NodeToolExecutor implements ToolExecutor {
         }
       }
       const fallback = ripgrepUnavailable
-        ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit, safeRootPath)
+        ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit, safeRootPath, query.exact === true)
             .filter(hit => !exactRequestedFile || resolveNativePath(safeRootPath, hit.path).toLowerCase() === exactRequestedFile)
         : []
+      const exactName = query.query.toLowerCase()
+      if (query.exact) {
+        graphResults = graphResults.filter(hit => (hit.symbolName || hit.title).toLowerCase() === exactName)
+      }
       if (exactRequestedFile) {
         graphResults = graphResults.filter(hit => resolveNativePath(safeRootPath, hit.path).toLowerCase() === exactRequestedFile)
       }
@@ -2006,7 +2011,7 @@ export class NodeToolExecutor implements ToolExecutor {
     return results
   }
 
-  private searchCodeSymbolsFallback(query: string, basePath: string, limit: number, workspacePath = basePath): CodeSearchHit[] {
+  private searchCodeSymbolsFallback(query: string, basePath: string, limit: number, workspacePath = basePath, exact = false): CodeSearchHit[] {
     const results: CodeSearchHit[] = []
     const queryLower = query.toLowerCase()
     this.walkDir(basePath, filePath => {
@@ -2015,7 +2020,9 @@ export class NodeToolExecutor implements ToolExecutor {
         const lines = readFileSync(filePath, 'utf-8').split(/\r?\n/)
         for (let index = 0; index < lines.length && results.length < limit; index += 1) {
           const declaration = this.extractSymbolDeclaration(lines[index])
-          if (!declaration || !declaration.name.toLowerCase().includes(queryLower)) continue
+          if (!declaration || (exact
+            ? declaration.name.toLowerCase() !== queryLower
+            : !declaration.name.toLowerCase().includes(queryLower))) continue
           const text = lines[index].trim()
           results.push({
             id: `sym_${index + 1}_${filePath.slice(-20)}`,

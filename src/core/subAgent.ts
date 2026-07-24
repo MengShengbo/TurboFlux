@@ -1472,6 +1472,21 @@ interface ToolExecResult {
   evidence: SubAgentEvidence[]
 }
 
+export function __testTraceDefinitionReadLimit(hit: {
+  startLine?: number
+  endLine?: number
+  line?: number
+  symbolKind?: string
+}): number {
+  const startLine = hit.startLine || hit.line || 1
+  const endLine = hit.endLine || startLine
+  const structuralDefinition = hit.symbolKind === 'class'
+    || hit.symbolKind === 'interface'
+    || hit.symbolKind === 'type'
+    || hit.symbolKind === 'enum'
+  return Math.min(220, Math.max(structuralDefinition ? 160 : 40, endLine - startLine + 24))
+}
+
 const GENERIC_TWIN_FILENAMES = new Set([
   'index.js', 'index.jsx', 'index.ts', 'index.tsx', 'main.js', 'main.ts',
   'mod.rs', 'lib.rs', '__init__.py', 'package.json', 'readme.md',
@@ -1710,12 +1725,20 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       const filePattern = pathIsFile ? pathFilter : undefined
       const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const pattern = /^[A-Za-z_$][\w$]*$/.test(query) ? `\\b${escaped}\\b` : escaped
-      const [symbolResult, referenceResult] = await Promise.all([
-        executor.searchCodeSymbols({ workspacePath, query, path: typeof args.path === 'string' ? args.path : undefined, limit: 12 }),
+      const exactIdentifier = /^[A-Za-z_$][\w$]*$/.test(query)
+      const [symbolResult, initialReferenceResult] = await Promise.all([
+        executor.searchCodeSymbols({ workspacePath, query, path: typeof args.path === 'string' ? args.path : undefined, limit: 12, exact: exactIdentifier }),
         executor.searchContentPage
           ? executor.searchContentPage(pattern, basePath, filePattern, false, { limit: 30, contextBefore: 1, contextAfter: 1 })
           : executor.searchContent(pattern, basePath, filePattern, false),
       ])
+      const initialReferencePage = initialReferenceResult.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }> } | Array<{ file: string; line: number; text: string; context?: string }> | undefined
+      const initialReferenceHits = Array.isArray(initialReferencePage) ? initialReferencePage : initialReferencePage?.hits || []
+      const referenceResult = initialReferenceHits.length === 0 && exactIdentifier
+        ? executor.searchContentPage
+          ? await executor.searchContentPage(escaped, basePath, filePattern, false, { limit: 30, contextBefore: 1, contextAfter: 1 })
+          : await executor.searchContent(escaped, basePath, filePattern, false)
+        : initialReferenceResult
       const symbolHits = normalizeCodeSearchHits(symbolResult.data).slice(0, 10)
       const referencePage = referenceResult.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }> } | Array<{ file: string; line: number; text: string; context?: string }> | undefined
       const referenceHits = diversifySearchHits(Array.isArray(referencePage) ? referencePage : referencePage?.hits || [], 30)
@@ -1763,7 +1786,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         readTargets.push({
           path: relPath,
           offset,
-          limit: Math.min(100, Math.max(40, endLine - offset + 24)),
+          limit: __testTraceDefinitionReadLimit(hit),
           label: `definition ${hit.title}`,
         })
       }
