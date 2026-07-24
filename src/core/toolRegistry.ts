@@ -167,7 +167,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'explore_code',
-    description: `Start FastContext architecture mapping in the background. Use when a feature, bug, workflow, or change may cross modules, ownership boundaries, implementations, configuration, state, persistence, or failure paths. It returns an evidence-grounded code map with execution relationships and change-impact candidates. Continue only non-overlapping work while it runs; do not duplicate broad retrieval or call explore_code repeatedly. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
+    description: `Start FastContext architecture mapping in the background. Use when a feature, bug, workflow, or change may cross modules, ownership boundaries, implementations, configuration, state, persistence, or failure paths. Its evidence-grounded code map is injected automatically at a safe turn boundary. Continue only non-overlapping work while it runs; never poll it with read_agent/list_agents, duplicate broad retrieval, or call explore_code repeatedly. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
     category: 'read',
     parameters: [
       { name: 'objective', type: 'string', description: 'Concrete thing to locate or understand. Include visible UI text, behavior, suspected feature area, symbol names, and what answer should prove.', required: true },
@@ -483,7 +483,7 @@ When NOT to use spawn_agent:
 - For a known string pattern in a known area, use search_content.
 - For a tiny known lookup where one targeted search is enough, stay with targeted read/search tools.
 
-Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results, list_agents to discover tasks, and cancel_agent to stop one.
+Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results for ordinary subagents, list_agents to discover tasks, and cancel_agent to stop one. FastContext is push-driven through explore_code and must not be polled.
 Launch multiple agents concurrently for independent topics and provide a highly specific objective.`,
     category: 'read',
     parameters: [
@@ -507,7 +507,7 @@ Launch multiple agents concurrently for independent topics and provide a highly 
   },
   {
     name: 'read_agent',
-    description: 'Read a background subagent status, final result when available, and a page of its persisted transcript.',
+    description: 'Read an ordinary background subagent status, final result when available, and a page of its persisted transcript. Never use this to poll FastContext; FastContext evidence is injected automatically.',
     category: 'read',
     parameters: [
       { name: 'agent_id', type: 'string', description: 'Agent ID returned by spawn_agent or list_agents.', required: true },

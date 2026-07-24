@@ -78,6 +78,7 @@ export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
 export function shouldPersistToolForHistory(tool: ToolStatus): boolean {
   if (tool.status !== 'done') return true
   if (tool.name === 'create_checkpoint') return false
+  if (tool.name === 'read_agent') return false
   if (tool.name === 'list_tasks' || tool.name === 'update_task' || tool.name === 'create_task' || tool.name === 'create_tasks') return false
   if (isCollapsedReadSearchTool(tool.name)) return false
   return true

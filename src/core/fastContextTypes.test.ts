@@ -5,7 +5,7 @@ import { buildFastContextSystemPrompt } from './subAgent'
 describe('FastContext architecture contract', () => {
   it('uses one adaptive architecture budget', () => {
     expect(FAST_CONTEXT_TUNING).toEqual({
-      maxTurns: 4,
+      maxTurns: 6,
       maxParallel: 8,
       taskTimeoutMs: 600_000,
       reasoningEffort: 'high',
@@ -19,9 +19,13 @@ describe('FastContext architecture contract', () => {
     expect(prompt).toContain('highest expected information gain')
     expect(prompt).toContain('deterministic local tools only execute')
     expect(prompt).toContain('submit_code_map')
+    expect(prompt).toContain('finish in three provider turns')
+    expect(prompt).toContain('request_more_search alone')
+    expect(prompt).toContain('exactly one bounded frontier check')
     expect(prompt).toContain('Relationships are optional')
     expect(prompt).toContain('Read every submitted candidate')
-    expect(prompt).toContain('counterfactual edit test')
+    expect(prompt).toContain('required propagation surface')
     expect(prompt).toContain('Do not enumerate the repository')
+    expect(prompt).not.toContain('get_codemap')
   })
 })

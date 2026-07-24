@@ -124,4 +124,105 @@ describe('AgentEngine background subagent tools', () => {
       rmSync(workspacePath, { recursive: true, force: true })
     }
   })
+
+  it('waits once for a running FastContext task instead of exposing a pollable transcript', async () => {
+    const workspacePath = mkdtempSync(path.join(tmpdir(), 'turboflux-fast-context-push-'))
+    const runtime = createAgentRuntime({
+      workspacePath,
+      workspaceName: 'fast-context-push-test',
+      conversationId: 'conversation-fast-context-push',
+      approvalPolicy: 'full',
+      connectMcp: false,
+      config: {
+        provider: 'custom',
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        contextWindow: 100_000,
+        maxTokens: 4096,
+      },
+    })
+    const dispatchTool = (runtime.engine as unknown as {
+      dispatchTool: (name: string, args: Record<string, unknown>) => Promise<string>
+    }).dispatchTool.bind(runtime.engine)
+    let resolveTask!: (result: unknown) => void
+    const started = runtime.subAgentTaskManager.startTask({
+      kind: 'fast_context',
+      agentType: 'fast_context',
+      label: 'FastContext',
+      objective: 'Map the runtime owner',
+      workspacePath,
+      run: () => new Promise(resolve => { resolveTask = resolve }),
+    })
+    const engineState = runtime.engine as unknown as {
+      fastContextRuntimeTaskId: string | null
+      fastContextRunPromise: Promise<unknown> | null
+    }
+    engineState.fastContextRuntimeTaskId = started.task.id
+    engineState.fastContextRunPromise = started.promise
+
+    try {
+      let settled = false
+      const read = dispatchTool('read_agent', { agent_id: started.task.id }).then(result => {
+        settled = true
+        return result
+      })
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(settled).toBe(false)
+
+      resolveTask({
+        objective: 'Map the runtime owner',
+        evidencePack: 'src/core/agentEngine.ts:1',
+        filesScanned: 1,
+        hits: [],
+        elapsedMs: 10,
+        truncated: false,
+      })
+      await expect(read).resolves.toContain('injected automatically')
+      expect(await dispatchTool('read_agent', { agent_id: started.task.id })).not.toContain('Transcript records')
+    } finally {
+      await runtime.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('emits a terminal FastContext event when a scan is already aborted', async () => {
+    const workspacePath = mkdtempSync(path.join(tmpdir(), 'turboflux-fast-context-abort-'))
+    const runtime = createAgentRuntime({
+      workspacePath,
+      workspaceName: 'fast-context-abort-test',
+      conversationId: 'conversation-fast-context-abort',
+      approvalPolicy: 'full',
+      connectMcp: false,
+      config: {
+        provider: 'custom',
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        contextWindow: 100_000,
+        maxTokens: 4096,
+      },
+    })
+    const events: Array<{ type: string }> = []
+    const unsubscribe = runtime.engine.subscribe(event => events.push(event))
+    const engineState = runtime.engine as unknown as {
+      fastContextGeneration: number
+      runFastContextScan: (objective: string, options: Record<string, unknown>) => Promise<unknown>
+    }
+    engineState.fastContextGeneration = 1
+
+    try {
+      await engineState.runFastContextScan('Map the runtime owner', {
+        signal: AbortSignal.abort(),
+        injectPack: true,
+        generation: 1,
+        sourceUserTurnId: null,
+      })
+      expect(events.filter(event => event.type === 'fast_context:complete')).toHaveLength(1)
+    } finally {
+      unsubscribe()
+      await runtime.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
 })
