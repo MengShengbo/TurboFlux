@@ -221,11 +221,11 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     maxTransientAttempts: 3,
     requireGroundedReport: true,
     maxCandidates: 10,
-    allowedTools: ['search_content', 'search_files', 'trace_symbol', 'read_file', 'submit_code_map'],
+    allowedTools: ['search_content', 'search_files', 'trace_symbol', 'trace_symbols', 'read_file', 'submit_code_map'],
     userPrompt: [
       `Objective: ${params.objective}`,
       '',
-      'Run FastContext as an adaptive model-led retrieval loop. Use the fewest evidence waves that fully close the edit frontier: finish simple tasks immediately after grounding the owner, and continue complex tasks while a concrete unresolved hypothesis can change the edit set.',
+      'Run FastContext as an adaptive model-led retrieval loop. Recover the smallest complete edit frontier, not every architectural category. Finish as soon as no concrete unread path or symbol can change the ranked candidates; continue only while a named causal next hop remains. Batch independent reads and same-frontier symbol traces.',
     ].join('\n'),
     onEvent: onSubAgentEvent,
   })
