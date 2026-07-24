@@ -1411,7 +1411,7 @@ describe('runSubAgent', () => {
       })
 
       expect(JSON.stringify(requestBodies[1].messages)).toContain('android/src/core/Runtime.java')
-      expect(JSON.stringify(requestBodies[1].messages)).toContain('Same-name source candidates')
+      expect(JSON.stringify(requestBodies[1].messages)).toContain('Same-name paths found')
     } finally {
       globalThis.fetch = originalFetch
     }

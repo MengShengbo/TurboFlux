@@ -231,7 +231,7 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
 }
 
 export function buildFastContextSystemPrompt(): string {
-  return `You are FastContext, a fast read-only causal code-retrieval controller. You own query rewriting, next-hop selection, and stopping decisions; deterministic local tools only execute searches, symbol traces, and file reads. Find the complete edit frontier with the fewest useful model turns, not a broad repository tour.
+  return `You are FastContext, a fast read-only causal code-retrieval controller. You own query rewriting, next-hop selection, semantic completeness, and stopping decisions; deterministic local tools only execute searches, symbol traces, file reads, parallel scheduling, and mechanical evidence validation. Find the complete edit frontier with the fewest useful model turns, not a broad repository tour.
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
@@ -241,13 +241,13 @@ Tools:
 - submit_code_map(candidates, relationships, frontier_complete, unresolved_edit_paths, rejected_hypotheses, searches_tried, uncertainty)
 
 Protocol:
-1. Aim to finish in three provider turns: locate, verify, submit. At the adaptive submission gate, call submit_code_map only when the complete likely edit frontier is read-grounded. If a specific unread sibling implementation, shared grammar/parser, contract mirror, platform variant, or failure edge still has meaningful patch probability, call request_more_search alone. A granted rescue provides one targeted tool wave, followed by final submission.
-2. Extract one to three discriminative anchors from the objective. If it names a symbol, path, error literal, config key, or visible text, search that exact anchor first. Use trace_symbol for an exact identifier because it resolves declarations and references together. In the first wave preserve two genuinely different hypotheses when plausible: the direct symptom owner and a compatibility, normalization, protocol, or runtime-version owner. Test both in parallel instead of collapsing early onto the first matching behavior.
+1. There is no fixed locate/verify/submit schedule. On every provider turn choose the action with the highest expected information gain: run a parallel retrieval wave, read known candidates, or call submit_code_map alone. A simple exact-owner task may finish after one tool wave; a lifecycle, pipeline, public-contract, persistence, platform, generated-code, or implementation-family task may require several waves.
+2. Extract one to three discriminative anchors from the objective. If it names a symbol, path, error literal, config key, or visible text, search that exact anchor first. Use trace_symbol for an exact identifier because it resolves declarations and references together. Preserve genuinely different causal hypotheses when plausible instead of collapsing onto the first matching symptom.
 3. Batch independent calls in parallel when each has information value, usually 2-6 at a time; never invent calls to fill a batch. Prefer one precise query plus one genuinely different ownership hypothesis over synonym expansion.
-4. Follow the next hop with the highest expected information gain. Read probable owners immediately and read multiple known candidates in one parallel wave. A search hit is only a hypothesis until read.
-5. After reading the probable owner, perform exactly one bounded frontier check. Inspect only direct callers, public contracts/types, registration or defaults, state/config/persistence collaborators, behavior-bearing variants, and focused tests that may need the same change. For parser, serializer, protocol, platform, generated/runtime, or language-family code, explicitly check whether a sibling or shared implementation carries the same behavior. If a discovered implementation does not fully explain the objective, try one semantic or naming-family alternative before stopping.
-6. Submit immediately when the owner and required propagation surface are read-grounded. Do not spend another turn merely increasing confidence, adding context, or drawing relationships.
-7. Finish only with submit_code_map. Rank up to ten candidates independently of discovery order. For each candidate estimate patch_probability, causal_distance, and change_effect. Set frontier_complete=true only when no unread file still has meaningful probability of requiring the same patch; otherwise list concrete unresolved_edit_paths and request rescue instead of submitting. Prefer a root-cause file whose isolated change could resolve the objective, then synchronized propagation surfaces, verification files, and context. Break ties by higher patch probability and shorter causal distance. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
+4. Follow the next hop with the highest expected information gain. Read probable owners immediately and read multiple known candidates in one parallel wave. A search hit is only a hypothesis until read. When a read exposes a constructor, imported owner, registration, dispatcher, conversion table, lifecycle boundary, or failure edge that can change the edit set, trace that concrete next hop before stopping.
+5. Reassess the frontier after every evidence wave. Consider, only when relevant to the observed behavior: the symptom sink and causal producer, direct callers and consumers, public contracts/configuration, state or persistence propagation, lifecycle cleanup and failure paths, and behavior-bearing variants or generated/runtime mirrors. These are semantic questions for you, not mandatory local heuristics.
+6. Continue retrieval while a concrete unresolved hypothesis can materially change the ranked edit set. Stop as soon as every material hypothesis is either read-grounded or explicitly rejected from read evidence. Do not spend another turn merely increasing confidence, adding context, or drawing optional relationships.
+7. Finish only with submit_code_map. Rank up to ten candidates independently of discovery order. For each candidate estimate patch_probability, causal_distance, and change_effect. Set frontier_complete=true only when no unread file or unresolved symbol still has meaningful probability of requiring the patch. Never hide a known unread path in uncertainty: retrieve it or place it in unresolved_edit_paths and continue searching instead of submitting. Prefer a root-cause file whose isolated change could resolve the objective, then synchronized propagation surfaces, verification files, and context. Break ties by higher patch probability and shorter causal distance. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
 
 Rules:
 - Never describe files you have not read.
@@ -281,7 +281,6 @@ export interface RunSubAgentOptions {
   retrievalContext?: string
   initialEvidence?: SubAgentEvidence[]
   submissionOnly?: boolean
-  adaptiveSubmissionTurn?: number
   userPrompt?: string
   allowedTools?: string[]
   requiredAuditPaths?: string[]
@@ -825,6 +824,10 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
     const unresolved = report.unresolvedEditPaths.length > 0 ? report.unresolvedEditPaths.join(', ') : 'unspecified edit candidate'
     return `edit frontier remains open; run one targeted retrieval wave for: ${unresolved}`
   }
+  const unreadClaims = explicitlyDeclaredUnreadPaths(report, evidence)
+  if (unreadClaims.length > 0) {
+    return `submission uncertainty declares unread path(s): ${unreadClaims.join(', ')}; continue retrieval or explicitly reject each path from read-grounded evidence`
+  }
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
     if (!rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
@@ -840,6 +843,22 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
     }
   }
   return null
+}
+
+function explicitlyDeclaredUnreadPaths(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string[] {
+  const readPaths = new Set(evidence
+    .filter(item => item.reason === 'file read')
+    .map(item => item.path.replace(/\\/g, '/').toLowerCase()))
+  const claims = new Set<string>()
+  const pathPattern = /(?:^|[\s`'"(])((?:[\w.@+-]+\/)+[\w.@+-]+\.[A-Za-z0-9]{1,12})(?=$|[\s`'"),:;])/g
+  for (const item of report.uncertainty) {
+    if (!/\b(?:unread|not (?:yet )?read|needs? (?:to be )?read|would need (?:a )?read)\b/i.test(item)) continue
+    for (const match of item.matchAll(pathPattern)) {
+      const path = match[1].replace(/\\/g, '/')
+      if (!readPaths.has(path.toLowerCase())) claims.add(path)
+    }
+  }
+  return [...claims]
 }
 
 function validateRequiredAuditPaths(report: SubmittedCodeMap, requiredPaths: string[] | undefined): string | null {
@@ -1053,7 +1072,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
               },
             },
             frontier_complete: { type: 'boolean', description: 'True only when no unread file still has meaningful probability of requiring the same patch.' },
-            unresolved_edit_paths: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Concrete unread paths or path hypotheses that may still require edits. Request rescue instead of submitting when non-empty.' },
+            unresolved_edit_paths: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Concrete unread paths or unresolved symbol/path hypotheses that may still require edits. Continue retrieval instead of submitting when non-empty.' },
             rejected_hypotheses: { type: 'array', items: { type: 'string' } },
             searches_tried: { type: 'array', items: { type: 'string' } },
             uncertainty: { type: 'array', items: { type: 'string' } },
@@ -1062,23 +1081,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         },
       },
     })
-    if (options.adaptiveSubmissionTurn) {
-      tools.push({
-        type: 'function',
-        function: {
-          name: 'request_more_search',
-          description: 'Request one final targeted retrieval wave instead of submitting now. Use only when a specific unresolved owner, contract, mirror, or failure edge can change the ranked result.',
-          parameters: {
-            type: 'object',
-            properties: {
-              reason: { type: 'string' },
-              next_queries: { type: 'array', items: { type: 'string' }, maxItems: 4 },
-            },
-            required: ['reason'],
-          },
-        },
-      })
-    }
   }
   const allowedToolNames = options.allowedTools ? new Set(options.allowedTools) : undefined
   const availableTools = allowedToolNames
@@ -1096,9 +1098,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
   let searchRecoveryUsed = false
   let reportRecoveryUsed = false
-  let submissionRecoveryUsed = false
-  let evidenceSaturationPrompted = false
-  let searchExtensionGrantedAtTurn: number | null = null
+  let submissionRejections = 0
+  let previousSubmissionError = ''
+  let submissionRepairExtensionUsed = false
   const activeProtocolCacheKey = protocolCacheKey({ baseUrl, provider, model: modelId, apiKey, customHeaders })
   let resolvedProtocol: ModelProtocol | null = getCachedProtocol(activeProtocolCacheKey)
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
@@ -1122,12 +1124,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     if (abortSignal?.aborted) break
     turn++
     emit({ type: 'turn_start', turn, maxTurns: turnLimit })
-    const adaptiveSubmissionGate = strictFastContext
-      && hasModelReadEvidence()
-      && searchExtensionGrantedAtTurn === null
-      && options.adaptiveSubmissionTurn !== undefined
-      && turn === options.adaptiveSubmissionTurn
-
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
     const waitStartedAt = Date.now()
@@ -1148,20 +1144,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
         const url = buildModelProtocolUrl(baseUrl, protocol)
-        const rescueFinalization = strictFastContext
-          && searchExtensionGrantedAtTurn !== null
-          && turn >= searchExtensionGrantedAtTurn + 2
         const finalizationOnly = strictFastContext
           && hasModelReadEvidence()
-          && (options.submissionOnly === true || turn === turnLimit || adaptiveSubmissionGate || rescueFinalization)
+          && (options.submissionOnly === true || turn === turnLimit)
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = compactToolHistory(messages, collectedEvidence, finalizationOnly)
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
-        const requestTools = adaptiveSubmissionGate
-          ? availableTools.filter(tool => tool.function.name === 'submit_code_map' || tool.function.name === 'request_more_search')
-          : finalizationOnly
-            ? availableTools.filter(tool => tool.function.name === 'submit_code_map')
-            : availableTools.filter(tool => tool.function.name !== 'request_more_search')
+        const requestTools = finalizationOnly
+          ? availableTools.filter(tool => tool.function.name === 'submit_code_map')
+          : strictFastContext && !hasModelReadEvidence()
+            ? availableTools.filter(tool => tool.function.name !== 'submit_code_map')
+            : availableTools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
               model: modelId,
@@ -1364,41 +1357,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     }
 
     const submissionCalls = responseToolCalls.filter(call => call.function.name === 'submit_code_map')
-    const extensionCalls = responseToolCalls.filter(call => call.function.name === 'request_more_search')
-    if (extensionCalls.length > 0 && submissionCalls.length === 0) {
-      const extension = extensionCalls[0]
-      let extensionArgs: Record<string, any> = {}
-      try { extensionArgs = JSON.parse(extension.function.arguments || '{}') } catch {}
-      const reason = String(extensionArgs.reason || '').replace(/\s+/g, ' ').trim().slice(0, 320)
-      const queries = stringList(extensionArgs.next_queries, 4)
-      const error = !adaptiveSubmissionGate
-        ? 'request_more_search is only available at the adaptive submission gate'
-        : responseToolCalls.length !== 1
-          ? 'request_more_search must be called alone'
-          : !reason
-            ? 'request_more_search requires a specific unresolved evidence gap'
-            : ''
-      messages.push({ role: 'assistant', content: messageText, tool_calls: [extension] })
-      messages.push({
-        role: 'tool',
-        tool_call_id: extension.id,
-        content: error || [
-          'One targeted rescue wave granted.',
-          `Unresolved gap: ${reason}`,
-          queries.length > 0 ? `Planned queries: ${queries.join('; ')}` : '',
-        ].filter(Boolean).join('\n'),
-      })
-      emit({ type: 'tool_call', tool: 'request_more_search', args: extensionArgs, turn })
-      emit({ type: 'tool_result', tool: 'request_more_search', ok: !error, summary: error || `rescue wave: ${reason}`, turn })
-      emit({ type: 'turn_complete', turn, calls: 1 })
-      if (error) continue
-      searchExtensionGrantedAtTurn = turn
-      messages.push({
-        role: 'user',
-        content: 'Run exactly one targeted rescue wave now. Execute only the searches or reads needed to close the stated gap; the following turn is final submission.',
-      })
-      continue
-    }
 
     if (submissionCalls.length > 0) {
       const submission = submissionCalls[0]
@@ -1422,7 +1380,14 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         emit({ type: 'turn_complete', turn, calls: 1 })
         return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence, codeMap: report }
       }
-      if (submissionRecoveryUsed) {
+      submissionRejections = previousSubmissionError === submissionError ? submissionRejections + 1 : 1
+      previousSubmissionError = submissionError
+      const semanticFrontierError = /^edit frontier remains open;|^submission uncertainty declares unread/i.test(submissionError)
+      if (turn >= turnLimit && !semanticFrontierError && !submissionRepairExtensionUsed) {
+        turnLimit += 1
+        submissionRepairExtensionUsed = true
+      }
+      if (submissionRejections >= 3 || turn >= turnLimit) {
         const error = `FastContext submission rejected: ${submissionError}`
         emit({ type: 'error', message: error })
         return {
@@ -1435,17 +1400,14 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           error,
         }
       }
-      if (turn >= turnLimit) turnLimit += 1
-      if (/^edit frontier remains open;/.test(submissionError) && searchExtensionGrantedAtTurn === null) {
-        searchExtensionGrantedAtTurn = turn
-      }
       messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })
       messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
       messages.push({
         role: 'user',
-        content: 'Correct the grounded evidence map and call submit_code_map again. Retrieve or read only if the rejection identifies missing evidence.',
+        content: semanticFrontierError
+          ? 'The submitted frontier is explicitly incomplete. Continue with the targeted searches, traces, or reads needed to resolve the named gap, then decide again whether to retrieve or submit.'
+          : 'Correct the mechanical evidence error. Retrieve or read only when the rejection identifies missing evidence, then decide again whether to retrieve or submit.',
       })
-      submissionRecoveryUsed = true
       emit({ type: 'tool_result', tool: 'submit_code_map', ok: false, summary: submissionError, turn })
       emit({ type: 'turn_complete', turn, calls: 1 })
       continue
@@ -1537,23 +1499,12 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: result.output })
     }
 
-    const readEvidencePaths = new Set(collectedEvidence
-      .filter(evidence => evidence.reason === 'file read')
-      .map(evidence => evidence.path.toLowerCase()))
-    if (strictFastContext && !evidenceSaturationPrompted && turn >= 4 && readEvidencePaths.size >= 6 && turn < turnLimit - 1) {
-      messages.push({
-        role: 'user',
-        content: `You now have read-confirmed evidence from ${readEvidencePaths.size} files. On the next turn, submit the ranked code map unless one specific unresolved owner, mirror, or failure edge still requires a targeted read. Do not broaden the search generically.`,
-      })
-      evidenceSaturationPrompted = true
-    }
-
     emit({ type: 'turn_complete', turn, calls: results.length })
 
     if (strictFastContext && turn === turnLimit - 1) {
       messages.push({
         role: 'user',
-        content: 'One turn remains. Call submit_code_map now using only read-confirmed evidence. Do not call more retrieval tools.',
+        content: 'The hard safety limit allows one final provider turn. Call submit_code_map using only read-confirmed evidence. If the frontier is still materially open, fail explicitly rather than inventing completeness.',
       })
     }
 
@@ -1769,7 +1720,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       if (rangeData?.truncated) outputLines.push(`[More lines available. Continue with offset=${offset + slice.length + 1}.]`)
       const pathTwins = await findPathTwinHints(relativePath, workspacePath, executor)
       if (pathTwins.length > 0) {
-        outputLines.push(`[Same-name source candidates: ${pathTwins.join(', ')}. Read behavior-bearing platform/package mirrors before final ranking; ignore stubs and generated copies that do not require edits.]`)
+        outputLines.push(`[Same-name paths found: ${pathTwins.join(', ')}. These are unverified filename hints, not semantic evidence; decide whether any concrete behavior requires tracing them.]`)
       }
       return { ok: true, output: outputLines.join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence }
     }

@@ -8,16 +8,17 @@ import {
 } from './fastContextSubagent'
 
 describe('FastContext controller', () => {
-  it('uses one compact adaptive controller', () => {
+  it('uses one model-led adaptive controller', () => {
     const definition = __testFastContextDefinition()
 
     expect(definition.label).toBe('FastContext Controller')
-    expect(definition.maxTurns).toBe(6)
+    expect(definition.maxTurns).toBe(8)
     expect(definition.maxParallel).toBe(8)
     expect(definition.systemPrompt).toContain('highest expected information gain')
     expect(definition.systemPrompt).toContain('Relationships are optional')
-    expect(definition.systemPrompt).toContain('three provider turns')
-    expect(definition.systemPrompt).toContain('request_more_search')
+    expect(definition.systemPrompt).toContain('There is no fixed locate/verify/submit schedule')
+    expect(definition.systemPrompt).toContain('A simple exact-owner task may finish after one tool wave')
+    expect(definition.systemPrompt).not.toContain('request_more_search')
   })
 
   it('does not touch the workspace without an active model', async () => {
