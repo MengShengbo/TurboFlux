@@ -42,7 +42,7 @@ RepoCoder 通过迭代检索改善仓库级代码补全，说明一次性相似�
 
 ### 3.2 软件工程代理与工具使用
 
-ReAct 将推理与动作交替组织，为语言模型驱动的工具代理提供了通用范式 [@yao2023react]；Toolformer 展示了模型学习使用外部工具的可能性 [@schick2023toolformer]。在软件工程领域，AutoCodeRover 与 Agentless 分别探索代理式程序改进和简化的软件修复流程 [@zhang2024autocoderover; @xia2024agentless]。Claude Code 与 OpenCode 则提供了工程化的只读探索或子任务机制。FastContext 关注其中更窄但关键的阶段：在补丁生成前快速形成可核验的修改候选集合。
+ReAct 将推理与动作交替组织，为语言模型驱动的工具代理提供了通用范式 [@yao2023react]；Toolformer 展示了模型学习使用外部工具的可能性 [@schick2023toolformer]。在软件工程领域，AutoCodeRover 与 Agentless 分别探索代理式程序改进和简化的软件修复流程 [@zhang2024autocoderover; @xia2024agentless]。Claude Code 与 OpenCode 则提供了工程化的只读探索或子任务机制 [@anthropicclaudecode; @opencode]。FastContext 关注其中更窄但关键的阶段：在补丁生成前快速形成可核验的修改候选集合。
 
 ### 3.3 自反思、选择性检索与图引导
 
@@ -50,7 +50,7 @@ Self-RAG 将检索与自反思决策结合，说明检索时机和证据质量�
 
 ### 3.4 评测基准
 
-SWE-bench 以真实 GitHub 问题和仓库快照评估软件工程系统 [@jimenez2024swebench]。SWE-bench Verified 对样本可解性进行人工验证，SWE-PolyBench Verified 扩展了语言与仓库类型。本文从二者构建平衡的代码定位语料，使用真实补丁涉及的实现文件作为 gold paths。与完整修复评测不同，本文隔离检索阶段，以便分析代理架构本身的定位质量、成本和稳定性。
+SWE-bench 以真实 GitHub 问题和仓库快照评估软件工程系统 [@jimenez2024swebench]。SWE-bench Verified 对样本可解性进行人工验证，SWE-PolyBench Verified 扩展了语言与仓库类型 [@swebenchverified; @swepolybenchverified]。本文从二者构建平衡的代码定位语料，使用真实补丁涉及的实现文件作为 gold paths。与完整修复评测不同，本文隔离检索阶段，以便分析代理架构本身的定位质量、成本和稳定性。
 
 ## 4 FastContext 架构
 

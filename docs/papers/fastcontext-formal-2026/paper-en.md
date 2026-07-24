@@ -42,7 +42,7 @@ RepoCoder demonstrated that iterative retrieval improves repository-level comple
 
 ### 3.2 Tool-Using Software Agents
 
-ReAct established an interleaved reasoning-and-action pattern for language-model agents [@yao2023react], while Toolformer investigated learned tool use [@schick2023toolformer]. AutoCodeRover and Agentless explored contrasting agentic and simplified workflows for software repair [@zhang2024autocoderover; @xia2024agentless]. Production coding assistants also expose read-only exploration and delegated subtask mechanisms. FastContext isolates the pre-edit retrieval stage and optimizes it as a distinct systems problem.
+ReAct established an interleaved reasoning-and-action pattern for language-model agents [@yao2023react], while Toolformer investigated learned tool use [@schick2023toolformer]. AutoCodeRover and Agentless explored contrasting agentic and simplified workflows for software repair [@zhang2024autocoderover; @xia2024agentless]. Production coding assistants also expose read-only exploration and delegated subtask mechanisms [@anthropicclaudecode; @opencode]. FastContext isolates the pre-edit retrieval stage and optimizes it as a distinct systems problem.
 
 ### 3.3 Selective Retrieval and Graph Guidance
 
@@ -50,7 +50,7 @@ Self-RAG couples retrieval with model-driven critique and retrieval decisions [@
 
 ### 3.4 Evaluation Corpora
 
-SWE-bench introduced repository snapshots paired with real GitHub issues and patches [@jimenez2024swebench]. SWE-bench Verified improves task validity through human review, and SWE-PolyBench Verified broadens the language and repository distribution. We derive file-level localization labels from historical implementation changes and evaluate retrieval independently from patch synthesis.
+SWE-bench introduced repository snapshots paired with real GitHub issues and patches [@jimenez2024swebench]. SWE-bench Verified improves task validity through human review, and SWE-PolyBench Verified broadens the language and repository distribution [@swebenchverified; @swepolybenchverified]. We derive file-level localization labels from historical implementation changes and evaluate retrieval independently from patch synthesis.
 
 ## 4. System Design
 

@@ -21,7 +21,8 @@
     "benchmark:retrieval-competitive": "tsx scripts/competitive-retrieval-benchmark.ts",
     "benchmark:retrieval-paper": "tsx scripts/paper-retrieval-benchmark.ts",
     "benchmark:retrieval-splits": "tsx scripts/prepare-retrieval-splits.ts",
-    "paper:fastcontext:data": "tsx scripts/build-formal-retrieval-paper-data.ts"
+    "paper:fastcontext:data": "tsx scripts/build-formal-retrieval-paper-data.ts",
+    "paper:fastcontext:finalize": "tsx scripts/finalize-formal-retrieval-papers.ts"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
