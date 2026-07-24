@@ -78,10 +78,18 @@ describe('FastContext semantic planner', () => {
       symbols: ['Description'],
       semanticQueries: ['@Description'],
       frontierSearches: [],
+      censusSearches: [
+        { role: 'anchor', mode: 'literal', query: '@Description' },
+        { role: 'violation', mode: 'regex', query: '@Description\\s*\\(\\s*"[a-z]', caseSensitive: true, fileGlob: '**/*.java' },
+      ],
     }))
 
     expect(parsed?.taskShape).toBe('repository-census')
     expect(parsed?.semanticQueries).toContain('@Description')
+    expect(parsed?.censusSearches).toEqual([
+      { role: 'anchor', mode: 'literal', query: '@Description', caseSensitive: false, multiline: false },
+      { role: 'violation', mode: 'regex', query: '@Description\\s*\\(\\s*"[a-z]', caseSensitive: true, multiline: false, fileGlob: '**/*.java' },
+    ])
   })
 
   it('runs the planner as a one-shot model task without exposing tools', async () => {
@@ -265,6 +273,24 @@ describe('FastContext semantic planner', () => {
     expect(merged.frontierSearches).toHaveLength(4)
   })
 
+  it('requires a concrete high-confidence contract before switching one-sided plans to census mode', () => {
+    const weak = mergeFastContextQueryPlans(plan, {
+      ...plan,
+      taskShape: 'repository-census',
+      confidence: 0.6,
+      censusSearches: [],
+    })
+    const grounded = mergeFastContextQueryPlans(plan, {
+      ...plan,
+      taskShape: 'repository-census',
+      confidence: 0.84,
+      censusSearches: [{ role: 'anchor', mode: 'literal', query: 'legacyClient' }],
+    })
+
+    expect(weak.taskShape).toBe('cross-boundary')
+    expect(grounded.taskShape).toBe('repository-census')
+  })
+
   it('executes semantic code and configuration lanes with read confirmation', async () => {
     const executor = {
       searchContentPage: vi.fn(async () => ({
@@ -399,7 +425,7 @@ describe('FastContext semantic planner', () => {
     expect(result.frontierCoverage).toBe(1)
   })
 
-  it('caps repository census reads after combining all candidate lanes', async () => {
+  it('caps broad repository census reads after combining all candidate lanes', async () => {
     const executor = {
       searchContentPage: vi.fn(async () => ({
         success: true,
@@ -425,14 +451,65 @@ describe('FastContext semantic planner', () => {
         taskShape: 'repository-census',
         symbols: ['Description'],
         semanticQueries: ['@Description("[a-z]'],
+        censusSearches: [{ role: 'violation', mode: 'regex', query: '@Description\\s*\\(\\s*"[a-z]' }],
         filenameGlobs: [],
         frontierSearches: [],
       },
     })
 
-    expect(result.readCalls).toBe(14)
-    expect(result.seedEvidence).toHaveLength(14)
-    expect(executor.readFileRange).toHaveBeenCalledTimes(14)
+    expect(result.readCalls).toBe(40)
+    expect(result.seedEvidence).toHaveLength(40)
+    expect(executor.readFileRange).toHaveBeenCalledTimes(40)
+    expect(result.census).toMatchObject({ candidateFiles: 80, directViolationFiles: 80, readFiles: 40, truncated: true })
+  })
+
+  it('uses a model-authored census contract for generic API migrations', async () => {
+    const searched: Array<{ pattern: string; limit?: number }> = []
+    const executor = {
+      searchContentPage: vi.fn(async (pattern: string, _path: string, _glob: string, insensitive: boolean, options: { limit?: number }) => {
+        searched.push({ pattern: `${pattern}:${insensitive}`, limit: options.limit })
+        if (pattern === 'legacyClient\\.(?:send|request)\\s*\\(') {
+          return { success: true, data: { hits: [
+            { file: 'C:/repo/packages/api/client.ts', line: 31, text: 'legacyClient.send(payload)' },
+            { file: 'C:/repo/services/worker/job.ts', line: 72, text: 'legacyClient.request(job)' },
+          ] } }
+        }
+        return { success: true, data: { hits: [
+          { file: 'C:/repo/docs/migration.md', line: 8, text: 'Use ModernClient instead of legacyClient' },
+        ] } }
+      }),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      readFileRange: vi.fn(async (path: string) => ({
+        success: true,
+        data: { content: `source for ${path}`, startLine: 1, endLine: 90, truncated: false },
+      })),
+      readFile: vi.fn(),
+    } as unknown as ToolExecutor
+
+    const result = await executeFastContextQueryPlan({
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      plan: {
+        ...plan,
+        taskShape: 'repository-census',
+        symbols: [],
+        semanticQueries: [],
+        filenameGlobs: [],
+        frontierSearches: [],
+        censusSearches: [
+          { role: 'violation', mode: 'regex', query: 'legacyClient\\.(?:send|request)\\s*\\(', caseSensitive: true },
+          { role: 'example', mode: 'literal', query: 'ModernClient' },
+        ],
+      },
+    })
+
+    expect(searched[0]).toEqual({ pattern: 'legacyClient\\.(?:send|request)\\s*\\(:false', limit: 500 })
+    expect(result.seedEvidence.slice(0, 2).map(item => item.path)).toEqual([
+      'packages/api/client.ts',
+      'services/worker/job.ts',
+    ])
+    expect(result.census).toMatchObject({ candidateFiles: 3, directViolationFiles: 2, readFiles: 3, truncated: false })
+    expect(result.text).toContain('violation/regex/case-sensitive: legacyClient\\.(?:send|request)\\s*\\(')
   })
 
   it('does not count one path as several independent frontier boundaries', async () => {

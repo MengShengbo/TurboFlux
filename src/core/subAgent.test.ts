@@ -1098,6 +1098,78 @@ describe('runSubAgent', () => {
     }
   })
 
+  it('supports a wider grounded candidate budget for repository censuses', async () => {
+    const originalFetch = globalThis.fetch
+    let requestBody: any
+    const candidates = Array.from({ length: 15 }, (_, index) => ({
+      path: `src/migration/Use${index}.ts`,
+      start_line: 1,
+      end_line: 4,
+      role: 'direct deprecated API occurrence',
+      edit_kind: 'implementation',
+      confidence: 'high',
+      why: 'read-confirmed migration target',
+    }))
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+        id: 'submit-census',
+        function: { name: 'submit_code_map', arguments: JSON.stringify({
+          candidates,
+          relationships: [],
+          rejected_hypotheses: [],
+          searches_tried: ['legacy API census'],
+          uncertainty: ['none'],
+        }) },
+      }] } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'fast_context',
+          label: 'FastContext Census',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'submit the census',
+          maxTurns: 1,
+          maxParallel: 1,
+        },
+        objective: 'replace every deprecated API call',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'census-test',
+        baseUrl: 'http://census-candidates.test',
+        model: 'census-model',
+        requireGroundedReport: true,
+        submissionOnly: true,
+        allowRelationshiplessReport: true,
+        maxCandidates: 15,
+        initialEvidence: candidates.map(candidate => ({
+          path: candidate.path,
+          startLine: 1,
+          endLine: 4,
+          preview: 'legacyClient.send()',
+          content: 'legacyClient.send()',
+          reason: 'file read',
+        })),
+      })
+
+      expect(result.codeMap?.candidates).toHaveLength(15)
+      const tools = requestBody.tools as Array<{ function?: { name?: string; parameters?: { properties?: { candidates?: { maxItems?: number } } } } }>
+      expect(tools[0].function?.parameters?.properties?.candidates?.maxItems).toBe(15)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('grants one correction request when the final-turn submission is ungrounded', async () => {
     const originalFetch = globalThis.fetch
     let requestCount = 0

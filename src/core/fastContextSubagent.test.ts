@@ -13,7 +13,6 @@ import {
   __testShouldAcceptSpeculativeJudge,
   __testShouldStartSpeculativeJudge,
   __testHasTaskSurfaceEvidence,
-  __testBuildExplicitCensusPlan,
   runFastContextSubagent,
 } from './fastContextSubagent'
 
@@ -48,16 +47,6 @@ describe('FastContext retrieval', () => {
 
     expect(__testHasTaskSurfaceEvidence('Add a user management page with an Edit button', evidence)).toBe(true)
     expect(__testHasTaskSurfaceEvidence('Fix database transaction retries', evidence)).toBe(false)
-  })
-
-  it('builds a local census plan only for explicit repeated annotation normalization', () => {
-    expect(__testBuildExplicitCensusPlan('Fix format for @Description value across inconsistent functions')).toMatchObject({
-      ok: true,
-      plan: { taskShape: 'repository-census', semanticQueries: ['@Description'] },
-    })
-    expect(__testBuildExplicitCensusPlan('Fix format for @Description values: `word_stem` differs from `zip`')?.plan.semanticQueries)
-      .toEqual(['@Description', 'word_stem'])
-    expect(__testBuildExplicitCensusPlan('Fix @Description lookup crash')).toBeUndefined()
   })
 
   it('requests serial semantic feedback only when first-pass evidence is scarce', () => {
@@ -158,11 +147,13 @@ describe('FastContext retrieval', () => {
       2,
       false,
       'RANKED_CODE_MAP\n1. src/llm.ts L20-L40 role=entry confidence=high why=read and confirmed',
+      'repository census inspected 18/40 candidate file(s)',
     )
 
     expect(pack).toContain('authority: llm_verified_code_map')
     expect(pack).toContain('llm_ranked_code_map:')
     expect(pack).toContain('src/llm.ts L20-L40')
+    expect(pack).toContain('coverage: repository census inspected 18/40 candidate file(s)')
     expect(pack).not.toContain('local_recall_candidates:')
     expect(pack).not.toContain('src/fallback.ts')
   })

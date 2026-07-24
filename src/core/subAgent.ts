@@ -302,6 +302,7 @@ export interface RunSubAgentOptions {
   requiredCandidatePaths?: string[]
   requireGroundedReport?: boolean
   allowRelationshiplessReport?: boolean
+  maxCandidates?: number
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -666,9 +667,9 @@ function normalizeEditKind(value: unknown, role: string): SubmittedCandidate['ed
   return 'supporting'
 }
 
-function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string): SubmittedCodeMap {
+function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string, maxCandidates = 10): SubmittedCodeMap {
   const candidates = Array.isArray(value.candidates)
-    ? value.candidates.slice(0, 10).map((candidate: Record<string, any>) => {
+    ? value.candidates.slice(0, Math.max(1, Math.min(40, maxCandidates))).map((candidate: Record<string, any>) => {
         const startLine = positiveLine(candidate.start_line ?? candidate.startLine)
         const role = String(candidate.role || '').replace(/\s+/g, ' ').trim().slice(0, 80)
         return {
@@ -983,6 +984,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           properties: {
             candidates: {
               type: 'array',
+              maxItems: Math.max(1, Math.min(40, options.maxCandidates ?? 10)),
               items: {
                 type: 'object',
                 properties: {
@@ -1303,7 +1305,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       } catch {
         submissionError = 'submit_code_map arguments are not valid JSON'
       }
-      const report = parseSubmittedCodeMap(submissionArgs, workspacePath)
+      const report = parseSubmittedCodeMap(submissionArgs, workspacePath, options.maxCandidates)
       normalizeSubmittedCodeMap(report, collectedEvidence)
       pruneUngroundedCodeMap(report, collectedEvidence)
       submissionError ||= validateSubmittedCodeMap(report, collectedEvidence, options.allowRelationshiplessReport === true) || ''

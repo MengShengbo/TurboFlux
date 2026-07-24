@@ -17,6 +17,15 @@ export interface FastContextFrontierSearch {
   subsystemHints: string[]
 }
 
+export interface FastContextCensusSearch {
+  role: 'anchor' | 'violation' | 'example'
+  mode: 'literal' | 'regex'
+  query: string
+  caseSensitive?: boolean
+  multiline?: boolean
+  fileGlob?: string
+}
+
 export interface FastContextQueryPlan {
   taskShape: FastContextTaskShape
   confidence: number
@@ -27,6 +36,7 @@ export interface FastContextQueryPlan {
   subsystemHints: string[]
   frontierRoles: string[]
   frontierSearches: FastContextFrontierSearch[]
+  censusSearches?: FastContextCensusSearch[]
   editableExtensions: string[]
   rationale: string
 }
@@ -48,6 +58,12 @@ export interface FastContextPlannedEvidence {
   frontierExpected: number
   frontierCovered: number
   frontierCoverage: number
+  census?: {
+    candidateFiles: number
+    directViolationFiles: number
+    readFiles: number
+    truncated: boolean
+  }
   text?: string
 }
 
@@ -120,6 +136,7 @@ interface PlannedHit {
   score: number
   source: 'semantic' | 'symbol' | 'filename' | 'symbol-filename' | 'frontier' | 'frontier-filename'
   queryIndex: number
+  censusRole?: FastContextCensusSearch['role']
 }
 
 interface AggregatedHit extends PlannedHit {
@@ -141,12 +158,12 @@ const PLANNER_DEFINITION: SubAgentDefinition = {
 
 Reason semantically: infer likely subsystems, architecture roles, morphological variants, indirect owners, configuration surfaces, and cross-boundary propagation. Do not merely repeat issue words. Do not claim that guessed paths exist. semanticQueries are executable source-search fragments, not prose: each must contain 2-5 discriminative code tokens likely to occur near one another in source. Put broader architectural hypotheses in rationale, subsystemHints, and frontierRoles. symbols must be plausible literal repository identifiers ordered from the most owner-specific to the least; do not put generic issue words in symbols unless they are likely exact code identifiers.
 
-  Use repository-census when the requested change applies the same rule to many independent occurrences across a repository, such as annotation wording, deprecated API replacement, formatting normalization, or configuration-key migration. For census work, prioritize one exact repeated construct plus a small number of violation patterns; do not invent an owner hierarchy or coordinated frontier.
+  Use repository-census when the requested change applies one rule to many independent occurrences, such as API migration, annotation or literal normalization, deprecated construct replacement, configuration-key migration, or a repeated cross-language convention. For census work, fill censusSearches instead of inventing an owner hierarchy. Use role=anchor for the broad repeated construct, role=violation for a pattern that directly identifies required edits, and role=example only for issue examples that help disambiguate but must not dominate enumeration. mode=literal is preferred; mode=regex must be a valid ripgrep/Rust regex without lookaround and should only be used when it materially improves precision. Set caseSensitive when casing is semantically meaningful, multiline only when one occurrence genuinely spans lines, and fileGlob only when the rule is scoped to a known file family. If the violation cannot be encoded safely, provide broad anchors and let the evidence judge classify the read-confirmed occurrences.
 
   frontierSearches is the coordinated edit frontier. Each item must represent a distinct causal boundary, not a synonym: examples include behavior owner, configuration/capability source, registration or routing, transport/IPC propagation, runtime execution/code generation, persistence/state, and client/UI consumer. Include only boundaries relevant to the issue. For indirect failures, trace both upstream definition/normalization and downstream runtime execution; a stack-trace frame can be a symptom rather than the edit owner. Each frontier query must be a short grep-ready fragment, with owner-specific symbols and likely subsystem hints. Prefer 2-4 high-information frontiers for cross-boundary work and 1-2 for direct-owner work. Do not emit speculative UI, transport, persistence, or configuration frontiers when the issue gives no evidence that those boundaries participate.
 
 Return one JSON object only, without Markdown, with this exact shape:
-  {"taskShape":"direct-owner|indirect-owner|cross-boundary|multi-frontier|repository-census","confidence":0.0,"needsFeedback":true,"symbols":[],"semanticQueries":[],"filenameGlobs":[],"subsystemHints":[],"frontierRoles":[],"frontierSearches":[{"role":"","query":"","symbols":[],"filenameGlobs":[],"subsystemHints":[]}],"editableExtensions":[],"rationale":""}
+  {"taskShape":"direct-owner|indirect-owner|cross-boundary|multi-frontier|repository-census","confidence":0.0,"needsFeedback":true,"symbols":[],"semanticQueries":[],"filenameGlobs":[],"subsystemHints":[],"frontierRoles":[],"frontierSearches":[{"role":"","query":"","symbols":[],"filenameGlobs":[],"subsystemHints":[]}],"censusSearches":[{"role":"anchor|violation|example","mode":"literal|regex","query":"","caseSensitive":false,"multiline":false,"fileGlob":""}],"editableExtensions":[],"rationale":""}
 
 confidence measures confidence that this plan can expose the real edit owner, not confidence in the issue description. needsFeedback is true when repository results should be shown back once before final ranking.`,
 }
@@ -207,6 +224,7 @@ function emptyPlan(): FastContextQueryPlan {
     subsystemHints: [],
     frontierRoles: [],
     frontierSearches: [],
+    censusSearches: [],
     editableExtensions: [],
     rationale: '',
   }
@@ -264,6 +282,26 @@ export function parseFastContextQueryPlan(value: string): FastContextQueryPlan |
         })
         .filter((item, index, all) => all.findIndex(other => `${other.role}:${other.query}`.toLowerCase() === `${item.role}:${item.query}`.toLowerCase()) === index)
         .slice(0, 6)
+      const censusSearches = (Array.isArray(parsed.censusSearches) ? parsed.censusSearches : [])
+        .flatMap(item => {
+          if (!item || typeof item !== 'object') return []
+          const value = item as Record<string, unknown>
+          const role = String(value.role || '').trim().toLowerCase()
+          const mode = String(value.mode || '').trim().toLowerCase()
+          const query = String(value.query || '').trim().slice(0, 240)
+          if (!['anchor', 'violation', 'example'].includes(role) || !['literal', 'regex'].includes(mode) || !query) return []
+          const fileGlob = String(value.fileGlob || '').trim().slice(0, 160)
+          return [{
+            role,
+            mode,
+            query,
+            caseSensitive: value.caseSensitive === true,
+            multiline: value.multiline === true,
+            ...(fileGlob ? { fileGlob } : {}),
+          } as FastContextCensusSearch]
+        })
+        .filter((item, index, all) => all.findIndex(other => `${other.role}:${other.mode}:${other.query}:${other.fileGlob || ''}:${other.caseSensitive}:${other.multiline}`.toLowerCase() === `${item.role}:${item.mode}:${item.query}:${item.fileGlob || ''}:${item.caseSensitive}:${item.multiline}`.toLowerCase()) === index)
+        .slice(0, 8)
       const plan: FastContextQueryPlan = {
         taskShape,
         confidence: clampConfidence(parsed.confidence),
@@ -274,10 +312,11 @@ export function parseFastContextQueryPlan(value: string): FastContextQueryPlan |
         subsystemHints: list(parsed.subsystemHints, 6),
         frontierRoles: list(parsed.frontierRoles, 6),
         frontierSearches,
+        censusSearches,
         editableExtensions: list(parsed.editableExtensions, 8),
         rationale: String(parsed.rationale || '').replace(/\s+/g, ' ').trim().slice(0, 500),
       }
-      if (plan.symbols.length === 0 && plan.semanticQueries.length === 0 && plan.filenameGlobs.length === 0) continue
+      if (plan.symbols.length === 0 && plan.semanticQueries.length === 0 && plan.filenameGlobs.length === 0 && (plan.censusSearches?.length || 0) === 0) continue
       return plan
     } catch {}
   }
@@ -421,7 +460,12 @@ function interleave(left: string[], right: string[], limit: number): string[] {
 export function mergeFastContextQueryPlans(owner: FastContextQueryPlan, frontier: FastContextQueryPlan): FastContextQueryPlan {
   const mergeTaskShape = (): FastContextTaskShape => {
     if (owner.taskShape === frontier.taskShape) return owner.taskShape
-    if (owner.taskShape === 'repository-census' || frontier.taskShape === 'repository-census') return 'repository-census'
+    if (owner.taskShape === 'repository-census' || frontier.taskShape === 'repository-census') {
+      const censusPlan = owner.taskShape === 'repository-census' ? owner : frontier
+      return censusPlan.confidence >= 0.72 && (censusPlan.censusSearches?.length || 0) > 0
+        ? 'repository-census'
+        : 'cross-boundary'
+    }
     const shapeRank: FastContextTaskShape[] = ['direct-owner', 'indirect-owner', 'cross-boundary', 'multi-frontier']
     const ownerRank = shapeRank.indexOf(owner.taskShape)
     const frontierRank = shapeRank.indexOf(frontier.taskShape)
@@ -443,6 +487,11 @@ export function mergeFastContextQueryPlans(owner: FastContextQueryPlan, frontier
       .filter((item): item is FastContextFrontierSearch => Boolean(item))
       .filter((item, index, all) => all.findIndex(other => `${other.role}:${other.query}`.toLowerCase() === `${item.role}:${item.query}`.toLowerCase()) === index)
       .slice(0, 4),
+    censusSearches: taskShape === 'repository-census'
+      ? [...(owner.censusSearches || []), ...(frontier.censusSearches || [])]
+        .filter((item, index, all) => all.findIndex(other => `${other.role}:${other.mode}:${other.query}:${other.fileGlob || ''}:${other.caseSensitive}:${other.multiline}`.toLowerCase() === `${item.role}:${item.mode}:${item.query}:${item.fileGlob || ''}:${item.caseSensitive}:${item.multiline}`.toLowerCase()) === index)
+        .slice(0, 8)
+      : [],
     editableExtensions: unique([...owner.editableExtensions, ...frontier.editableExtensions], 10),
     rationale: `Owner view: ${owner.rationale} Frontier view: ${frontier.rationale}`.slice(0, 900),
   }
@@ -590,32 +639,77 @@ export async function executeFastContextQueryPlan(params: {
   const repositoryCensus = params.plan.taskShape === 'repository-census'
   const semanticQueries = unique(params.plan.semanticQueries, repositoryCensus ? 3 : crossBoundary ? 4 : 3)
   const symbolQueries = unique(params.plan.symbols, repositoryCensus ? 4 : 6)
+  const censusSearches = (params.plan.censusSearches || []).slice(0, 8)
   const filenameGlobs = unique(params.plan.filenameGlobs, 2)
   const frontierSearches = repositoryCensus ? [] : params.plan.frontierSearches.slice(0, crossBoundary ? 4 : 2)
   const extensionList = editableExtensions(params.plan)
   const extensionSet = new Set(extensionList)
   const sourceGlob = editableGlob(extensionList)
-  const contentQueries = [
-    ...semanticQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'semantic' as const })),
-    ...symbolQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'symbol' as const })),
-    ...frontierSearches.flatMap((frontier, queryIndex) => unique([frontier.query, ...frontier.symbols], 1)
-      .map(query => ({ query, queryIndex, source: 'frontier' as const }))),
-  ]
-  const censusViolationScore = (text: string): number => {
-    if (!repositoryCensus) return 0
-    const value = text.match(/@[A-Za-z_$][\w$]*\s*\(\s*"([^"]*)"/)?.[1]
-      || text.match(/"([^"]+)"/)?.[1]
-    if (!value) return 0
-    const trimmed = value.trim()
-    return (/^[a-z]/.test(trimmed) ? 32 : 0) + (trimmed && !/[.!?]$/.test(trimmed) ? 16 : 0)
-  }
+  const censusContractQueries = censusSearches.map((search, queryIndex) => ({
+    query: search.query,
+    queryIndex,
+    source: 'semantic' as const,
+    censusRole: search.role,
+    mode: search.mode,
+    caseSensitive: search.caseSensitive === true,
+    multiline: search.multiline === true,
+    fileGlob: search.fileGlob,
+  }))
+  const censusFallbackQueries = repositoryCensus && censusSearches.length > 0
+    ? [
+      ...semanticQueries.slice(0, 2).map((query, index) => ({
+        query,
+        queryIndex: censusSearches.length + index,
+        source: 'semantic' as const,
+        censusRole: undefined,
+        mode: 'literal' as const,
+        caseSensitive: false,
+        multiline: false,
+        fileGlob: undefined,
+      })),
+      ...symbolQueries.slice(0, 2).map((query, index) => ({
+        query,
+        queryIndex: censusSearches.length + semanticQueries.slice(0, 2).length + index,
+        source: 'symbol' as const,
+        censusRole: undefined,
+        mode: 'literal' as const,
+        caseSensitive: false,
+        multiline: false,
+        fileGlob: undefined,
+      })),
+    ]
+    : []
+  const rawContentQueries = repositoryCensus && censusSearches.length > 0
+    ? [...censusContractQueries, ...censusFallbackQueries]
+    : [
+      ...semanticQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'semantic' as const, censusRole: undefined, mode: 'literal' as const, caseSensitive: false, multiline: false, fileGlob: undefined })),
+      ...symbolQueries.map((query, queryIndex) => ({ query, queryIndex, source: 'symbol' as const, censusRole: undefined, mode: 'literal' as const, caseSensitive: false, multiline: false, fileGlob: undefined })),
+      ...frontierSearches.flatMap((frontier, queryIndex) => unique([frontier.query, ...frontier.symbols], 1)
+        .map(query => ({ query, queryIndex, source: 'frontier' as const, censusRole: undefined, mode: 'literal' as const, caseSensitive: false, multiline: false, fileGlob: undefined }))),
+    ]
+  const contentQueries = rawContentQueries.filter((query, index, all) => all.findIndex(other => [
+    other.mode,
+    other.query,
+    other.fileGlob || '',
+    String(other.caseSensitive),
+    String(other.multiline),
+  ].join('\0').toLowerCase() === [
+    query.mode,
+    query.query,
+    query.fileGlob || '',
+    String(query.caseSensitive),
+    String(query.multiline),
+  ].join('\0').toLowerCase()) === index)
   const tasks: Array<() => Promise<PlannedHit[]>> = [
-    ...contentQueries.map(({ query, queryIndex, source }) => async () => {
-      const pattern = literalPattern(query)
+    ...contentQueries.map(({ query, queryIndex, source, censusRole, mode, caseSensitive, multiline, fileGlob }) => async () => {
+      const pattern = repositoryCensus && mode === 'regex' ? query : literalPattern(query)
       if (!pattern) return []
       const result = params.toolExecutor.searchContentPage
-        ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, sourceGlob, true, { limit: 160 })
-        : await params.toolExecutor.searchContent(pattern, params.workspacePath, sourceGlob, true)
+        ? await params.toolExecutor.searchContentPage(pattern, params.workspacePath, fileGlob || sourceGlob, repositoryCensus ? !caseSensitive : true, {
+          limit: repositoryCensus ? 500 : 160,
+          multiline: repositoryCensus && multiline,
+        })
+        : await params.toolExecutor.searchContent(pattern, params.workspacePath, fileGlob || sourceGlob, repositoryCensus ? !caseSensitive : true)
       const page = result.data as SearchContentHit[] | { hits?: SearchContentHit[] } | undefined
       const hits = Array.isArray(page) ? page : page?.hits || []
       const seen = new Set<string>()
@@ -629,16 +723,17 @@ export async function executeFastContextQueryPlan(params: {
           line: hit.line,
           preview: `${path}:${hit.line} ${hit.text.replace(/\s+/g, ' ').trim().slice(0, 180)}`,
           score: (repositoryCensus
-            ? source === 'semantic' ? 70 : hit.text.includes(`@${query}`) ? 64 : 30
+            ? censusRole === 'violation' ? 86 : censusRole === 'anchor' ? 64 : censusRole === 'example' ? 42 : source === 'semantic' ? 34 : 30
             : source === 'symbol' ? 44 : source === 'frontier' ? 46 : 40)
             - queryIndex * 2
             + pathScore(path, params.plan)
             + (source === 'frontier' ? frontierPathScore(path, frontierSearches[queryIndex]) : 0),
           source,
           queryIndex,
+          censusRole,
         }]
-      }).map(hit => ({ ...hit, score: hit.score + censusViolationScore(hit.preview) })) : []
-      return diversifyByDirectory(queryHits, repositoryCensus ? 32 : 18)
+      }) : []
+      return diversifyByDirectory(queryHits, repositoryCensus ? 120 : 18)
     }),
     ...filenameGlobs.map((glob, globIndex) => async () => {
       const result = await params.toolExecutor.searchFiles(glob, params.workspacePath)
@@ -699,15 +794,15 @@ export async function executeFastContextQueryPlan(params: {
     return anchor >= Math.max(1, evidence.startLine - 20) && anchor <= evidence.endLine + 20
   })
   const settledHits = settled.flatMap(result => result.status === 'fulfilled' ? result.value : [])
-  const censusAnchorDirectories = new Set(repositoryCensus
+  const censusViolationDirectories = new Set(repositoryCensus
     ? settledHits
-      .filter(hit => hit.source === 'semantic' && hit.queryIndex > 0)
+      .filter(hit => hit.censusRole === 'violation')
       .map(hit => directoryBucket(hit.path))
     : [])
   const bestByPath = new Map<string, AggregatedHit>()
   for (const originalHit of settledHits) {
-    const hit = repositoryCensus && censusAnchorDirectories.has(directoryBucket(originalHit.path))
-      ? { ...originalHit, score: originalHit.score + 24 }
+    const hit = repositoryCensus && censusViolationDirectories.has(directoryBucket(originalHit.path))
+      ? { ...originalHit, score: originalHit.score + (originalHit.censusRole === 'violation' ? 12 : 4) }
       : originalHit
     const key = hit.path.toLowerCase()
     if (isCovered(hit)) continue
@@ -742,10 +837,9 @@ export async function executeFastContextQueryPlan(params: {
   const semanticLane = semanticQueries.flatMap((_, queryIndex) => ranked
     .filter(hit => hit.queryKeys.has(`semantic:${queryIndex}`))
     .slice(0, repositoryCensus ? 8 : 1))
-  const censusLiteralLane = repositoryCensus
-    ? ranked.filter(hit => hit.sources.has('semantic')
-      || (hit.sources.has('symbol') && /@[A-Za-z_$][\w$]*\s*\(/.test(hit.preview))).slice(0, 14)
-    : []
+  const censusViolationLane = repositoryCensus ? diversifyByDirectory(ranked.filter(hit => hit.censusRole === 'violation'), 40) : []
+  const censusAnchorLane = repositoryCensus ? diversifyByDirectory(ranked.filter(hit => hit.censusRole === 'anchor'), 40) : []
+  const censusExampleLane = repositoryCensus ? ranked.filter(hit => hit.censusRole === 'example').slice(0, 8) : []
   const symbolLane = ranked.filter(hit => hit.sources.has('symbol')).slice(0, 5)
   const symbolFilenameLane = ranked.filter(hit => hit.sources.has('symbol-filename')).slice(0, 3)
   const filenameLane = ranked.filter(hit => hit.sources.has('filename')).slice(0, 2)
@@ -758,18 +852,22 @@ export async function executeFastContextQueryPlan(params: {
     return [{ frontierIndex, hit }]
   })
   const frontierLane = frontierAssignments.map(assignment => assignment.hit)
-  const diverseLane = diversifyByDirectory(ranked, repositoryCensus ? 12 : crossBoundary ? 6 : 3)
-  const readLimit = repositoryCensus ? 14 : crossBoundary ? Math.min(12, Math.max(9, frontierSearches.length + 7)) : 8
+  const diverseLane = diversifyByDirectory(ranked, repositoryCensus ? 32 : crossBoundary ? 6 : 3)
+  const censusDirectCount = censusViolationLane.length
+  const readLimit = repositoryCensus
+    ? Math.min(40, Math.max(censusDirectCount > 0 ? censusDirectCount : 24, Math.min(32, ranked.length)))
+    : crossBoundary ? Math.min(12, Math.max(9, frontierSearches.length + 7)) : 8
   const readTargets = (repositoryCensus
-    ? [...censusLiteralLane, ...semanticLane, ...diverseLane, ...ranked]
+    ? [...censusViolationLane, ...diverseLane, ...censusAnchorLane, ...censusExampleLane, ...semanticLane, ...ranked]
     : [...frontierLane, ...diverseLane, ...symbolFilenameLane, ...symbolLane, ...semanticLane, ...filenameLane, ...configLane, ...ranked])
     .filter((hit, index, all) => all.findIndex(other => other.path.toLowerCase() === hit.path.toLowerCase()) === index)
     .slice(0, readLimit)
   const readResults = await runLimited(readTargets.map(hit => async () => {
     throwIfAborted(params.abortSignal)
-    const offset = Math.max(0, (hit.line || 1) - 61)
+    const offset = Math.max(0, (hit.line || 1) - (repositoryCensus ? 21 : 61))
+    const readLineLimit = repositoryCensus ? 90 : 220
     const range = params.toolExecutor.readFileRange
-      ? await params.toolExecutor.readFileRange(hit.path, offset, 220, 96_000)
+      ? await params.toolExecutor.readFileRange(hit.path, offset, readLineLimit, repositoryCensus ? 32_000 : 96_000)
       : undefined
     if (range?.success && range.data?.content) {
       return {
@@ -779,7 +877,7 @@ export async function executeFastContextQueryPlan(params: {
           startLine: range.data.startLine,
           endLine: range.data.endLine,
           preview: range.data.content.split('\n').slice(0, 12).join('\n'),
-          content: range.data.content.slice(0, 16_000),
+          content: range.data.content.slice(0, repositoryCensus ? 6_000 : 16_000),
           reason: 'file read',
           score: hit.score,
         } satisfies SubAgentEvidence,
@@ -787,7 +885,7 @@ export async function executeFastContextQueryPlan(params: {
     }
     const file = await params.toolExecutor.readFile(hit.path)
     if (!file.success || !file.data) return undefined
-    const lines = String(file.data).split('\n').slice(offset, offset + 220)
+    const lines = String(file.data).split('\n').slice(offset, offset + readLineLimit)
     return {
       hit,
       evidence: {
@@ -795,7 +893,7 @@ export async function executeFastContextQueryPlan(params: {
         startLine: offset + 1,
         endLine: offset + lines.length,
         preview: lines.slice(0, 12).join('\n'),
-        content: lines.join('\n').slice(0, 16_000),
+        content: lines.join('\n').slice(0, repositoryCensus ? 6_000 : 16_000),
         reason: 'file read',
         score: hit.score,
       } satisfies SubAgentEvidence,
@@ -828,20 +926,28 @@ export async function executeFastContextQueryPlan(params: {
     `Semantic planner: ${params.plan.taskShape}; confidence=${params.plan.confidence.toFixed(2)}; feedback=${params.plan.needsFeedback}`,
     `Planner rationale: ${params.plan.rationale}`,
     `Planner queries: ${[...params.plan.symbols, ...params.plan.semanticQueries].join(' | ')}`,
+    repositoryCensus ? `Census contract: ${censusSearches.map(search => `${search.role}/${search.mode}${search.caseSensitive ? '/case-sensitive' : ''}${search.multiline ? '/multiline' : ''}${search.fileGlob ? `/${search.fileGlob}` : ''}: ${search.query}`).join(' | ')}` : '',
+    repositoryCensus ? `Census inventory (${ranked.length} candidate file(s)):\n${ranked.slice(0, 120).map(hit => `${hit.path}:${hit.line || 1} [${hit.censusRole || 'fallback'}] ${hit.preview.slice(0, 220)}`).join('\n')}` : '',
     `Planner subsystems: ${params.plan.subsystemHints.join(' | ')}`,
     `Planner frontier coverage: ${frontierCovered}/${frontierExpected}`,
     `Planner frontiers: ${frontierSearches.map(frontier => `${frontier.role}: ${frontier.query}`).join(' | ')}`,
-    `Planner candidate reads:\n${seedEvidence.map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(item.content || item.preview).slice(0, 1_200)}`).join('\n---\n')}`,
-  ].join('\n\n').slice(0, 36_000)
+    `Planner candidate reads:\n${seedEvidence.map(item => `${item.path}:${item.startLine}-${item.endLine}\n${(item.content || item.preview).slice(0, repositoryCensus ? 700 : 1_200)}`).join('\n---\n')}`,
+  ].filter(Boolean).join('\n\n').slice(0, repositoryCensus ? 60_000 : 36_000)
   return {
     calls: tasks.length + readTargets.length,
     readCalls: readTargets.length,
-    candidatePaths: ranked.map(hit => hit.path).slice(0, 80),
+    candidatePaths: ranked.map(hit => hit.path).slice(0, repositoryCensus ? 160 : 80),
     seedEvidence,
     confidence,
     frontierExpected,
     frontierCovered,
     frontierCoverage,
+    census: repositoryCensus ? {
+      candidateFiles: ranked.length,
+      directViolationFiles: ranked.filter(hit => hit.censusRole === 'violation').length,
+      readFiles: seedEvidence.length,
+      truncated: ranked.length > seedEvidence.length,
+    } : undefined,
     text,
   }
 }
