@@ -5,23 +5,23 @@ import { buildFastContextSystemPrompt } from './subAgent'
 describe('FastContext architecture contract', () => {
   it('uses one adaptive architecture budget', () => {
     expect(FAST_CONTEXT_TUNING).toEqual({
-      maxTurns: 10,
+      maxTurns: 4,
       maxParallel: 8,
       taskTimeoutMs: 600_000,
       reasoningEffort: 'high',
     })
   })
 
-  it('requires an architecture-level code map', () => {
+  it('keeps semantic decisions in one grounded controller', () => {
     const prompt = buildFastContextSystemPrompt()
 
-    expect(prompt).toContain('architecture-level code map')
-    expect(prompt).toContain('change-impact frontier')
-    expect(prompt).toContain('local tools only execute the exact searches and reads you request')
+    expect(prompt).toContain('read-only causal code-retrieval controller')
+    expect(prompt).toContain('highest expected information gain')
+    expect(prompt).toContain('deterministic local tools only execute')
     expect(prompt).toContain('submit_code_map')
-    expect(prompt).toContain('Rank candidates strictly by direct edit necessity')
-    expect(prompt).toContain('Include it as a candidate or name it in rejected_hypotheses')
-    expect(prompt).toContain('behavior-bearing mirrors')
-    expect(prompt).not.toContain('Depth level')
+    expect(prompt).toContain('Relationships are optional')
+    expect(prompt).toContain('Read every submitted candidate')
+    expect(prompt).toContain('counterfactual edit test')
+    expect(prompt).toContain('Do not enumerate the repository')
   })
 })
