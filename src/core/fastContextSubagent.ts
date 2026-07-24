@@ -221,7 +221,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
     maxTransientAttempts: 3,
     requireGroundedReport: true,
-    adaptiveSubmissionTurn: 4,
+    adaptiveSubmissionTurn: 3,
     maxCandidates: 10,
     allowedTools: ['search_content', 'search_files', 'trace_symbol', 'read_file', 'submit_code_map', 'request_more_search'],
     userPrompt: [
