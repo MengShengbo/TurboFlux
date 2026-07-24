@@ -3,6 +3,7 @@ import { resolve, join, relative } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { loadConfig } from '../src/core/config'
 import { configureNetworkProxy } from '../src/core/networkProxy'
+import { FAST_CONTEXT_TUNING } from '../src/core/fastContextTypes'
 import { fileSha256, prepareManifest, readManifest, writeManifest } from './retrieval-paper/datasets'
 import { generateReport } from './retrieval-paper/report'
 import { installedCliVersions, MODEL, runRetrievalSystem } from './retrieval-paper/runners'
@@ -259,7 +260,7 @@ function experimentMetadata(args: Args, manifestPath: string, caseIds: string[])
     notes: [
       'All LLM systems use the active TurboFlux endpoint and gpt-5.5.',
       'Native reasoning is disabled; protocol differences are recorded per run.',
-      `Adaptive case-level concurrency starts at ${Math.min(effectiveCaseConcurrency(args), 4)} and may rise to ${effectiveCaseConcurrency(args)}; FastContext uses one closed listwise model judgment and the API request ceiling is ${args.concurrency}. Systems within one case remain sequential and rotated.`,
+      `Adaptive case-level concurrency starts at ${Math.min(effectiveCaseConcurrency(args), 4)} and may rise to ${effectiveCaseConcurrency(args)}; FastContext uses one model-led adaptive controller with a hard provider-turn ceiling of ${FAST_CONTEXT_TUNING.maxTurns}. Systems within one case remain sequential and rotated.`,
       args.retryTransient ? `Transient failures are retried up to ${args.transientAttempts} time(s) per run invocation.` : 'Transient retries are disabled.',
       args.command === 'calibrate' ? 'Calibration run; not a final comparative result.' : 'Formal repeated experiment.',
       args.caseOffset > 0 ? `Selection starts after ${args.caseOffset} balanced case(s), allowing a disjoint development slice.` : 'Selection starts at the first balanced case.',
