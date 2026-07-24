@@ -143,6 +143,80 @@ describe('FastContext semantic planner', () => {
     }
   })
 
+  it('keeps a shared planner alive until its final subscriber cancels', async () => {
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    let fetchSignal: AbortSignal | undefined
+    let resolveFetch: ((response: Response) => void) | undefined
+    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      calls += 1
+      fetchSignal = init?.signal || undefined
+      return new Promise<Response>(resolve => { resolveFetch = resolve })
+    }) as unknown as typeof fetch
+
+    try {
+      __testClearFastContextPlannerCache()
+      const firstController = new AbortController()
+      const secondController = new AbortController()
+      const params = {
+        objective: 'shared planner cancellation objective',
+        workspacePath: 'C:/shared-planner-test',
+        toolExecutor: {} as ToolExecutor,
+        apiKey: 'test',
+        baseUrl: 'http://shared-planner.test',
+        model: 'test-model',
+      }
+      const first = planFastContextQueries({ ...params, abortSignal: firstController.signal })
+      const firstOutcome = first.catch(error => error)
+      const second = planFastContextQueries({ ...params, abortSignal: secondController.signal })
+
+      firstController.abort()
+      expect((await firstOutcome).name).toBe('AbortError')
+      expect(fetchSignal?.aborted).toBe(false)
+
+      resolveFetch?.(new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(plan) } }] }), { status: 200 }))
+      await expect(second).resolves.toMatchObject({ ok: true, cacheHit: true })
+      expect(calls).toBe(1)
+    } finally {
+      __testClearFastContextPlannerCache()
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('aborts an in-flight planner when its final subscriber leaves', async () => {
+    const originalFetch = globalThis.fetch
+    let fetchAborted = false
+    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        fetchAborted = true
+        const error = new Error('aborted')
+        error.name = 'AbortError'
+        reject(error)
+      }, { once: true })
+    })) as unknown as typeof fetch
+
+    try {
+      __testClearFastContextPlannerCache()
+      const controller = new AbortController()
+      const pending = planFastContextQueries({
+        objective: 'orphan planner cancellation objective',
+        workspacePath: 'C:/orphan-planner-test',
+        toolExecutor: {} as ToolExecutor,
+        apiKey: 'test',
+        baseUrl: 'http://orphan-planner.test',
+        model: 'test-model',
+        abortSignal: controller.signal,
+      })
+
+      controller.abort()
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+      expect(fetchAborted).toBe(true)
+    } finally {
+      __testClearFastContextPlannerCache()
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('interleaves independent owner and frontier plans without duplicating queries', () => {
     const merged = mergeFastContextQueryPlans(plan, {
       ...plan,

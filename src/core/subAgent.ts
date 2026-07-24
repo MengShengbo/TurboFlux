@@ -384,6 +384,57 @@ function compactToolHistory(
 
 const TRANSIENT_HTTP_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504])
 const TRANSIENT_RETRY_DELAYS_MS = [300, 900, 1_800]
+const PROTOCOL_CACHE_TTL_MS = 10 * 60_000
+const PROTOCOL_CACHE_MAX_ENTRIES = 64
+const protocolCache = new Map<string, { protocol: ModelProtocol; expiresAt: number }>()
+
+function protocolCacheKey(params: {
+  baseUrl: string
+  provider?: string
+  model: string
+  apiKey: string
+  customHeaders?: Record<string, string>
+}): string {
+  const headers = Object.entries(params.customHeaders || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key.toLowerCase()}:${value}`)
+    .join('\n')
+  return createHash('sha256')
+    .update([
+      params.baseUrl.replace(/\/+$/, ''),
+      params.provider || '',
+      params.model,
+      params.apiKey,
+      headers,
+    ].join('\0'))
+    .digest('hex')
+}
+
+function getCachedProtocol(key: string): ModelProtocol | null {
+  const cached = protocolCache.get(key)
+  if (!cached) return null
+  if (cached.expiresAt <= Date.now()) {
+    protocolCache.delete(key)
+    return null
+  }
+  protocolCache.delete(key)
+  protocolCache.set(key, cached)
+  return cached.protocol
+}
+
+function rememberProtocol(key: string, protocol: ModelProtocol): void {
+  protocolCache.delete(key)
+  protocolCache.set(key, { protocol, expiresAt: Date.now() + PROTOCOL_CACHE_TTL_MS })
+  while (protocolCache.size > PROTOCOL_CACHE_MAX_ENTRIES) {
+    const oldest = protocolCache.keys().next().value
+    if (!oldest) break
+    protocolCache.delete(oldest)
+  }
+}
+
+export function __testClearSubAgentProtocolCache(): void {
+  protocolCache.clear()
+}
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
@@ -988,7 +1039,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let reportRecoveryUsed = false
   let submissionRecoveryUsed = false
   let evidenceSaturationPrompted = false
-  let resolvedProtocol: ModelProtocol | null = null
+  const activeProtocolCacheKey = protocolCacheKey({ baseUrl, provider, model: modelId, apiKey, customHeaders })
+  let resolvedProtocol: ModelProtocol | null = getCachedProtocol(activeProtocolCacheKey)
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
   let turnLimit = definition.maxTurns
   const effectiveReasoning: NativeReasoningConfig | undefined = definition.thinking === 'disabled'
@@ -1014,6 +1066,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
     const waitStartedAt = Date.now()
+    const requestDeadline = waitStartedAt + requestTimeoutMs
     emit({ type: 'model_wait', turn, elapsedMs: 0, timeoutMs: requestTimeoutMs })
     const waitTimer = setInterval(() => {
       emit({ type: 'model_wait', turn, elapsedMs: Date.now() - waitStartedAt, timeoutMs: requestTimeoutMs })
@@ -1114,11 +1167,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         let res: Response | undefined
         let errorText = ''
         for (let compatibilityAttempt = 0; compatibilityAttempt < 4; compatibilityAttempt += 1) {
+          const remainingRequestMs = requestDeadline - Date.now()
+          if (remainingRequestMs <= 0) throw new Error(`Model request timed out after ${requestTimeoutMs}ms`)
           res = await fetchWithTransientRetry(url, {
             method: 'POST',
             headers,
             body: JSON.stringify(requestBody),
-          }, abortSignal, requestTimeoutMs, (attempt, delayMs, reason) => {
+          }, abortSignal, remainingRequestMs, (attempt, delayMs, reason) => {
             emit({ type: 'model_retry', turn, attempt, delayMs, reason })
           }, options.maxTransientAttempts ?? 4)
           if (res.ok) break
@@ -1216,6 +1271,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           responseToolCalls = choice.message?.tool_calls || []
         }
         resolvedProtocol = protocol
+        rememberProtocol(activeProtocolCacheKey, protocol)
         parsedResponse = true
         break
       }
@@ -1227,7 +1283,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       }
     } catch (e: any) {
       if (e.name === 'AbortError') return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: 'Aborted' }
-      const message = formatSubAgentError(e)
+      const detail = formatSubAgentError(e)
+      const message = /Model request timed out after \d+ms/i.test(detail)
+        ? `Model request timed out after ${requestTimeoutMs}ms`
+        : detail
       emit({ type: 'error', message })
       return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
     } finally {

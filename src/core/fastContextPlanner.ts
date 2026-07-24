@@ -71,12 +71,21 @@ interface PlannerParams {
 const PLANNER_CACHE_TTL_MS = 60_000
 const PLANNER_CACHE_MAX_ENTRIES = 64
 const plannerCache = new Map<string, { result: FastContextPlannerResult; expiresAt: number }>()
-const plannerInFlight = new Map<string, Promise<FastContextPlannerResult>>()
+interface PlannerInFlightEntry {
+  controller: AbortController
+  listeners: Set<PlannerEventListener>
+  promise: Promise<FastContextPlannerResult>
+  subscribers: number
+  settled: boolean
+}
+type PlannerEventListener = NonNullable<PlannerParams['onEvent']>
+const plannerInFlight = new Map<string, PlannerInFlightEntry>()
 
 function plannerCacheKey(params: PlannerParams, perspective: FastContextPlannerPerspective, feedbackContext?: string): string {
   return createHash('sha256')
     .update([
       params.workspacePath.replace(/\\/g, '/').toLowerCase(),
+      params.baseUrl.replace(/\/+$/, ''),
       params.provider || '',
       params.model || '',
       perspective,
@@ -100,6 +109,7 @@ function rememberPlannerResult(key: string, result: FastContextPlannerResult): v
 
 export function __testClearFastContextPlannerCache(): void {
   plannerCache.clear()
+  for (const entry of plannerInFlight.values()) entry.controller.abort()
   plannerInFlight.clear()
 }
 
@@ -355,18 +365,51 @@ export async function planFastContextQueries(
     }
     plannerCache.delete(key)
   }
-  const pending = plannerInFlight.get(key)
-  if (pending) return waitForPlannerResult(pending.then(result => ({ ...result, elapsedMs: 0, cacheHit: true })), params.abortSignal)
-  const request = runFastContextQueryPlanner({ ...params, abortSignal: undefined }, feedbackContext, perspective)
-    .then(result => {
-      rememberPlannerResult(key, result)
-      return result
-    })
-    .finally(() => {
-      plannerInFlight.delete(key)
-    })
-  plannerInFlight.set(key, request)
-  return waitForPlannerResult(request, params.abortSignal)
+  let entry = plannerInFlight.get(key)
+  const shared = Boolean(entry)
+  const listener: PlannerEventListener | undefined = params.onEvent
+    ? event => params.onEvent?.(event)
+    : undefined
+  if (!entry) {
+    const controller = new AbortController()
+    const listeners = new Set<PlannerEventListener>()
+    if (listener) listeners.add(listener)
+    entry = {
+      controller,
+      listeners,
+      subscribers: 1,
+      settled: false,
+      promise: Promise.resolve({ ok: false, plan: emptyPlan(), elapsedMs: 0 }),
+    }
+    const current = entry
+    current.promise = runFastContextQueryPlanner({
+      ...params,
+      abortSignal: controller.signal,
+      onEvent: event => {
+        for (const listener of current.listeners) listener(event)
+      },
+    }, feedbackContext, perspective)
+      .then(result => {
+        rememberPlannerResult(key, result)
+        return result
+      })
+      .finally(() => {
+        current.settled = true
+        if (plannerInFlight.get(key) === current) plannerInFlight.delete(key)
+      })
+    plannerInFlight.set(key, current)
+  } else {
+    entry.subscribers += 1
+    if (listener) entry.listeners.add(listener)
+  }
+  try {
+    const result = await waitForPlannerResult(entry.promise, params.abortSignal)
+    return shared ? { ...result, elapsedMs: 0, cacheHit: true } : result
+  } finally {
+    entry.subscribers = Math.max(0, entry.subscribers - 1)
+    if (listener) entry.listeners.delete(listener)
+    if (entry.subscribers === 0 && !entry.settled) entry.controller.abort()
+  }
 }
 
 function interleave(left: string[], right: string[], limit: number): string[] {

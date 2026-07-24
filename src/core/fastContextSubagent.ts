@@ -137,6 +137,27 @@ Relationships are optional for census work. Every candidate must cite a supplied
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 60_000
 
+function unavailablePlannerResult(error: unknown): FastContextPlannerResult {
+  return {
+    ok: false,
+    elapsedMs: 0,
+    error: error instanceof Error ? error.message : String(error || 'Planner unavailable'),
+    plan: {
+      taskShape: 'indirect-owner',
+      confidence: 0,
+      needsFeedback: true,
+      symbols: [],
+      semanticQueries: [],
+      filenameGlobs: [],
+      subsystemHints: [],
+      frontierRoles: [],
+      frontierSearches: [],
+      editableExtensions: [],
+      rationale: '',
+    },
+  }
+}
+
 interface RunParams {
   workspacePath: string
   objective: string
@@ -695,20 +716,20 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     params.abortSignal?.addEventListener('abort', forwardPlannerAbort, { once: true })
     params.abortSignal?.addEventListener('abort', forwardSpeculativeAbort, { once: true })
   }
-  const ownerPlannerPromise = explicitCensusPlan
+  const ownerPlannerPromise = (explicitCensusPlan
     ? Promise.resolve(explicitCensusPlan)
     : planFastContextQueries(
       { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('owner-planner') },
       undefined,
       'causal-owner',
-    )
-  const frontierPlannerPromise = explicitCensusPlan
+    )).catch(unavailablePlannerResult)
+  const frontierPlannerPromise = (explicitCensusPlan
     ? Promise.resolve(explicitCensusPlan)
     : planFastContextQueries(
       { ...params, abortSignal: plannerAbortController.signal, onEvent: createSubEventHandler('frontier-planner') },
       undefined,
       'frontier',
-    )
+    )).catch(unavailablePlannerResult)
   const plannersPromise = Promise.all([ownerPlannerPromise, frontierPlannerPromise])
   const initialPrimer = await initialPrimerPromise
   const speculativeReadPaths = initialPrimer.seedEvidence.map(item => item.path)
@@ -725,7 +746,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       readPaths: speculativeReadPaths,
     }))
   )
-  const speculativeJudgePromise = __testShouldStartSpeculativeJudge({
+  const speculativeJudgePromise = (__testShouldStartSpeculativeJudge({
     objective: params.objective,
     primerConfidence: initialPrimer.confidence,
     evidenceCount: initialPrimer.seedEvidence.length,
@@ -752,7 +773,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         submissionOnly: true,
         onEvent: createSubEventHandler('speculative'),
       })
-    : Promise.resolve(undefined)
+    : Promise.resolve(undefined)).catch(() => undefined)
   const firstDecision = await Promise.race([
     plannersPromise.then(value => ({ kind: 'planners' as const, value })),
     speculativeJudgePromise.then(value => ({ kind: 'speculative' as const, value })),
@@ -767,10 +788,11 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     speculativeJudge = firstDecision.value
     speculativeAccepted = true
     plannerAbortController.abort()
-    ;[ownerPlanner, frontierPlanner] = await plannersPromise
+    ownerPlanner = unavailablePlannerResult('Canceled after speculative acceptance')
+    frontierPlanner = unavailablePlannerResult('Canceled after speculative acceptance')
   } else {
     speculativeAbortController.abort()
-    speculativeJudge = firstDecision.kind === 'speculative' ? firstDecision.value : await speculativeJudgePromise
+    speculativeJudge = firstDecision.kind === 'speculative' ? firstDecision.value : undefined
     ;[ownerPlanner, frontierPlanner] = firstDecision.kind === 'planners' ? firstDecision.value : await plannersPromise
     planner = ownerPlanner.ok && frontierPlanner.ok
       ? { ...ownerPlanner, plan: mergeFastContextQueryPlans(ownerPlanner.plan, frontierPlanner.plan), elapsedMs: Math.max(ownerPlanner.elapsedMs, frontierPlanner.elapsedMs) }

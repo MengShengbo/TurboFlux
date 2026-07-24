@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { buildFastContextSystemPrompt, runSubAgent } from './subAgent'
+import { __testClearSubAgentProtocolCache, buildFastContextSystemPrompt, runSubAgent } from './subAgent'
 import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
@@ -139,6 +139,121 @@ describe('runSubAgent', () => {
     } finally {
       globalThis.fetch = originalFetch
       vi.useRealTimers()
+    }
+  })
+
+  it('shares one request deadline across protocol fallback attempts', async () => {
+    const originalFetch = globalThis.fetch
+    vi.useFakeTimers()
+    let requestCount = 0
+    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Promise<Response>(resolve => {
+          setTimeout(() => resolve(new Response('not found', { status: 404 })), 600)
+        })
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          const error = new Error('aborted')
+          error.name = 'AbortError'
+          reject(error)
+        }, { once: true })
+      })
+    }) as unknown as typeof fetch
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      __testClearSubAgentProtocolCache()
+      const resultPromise = runSubAgent({
+        definition: {
+          id: 'deadline-test',
+          label: 'Deadline test',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'test',
+          maxTurns: 1,
+          maxParallel: 1,
+        },
+        objective: 'inspect the project',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'deadline-key',
+        baseUrl: 'http://deadline.test',
+        provider: 'custom',
+        model: 'deadline-model',
+        requestTimeoutMs: 1_000,
+      })
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      await expect(resultPromise).resolves.toMatchObject({
+        ok: false,
+        error: 'Model request timed out after 1000ms',
+      })
+      expect(requestCount).toBe(2)
+    } finally {
+      __testClearSubAgentProtocolCache()
+      globalThis.fetch = originalFetch
+      vi.useRealTimers()
+    }
+  })
+
+  it('reuses a successful protocol across subagent calls', async () => {
+    const originalFetch = globalThis.fetch
+    const requestUrls: string[] = []
+    globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      requestUrls.push(url)
+      if (url.endsWith('/chat/completions')) return new Response('not found', { status: 404 })
+      return new Response(JSON.stringify({
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'done' }] }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+    const options = {
+      definition: {
+        id: 'protocol-cache-test',
+        label: 'Protocol cache test',
+        description: 'test',
+        driver: 'main-model' as const,
+        systemPrompt: 'test',
+        maxTurns: 1,
+        maxParallel: 1,
+      },
+      objective: 'inspect the project',
+      workspacePath: 'C:/repo',
+      toolExecutor: executor,
+      apiKey: 'protocol-cache-key',
+      baseUrl: 'http://protocol-cache.test',
+      provider: 'custom',
+      model: 'unknown-protocol-model',
+    }
+
+    try {
+      __testClearSubAgentProtocolCache()
+      await expect(runSubAgent(options)).resolves.toMatchObject({ ok: true })
+      await expect(runSubAgent(options)).resolves.toMatchObject({ ok: true })
+
+      expect(requestUrls).toEqual([
+        'http://protocol-cache.test/v1/chat/completions',
+        'http://protocol-cache.test/v1/responses',
+        'http://protocol-cache.test/v1/responses',
+      ])
+    } finally {
+      __testClearSubAgentProtocolCache()
+      globalThis.fetch = originalFetch
     }
   })
 
