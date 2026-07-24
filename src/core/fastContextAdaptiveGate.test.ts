@@ -154,6 +154,85 @@ describe('FastContext adaptive submission gate', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('rejects an acknowledged open frontier and grants one bounded sibling read', async () => {
+    const originalFetch = globalThis.fetch
+    const requestTools: string[][] = []
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestCount += 1
+      const body = JSON.parse(String(init?.body))
+      requestTools.push((body.tools || []).map((tool: any) => tool.function?.name || tool.name))
+      const toolCall = requestCount === 1
+        ? call('read-owner', 'read_file', { path: 'src/parser.ts', offset: 1, limit: 10 })
+        : requestCount === 2
+          ? call('search-sibling', 'search_files', { pattern: 'src/*Parser.ts' })
+          : requestCount === 3
+            ? call('submit-open-frontier', 'submit_code_map', {
+                candidates: [candidate('src/parser.ts', 'primary parser owner', 'owner', 'owns parsing behavior')],
+                relationships: [],
+                frontier_complete: false,
+                unresolved_edit_paths: ['src/sharedParser.ts'],
+                rejected_hypotheses: [],
+                searches_tried: [],
+                uncertainty: [],
+              })
+            : requestCount === 4
+              ? call('read-sibling', 'read_file', { path: 'src/sharedParser.ts', offset: 1, limit: 10 })
+              : call('submit-closed-frontier', 'submit_code_map', {
+                  candidates: [
+                    candidate('src/parser.ts', 'primary parser owner', 'owner', 'owns parsing behavior'),
+                    candidate('src/sharedParser.ts', 'shared parser implementation', 'implementation', 'carries the same grammar behavior'),
+                  ],
+                  relationships: [],
+                  frontier_complete: true,
+                  unresolved_edit_paths: [],
+                  rejected_hypotheses: [],
+                  searches_tried: [],
+                  uncertainty: [],
+                })
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [toolCall] } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFileRange: vi.fn(async (path: string) => ({
+        success: true,
+        data: {
+          content: path.endsWith('sharedParser.ts')
+            ? 'export function parseShared() {}\nparseShared()'
+            : 'export function parsePrimary() {}\nparsePrimary()',
+          startLine: 1,
+          endLine: 2,
+          truncated: false,
+        },
+      })),
+      readFile: vi.fn(),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: ['C:/repo/src/sharedParser.ts'] } })),
+      searchContent: vi.fn(async () => ({ success: true, data: [] })),
+      searchCodeSymbols: vi.fn(),
+      getCodeMap: vi.fn(),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runFastContextSubagent({
+        workspacePath: 'C:/repo',
+        objective: 'update parser behavior across shared implementations',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://frontier-closure-fastcontext.test',
+        provider: 'openai-compatible',
+        model: 'test-model',
+      })
+
+      expect(requestCount).toBe(5)
+      expect(requestTools[2]).toEqual(expect.arrayContaining(['submit_code_map', 'request_more_search']))
+      expect(requestTools[3]).toContain('read_file')
+      expect(requestTools[4]).toEqual(['submit_code_map'])
+      expect(result.evidencePack).toContain('src/sharedParser.ts')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
 
 function call(id: string, name: string, args: Record<string, unknown>) {

@@ -33,6 +33,7 @@ interface Args {
   systems: RetrievalSystemId[]
   retryTransient: boolean
   transientAttempts: number
+  apiConfigId?: string
 }
 
 function option(name: string): string | undefined {
@@ -75,11 +76,29 @@ function parseArgs(): Args {
     systems: parseSystems(option('--systems')),
     retryTransient: process.argv.includes('--retry-transient'),
     transientAttempts: numberOption('--transient-attempts', 3),
+    apiConfigId: option('--api-config-id')?.trim() || undefined,
   }
 }
 
 function effectiveCaseConcurrency(args: Args): number {
   return args.systems.includes('fastcontext') ? Math.min(args.concurrency, 25) : args.concurrency
+}
+
+function relevantCliVersionsMatch(
+  expected: ExperimentMetadata['cliVersions'],
+  current: ExperimentMetadata['cliVersions'],
+  systems: RetrievalSystemId[],
+): boolean {
+  if (systems.includes('claude-code-readonly') && expected.claudeCode !== current.claudeCode) return false
+  if (systems.includes('opencode-explore') && expected.openCode !== current.openCode) return false
+  return true
+}
+
+function selectBenchmarkConfig(config: Awaited<ReturnType<typeof loadConfig>>, apiConfigId: string | undefined) {
+  if (!apiConfigId) return config
+  const profile = config.apiConfigs?.find(item => item.id === apiConfigId)
+  if (!profile) throw new Error(`Unknown API config id: ${apiConfigId}`)
+  return { ...config, ...profile, activeApiConfigId: profile.id }
 }
 
 function readJournal(path: string): RunRecord[] {
@@ -261,7 +280,7 @@ async function runExperiment(args: Args): Promise<void> {
   const manifest = readManifest(args.manifest)
   const selectionLimit = args.limit === undefined ? undefined : args.limit + args.caseOffset
   const selectedCases = balancedCases(manifest.cases, selectionLimit).slice(args.caseOffset)
-  const config = await loadConfig()
+  const config = selectBenchmarkConfig(await loadConfig(), args.apiConfigId)
   if (!config.apiKey || !config.baseUrl) throw new Error('Active TurboFlux API configuration is incomplete')
   const metadataPath = join(args.output, 'metadata.json')
   const journalPath = join(args.output, 'runs.jsonl')
@@ -273,18 +292,20 @@ async function runExperiment(args: Args): Promise<void> {
       writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`)
     }
     const currentCliVersions = installedCliVersions()
-    const incompatible = metadata.model !== MODEL
-      || metadata.manifestSha256 !== fileSha256(args.manifest)
-      || metadata.endpointHost !== new URL(config.baseUrl).host
-      || metadata.repeats !== args.repeats
-      || (metadata.concurrency || 1) !== args.concurrency
-      || metadata.timeoutMs !== args.timeoutMs
-      || metadata.seed !== args.seed
-      || JSON.stringify(metadata.systems) !== JSON.stringify(args.systems)
-      || JSON.stringify(metadata.caseIds) !== JSON.stringify(selectedCases.map(item => item.id))
-      || JSON.stringify(metadata.cliVersions) !== JSON.stringify(currentCliVersions)
-    if (incompatible) {
-      throw new Error('Existing output directory uses a different model, endpoint, manifest, case set, system matrix, timeout, seed, repeat count, or CLI version')
+    const incompatibilities = [
+      metadata.model !== MODEL ? 'model' : '',
+      metadata.manifestSha256 !== fileSha256(args.manifest) ? 'manifest' : '',
+      metadata.endpointHost !== new URL(config.baseUrl).host ? 'endpoint' : '',
+      metadata.repeats !== args.repeats ? 'repeats' : '',
+      (metadata.concurrency || 1) !== args.concurrency ? 'concurrency' : '',
+      metadata.timeoutMs !== args.timeoutMs ? 'timeout' : '',
+      metadata.seed !== args.seed ? 'seed' : '',
+      JSON.stringify(metadata.systems) !== JSON.stringify(args.systems) ? 'systems' : '',
+      JSON.stringify(metadata.caseIds) !== JSON.stringify(selectedCases.map(item => item.id)) ? 'case set' : '',
+      !relevantCliVersionsMatch(metadata.cliVersions, currentCliVersions, args.systems) ? 'CLI version' : '',
+    ].filter(Boolean)
+    if (incompatibilities.length > 0) {
+      throw new Error(`Existing output directory is incompatible: ${incompatibilities.join(', ')}`)
     }
   } else {
     metadata = experimentMetadata(args, args.manifest, selectedCases.map(item => item.id))

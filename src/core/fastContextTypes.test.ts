@@ -25,6 +25,8 @@ describe('FastContext architecture contract', () => {
     expect(prompt).toContain('Relationships are optional')
     expect(prompt).toContain('Read every submitted candidate')
     expect(prompt).toContain('required propagation surface')
+    expect(prompt).toContain('frontier_complete=true')
+    expect(prompt).toContain('shared grammar/parser')
     expect(prompt).toContain('Do not enumerate the repository')
     expect(prompt).not.toContain('get_codemap')
   })

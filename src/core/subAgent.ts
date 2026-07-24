@@ -238,16 +238,16 @@ Tools:
 - search_files(pattern)
 - trace_symbol(query, path?)
 - read_file(path, offset?, limit?)
-- submit_code_map(candidates, relationships, rejected_hypotheses, searches_tried, uncertainty)
+- submit_code_map(candidates, relationships, frontier_complete, unresolved_edit_paths, rejected_hypotheses, searches_tried, uncertainty)
 
 Protocol:
-1. Aim to finish in three provider turns: locate, verify, submit. At the adaptive submission gate, call submit_code_map unless one specific unresolved evidence gap can change the ranked result; only then call request_more_search alone. A granted rescue provides one targeted tool wave, followed by final submission.
+1. Aim to finish in three provider turns: locate, verify, submit. At the adaptive submission gate, call submit_code_map only when the complete likely edit frontier is read-grounded. If a specific unread sibling implementation, shared grammar/parser, contract mirror, platform variant, or failure edge still has meaningful patch probability, call request_more_search alone. A granted rescue provides one targeted tool wave, followed by final submission.
 2. Extract one to three discriminative anchors from the objective. If it names a symbol, path, error literal, config key, or visible text, search that exact anchor first. Use trace_symbol for an exact identifier because it resolves declarations and references together. In the first wave preserve two genuinely different hypotheses when plausible: the direct symptom owner and a compatibility, normalization, protocol, or runtime-version owner. Test both in parallel instead of collapsing early onto the first matching behavior.
 3. Batch independent calls in parallel when each has information value, usually 2-6 at a time; never invent calls to fill a batch. Prefer one precise query plus one genuinely different ownership hypothesis over synonym expansion.
 4. Follow the next hop with the highest expected information gain. Read probable owners immediately and read multiple known candidates in one parallel wave. A search hit is only a hypothesis until read.
-5. After reading the probable owner, perform exactly one bounded frontier check. Inspect only direct callers, public contracts/types, registration or defaults, state/config/persistence collaborators, behavior-bearing variants, and focused tests that may need the same change. If a discovered implementation does not fully explain the objective, try one semantic or naming-family alternative before stopping.
+5. After reading the probable owner, perform exactly one bounded frontier check. Inspect only direct callers, public contracts/types, registration or defaults, state/config/persistence collaborators, behavior-bearing variants, and focused tests that may need the same change. For parser, serializer, protocol, platform, generated/runtime, or language-family code, explicitly check whether a sibling or shared implementation carries the same behavior. If a discovered implementation does not fully explain the objective, try one semantic or naming-family alternative before stopping.
 6. Submit immediately when the owner and required propagation surface are read-grounded. Do not spend another turn merely increasing confidence, adding context, or drawing relationships.
-7. Finish only with submit_code_map. Rank up to ten candidates independently of discovery order. For each candidate estimate patch_probability, causal_distance, and change_effect. Prefer a root-cause file whose isolated change could resolve the objective, then synchronized propagation surfaces, verification files, and context. Break ties by higher patch probability and shorter causal distance. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
+7. Finish only with submit_code_map. Rank up to ten candidates independently of discovery order. For each candidate estimate patch_probability, causal_distance, and change_effect. Set frontier_complete=true only when no unread file still has meaningful probability of requiring the same patch; otherwise list concrete unresolved_edit_paths and request rescue instead of submitting. Prefer a root-cause file whose isolated change could resolve the objective, then synchronized propagation surfaces, verification files, and context. Break ties by higher patch probability and shorter causal distance. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
 
 Rules:
 - Never describe files you have not read.
@@ -332,6 +332,8 @@ export interface SubmittedRelationship {
 export interface SubmittedCodeMap {
   candidates: SubmittedCandidate[]
   relationships: SubmittedRelationship[]
+  frontierComplete: boolean
+  unresolvedEditPaths: string[]
   rejectedHypotheses: string[]
   searchesTried: string[]
   uncertainty: string[]
@@ -702,6 +704,8 @@ function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string
   return {
     candidates,
     relationships,
+    frontierComplete: value.frontier_complete ?? value.frontierComplete ?? true,
+    unresolvedEditPaths: stringList(value.unresolved_edit_paths ?? value.unresolvedEditPaths, 8),
     rejectedHypotheses: stringList(value.rejected_hypotheses ?? value.rejectedHypotheses, 8),
     searchesTried: stringList(value.searches_tried ?? value.searchesTried, 12),
     uncertainty: stringList(value.uncertainty, 8),
@@ -817,6 +821,10 @@ function rankSubmittedCandidates(report: SubmittedCodeMap): void {
 
 function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
   if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
+  if (!report.frontierComplete || report.unresolvedEditPaths.length > 0) {
+    const unresolved = report.unresolvedEditPaths.length > 0 ? report.unresolvedEditPaths.join(', ') : 'unspecified edit candidate'
+    return `edit frontier remains open; run one targeted retrieval wave for: ${unresolved}`
+  }
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
     if (!rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
@@ -1044,11 +1052,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                 required: ['from', 'to', 'relationship', 'evidence_path', 'start_line', 'end_line'],
               },
             },
+            frontier_complete: { type: 'boolean', description: 'True only when no unread file still has meaningful probability of requiring the same patch.' },
+            unresolved_edit_paths: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Concrete unread paths or path hypotheses that may still require edits. Request rescue instead of submitting when non-empty.' },
             rejected_hypotheses: { type: 'array', items: { type: 'string' } },
             searches_tried: { type: 'array', items: { type: 'string' } },
             uncertainty: { type: 'array', items: { type: 'string' } },
           },
-          required: ['candidates', 'relationships', 'rejected_hypotheses', 'searches_tried', 'uncertainty'],
+          required: ['candidates', 'relationships', 'frontier_complete', 'unresolved_edit_paths', 'rejected_hypotheses', 'searches_tried', 'uncertainty'],
         },
       },
     })
@@ -1426,6 +1436,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         }
       }
       if (turn >= turnLimit) turnLimit += 1
+      if (/^edit frontier remains open;/.test(submissionError) && searchExtensionGrantedAtTurn === null) {
+        searchExtensionGrantedAtTurn = turn
+      }
       messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })
       messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
       messages.push({
