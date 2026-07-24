@@ -495,6 +495,7 @@ export class NodeToolExecutor implements ToolExecutor {
       try {
         if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
         const graph = await CodeGraphService.load()
+        if (!graph.isInitialized(safeRootPath)) throw new Error('CodeGraph index is not ready')
         graphResults = await graph.searchSymbols({
           workspacePath: safeRootPath,
           query: query.query,
