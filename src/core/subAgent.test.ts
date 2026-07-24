@@ -1496,6 +1496,68 @@ describe('runSubAgent', () => {
       expect(result).toMatchObject({ ok: true, turns: 4, finalText: expect.stringContaining('EXECUTION_FLOW') })
       expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'src/core.ts', reason: 'file read' })]))
       expect(requestBodies).toHaveLength(4)
+      expect(JSON.stringify(requestBodies[3].messages)).toContain('FASTCONTEXT_EVIDENCE_CHECKPOINT')
+      expect(JSON.stringify(requestBodies[3].messages)).not.toContain('src/core.ts looks relevant')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('resolves a missing package index path to the historical module file', async () => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'read-old-module',
+          function: { name: 'read_file', arguments: JSON.stringify({ path: 'lib/matplotlib/cbook/__init__.py', offset: 1, limit: 10 }) },
+        }] } }] }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+        id: 'submit-old-module',
+        function: { name: 'submit_code_map', arguments: JSON.stringify({
+          candidates: [{ path: 'lib/matplotlib/cbook.py', start_line: 1, end_line: 2, role: 'runtime owner', confidence: 'high', why: 'resolved and read' }],
+        }) },
+      }] } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFileRange: vi.fn(async (path: string) => path.replace(/\\/g, '/').endsWith('/lib/matplotlib/cbook.py')
+        ? { success: true, data: { content: 'class Grouper:\n    pass', truncated: false } }
+        : { success: false, error: 'File not found' }),
+      readFile: async () => ({ success: false, error: 'File not found' }),
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [] } })),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'fast_context',
+          label: 'FastContext',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: buildFastContextSystemPrompt(),
+          maxTurns: 2,
+          maxParallel: 2,
+        },
+        objective: 'find Grouper serialization owner',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        requireGroundedReport: true,
+      })
+
+      expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('lib/matplotlib/cbook.py') })
+      expect(result.evidence).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: 'lib/matplotlib/cbook.py', reason: 'file read' }),
+      ]))
+      expect(executor.searchFiles).not.toHaveBeenCalled()
     } finally {
       globalThis.fetch = originalFetch
     }

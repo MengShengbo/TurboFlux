@@ -39,6 +39,14 @@ export interface SearchContentPage {
   truncated: boolean
 }
 
+export interface SearchContentBatchRequest {
+  pattern: string
+  basePath: string
+  filePattern?: string
+  caseInsensitive?: boolean
+  options?: SearchContentOptions
+}
+
 export interface SearchFilesOptions {
   offset?: number
   limit?: number
@@ -95,6 +103,7 @@ export interface ToolExecutor {
   searchFiles(pattern: string, basePath: string, options?: SearchFilesOptions): Promise<Result<{ matches: string[]; truncated?: boolean; offset?: number; limit?: number }>>
   searchContent(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean): Promise<Result<SearchContentHit[]>>
   searchContentPage?(pattern: string, basePath: string, filePattern?: string, caseInsensitive?: boolean, options?: SearchContentOptions): Promise<Result<SearchContentPage>>
+  searchContentBatch?(requests: SearchContentBatchRequest[]): Promise<Array<Result<SearchContentPage>>>
   webSearch?(query: Record<string, any>): Promise<Result<{ results: WebSearchResult[]; provider: string; query: string }>>
 
   // Code lookup operations

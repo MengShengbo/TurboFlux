@@ -395,6 +395,26 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.data?.hits[0]?.context).toContain('6: after one')
   }))
 
+  it('separates compatible batched content searches', async () => withWorkspace(async ({ workspace }) => {
+    writeFileSync(join(workspace, 'owners.ts'), [
+      'export function createOwner() { return true }',
+      'export function dropOwner() { return false }',
+      'export function unrelated() { return null }',
+    ].join('\n'), 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const results = await executor.searchContentBatch([
+      { pattern: 'createOwner', basePath: workspace, filePattern: '*.ts', options: { limit: 20 } },
+      { pattern: 'dropOwner', basePath: workspace, filePattern: '*.ts', options: { limit: 20 } },
+    ])
+
+    expect(results).toHaveLength(2)
+    expect(results[0]).toMatchObject({ success: true, data: { totalMatches: 1 } })
+    expect(results[1]).toMatchObject({ success: true, data: { totalMatches: 1 } })
+    expect(results[0].data?.hits[0]?.text).toContain('createOwner')
+    expect(results[1].data?.hits[0]?.text).toContain('dropOwner')
+  }))
+
   it('can cap census search to one anchor per file', async () => withWorkspace(async ({ workspace }) => {
     writeFileSync(join(workspace, 'first.ts'), 'needle one\nneedle two\nneedle three\n', 'utf-8')
     writeFileSync(join(workspace, 'second.ts'), 'needle four\nneedle five\n', 'utf-8')

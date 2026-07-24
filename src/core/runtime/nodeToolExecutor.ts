@@ -10,6 +10,7 @@ import type {
   ToolExecutor,
   Result,
   SearchContentHit,
+  SearchContentBatchRequest,
   SearchContentOptions,
   SearchFilesOptions,
   SearchContentPage,
@@ -318,6 +319,136 @@ export class NodeToolExecutor implements ToolExecutor {
     return result.success
       ? { success: true, data: result.data?.hits || [] }
       : { success: false, error: result.error, data: [] }
+  }
+
+  async searchContentBatch(requests: SearchContentBatchRequest[]): Promise<Array<Result<SearchContentPage>>> {
+    if (requests.length < 2) {
+      return Promise.all(requests.map(request => this.searchContentPage(
+        request.pattern,
+        request.basePath,
+        request.filePattern,
+        request.caseInsensitive,
+        request.options,
+      )))
+    }
+
+    const first = requests[0]
+    const batchKey = (request: SearchContentBatchRequest) => JSON.stringify({
+      basePath: resolveNativePath(request.basePath),
+      filePattern: request.filePattern || '',
+      caseInsensitive: Boolean(request.caseInsensitive),
+      contextBefore: Math.max(0, Math.min(20, Math.floor(request.options?.contextBefore || 0))),
+      contextAfter: Math.max(0, Math.min(20, Math.floor(request.options?.contextAfter || 0))),
+      multiline: Boolean(request.options?.multiline),
+      fileType: request.options?.fileType || '',
+      maxColumns: Math.max(120, Math.min(2_000, Math.floor(request.options?.maxColumns || 500))),
+    })
+    const compatible = requests.every(request => batchKey(request) === batchKey(first))
+      && !first.options?.multiline
+      && requests.every(request => {
+        try {
+          void new RegExp(request.pattern, request.caseInsensitive ? 'i' : '')
+          return true
+        } catch {
+          return false
+        }
+      })
+    if (!compatible) {
+      return Promise.all(requests.map(request => this.searchContentPage(
+        request.pattern,
+        request.basePath,
+        request.filePattern,
+        request.caseInsensitive,
+        request.options,
+      )))
+    }
+
+    let safeBasePath: string
+    try {
+      safeBasePath = this.ensureAllowedPath(first.basePath)
+    } catch (error) {
+      return requests.map(request => ({
+        success: false,
+        error: String(error),
+        data: {
+          hits: [],
+          totalMatches: 0,
+          offset: Math.max(0, Math.floor(request.options?.offset || 0)),
+          limit: Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.floor(request.options?.limit || DEFAULT_SEARCH_LIMIT))),
+          truncated: false,
+        },
+      }))
+    }
+
+    const contextBefore = Math.max(0, Math.min(20, Math.floor(first.options?.contextBefore || 0)))
+    const contextAfter = Math.max(0, Math.min(20, Math.floor(first.options?.contextAfter || 0)))
+    const maxColumns = Math.max(120, Math.min(2_000, Math.floor(first.options?.maxColumns || 500)))
+    const args = [
+      '--json',
+      '--hidden',
+      `--max-columns=${maxColumns}`,
+      '--max-columns-preview',
+      ...CODE_SEARCH_EXCLUDE_GLOBS.map(pattern => `--glob=!${pattern}`),
+      '--glob=!.env',
+      '--glob=!.env.local',
+      '--glob=!.env.*.local',
+    ]
+    if (first.caseInsensitive) args.push('--ignore-case')
+    if (contextBefore > 0) args.push('-B', String(contextBefore))
+    if (contextAfter > 0) args.push('-A', String(contextAfter))
+    if (first.options?.fileType) args.push('--type', first.options.fileType)
+    if (first.filePattern) args.push(`--glob=${first.filePattern}`)
+    for (const request of requests) args.push('-e', request.pattern)
+    args.push('--', '.')
+
+    try {
+      const { stdout } = await execFileAsync('rg', args, {
+        cwd: safeBasePath,
+        timeout: 15_000,
+        maxBuffer: 8 * 1024 * 1024,
+        signal: first.options?.signal,
+      })
+      const events: Array<{ type: 'match' | 'context'; file: string; line: number; text: string }> = []
+      for (const line of stdout.split(/\r?\n/)) {
+        if (!line) continue
+        try {
+          const event = JSON.parse(line) as Record<string, any>
+          if (event.type !== 'match' && event.type !== 'context') continue
+          const relativePath = event.data?.path?.text
+          const lineNumber = Number(event.data?.line_number)
+          const text = String(event.data?.lines?.text || '').replace(/\r?\n$/, '')
+          if (!relativePath || !Number.isFinite(lineNumber)) continue
+          events.push({ type: event.type, file: resolveNativePath(safeBasePath, relativePath), line: lineNumber, text })
+        } catch {}
+      }
+      const matches = events.filter(event => event.type === 'match')
+      return requests.map(request => {
+        const tester = new RegExp(request.pattern, request.caseInsensitive ? 'i' : '')
+        const matching = matches.filter(match => tester.test(match.text))
+        const offset = Math.max(0, Math.floor(request.options?.offset || 0))
+        const limit = Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.floor(request.options?.limit || DEFAULT_SEARCH_LIMIT)))
+        const selected = matching.slice(offset, offset + limit)
+        const hits = selected.map(match => {
+          const context = events
+            .filter(event => event.type === 'context' && event.file === match.file && event.line >= match.line - contextBefore && event.line <= match.line + contextAfter)
+            .map(event => `${event.line}: ${event.text}`)
+            .join('\n')
+          return { file: match.file, line: match.line, text: match.text, ...(context ? { context } : {}) }
+        })
+        return {
+          success: true,
+          data: { hits, totalMatches: matching.length, offset, limit, truncated: matching.length > offset + limit },
+        }
+      })
+    } catch {
+      return Promise.all(requests.map(request => this.searchContentPage(
+        request.pattern,
+        request.basePath,
+        request.filePattern,
+        request.caseInsensitive,
+        request.options,
+      )))
+    }
   }
 
   async searchContentPage(

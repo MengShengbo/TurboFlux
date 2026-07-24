@@ -229,7 +229,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     userPrompt: [
       `Objective: ${params.objective}`,
       '',
-      'Run FastContext as an adaptive model-led retrieval loop. Locate the smallest read-grounded edit set. Prefer source owners over textual use sites, batch independent work, and submit as soon as no named unread owner can change the ranking.',
+      'Run FastContext as an adaptive model-led retrieval loop. Recover the complete minimal evidence-grounded edit frontier, not merely one plausible file. Read direct owners, preserve tightly coupled propagation surfaces discovered by exact search or symbol evidence, batch independent work, and submit as soon as no named unread owner can change the top-ten ranking.',
     ].join('\n'),
     onEvent: onSubAgentEvent,
   })
