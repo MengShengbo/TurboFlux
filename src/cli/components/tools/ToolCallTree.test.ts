@@ -21,6 +21,7 @@ describe('ToolCallTree history policy', () => {
     expect(shouldPersistToolForHistory(tool('get_codemap', 'done'))).toBe(false)
     expect(shouldPersistToolForHistory(tool('explore_code', 'done'))).toBe(true)
     expect(shouldPersistToolForHistory(tool('web_search', 'done'))).toBe(true)
+    expect(shouldPersistToolForHistory(tool('read_agent', 'done'))).toBe(false)
   })
 
   it('keeps failed exploration tools visible', () => {

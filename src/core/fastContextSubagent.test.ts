@@ -12,10 +12,12 @@ describe('FastContext controller', () => {
     const definition = __testFastContextDefinition()
 
     expect(definition.label).toBe('FastContext Controller')
-    expect(definition.maxTurns).toBe(4)
+    expect(definition.maxTurns).toBe(6)
     expect(definition.maxParallel).toBe(8)
     expect(definition.systemPrompt).toContain('highest expected information gain')
     expect(definition.systemPrompt).toContain('Relationships are optional')
+    expect(definition.systemPrompt).toContain('three provider turns')
+    expect(definition.systemPrompt).toContain('request_more_search')
   })
 
   it('does not touch the workspace without an active model', async () => {
