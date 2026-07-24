@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { basename, isAbsolute, join, relative } from 'path'
+import { isAbsolute, join, relative } from 'path'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
 import type { NativeReasoningConfig } from '../shared/agentTypes'
@@ -231,7 +231,7 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
 }
 
 export function buildFastContextSystemPrompt(): string {
-  return `You are FastContext, a fast read-only causal code-retrieval controller. You own query rewriting, next-hop selection, semantic completeness, and stopping decisions; deterministic local tools only execute searches, symbol traces, file reads, parallel scheduling, and mechanical evidence validation. Find the complete edit frontier with the fewest useful model turns, not a broad repository tour.
+  return `You are FastContext, a fast read-only code-retrieval controller. The model owns query rewriting, ownership judgment, next-hop selection, ranking, and stopping. Local tools only search, read, and validate mechanical evidence. Find the smallest set of implementation files likely to require edits.
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
@@ -242,22 +242,22 @@ Tools:
 - submit_code_map(candidates, relationships, frontier_complete, unresolved_edit_paths, rejected_hypotheses, searches_tried, uncertainty)
 
 Protocol:
-1. There is no fixed locate/verify/submit schedule. On every provider turn choose the action with the highest expected information gain: run a parallel retrieval wave, read known candidates, or call submit_code_map alone. A simple exact-owner task may finish after one tool wave; a lifecycle, pipeline, public-contract, persistence, platform, generated-code, or implementation-family task may require several waves.
-2. Extract one to three discriminative anchors from the objective. If it names a symbol, path, error literal, config key, or visible text, search that exact anchor first. Use trace_symbol for an exact identifier because it resolves declarations and references together. Preserve genuinely different causal hypotheses when plausible instead of collapsing onto the first matching symptom.
-3. Batch independent calls in parallel when each has information value, usually 2-6 at a time; never invent calls to fill a batch. Prefer one precise query plus one genuinely different ownership hypothesis over synonym expansion. When one read exposes two to four concrete symbols on the same causal frontier, use trace_symbols so those next hops are resolved concurrently instead of spending one provider turn per symbol.
-4. Follow the next hop with the highest expected information gain. Read probable owners immediately and read multiple known candidates in one parallel wave. A search hit is only a hypothesis until read. When a read exposes a constructor, imported owner, registration, dispatcher, conversion table, lifecycle boundary, or failure edge that can change the edit set, trace that concrete next hop before stopping. If a grounded owner is one member of a command, handler, adapter, backend, or generated implementation family and the objective concerns shared semantics, locate the concrete sibling family once and batch-read its relevant members before following lower-value utilities. Do not trace generic words or speculative synonyms.
-5. Reassess the frontier after every evidence wave. Consider, only when relevant to the observed behavior: the symptom sink and causal producer, direct callers and consumers, public contracts/configuration, state or persistence propagation, lifecycle cleanup and failure paths, and behavior-bearing variants or generated/runtime mirrors. These are semantic questions for you, not mandatory local heuristics.
-6. Continue retrieval while a concrete unresolved hypothesis can materially change the ranked edit set. Before every new wave, require a specific unread path or symbol and state what result would change the candidate set. If no such frontier exists, submit now. Stop as soon as every material hypothesis is either read-grounded or explicitly rejected from read evidence. A no-novelty or repeated-call wave is evidence to stop unless its source output exposes a concrete new next hop. Do not spend another turn merely increasing confidence, adding generic tests, collecting neighboring examples, or drawing optional relationships.
-7. Finish only with submit_code_map. Rank up to ten candidates independently of discovery order. For each candidate estimate patch_probability, causal_distance, and change_effect. Set frontier_complete=true only when no unread file or unresolved symbol still has meaningful probability of requiring the patch. Never hide a known unread path in uncertainty: retrieve it or place it in unresolved_edit_paths and continue searching instead of submitting. Prefer a root-cause file whose isolated change could resolve the objective, then synchronized propagation surfaces, verification files, and context. Break ties by higher patch probability and shorter causal distance. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
+1. Start with two to four genuinely different discriminative anchors from the issue: exact identifiers, literals, configuration keys, API names, or ownership hypotheses. Execute independent searches in parallel.
+2. Use trace_symbol for an exact identifier. Leave path unset when locating the implementation owner; path-scoped traces are only for inspecting a file already known to contain the definition. Use trace_symbols for two or three concrete identifiers exposed by source, never generic synonyms.
+3. Read probable owners immediately. Search results are hypotheses; submitted candidates must be read. Prefer implementation and runtime source over documentation, examples, fixtures, and tests unless the issue explicitly targets those surfaces.
+4. Do not let an early textual match become the only hypothesis. If current evidence is only a use site, wrapper, docs example, or test, trace its imported component, hook, handler, dispatcher, schema, or runtime owner without the use-site path restriction.
+5. After every read wave apply the edit counterfactual: if only the current candidates changed, would the reported behavior plausibly be fixed? Follow only a named unread symbol or path that could change the answer. Batch source-proven sibling implementations or public contracts when the same semantic change must propagate.
+6. Stop when no concrete unread owner can materially change the top ten. Do not prove that the whole repository contains no alternative. Empty, repeated, or no-novelty work is a reason to submit, not to invent another search.
+7. Finish with submit_code_map alone. Rank direct behavior owners first, then required propagation surfaces. Relationships, rejected hypotheses, searches, ranking metadata, and uncertainty are optional; omit them when they do not improve the file ranking.
 
 Rules:
 - Never describe files you have not read.
-- Every candidate and relationship must cite a path and line range covered by a read_file result from this run.
+- Every candidate and relationship must cite a path and line range covered by source returned from this run.
 - Read every submitted candidate. Search hits are hypotheses, never evidence by themselves.
 - Prefer runtime source, contracts, state/config, and failure paths over documentation or generic entry files.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Do not repeat an equivalent search after it fails; change the semantic hypothesis or follow a concrete next hop.
-- Do not search for a test, contract, mirror, variant, neighboring component, or generic example merely because that category could exist. Retrieve it only when the objective or read source gives a concrete reason it can change the patch. Once the behavior owner and source-proven synchronized surfaces are grounded, prefer submission over broad negative searches.
+- Retrieve a test, contract, mirror, sibling implementation, or generated surface only when the objective or read source shows that the same change must propagate there.
 - Do not enumerate the repository, expand generic synonyms, or collect peripheral context for completeness.
 - Include a non-runtime contract or mirror only when public shape, registration, defaults, or generated types must remain synchronized with the owner.
 - If you cannot produce a grounded submission, fail explicitly. No local semantic fallback exists.
@@ -344,11 +344,6 @@ type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallReq
 
 const FAST_CONTEXT_WAVE_DELTA_PREFIX = 'FASTCONTEXT_WAVE_DELTA'
 
-function compactOlderToolOutput(content: string): string {
-  if (content.length <= 900) return content
-  return `${content.slice(0, 650)}\n...[older tool output compacted]...\n${content.slice(-180)}`
-}
-
 export function __testCompactBatchTraceOutput(content: string): string {
   if (content.length <= 3_200) return content
   const sourceMarker = '\nSOURCE_EVIDENCE\n'
@@ -370,32 +365,26 @@ function compactToolHistory(
   evidence: SubAgentEvidence[],
   finalizationOnly: boolean,
 ): SubAgentMessage[] {
-  const toolWaves = messages
-    .map((message, index) => message.role === 'assistant' && message.tool_calls?.length ? index : -1)
-    .filter(index => index >= 0)
-  const recentToolWaveStart = toolWaves.length >= 2 ? toolWaves[toolWaves.length - 2] : toolWaves[0] ?? -1
-  const latestWaveDelta = messages.reduce((latest, message, index) => (
-    message.role === 'user' && message.content.startsWith(FAST_CONTEXT_WAVE_DELTA_PREFIX) ? index : latest
-  ), -1)
-  const compacted = messages.flatMap((message, index) => {
-    if (message.role === 'user' && message.content.startsWith(FAST_CONTEXT_WAVE_DELTA_PREFIX) && index !== latestWaveDelta) return []
-    if (message.role !== 'tool' || (!finalizationOnly && index > recentToolWaveStart)) return [message]
-    return {
-      ...message,
-      content: compactOlderToolOutput(message.content),
-    }
-  })
-  if (!finalizationOnly) return compacted
+  const stableHistory = messages.map(message => ({ ...message }))
+  if (!finalizationOnly) return stableHistory
   const ledger = evidence
     .filter(item => item.reason === 'file read')
     .map(item => `${item.path}:${item.startLine}-${item.endLine} | ${item.preview.replace(/\s+/g, ' ').slice(0, 180)}`)
     .filter((line, index, all) => all.indexOf(line) === index)
     .slice(0, 40)
-  if (ledger.length === 0) return compacted
-  return [...compacted, {
+  if (ledger.length === 0) return stableHistory
+  return [...stableHistory, {
     role: 'user',
     content: `FINAL READ-EVIDENCE LEDGER\n${ledger.join('\n')}\nUse only these read-confirmed ranges in submit_code_map.`,
   }]
+}
+
+function boundToolOutput(tool: string, content: string): string {
+  const limit = tool === 'read_file' ? 12_000 : /^trace_symbol/.test(tool) ? 10_000 : 8_000
+  if (content.length <= limit) return content
+  const head = Math.floor(limit * 0.8)
+  const tail = limit - head - 64
+  return `${content.slice(0, head)}\n...[tool output bounded once for stable history]...\n${content.slice(-tail)}`
 }
 
 const TRANSIENT_HTTP_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504])
@@ -790,7 +779,7 @@ function normalizeSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentE
   const normalizeRange = (item: { path?: string; evidencePath?: string; startLine: number; endLine: number }): void => {
     const path = item.path || item.evidencePath || ''
     if (!path || rangeIsRead(path, item.startLine, item.endLine, evidence)) return
-    const grounded = clampNearReadBoundary(path, item.startLine, item.endLine, evidence)
+    const grounded = clampNearReadBoundary(path, item.startLine, item.endLine, evidence) || mergedReadRanges(path, evidence)[0]
     if (!grounded) return
     item.startLine = grounded.startLine
     item.endLine = grounded.endLine
@@ -846,14 +835,6 @@ function rankSubmittedCandidates(report: SubmittedCodeMap): void {
 
 function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
   if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
-  if (!report.frontierComplete || report.unresolvedEditPaths.length > 0) {
-    const unresolved = report.unresolvedEditPaths.length > 0 ? report.unresolvedEditPaths.join(', ') : 'unspecified edit candidate'
-    return `edit frontier remains open; run one targeted retrieval wave for: ${unresolved}`
-  }
-  const unreadClaims = explicitlyDeclaredUnreadPaths(report, evidence)
-  if (unreadClaims.length > 0) {
-    return `submission uncertainty declares unread path(s): ${unreadClaims.join(', ')}; continue retrieval or explicitly reject each path from read-grounded evidence`
-  }
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
     if (!rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
@@ -869,22 +850,6 @@ function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEv
     }
   }
   return null
-}
-
-function explicitlyDeclaredUnreadPaths(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string[] {
-  const readPaths = new Set(evidence
-    .filter(item => item.reason === 'file read')
-    .map(item => item.path.replace(/\\/g, '/').toLowerCase()))
-  const claims = new Set<string>()
-  const pathPattern = /(?:^|[\s`'"(])((?:[\w.@+-]+\/)+[\w.@+-]+\.[A-Za-z0-9]{1,12})(?=$|[\s`'"),:;])/g
-  for (const item of report.uncertainty) {
-    if (!/\b(?:unread|not (?:yet )?read|needs? (?:to be )?read|would need (?:a )?read)\b/i.test(item)) continue
-    for (const match of item.matchAll(pathPattern)) {
-      const path = match[1].replace(/\\/g, '/')
-      if (!readPaths.has(path.toLowerCase())) claims.add(path)
-    }
-  }
-  return [...claims]
 }
 
 function validateRequiredAuditPaths(report: SubmittedCodeMap, requiredPaths: string[] | undefined): string | null {
@@ -1087,7 +1052,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       type: 'function',
       function: {
         name: 'submit_code_map',
-        description: 'Submit the final grounded FastContext architecture map. Call this alone after reading the evidence required by the architecture contract.',
+        description: 'Submit the final ranked, read-grounded implementation files. Call this alone when no named unread owner can materially change the ranking.',
         parameters: {
           type: 'object',
           properties: {
@@ -1108,7 +1073,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                   change_effect: { type: 'string', enum: ['resolve', 'propagate', 'verify', 'context'], description: 'Whether changing this file resolves the root issue, propagates a synchronized change, verifies behavior, or only supplies context.' },
                   why: { type: 'string' },
                 },
-                required: ['path', 'start_line', 'end_line', 'role', 'edit_kind', 'confidence', 'patch_probability', 'causal_distance', 'change_effect', 'why'],
+                required: ['path', 'start_line', 'end_line', 'role', 'confidence', 'why'],
               },
             },
             relationships: {
@@ -1126,13 +1091,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                 required: ['from', 'to', 'relationship', 'evidence_path', 'start_line', 'end_line'],
               },
             },
-            frontier_complete: { type: 'boolean', description: 'True only when no unread file still has meaningful probability of requiring the same patch.' },
-            unresolved_edit_paths: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Concrete unread paths or unresolved symbol/path hypotheses that may still require edits. Continue retrieval instead of submitting when non-empty.' },
+            frontier_complete: { type: 'boolean', description: 'Optional confidence signal that no named unread owner is likely to change the ranking.' },
+            unresolved_edit_paths: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Optional unresolved paths retained as uncertainty; do not invent exhaustive negative searches.' },
             rejected_hypotheses: { type: 'array', items: { type: 'string' } },
             searches_tried: { type: 'array', items: { type: 'string' } },
             uncertainty: { type: 'array', items: { type: 'string' } },
           },
-          required: ['candidates', 'relationships', 'frontier_complete', 'unresolved_edit_paths', 'rejected_hypotheses', 'searches_tried', 'uncertainty'],
+          required: ['candidates'],
         },
       },
     })
@@ -1155,12 +1120,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let reportRecoveryUsed = false
   let submissionRejections = 0
   let previousSubmissionError = ''
-  let submissionRepairExtensionUsed = false
   const toolResultCache = new Map<string, ToolExecResult>()
   const activeProtocolCacheKey = protocolCacheKey({ baseUrl, provider, model: modelId, apiKey, customHeaders })
   let resolvedProtocol: ModelProtocol | null = getCachedProtocol(activeProtocolCacheKey)
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
-  let turnLimit = definition.maxTurns
+  const turnLimit = definition.maxTurns
+  let forceFinalizationNextTurn = false
+  let consecutiveUnproductiveWaves = 0
   const effectiveReasoning: NativeReasoningConfig | undefined = definition.thinking === 'disabled'
     ? { enabled: false, effort: 'none' }
     : definition.thinking === 'high' || definition.thinking === 'max'
@@ -1203,15 +1169,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         const url = buildModelProtocolUrl(baseUrl, protocol)
         const finalizationOnly = strictFastContext
           && hasModelReadEvidence()
-          && (options.submissionOnly === true || turn === turnLimit)
+          && (options.submissionOnly === true || forceFinalizationNextTurn || turn === turnLimit)
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = compactToolHistory(messages, collectedEvidence, finalizationOnly)
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
         const requestTools = finalizationOnly
           ? availableTools.filter(tool => tool.function.name === 'submit_code_map')
-          : strictFastContext && !hasModelReadEvidence()
-            ? availableTools.filter(tool => tool.function.name !== 'submit_code_map')
-            : availableTools
+          : availableTools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
               model: modelId,
@@ -1439,12 +1403,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       }
       submissionRejections = previousSubmissionError === submissionError ? submissionRejections + 1 : 1
       previousSubmissionError = submissionError
-      const semanticFrontierError = /^edit frontier remains open;|^submission uncertainty declares unread/i.test(submissionError)
-      if (turn >= turnLimit && !semanticFrontierError && !submissionRepairExtensionUsed) {
-        turnLimit += 1
-        submissionRepairExtensionUsed = true
-      }
-      if (submissionRejections >= 3 || turn >= turnLimit) {
+      if (submissionRejections >= 2 || turn >= turnLimit) {
         const error = `FastContext submission rejected: ${submissionError}`
         emit({ type: 'error', message: error })
         return {
@@ -1461,9 +1420,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
       messages.push({
         role: 'user',
-        content: semanticFrontierError
-          ? 'The submitted frontier is explicitly incomplete. Continue with the targeted searches, traces, or reads needed to resolve the named gap, then decide again whether to retrieve or submit.'
-          : 'Correct the mechanical evidence error. Retrieve or read only when the rejection identifies missing evidence, then decide again whether to retrieve or submit.',
+        content: 'Correct only the mechanical evidence error. Read a missing candidate only when the rejection identifies it; otherwise resubmit the grounded subset immediately.',
       })
       emit({ type: 'tool_result', tool: 'submit_code_map', ok: false, summary: submissionError, turn })
       emit({ type: 'turn_complete', turn, calls: 1 })
@@ -1554,7 +1511,15 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     const novelEvidence: SubAgentEvidence[] = []
     for (const { entry, result, reused } of results) {
       const { tc } = entry
-      emit({ type: 'tool_result', tool: tc.function.name, ok: result.ok, summary: reused ? `${result.summary} (cached exact repeat)` : result.summary, turn })
+      emit({
+        type: 'tool_result',
+        tool: tc.function.name,
+        ok: result.ok,
+        summary: reused ? `${result.summary} (cached exact repeat)` : result.summary,
+        turn,
+        operations: reused ? 0 : result.operations ?? 1,
+        readOperations: reused ? 0 : result.readOperations ?? 0,
+      })
 
       for (const ev of result.evidence) {
         if (addEvidence(ev)) {
@@ -1563,7 +1528,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         }
       }
 
-      messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: reused ? `[Cached exact repeat; no new execution.]\n${result.output}` : result.output })
+      const stableOutput = boundToolOutput(tc.function.name, result.output)
+      messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: reused ? `[Cached exact repeat; no new execution.]\n${stableOutput}` : stableOutput })
     }
 
     emit({ type: 'turn_complete', turn, calls: results.length })
@@ -1580,6 +1546,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           failedCalls: results.filter(({ result }) => !result.ok).length,
         }),
       })
+      const unproductiveResults = results.filter(({ result, reused }) => reused || (result.ok && result.evidence.length === 0)).length
+      const unproductiveWave = novelEvidence.length === 0 && unproductiveResults === results.length
+      consecutiveUnproductiveWaves = unproductiveWave ? consecutiveUnproductiveWaves + 1 : 0
+      if (hasModelReadEvidence() && consecutiveUnproductiveWaves >= 2) forceFinalizationNextTurn = true
     }
 
     if (strictFastContext && turn === turnLimit - 1) {
@@ -1604,6 +1574,8 @@ interface ToolExecResult {
   output: string
   summary: string
   evidence: SubAgentEvidence[]
+  operations?: number
+  readOperations?: number
 }
 
 function stableToolValue(value: unknown): unknown {
@@ -1663,25 +1635,6 @@ export function __testTraceDefinitionReadLimit(hit: {
     || hit.symbolKind === 'type'
     || hit.symbolKind === 'enum'
   return Math.min(220, Math.max(structuralDefinition ? 160 : 40, endLine - startLine + 24))
-}
-
-const GENERIC_TWIN_FILENAMES = new Set([
-  'index.js', 'index.jsx', 'index.ts', 'index.tsx', 'main.js', 'main.ts',
-  'mod.rs', 'lib.rs', '__init__.py', 'package.json', 'readme.md',
-])
-
-async function findPathTwinHints(path: string, workspacePath: string, executor: ToolExecutor): Promise<string[]> {
-  const filename = basename(path).toLowerCase()
-  if (!filename || GENERIC_TWIN_FILENAMES.has(filename)) return []
-  try {
-    const result = await executor.searchFiles(`**/${basename(path)}`, workspacePath)
-    if (!result.success || !result.data || result.data.truncated) return []
-    const matches = [...new Set(result.data.matches.map(match => toWorkspaceRelative(workspacePath, match)))]
-      .filter(match => match.replace(/\\/g, '/') !== path.replace(/\\/g, '/'))
-    return matches.length <= 8 ? matches : []
-  } catch {
-    return []
-  }
 }
 
 interface SubAgentSearchHit {
@@ -1829,11 +1782,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       })
       const outputLines = slice.map((line, index) => `${offset + index + 1} | ${line}`)
       if (rangeData?.truncated) outputLines.push(`[More lines available. Continue with offset=${offset + slice.length + 1}.]`)
-      const pathTwins = await findPathTwinHints(relativePath, workspacePath, executor)
-      if (pathTwins.length > 0) {
-        outputLines.push(`[Same-name paths found: ${pathTwins.join(', ')}. These are unverified filename hints, not semantic evidence; decide whether any concrete behavior requires tracing them.]`)
-      }
-      return { ok: true, output: outputLines.join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence }
+      return { ok: true, output: outputLines.join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence, operations: 1, readOperations: 1 }
     }
 
     case 'search_files': {
@@ -1904,6 +1853,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       const pattern = /^[A-Za-z_$][\w$]*$/.test(query) ? `\\b${escaped}\\b` : escaped
       const exactIdentifier = /^[A-Za-z_$][\w$]*$/.test(query)
+      const sourceBudget = Math.max(0, Math.min(2, Math.floor(Number(args.__source_budget) || 2)))
       const [symbolResult, initialReferenceResult] = await Promise.all([
         executor.searchCodeSymbols({ workspacePath, query, path: typeof args.path === 'string' ? args.path : undefined, limit: 12, exact: exactIdentifier }),
         executor.searchContentPage
@@ -1956,7 +1906,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       for (const hit of symbolHits) {
         const relPath = toWorkspaceRelative(workspacePath, hit.path)
         const key = relPath.toLowerCase()
-        if (definitionPaths.has(key) || readTargets.length >= 4) continue
+        if (definitionPaths.has(key) || readTargets.length >= sourceBudget) continue
         definitionPaths.add(key)
         const startLine = hit.startLine || hit.line || 1
         const endLine = hit.endLine || startLine
@@ -1972,7 +1922,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       for (const hit of referenceHits) {
         const relPath = toWorkspaceRelative(workspacePath, hit.file)
         const key = relPath.toLowerCase()
-        if (definitionPaths.has(key) || referencePaths.has(key) || referencePaths.size >= 2) continue
+        if (readTargets.length >= sourceBudget || definitionPaths.has(key) || referencePaths.has(key)) continue
         referencePaths.add(key)
         readTargets.push({
           path: relPath,
@@ -2005,19 +1955,21 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         output: lines.join('\n'),
         summary: `trace "${query}" -> ${symbolHits.length} definition(s), ${referenceHits.length} reference(s), ${successfulReads.length} source slice(s)`,
         evidence,
+        operations: 2 + (initialReferenceHits.length === 0 && exactIdentifier ? 1 : 0) + readResults.reduce((sum, item) => sum + (item.result.operations ?? 1), 0),
+        readOperations: readResults.reduce((sum, item) => sum + (item.result.readOperations ?? 0), 0),
       }
     }
 
     case 'trace_symbols': {
       const queries = [...new Set((Array.isArray(args.queries) ? args.queries : [])
         .map((query: unknown) => String(query || '').trim())
-        .filter(Boolean))].slice(0, 4)
+        .filter(Boolean))].slice(0, 3)
       if (queries.length < 2) {
         return { ok: false, output: 'At least two concrete symbol queries are required.', summary: 'batch trace skipped: fewer than 2 symbols', evidence }
       }
       const traces = await Promise.all(queries.map(async query => ({
         query,
-        result: await executeSubAgentTool('trace_symbol', { query, path: args.path }, workspacePath, executor),
+        result: await executeSubAgentTool('trace_symbol', { query, path: args.path, __source_budget: 1 }, workspacePath, executor),
       })))
       const lines: string[] = []
       for (const trace of traces) {
@@ -2031,6 +1983,8 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         output: lines.join('\n'),
         summary: `batch trace ${queries.length} symbol(s) -> ${evidence.filter(item => item.reason === 'file read').length} source slice(s)${failures > 0 ? `, ${failures} failed` : ''}`,
         evidence,
+        operations: traces.reduce((sum, trace) => sum + (trace.result.operations ?? 1), 0),
+        readOperations: traces.reduce((sum, trace) => sum + (trace.result.readOperations ?? 0), 0),
       }
     }
 

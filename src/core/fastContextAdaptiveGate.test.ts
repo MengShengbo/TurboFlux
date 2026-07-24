@@ -37,8 +37,9 @@ describe('FastContext adaptive controller', () => {
       })
 
       expect(requestCount).toBe(2)
-      expect(requestTools[0]).not.toContain('submit_code_map')
+      expect(requestTools[0]).toEqual(expect.arrayContaining(['read_file', 'search_content', 'submit_code_map']))
       expect(requestTools[1]).toEqual(expect.arrayContaining(['read_file', 'search_content', 'submit_code_map']))
+      expect(requestTools[1]).toEqual(requestTools[0])
       expect(requestTools.flat()).not.toContain('request_more_search')
       expect(result.evidencePack).toContain('1. src/owner.ts')
     } finally {
@@ -98,7 +99,7 @@ describe('FastContext adaptive controller', () => {
     }
   })
 
-  it('rejects a closed-frontier claim that explicitly admits an unread path', async () => {
+  it('accepts a grounded ranking with unresolved uncertainty without a repair round trip', async () => {
     const originalFetch = globalThis.fetch
     const requestBodies: any[] = []
     let requestCount = 0
@@ -146,10 +147,9 @@ describe('FastContext adaptive controller', () => {
         model: 'gpt-5.5',
       })
 
-      expect(requestCount).toBe(4)
-      expect(JSON.stringify(requestBodies[2])).toContain('submission uncertainty declares unread path')
-      expect(toolNames(requestBodies[2])).toEqual(expect.arrayContaining(['read_file', 'submit_code_map']))
-      expect(result.evidencePack).toContain('src/runtime/server.ts')
+      expect(requestCount).toBe(2)
+      expect(result.evidencePack).toContain('src/symptom.ts')
+      expect(result.evidencePack).toContain('src/runtime/server.ts contains RuntimeServer')
     } finally {
       globalThis.fetch = originalFetch
     }

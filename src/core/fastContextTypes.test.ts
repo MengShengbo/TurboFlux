@@ -5,8 +5,8 @@ import { buildFastContextSystemPrompt } from './subAgent'
 describe('FastContext architecture contract', () => {
   it('uses one adaptive architecture budget', () => {
     expect(FAST_CONTEXT_TUNING).toEqual({
-      maxTurns: 8,
-      maxParallel: 8,
+      maxTurns: 6,
+      maxParallel: 6,
       taskTimeoutMs: 600_000,
       reasoningEffort: 'high',
     })
@@ -15,17 +15,15 @@ describe('FastContext architecture contract', () => {
   it('keeps semantic decisions in one grounded controller', () => {
     const prompt = buildFastContextSystemPrompt()
 
-    expect(prompt).toContain('read-only causal code-retrieval controller')
-    expect(prompt).toContain('highest expected information gain')
-    expect(prompt).toContain('deterministic local tools only execute')
+    expect(prompt).toContain('read-only code-retrieval controller')
+    expect(prompt).toContain('model owns query rewriting')
+    expect(prompt).toContain('Local tools only search, read')
     expect(prompt).toContain('submit_code_map')
-    expect(prompt).toContain('There is no fixed locate/verify/submit schedule')
-    expect(prompt).toContain('Reassess the frontier after every evidence wave')
-    expect(prompt).toContain('Continue retrieval while a concrete unresolved hypothesis')
-    expect(prompt).toContain('Relationships are optional')
+    expect(prompt).toContain('edit counterfactual')
+    expect(prompt).toContain('Do not let an early textual match become the only hypothesis')
+    expect(prompt).toContain('Relationships, rejected hypotheses')
     expect(prompt).toContain('Read every submitted candidate')
-    expect(prompt).toContain('frontier_complete=true')
-    expect(prompt).toContain('Never hide a known unread path in uncertainty')
+    expect(prompt).toContain('Do not prove that the whole repository')
     expect(prompt).toContain('Do not enumerate the repository')
     expect(prompt).not.toContain('request_more_search')
     expect(prompt).not.toContain('get_codemap')

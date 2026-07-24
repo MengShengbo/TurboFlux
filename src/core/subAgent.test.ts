@@ -1053,7 +1053,7 @@ describe('runSubAgent', () => {
     }
   })
 
-  it('rejects an ungrounded structured submission and allows one correction', async () => {
+  it('normalizes an oversized structured submission to read evidence', async () => {
     const originalFetch = globalThis.fetch
     const requestBodies: any[] = []
     let requestCount = 0
@@ -1109,8 +1109,8 @@ describe('runSubAgent', () => {
       })
 
       expect(result.error).toBeUndefined()
-      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
-      expect(JSON.stringify(requestBodies[2].messages)).toContain('at least one grounded architecture node is required')
+      expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('src/core.ts L1-L3') })
+      expect(requestBodies).toHaveLength(2)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1187,7 +1187,7 @@ describe('runSubAgent', () => {
     }
   })
 
-  it('grants one correction request when the final-turn submission is ungrounded', async () => {
+  it('clamps a final submission to an already-read range without another provider turn', async () => {
     const originalFetch = globalThis.fetch
     let requestCount = 0
     globalThis.fetch = vi.fn(async () => {
@@ -1240,8 +1240,8 @@ describe('runSubAgent', () => {
       })
 
       expect(result.error).toBeUndefined()
-      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
-      expect(requestCount).toBe(3)
+      expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('src/core.ts L1-L3') })
+      expect(requestCount).toBe(2)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1375,7 +1375,7 @@ describe('runSubAgent', () => {
     }
   })
 
-  it('surfaces bounded same-name source mirrors after a read', async () => {
+  it('does not launch a same-name repository scan after every read', async () => {
     const originalFetch = globalThis.fetch
     const requestBodies: any[] = []
     let requestCount = 0
@@ -1393,10 +1393,10 @@ describe('runSubAgent', () => {
 
     const executor = {
       readFile: async () => ({ success: true, data: 'class Runtime {\n  void start() {}\n}' }),
-      searchFiles: async () => ({ success: true, data: { matches: [
+      searchFiles: vi.fn(async () => ({ success: true, data: { matches: [
         'C:/repo/src/core/Runtime.java',
         'C:/repo/android/src/core/Runtime.java',
-      ] } }),
+      ] } })),
       searchContent: async () => ({ success: true, data: [] }),
       searchCodeSymbols: async () => ({ success: true, data: [] }),
       getCodeMap: async () => ({ success: true, data: { map: [] } }),
@@ -1421,8 +1421,8 @@ describe('runSubAgent', () => {
         model: 'test-model',
       })
 
-      expect(JSON.stringify(requestBodies[1].messages)).toContain('android/src/core/Runtime.java')
-      expect(JSON.stringify(requestBodies[1].messages)).toContain('Same-name paths found')
+      expect(JSON.stringify(requestBodies[1].messages)).not.toContain('android/src/core/Runtime.java')
+      expect(executor.searchFiles).not.toHaveBeenCalled()
     } finally {
       globalThis.fetch = originalFetch
     }
