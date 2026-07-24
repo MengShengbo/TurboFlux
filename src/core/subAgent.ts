@@ -242,12 +242,12 @@ Tools:
 
 Protocol:
 1. Aim to finish in three provider turns: locate, verify, submit. At the adaptive submission gate, call submit_code_map unless one specific unresolved evidence gap can change the ranked result; only then call request_more_search alone. A granted rescue provides one targeted tool wave, followed by final submission.
-2. Extract one to three discriminative anchors from the objective. If it names a symbol, path, error literal, config key, or visible text, search that exact anchor first. Use trace_symbol for an exact identifier because it resolves declarations and references together.
+2. Extract one to three discriminative anchors from the objective. If it names a symbol, path, error literal, config key, or visible text, search that exact anchor first. Use trace_symbol for an exact identifier because it resolves declarations and references together. In the first wave preserve two genuinely different hypotheses when plausible: the direct symptom owner and a compatibility, normalization, protocol, or runtime-version owner. Test both in parallel instead of collapsing early onto the first matching behavior.
 3. Batch independent calls in parallel when each has information value, usually 2-6 at a time; never invent calls to fill a batch. Prefer one precise query plus one genuinely different ownership hypothesis over synonym expansion.
 4. Follow the next hop with the highest expected information gain. Read probable owners immediately and read multiple known candidates in one parallel wave. A search hit is only a hypothesis until read.
 5. After reading the probable owner, perform exactly one bounded frontier check. Inspect only direct callers, public contracts/types, registration or defaults, state/config/persistence collaborators, behavior-bearing variants, and focused tests that may need the same change. If a discovered implementation does not fully explain the objective, try one semantic or naming-family alternative before stopping.
 6. Submit immediately when the owner and required propagation surface are read-grounded. Do not spend another turn merely increasing confidence, adding context, or drawing relationships.
-7. Finish only with submit_code_map. Rank up to ten candidates by direct edit necessity. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
+7. Finish only with submit_code_map. Rank up to ten candidates independently of discovery order. For each candidate estimate patch_probability, causal_distance, and change_effect. Prefer a root-cause file whose isolated change could resolve the objective, then synchronized propagation surfaces, verification files, and context. Break ties by higher patch probability and shorter causal distance. Relationships are optional; include only relationships directly supported by read evidence. searches_tried and uncertainty may be empty.
 
 Rules:
 - Never describe files you have not read.
@@ -314,6 +314,9 @@ export interface SubmittedCandidate {
   role: string
   editKind: 'owner' | 'mirror' | 'implementation' | 'consumer' | 'test' | 'supporting'
   confidence: 'high' | 'medium' | 'low'
+  patchProbability: number | null
+  causalDistance: number | null
+  changeEffect: 'resolve' | 'propagate' | 'verify' | 'context' | null
   why: string
 }
 
@@ -639,6 +642,18 @@ function positiveLine(value: unknown, fallback = 1): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function boundedNumber(value: unknown, minimum: number, maximum: number): number | null {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, parsed)) : null
+}
+
+function normalizeChangeEffect(value: unknown): SubmittedCandidate['changeEffect'] {
+  const normalized = String(value || '').trim().toLowerCase()
+  return ['resolve', 'propagate', 'verify', 'context'].includes(normalized)
+    ? normalized as SubmittedCandidate['changeEffect']
+    : null
+}
+
 function normalizeEditKind(value: unknown, role: string): SubmittedCandidate['editKind'] {
   const normalized = String(value || '').trim().toLowerCase()
   if (['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'].includes(normalized)) {
@@ -664,6 +679,9 @@ function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string
           role,
           editKind: normalizeEditKind(candidate.edit_kind ?? candidate.editKind, role.toLowerCase()),
           confidence: ['high', 'medium', 'low'].includes(candidate.confidence) ? candidate.confidence : 'medium',
+          patchProbability: boundedNumber(candidate.patch_probability ?? candidate.patchProbability, 0, 1),
+          causalDistance: boundedNumber(candidate.causal_distance ?? candidate.causalDistance, 0, 12),
+          changeEffect: normalizeChangeEffect(candidate.change_effect ?? candidate.changeEffect),
           why: String(candidate.why || '').replace(/\s+/g, ' ').trim().slice(0, 320),
         } satisfies SubmittedCandidate
       })
@@ -765,6 +783,36 @@ function pruneUngroundedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvid
   if (removedCandidates > 0 || removedRelationships > 0) {
     report.uncertainty.push(`evidence gate excluded ${removedCandidates} ungrounded candidate(s) and ${removedRelationships} ungrounded relationship(s)`)
   }
+}
+
+function rankSubmittedCandidates(report: SubmittedCodeMap): void {
+  const effectRank: Record<NonNullable<SubmittedCandidate['changeEffect']>, number> = {
+    resolve: 4,
+    propagate: 3,
+    verify: 2,
+    context: 1,
+  }
+  report.candidates = report.candidates
+    .map((candidate, discoveryOrder) => ({ candidate, discoveryOrder }))
+    .sort((left, right) => {
+      const leftHasRanking = left.candidate.changeEffect !== null
+        || left.candidate.patchProbability !== null
+        || left.candidate.causalDistance !== null
+      const rightHasRanking = right.candidate.changeEffect !== null
+        || right.candidate.patchProbability !== null
+        || right.candidate.causalDistance !== null
+      if (leftHasRanking !== rightHasRanking) return leftHasRanking ? -1 : 1
+      if (!leftHasRanking) return left.discoveryOrder - right.discoveryOrder
+
+      const effectDelta = (effectRank[right.candidate.changeEffect || 'context'])
+        - (effectRank[left.candidate.changeEffect || 'context'])
+      if (effectDelta !== 0) return effectDelta
+      const probabilityDelta = (right.candidate.patchProbability ?? 0) - (left.candidate.patchProbability ?? 0)
+      if (probabilityDelta !== 0) return probabilityDelta
+      const distanceDelta = (left.candidate.causalDistance ?? 12) - (right.candidate.causalDistance ?? 12)
+      return distanceDelta || left.discoveryOrder - right.discoveryOrder
+    })
+    .map(item => item.candidate)
 }
 
 function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
@@ -973,9 +1021,12 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                   role: { type: 'string' },
                   edit_kind: { type: 'string', enum: ['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'] },
                   confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+                  patch_probability: { type: 'number', minimum: 0, maximum: 1, description: 'Probability that this file must change for the objective.' },
+                  causal_distance: { type: 'number', minimum: 0, maximum: 12, description: 'Semantic hops from the observed symptom to this file; zero is the direct behavior owner.' },
+                  change_effect: { type: 'string', enum: ['resolve', 'propagate', 'verify', 'context'], description: 'Whether changing this file resolves the root issue, propagates a synchronized change, verifies behavior, or only supplies context.' },
                   why: { type: 'string' },
                 },
-                required: ['path', 'start_line', 'end_line', 'role', 'edit_kind', 'confidence', 'why'],
+                required: ['path', 'start_line', 'end_line', 'role', 'edit_kind', 'confidence', 'patch_probability', 'causal_distance', 'change_effect', 'why'],
               },
             },
             relationships: {
@@ -1037,7 +1088,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let reportRecoveryUsed = false
   let submissionRecoveryUsed = false
   let evidenceSaturationPrompted = false
-  let searchExtensionGranted = false
+  let searchExtensionGrantedAtTurn: number | null = null
   const activeProtocolCacheKey = protocolCacheKey({ baseUrl, provider, model: modelId, apiKey, customHeaders })
   let resolvedProtocol: ModelProtocol | null = getCachedProtocol(activeProtocolCacheKey)
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
@@ -1063,7 +1114,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     emit({ type: 'turn_start', turn, maxTurns: turnLimit })
     const adaptiveSubmissionGate = strictFastContext
       && hasModelReadEvidence()
-      && !searchExtensionGranted
+      && searchExtensionGrantedAtTurn === null
       && options.adaptiveSubmissionTurn !== undefined
       && turn === options.adaptiveSubmissionTurn
 
@@ -1087,9 +1138,12 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
         const url = buildModelProtocolUrl(baseUrl, protocol)
+        const rescueFinalization = strictFastContext
+          && searchExtensionGrantedAtTurn !== null
+          && turn >= searchExtensionGrantedAtTurn + 2
         const finalizationOnly = strictFastContext
           && hasModelReadEvidence()
-          && (options.submissionOnly === true || turn === turnLimit || adaptiveSubmissionGate)
+          && (options.submissionOnly === true || turn === turnLimit || adaptiveSubmissionGate || rescueFinalization)
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = compactToolHistory(messages, collectedEvidence, finalizationOnly)
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
@@ -1154,7 +1208,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             model: modelId,
             workspacePath,
             codemap,
-            tools: requestTools,
+            tools: strictFastContext ? availableTools : requestTools,
           })
           if (protocol === 'openai_responses' && /gpt-5\.5/i.test(modelId)) {
             requestBody.prompt_cache_retention = '24h'
@@ -1328,7 +1382,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       emit({ type: 'tool_result', tool: 'request_more_search', ok: !error, summary: error || `rescue wave: ${reason}`, turn })
       emit({ type: 'turn_complete', turn, calls: 1 })
       if (error) continue
-      searchExtensionGranted = true
+      searchExtensionGrantedAtTurn = turn
       messages.push({
         role: 'user',
         content: 'Run exactly one targeted rescue wave now. Execute only the searches or reads needed to close the stated gap; the following turn is final submission.',
@@ -1348,6 +1402,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       const report = parseSubmittedCodeMap(submissionArgs, workspacePath, options.maxCandidates)
       normalizeSubmittedCodeMap(report, collectedEvidence)
       pruneUngroundedCodeMap(report, collectedEvidence)
+      rankSubmittedCandidates(report)
       submissionError ||= validateSubmittedCodeMap(report, collectedEvidence) || ''
       submissionError ||= validateRequiredAuditPaths(report, options.requiredAuditPaths) || ''
       submissionError ||= validateRequiredCandidatePaths(report, options.requiredCandidatePaths) || ''
