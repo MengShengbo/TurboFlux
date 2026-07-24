@@ -13,8 +13,8 @@ export interface FastContextTuning {
 }
 
 export const FAST_CONTEXT_TUNING: Readonly<FastContextTuning> = {
-  maxTurns: 8,
-  maxParallel: 8,
+  maxTurns: 6,
+  maxParallel: 6,
   taskTimeoutMs: 600_000,
   reasoningEffort: 'high',
 }
@@ -52,6 +52,8 @@ export interface FastContextScanResult {
     toolCalls: number
     searchCalls: number
     readCalls: number
+    internalOperations?: number
+    internalReadOperations?: number
     stageDurationsMs?: {
       planner: number
       primer: number

@@ -123,6 +123,8 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     toolCalls: 0,
     searchCalls: 0,
     readCalls: 0,
+    internalOperations: 0,
+    internalReadOperations: 0,
     stageDurationsMs: {
       planner: 0,
       primer: 0,
@@ -185,6 +187,8 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       return
     }
     if (event.type === 'tool_result') {
+      telemetry.internalOperations += event.operations || 0
+      telemetry.internalReadOperations += event.readOperations || 0
       emit({ type: 'insight', text: event.summary, tone: event.ok ? 'info' : 'warning' })
       return
     }
@@ -225,7 +229,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     userPrompt: [
       `Objective: ${params.objective}`,
       '',
-      'Run FastContext as an adaptive model-led retrieval loop. Recover the smallest complete edit frontier, not every architectural category. Finish as soon as no concrete unread path or symbol can change the ranked candidates; continue only while a named causal next hop remains. Batch independent reads and same-frontier symbol traces.',
+      'Run FastContext as an adaptive model-led retrieval loop. Locate the smallest read-grounded edit set. Prefer source owners over textual use sites, batch independent work, and submit as soon as no named unread owner can change the ranking.',
     ].join('\n'),
     onEvent: onSubAgentEvent,
   })

@@ -81,7 +81,7 @@ export type SubAgentEvent =
   | { type: 'model_retry'; turn: number; attempt: number; delayMs: number; reason: string }
   | { type: 'turn_complete'; turn: number; calls: number }
   | { type: 'tool_call'; tool: string; args: unknown; turn: number }
-  | { type: 'tool_result'; tool: string; ok: boolean; summary: string; turn: number }
+  | { type: 'tool_result'; tool: string; ok: boolean; summary: string; turn: number; operations?: number; readOperations?: number }
   | { type: 'evidence'; evidence: SubAgentEvidence }
   | { type: 'final'; text: string }
   | { type: 'error'; message: string }

@@ -12,12 +12,12 @@ describe('FastContext controller', () => {
     const definition = __testFastContextDefinition()
 
     expect(definition.label).toBe('FastContext Controller')
-    expect(definition.maxTurns).toBe(8)
-    expect(definition.maxParallel).toBe(8)
-    expect(definition.systemPrompt).toContain('highest expected information gain')
-    expect(definition.systemPrompt).toContain('Relationships are optional')
-    expect(definition.systemPrompt).toContain('There is no fixed locate/verify/submit schedule')
-    expect(definition.systemPrompt).toContain('A simple exact-owner task may finish after one tool wave')
+    expect(definition.maxTurns).toBe(6)
+    expect(definition.maxParallel).toBe(6)
+    expect(definition.systemPrompt).toContain('edit counterfactual')
+    expect(definition.systemPrompt).toContain('Relationships, rejected hypotheses')
+    expect(definition.systemPrompt).toContain('Do not let an early textual match become the only hypothesis')
+    expect(definition.systemPrompt).toContain('Empty, repeated, or no-novelty work')
     expect(definition.systemPrompt).not.toContain('request_more_search')
   })
 
@@ -129,7 +129,13 @@ describe('FastContext controller', () => {
       })
 
       expect(result.evidencePack).toContain('src/owner.ts')
-      expect(result.telemetry).toMatchObject({ toolCalls: 1, readCalls: 1, searchCalls: 0 })
+      expect(result.telemetry).toMatchObject({
+        toolCalls: 1,
+        readCalls: 1,
+        searchCalls: 0,
+        internalOperations: 1,
+        internalReadOperations: 1,
+      })
       expect(result.truncated).toBe(false)
     } finally {
       globalThis.fetch = originalFetch
