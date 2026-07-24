@@ -231,7 +231,7 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
 }
 
 export function buildFastContextSystemPrompt(): string {
-  return `You are FastContext, a fast read-only code-retrieval controller. The model owns query rewriting, ownership judgment, next-hop selection, ranking, and stopping. Local tools only search, read, and validate mechanical evidence. Find the smallest set of implementation files likely to require edits.
+  return `You are FastContext, a fast read-only code-retrieval controller. The model owns query rewriting, ownership judgment, next-hop selection, ranking, and stopping. Local tools only search, read, and validate mechanical evidence. Recover the complete minimal edit frontier: every implementation file with meaningful probability of changing, without broad repository touring.
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
@@ -242,19 +242,20 @@ Tools:
 - submit_code_map(candidates, relationships, frontier_complete, unresolved_edit_paths, rejected_hypotheses, searches_tried, uncertainty)
 
 Protocol:
-1. Start with two to four genuinely different discriminative anchors from the issue: exact identifiers, literals, configuration keys, API names, or ownership hypotheses. Execute independent searches in parallel.
+1. Start with two to four genuinely different discriminative anchors from the issue: exact identifiers, literals, configuration keys, API names, named files, stack frames, or ownership hypotheses. Execute independent searches in parallel. Resolve every explicit implementation clue from the objective or reject it from source evidence; do not silently replace it with a nearby design.
 2. Use trace_symbol for an exact identifier. Leave path unset when locating the implementation owner; path-scoped traces are only for inspecting a file already known to contain the definition. Use trace_symbols for two or three concrete identifiers exposed by source, never generic synonyms.
-3. Read probable owners immediately. Search results are hypotheses; submitted candidates must be read. Prefer implementation and runtime source over documentation, examples, fixtures, and tests unless the issue explicitly targets those surfaces.
+3. Read probable direct behavior owners immediately. Exact search and symbol results are valid discovery evidence for tightly coupled mirrors, entrypoints, generated surfaces, and sibling implementations; submit them only when you explicitly judge that the same change propagates there. Prefer implementation and runtime source over documentation, examples, fixtures, and tests unless the issue explicitly targets those surfaces.
 4. Do not let an early textual match become the only hypothesis. If current evidence is only a use site, wrapper, docs example, or test, trace its imported component, hook, handler, dispatcher, schema, or runtime owner without the use-site path restriction.
-5. After every read wave apply the edit counterfactual: if only the current candidates changed, would the reported behavior plausibly be fixed? Follow only a named unread symbol or path that could change the answer. Batch source-proven sibling implementations or public contracts when the same semantic change must propagate.
-6. Stop when no concrete unread owner can materially change the top ten. Do not prove that the whole repository contains no alternative. Empty, repeated, or no-novelty work is a reason to submit, not to invent another search.
-7. Finish with submit_code_map alone. Rank direct behavior owners first, then required propagation surfaces. Relationships, rejected hypotheses, searches, ranking metadata, and uncertainty are optional; omit them when they do not improve the file ranking.
+5. After every read wave apply the edit counterfactual: if only the current candidates changed, would the reported behavior and all named variants be fixed? Follow only a named unread symbol or path that could change the answer. For compatibility changes, inspect the shared adapter or conversion boundary before duplicating logic across consumers; when that shared boundary preserves existing consumer contracts, rank it ahead of duplicated consumer edits. For commands, backends, generators, platforms, public entrypoints, and source mirrors, batch source-proven siblings when the same semantic change must propagate.
+6. Treat executable examples, scripts, migrations, and generated/runtime mirrors as implementation surfaces when they instantiate the changed contract. Deprioritize only prose documentation and unrelated tests. A complete answer may contain several tightly coupled files; "minimal" means no peripheral context, not one-file bias.
+7. Stop adaptively when no concrete unread owner can materially change the top ten. Do not prove that the whole repository contains no alternative. Direct exact-owner tasks should usually finish in two to four provider turns; use the remaining budget only for a named causal frontier. Empty, repeated, or no-novelty work is a reason to submit, not to invent another search.
+8. Finish with submit_code_map alone. Optimize the ranked top ten for complete edit recall: direct behavior owners first, then required propagation surfaces, then verification. Exclude files that only explain behavior, but do not omit an evidence-grounded candidate merely because one owner looks sufficient. Relationships, rejected hypotheses, searches, ranking metadata, and uncertainty are optional.
 
 Rules:
 - Never describe files you have not read.
-- Every candidate and relationship must cite a path and line range covered by source returned from this run.
-- Read every submitted candidate. Search hits are hypotheses, never evidence by themselves.
-- Prefer runtime source, contracts, state/config, and failure paths over documentation or generic entry files.
+- Every candidate and relationship must cite a path and line range covered by search, symbol, trace, or read evidence returned from this run.
+- Read every probable direct behavior owner. Discovery-grounded propagation candidates remain hypotheses for the main agent to verify before editing.
+- Prefer runtime source, contracts, state/config, and failure paths over documentation or generic entry files, while retaining executable entrypoints that must change with the contract.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Do not repeat an equivalent search after it fails; change the semantic hypothesis or follow a concrete next hop.
 - Retrieve a test, contract, mirror, sibling implementation, or generated surface only when the objective or read source shows that the same change must propagate there.
@@ -368,15 +369,39 @@ function compactToolHistory(
   const stableHistory = messages.map(message => ({ ...message }))
   if (!finalizationOnly) return stableHistory
   const ledger = evidence
-    .filter(item => item.reason === 'file read')
-    .map(item => `${item.path}:${item.startLine}-${item.endLine} | ${item.preview.replace(/\s+/g, ' ').slice(0, 180)}`)
+    .map(item => `${item.path}:${item.startLine}-${item.endLine} | ${item.reason === 'file read' ? 'read' : 'discovered'} | ${item.preview.replace(/\s+/g, ' ').slice(0, 180)}`)
     .filter((line, index, all) => all.indexOf(line) === index)
     .slice(0, 40)
   if (ledger.length === 0) return stableHistory
   return [...stableHistory, {
     role: 'user',
-    content: `FINAL READ-EVIDENCE LEDGER\n${ledger.join('\n')}\nUse only these read-confirmed ranges in submit_code_map.`,
+    content: `FINAL EVIDENCE LEDGER\n${ledger.join('\n')}\nUse only these tool-grounded ranges in submit_code_map. Direct behavior owners should be read; exact propagation surfaces may remain discovery-grounded for main-agent verification.`,
   }]
+}
+
+function buildFastContextEvidenceCheckpoint(evidence: SubAgentEvidence[]): string {
+  const reads = evidence
+    .filter(item => item.reason === 'file read')
+    .map(item => {
+      const source = (item.content || item.preview).replace(/\s+/g, ' ').trim().slice(0, 560)
+      return `${item.path}:${item.startLine}-${item.endLine} | ${source}`
+    })
+    .filter((line, index, all) => all.indexOf(line) === index)
+    .slice(-20)
+  const discoveries = evidence
+    .filter(item => item.reason !== 'file read')
+    .map(item => `${item.path}:${item.startLine} | ${item.reason} | ${item.preview.replace(/\s+/g, ' ').trim().slice(0, 140)}`)
+    .filter((line, index, all) => all.indexOf(line) === index)
+    .slice(-32)
+  if (reads.length === 0 && discoveries.length === 0) return ''
+  return [
+    'FASTCONTEXT_EVIDENCE_CHECKPOINT',
+    'Earlier raw tool messages were mechanically compacted once to bound latency. Preserve these facts and continue from the highest-value named frontier.',
+    'READ_EVIDENCE',
+    ...(reads.length > 0 ? reads : ['none']),
+    'DISCOVERY_EVIDENCE',
+    ...(discoveries.length > 0 ? discoveries : ['none']),
+  ].join('\n')
 }
 
 function boundToolOutput(tool: string, content: string): string {
@@ -749,8 +774,30 @@ function mergedReadRanges(path: string, evidence: SubAgentEvidence[]): LineRange
   return merged
 }
 
+function mergedEvidenceRanges(path: string, evidence: SubAgentEvidence[]): LineRange[] {
+  const normalizedPath = path.replace(/\\/g, '/')
+  const ranges = evidence
+    .filter(item => item.path.replace(/\\/g, '/') === normalizedPath)
+    .map(item => ({ startLine: item.startLine, endLine: item.endLine }))
+    .sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine)
+  const merged: LineRange[] = []
+  for (const range of ranges) {
+    const previous = merged.at(-1)
+    if (!previous || range.startLine > previous.endLine + 1) {
+      merged.push({ ...range })
+      continue
+    }
+    previous.endLine = Math.max(previous.endLine, range.endLine)
+  }
+  return merged
+}
+
 function rangeIsRead(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): boolean {
   return mergedReadRanges(path, evidence).some(range => startLine >= range.startLine && endLine <= range.endLine)
+}
+
+function rangeIsGrounded(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): boolean {
+  return mergedEvidenceRanges(path, evidence).some(range => startLine >= range.startLine && endLine <= range.endLine)
 }
 
 function readRangesForPath(path: string, evidence: SubAgentEvidence[]): string {
@@ -758,8 +805,8 @@ function readRangesForPath(path: string, evidence: SubAgentEvidence[]): string {
   return ranges.length > 0 ? ranges.join(', ') : 'none'
 }
 
-function clampNearReadBoundary(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): LineRange | null {
-  const overlaps = mergedReadRanges(path, evidence)
+function clampNearEvidenceBoundary(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): LineRange | null {
+  const overlaps = mergedEvidenceRanges(path, evidence)
     .map(range => ({
       startLine: Math.max(startLine, range.startLine),
       endLine: Math.min(endLine, range.endLine),
@@ -778,8 +825,8 @@ function clampNearReadBoundary(path: string, startLine: number, endLine: number,
 function normalizeSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): void {
   const normalizeRange = (item: { path?: string; evidencePath?: string; startLine: number; endLine: number }): void => {
     const path = item.path || item.evidencePath || ''
-    if (!path || rangeIsRead(path, item.startLine, item.endLine, evidence)) return
-    const grounded = clampNearReadBoundary(path, item.startLine, item.endLine, evidence) || mergedReadRanges(path, evidence)[0]
+    if (!path || rangeIsGrounded(path, item.startLine, item.endLine, evidence)) return
+    const grounded = clampNearEvidenceBoundary(path, item.startLine, item.endLine, evidence) || mergedEvidenceRanges(path, evidence)[0]
     if (!grounded) return
     item.startLine = grounded.startLine
     item.endLine = grounded.endLine
@@ -792,10 +839,10 @@ function pruneUngroundedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvid
   const candidateCount = report.candidates.length
   const relationshipCount = report.relationships.length
   report.candidates = report.candidates.filter(candidate => Boolean(candidate.path && candidate.role && candidate.why)
-    && rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence))
+    && rangeIsGrounded(candidate.path, candidate.startLine, candidate.endLine, evidence))
   report.relationships = report.relationships.filter(relationship => Boolean(
     relationship.from && relationship.to && relationship.relationship && relationship.evidencePath,
-  ) && rangeIsRead(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence))
+  ) && rangeIsGrounded(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence))
   const removedCandidates = candidateCount - report.candidates.length
   const removedRelationships = relationshipCount - report.relationships.length
   if (removedCandidates > 0 || removedRelationships > 0) {
@@ -835,18 +882,19 @@ function rankSubmittedCandidates(report: SubmittedCodeMap): void {
 
 function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
   if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
+  if (!evidence.some(item => item.reason === 'file read')) return 'at least one direct behavior owner must be read before submission'
   for (const candidate of report.candidates) {
     if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
-    if (!rangeIsRead(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
-      return `candidate ${candidate.path}:${candidate.startLine}-${candidate.endLine} is not covered by a read_file result; covered ranges for this path: ${readRangesForPath(candidate.path, evidence)}`
+    if (!rangeIsGrounded(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
+      return `candidate ${candidate.path}:${candidate.startLine}-${candidate.endLine} is not covered by tool evidence from this run`
     }
   }
   for (const relationship of report.relationships) {
     if (!relationship.from || !relationship.to || !relationship.relationship || !relationship.evidencePath) {
       return 'every relationship requires from, to, relationship, and evidence_path'
     }
-    if (!rangeIsRead(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence)) {
-      return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by a read_file result; covered ranges for this path: ${readRangesForPath(relationship.evidencePath, evidence)}`
+    if (!rangeIsGrounded(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence)) {
+      return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by tool evidence from this run`
     }
   }
   return null
@@ -929,6 +977,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Rank the probable direct edit target first; represent supporting architecture through grounded relationships.',
     ].filter(Boolean).join('\n'),
   })
+  const conversationPrefixLength = messages.length
 
   const tools: Array<Record<string, any>> = [
     {
@@ -1127,6 +1176,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const turnLimit = definition.maxTurns
   let forceFinalizationNextTurn = false
   let consecutiveUnproductiveWaves = 0
+  let historyCheckpointed = false
   const effectiveReasoning: NativeReasoningConfig | undefined = definition.thinking === 'disabled'
     ? { enabled: false, effort: 'none' }
     : definition.thinking === 'high' || definition.thinking === 'max'
@@ -1146,6 +1196,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   while (turn < turnLimit) {
     if (abortSignal?.aborted) break
     turn++
+    if (strictFastContext && !historyCheckpointed && turn === 4) {
+      const checkpoint = buildFastContextEvidenceCheckpoint(collectedEvidence)
+      if (checkpoint) {
+        messages.splice(conversationPrefixLength, messages.length - conversationPrefixLength, { role: 'user', content: checkpoint })
+        historyCheckpointed = true
+      }
+    }
     emit({ type: 'turn_start', turn, maxTurns: turnLimit })
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
@@ -1474,6 +1531,22 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       emit({ type: 'tool_call', tool: tc.function.name, args, turn })
       return { tc, args, signature: toolCallSignature(tc.function.name, args) }
     })
+    const batchedSearchResults = new Map<string, unknown>()
+    const batchableSearchEntries = entries.filter(entry => entry.tc.function.name === 'search_content'
+      && !toolResultCache.has(entry.signature)
+      && buildSearchContentBatchRequest(entry.args, workspacePath))
+    if (toolExecutor.searchContentBatch && batchableSearchEntries.length >= 2) {
+      const requests = batchableSearchEntries
+        .map(entry => buildSearchContentBatchRequest(entry.args, workspacePath))
+        .filter((request): request is NonNullable<ReturnType<typeof buildSearchContentBatchRequest>> => Boolean(request))
+      try {
+        const pages = await toolExecutor.searchContentBatch(requests)
+        pages.forEach((page, index) => {
+          const entry = batchableSearchEntries[index]
+          if (entry) batchedSearchResults.set(entry.tc.id, page)
+        })
+      } catch {}
+    }
     const results = await Promise.all(entries.map(async entry => {
       const cached = toolResultCache.get(entry.signature)
       if (cached) return { entry, result: cached, reused: true }
@@ -1490,7 +1563,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         }
       }
       try {
-        const result = await executeSubAgentTool(entry.tc.function.name, entry.args, workspacePath, toolExecutor)
+        const batchResult = batchedSearchResults.get(entry.tc.id)
+        const executionArgs = batchResult ? { ...entry.args, __batch_result: batchResult } : entry.args
+        const result = await executeSubAgentTool(entry.tc.function.name, executionArgs, workspacePath, toolExecutor)
         if (result.ok) toolResultCache.set(entry.signature, result)
         return { entry, result, reused: false }
       } catch (error) {
@@ -1622,6 +1697,25 @@ function buildFastContextWaveDelta(params: {
   ].join('\n')
 }
 
+function buildSearchContentBatchRequest(args: Record<string, any>, workspacePath: string) {
+  const pattern = String(args.pattern || '').trim()
+  if (!pattern) return null
+  return {
+    pattern,
+    basePath: args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath,
+    filePattern: args.file_pattern,
+    caseInsensitive: args.case_sensitive !== true,
+    options: {
+      offset: Math.max(0, Math.floor(Number(args.offset) || 0)),
+      limit: Math.min(200, Math.max(1, Math.floor(Number(args.head_limit) || 40)) * 4),
+      contextBefore: Math.max(0, Math.min(12, Math.floor(Number(args.context_before) || 0))),
+      contextAfter: Math.max(0, Math.min(12, Math.floor(Number(args.context_after) || 0))),
+      multiline: args.multiline === true,
+      fileType: typeof args.file_type === 'string' ? args.file_type : undefined,
+    },
+  }
+}
+
 export function __testTraceDefinitionReadLimit(hit: {
   startLine?: number
   endLine?: number
@@ -1690,7 +1784,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       const usingPagedSearch = typeof executor.searchContentPage === 'function'
       const retrievalLimit = Math.min(200, headLimit * 4)
       let effectivePattern = pattern
-      let res = usingPagedSearch
+      let res = args.__batch_result || (usingPagedSearch
         ? await executor.searchContentPage!(pattern, basePath, filePattern, caseInsensitive, {
             offset,
             limit: retrievalLimit,
@@ -1699,7 +1793,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
             multiline: args.multiline === true,
             fileType: typeof args.file_type === 'string' ? args.file_type : undefined,
           })
-        : await executor.searchContent(pattern, basePath, filePattern, caseInsensitive)
+        : await executor.searchContent(pattern, basePath, filePattern, caseInsensitive))
       if (!res.success && /regex parse error|invalid regular expression|unclosed (?:group|class)|unterminated/i.test(res.error || '')) {
         effectivePattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
         res = usingPagedSearch
@@ -1747,14 +1841,35 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       if (!requestedPath) {
         return { ok: false, output: 'File path is required.', summary: 'read failed: missing path', evidence }
       }
-      const filePath = resolveWorkspacePath(workspacePath, requestedPath)
-      const relativePath = toWorkspaceRelative(workspacePath, filePath)
       const offset = Math.max(0, Math.floor(Number(args.offset) || 1) - 1)
       const limit = Math.max(1, Math.min(400, Math.floor(Number(args.limit) || 80)))
-      const rangeResult = executor.readFileRange
-        ? await executor.readFileRange(filePath, offset, limit)
-        : null
-      const res = rangeResult || await executor.readFile(filePath)
+      const readPath = async (path: string) => {
+        const filePath = resolveWorkspacePath(workspacePath, path)
+        const rangeResult = executor.readFileRange
+          ? await executor.readFileRange(filePath, offset, limit)
+          : null
+        return { path, filePath, rangeResult, res: rangeResult || await executor.readFile(filePath) }
+      }
+      let read = await readPath(requestedPath)
+      let recoveryOperations = 0
+      if (!read.res.success || !read.res.data) {
+        const normalized = requestedPath.replace(/\\/g, '/').replace(/^\.\//, '')
+        const collapsedModule = normalized.replace(/\/(?:__init__|index)(\.[^/.]+)$/i, '$1')
+        if (collapsedModule !== normalized) {
+          const collapsedRead = await readPath(collapsedModule)
+          recoveryOperations += 1
+          if (collapsedRead.res.success && collapsedRead.res.data) read = collapsedRead
+        }
+        if (!read.res.success || !read.res.data) {
+          const basename = normalized.split('/').pop() || normalized
+          const matches = await executor.searchFiles(`**/${basename}`, workspacePath)
+          recoveryOperations += 1
+          const candidates = matches.success ? matches.data?.matches || [] : []
+          if (candidates.length === 1) read = await readPath(toWorkspaceRelative(workspacePath, candidates[0]))
+        }
+      }
+      const { rangeResult, res } = read
+      const relativePath = toWorkspaceRelative(workspacePath, read.filePath)
       if (!res.success || !res.data) {
         const error = res.error || 'file not found'
         return { ok: false, output: `Read failed: ${error}`, summary: `read ${relativePath} failed: ${error}`, evidence }
@@ -1782,7 +1897,15 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       })
       const outputLines = slice.map((line, index) => `${offset + index + 1} | ${line}`)
       if (rangeData?.truncated) outputLines.push(`[More lines available. Continue with offset=${offset + slice.length + 1}.]`)
-      return { ok: true, output: outputLines.join('\n'), summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}`, evidence, operations: 1, readOperations: 1 }
+      const recovered = relativePath.replace(/\\/g, '/').toLowerCase() !== requestedPath.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase()
+      return {
+        ok: true,
+        output: `${recovered ? `[Resolved requested path ${requestedPath} -> ${relativePath}]\n` : ''}${outputLines.join('\n')}`,
+        summary: `read ${relativePath}:${offset + 1}-${offset + slice.length}${recovered ? ' (resolved missing path)' : ''}`,
+        evidence,
+        operations: 1 + recoveryOperations,
+        readOperations: 1,
+      }
     }
 
     case 'search_files': {

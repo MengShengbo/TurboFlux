@@ -22,7 +22,7 @@ describe('FastContext architecture contract', () => {
     expect(prompt).toContain('edit counterfactual')
     expect(prompt).toContain('Do not let an early textual match become the only hypothesis')
     expect(prompt).toContain('Relationships, rejected hypotheses')
-    expect(prompt).toContain('Read every submitted candidate')
+    expect(prompt).toContain('Read every probable direct behavior owner')
     expect(prompt).toContain('Do not prove that the whole repository')
     expect(prompt).toContain('Do not enumerate the repository')
     expect(prompt).not.toContain('request_more_search')
