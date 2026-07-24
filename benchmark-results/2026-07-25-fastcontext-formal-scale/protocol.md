@@ -32,3 +32,24 @@ The confirmatory cases are a frozen subset of the 200-case corpus. Historical ex
 ## Persistence
 
 Each completed system run is appended immediately to `runs.jsonl`. Re-running the same command resumes compatible completed runs and retries only transient failures. Repository snapshots are deleted after each case; shallow mirrors remain cached for later cases.
+
+## Final deliverables
+
+When both matrices complete, the experiment will produce two independent publication-ready manuscripts rather than a translated summary:
+
+1. A formal Chinese FastContext paper with Chinese abstract, related work, architecture, adaptive stopping and long-chain tracing methods, experimental protocol, threats to validity, complete results, failure analysis, and reproducibility appendix.
+2. A formal English FastContext paper with independently edited academic English, the same auditable evidence base, statistical claims, limitations, and reproducibility material.
+
+Both editions will include:
+
+- Markdown source and typeset PDF.
+- Full aggregate and per-case data in CSV and JSON formats.
+- Main-matrix and confirmatory-matrix results reported separately.
+- Bootstrap confidence intervals, paired significance tests, effect sizes, repeat variance, and multiple-comparison disclosure.
+- Slices by language, dataset, repository, task category, gold-file count, and observed retrieval-chain complexity.
+- Success, timeout, protocol, tool, output-contract, and repository failure audits.
+- Quality, latency, token, request, and tool-call Pareto analysis.
+- Publication-grade vector charts for aggregate quality, latency CDF, cost-quality frontier, win/loss/tie counts, language slices, difficulty slices, reliability, repeat stability, and per-case recall heatmaps.
+- A machine-readable figure-data directory so every plotted value can be independently checked.
+
+No missing result will be imputed, and no failed run will be silently excluded. Marketing claims must be derived from the frozen confirmatory matrix, not selected individual cases.
