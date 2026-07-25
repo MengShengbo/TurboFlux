@@ -79,9 +79,19 @@ export type SubAgentEvent =
   | { type: 'turn_start'; turn: number; maxTurns: number }
   | { type: 'model_wait'; turn: number; elapsedMs: number; timeoutMs: number }
   | { type: 'model_retry'; turn: number; attempt: number; delayMs: number; reason: string }
-  | { type: 'turn_complete'; turn: number; calls: number }
+  | {
+      type: 'turn_complete'
+      turn: number
+      calls: number
+      modelElapsedMs?: number
+      toolElapsedMs?: number
+      totalElapsedMs?: number
+      inputTokens?: number
+      outputTokens?: number
+      cacheReadTokens?: number
+    }
   | { type: 'tool_call'; tool: string; args: unknown; turn: number }
-  | { type: 'tool_result'; tool: string; ok: boolean; summary: string; turn: number; operations?: number; readOperations?: number }
+  | { type: 'tool_result'; tool: string; ok: boolean; summary: string; turn: number; elapsedMs?: number; operations?: number; readOperations?: number }
   | { type: 'evidence'; evidence: SubAgentEvidence }
   | { type: 'final'; text: string }
   | { type: 'error'; message: string }

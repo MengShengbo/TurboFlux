@@ -1196,6 +1196,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   while (turn < turnLimit) {
     if (abortSignal?.aborted) break
     turn++
+    const turnStartedAt = Date.now()
+    let modelElapsedMs = 0
+    let turnInputTokens = 0
+    let turnOutputTokens = 0
+    let turnCacheReadTokens = 0
     if (strictFastContext && !historyCheckpointed && turn === 4) {
       const checkpoint = buildFastContextEvidenceCheckpoint(collectedEvidence)
       if (checkpoint) {
@@ -1376,6 +1381,15 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         }
 
         const response: any = await res.json()
+        const responseUsage = response?.usage || {}
+        turnInputTokens = Number(responseUsage.input_tokens ?? responseUsage.prompt_tokens ?? 0) || 0
+        turnOutputTokens = Number(responseUsage.output_tokens ?? responseUsage.completion_tokens ?? 0) || 0
+        turnCacheReadTokens = Number(
+          responseUsage.input_tokens_details?.cached_tokens
+          ?? responseUsage.prompt_tokens_details?.cached_tokens
+          ?? responseUsage.cache_read_input_tokens
+          ?? 0,
+        ) || 0
         if (protocol === 'anthropic_messages') {
           const blocks = Array.isArray(response.content) ? response.content : []
           messageText = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text || '').join('')
@@ -1432,6 +1446,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, error: message }
     } finally {
       clearInterval(waitTimer)
+      modelElapsedMs = Date.now() - waitStartedAt
     }
 
     const submissionCalls = responseToolCalls.filter(call => call.function.name === 'submit_code_map')
@@ -1455,7 +1470,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       if (!submissionError) {
         const finalText = renderSubmittedCodeMap(report)
         emit({ type: 'final', text: finalText })
-        emit({ type: 'turn_complete', turn, calls: 1 })
+        emit({
+          type: 'turn_complete',
+          turn,
+          calls: 1,
+          modelElapsedMs,
+          toolElapsedMs: 0,
+          totalElapsedMs: Date.now() - turnStartedAt,
+          inputTokens: turnInputTokens,
+          outputTokens: turnOutputTokens,
+          cacheReadTokens: turnCacheReadTokens,
+        })
         return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence, codeMap: report }
       }
       submissionRejections = previousSubmissionError === submissionError ? submissionRejections + 1 : 1
@@ -1480,7 +1505,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         content: 'Correct only the mechanical evidence error. Read a missing candidate only when the rejection identifies it; otherwise resubmit the grounded subset immediately.',
       })
       emit({ type: 'tool_result', tool: 'submit_code_map', ok: false, summary: submissionError, turn })
-      emit({ type: 'turn_complete', turn, calls: 1 })
+      emit({
+        type: 'turn_complete',
+        turn,
+        calls: 1,
+        modelElapsedMs,
+        toolElapsedMs: 0,
+        totalElapsedMs: Date.now() - turnStartedAt,
+        inputTokens: turnInputTokens,
+        outputTokens: turnOutputTokens,
+        cacheReadTokens: turnCacheReadTokens,
+      })
       continue
     }
 
@@ -1517,7 +1552,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
       }
       emit({ type: 'final', text: messageText })
-      emit({ type: 'turn_complete', turn, calls: 0 })
+      emit({
+        type: 'turn_complete',
+        turn,
+        calls: 0,
+        modelElapsedMs,
+        toolElapsedMs: 0,
+        totalElapsedMs: Date.now() - turnStartedAt,
+        inputTokens: turnInputTokens,
+        outputTokens: turnOutputTokens,
+        cacheReadTokens: turnCacheReadTokens,
+      })
       return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: messageText, evidence: collectedEvidence }
     }
 
@@ -1531,6 +1576,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       emit({ type: 'tool_call', tool: tc.function.name, args, turn })
       return { tc, args, signature: toolCallSignature(tc.function.name, args) }
     })
+    const toolWaveStartedAt = Date.now()
     const batchedSearchResults = new Map<string, unknown>()
     const batchableSearchEntries = entries.filter(entry => entry.tc.function.name === 'search_content'
       && !toolResultCache.has(entry.signature)
@@ -1548,8 +1594,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       } catch {}
     }
     const results = await Promise.all(entries.map(async entry => {
+      const toolStartedAt = Date.now()
       const cached = toolResultCache.get(entry.signature)
-      if (cached) return { entry, result: cached, reused: true }
+      if (cached) return { entry, result: cached, reused: true, elapsedMs: 0 }
       if (abortSignal?.aborted) {
         return {
           entry,
@@ -1560,6 +1607,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             evidence: [],
           } satisfies ToolExecResult,
           reused: false,
+          elapsedMs: Date.now() - toolStartedAt,
         }
       }
       try {
@@ -1567,7 +1615,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         const executionArgs = batchResult ? { ...entry.args, __batch_result: batchResult } : entry.args
         const result = await executeSubAgentTool(entry.tc.function.name, executionArgs, workspacePath, toolExecutor)
         if (result.ok) toolResultCache.set(entry.signature, result)
-        return { entry, result, reused: false }
+        return { entry, result, reused: false, elapsedMs: Date.now() - toolStartedAt }
       } catch (error) {
         const message = formatSubAgentError(error)
         return {
@@ -1579,12 +1627,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             evidence: [],
           } satisfies ToolExecResult,
           reused: false,
+          elapsedMs: Date.now() - toolStartedAt,
         }
       }
     }))
 
     const novelEvidence: SubAgentEvidence[] = []
-    for (const { entry, result, reused } of results) {
+    for (const { entry, result, reused, elapsedMs } of results) {
       const { tc } = entry
       emit({
         type: 'tool_result',
@@ -1592,6 +1641,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         ok: result.ok,
         summary: reused ? `${result.summary} (cached exact repeat)` : result.summary,
         turn,
+        elapsedMs,
         operations: reused ? 0 : result.operations ?? 1,
         readOperations: reused ? 0 : result.readOperations ?? 0,
       })
@@ -1607,7 +1657,17 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: reused ? `[Cached exact repeat; no new execution.]\n${stableOutput}` : stableOutput })
     }
 
-    emit({ type: 'turn_complete', turn, calls: results.length })
+    emit({
+      type: 'turn_complete',
+      turn,
+      calls: results.length,
+      modelElapsedMs,
+      toolElapsedMs: Date.now() - toolWaveStartedAt,
+      totalElapsedMs: Date.now() - turnStartedAt,
+      inputTokens: turnInputTokens,
+      outputTokens: turnOutputTokens,
+      cacheReadTokens: turnCacheReadTokens,
+    })
 
     if (strictFastContext) {
       messages.push({

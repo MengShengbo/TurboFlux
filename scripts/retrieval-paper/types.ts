@@ -76,6 +76,16 @@ export interface FastContextRunDiagnostics {
     judge: number
     total: number
   }
+  waves?: Array<{
+    turn: number
+    calls: number
+    modelElapsedMs: number
+    toolElapsedMs: number
+    totalElapsedMs: number
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+  }>
   insights: string[]
 }
 
