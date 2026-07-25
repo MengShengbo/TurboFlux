@@ -39,6 +39,7 @@ export type FastContextScanEvent =
   | { type: 'file'; path: string; status: FastContextScanFileStatus; workerId?: string; reason?: string; kind?: FastContextEvidenceKind; score?: number; confidence?: FastContextConfidence }
   | { type: 'hit'; hit: FastContextScanHit }
   | { type: 'insight'; text: string; tone?: 'info' | 'success' | 'warning' }
+  | { type: 'wave_metrics'; turn: number; calls: number; modelElapsedMs: number; toolElapsedMs: number; totalElapsedMs: number; inputTokens: number; outputTokens: number; cacheReadTokens: number }
   | { type: 'context_maps'; state: ContextMapsState; confidence?: number; nodes?: number; elapsedMs?: number }
 
 export interface FastContextScanResult {

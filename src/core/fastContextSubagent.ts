@@ -165,6 +165,17 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       return
     }
     if (event.type === 'turn_complete') {
+      emit({
+        type: 'wave_metrics',
+        turn: event.turn,
+        calls: event.calls,
+        modelElapsedMs: event.modelElapsedMs || 0,
+        toolElapsedMs: event.toolElapsedMs || 0,
+        totalElapsedMs: event.totalElapsedMs || 0,
+        inputTokens: event.inputTokens || 0,
+        outputTokens: event.outputTokens || 0,
+        cacheReadTokens: event.cacheReadTokens || 0,
+      })
       emit({ type: 'worker', id: `controller-turn-${event.turn}`, label: `adaptive search ${event.turn}`, status: 'completed' })
       return
     }
