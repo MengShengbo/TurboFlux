@@ -47,7 +47,7 @@ export function Header({
         <Text key={index} color={index === wordmark.length - 1 ? theme.brand : moodColor} bold>{line}</Text>
       ))}
       <Text color={theme.brandShimmer} bold>{centerText(showVersion ? `v${TURBOFLUX_VERSION}` : ' ', width)}</Text>
-      {showConnector && <Text color={theme.brand}>{centerText(showVersion ? '├────────────┤' : ' ', width)}</Text>}
+      {showConnector && <Text color={theme.info}>{centerText(showVersion ? '├────────────┤' : ' ', width)}</Text>}
       <Text color={theme.inactive}>{centerText(showWorkspace ? path : ' ', width)}</Text>
       {!hasApiKey && <Text color={theme.warning}>{centerText(showWorkspace ? 'setup required' : ' ', width)}</Text>}
     </Box>

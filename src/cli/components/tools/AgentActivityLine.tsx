@@ -3,6 +3,7 @@ import { Box, Text } from 'ink'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { SPINNER_INTERVAL_MS } from '../spinner/constants'
 import { useTheme } from '../../theme/index'
+import { TURBOFLUX_ACCENTS } from '../../theme/palette'
 
 interface AgentActivityLineProps {
   active: boolean
@@ -17,8 +18,16 @@ interface AgentActivitySegment {
 }
 
 const SHIMMER_STEP = 2
-const BASE_COLOR = '#075985'
-const SWEEP_COLORS = ['#0e7490', '#0891b2', '#22d3ee', '#67e8f9', '#22d3ee', '#0891b2', '#0e7490']
+const BASE_COLOR = TURBOFLUX_ACCENTS.cyanDeep
+const SWEEP_COLORS = [
+  TURBOFLUX_ACCENTS.cyanDeep,
+  TURBOFLUX_ACCENTS.cyanMid,
+  TURBOFLUX_ACCENTS.cyan,
+  TURBOFLUX_ACCENTS.neonGreen,
+  TURBOFLUX_ACCENTS.cyan,
+  TURBOFLUX_ACCENTS.cyanMid,
+  TURBOFLUX_ACCENTS.cyanDeep,
+]
 
 export function AgentActivityLine({ active, persistent = false, width: requestedWidth }: AgentActivityLineProps) {
   const { columns } = useTerminalSize()

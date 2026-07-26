@@ -14,8 +14,8 @@ export function ThemeProvider({ theme = 'dark', transparentBackground = false, c
       ...base,
       transparentBackground: true,
       divider: theme === 'dark' ? '#707070' : base.divider,
-      subtle: theme === 'dark' ? '#8a8a8a' : base.subtle,
-      promptBorder: theme === 'dark' ? '#8a8a8a' : base.promptBorder,
+      subtle: theme === 'dark' ? '#8A8A8A' : base.subtle,
+      promptBorder: base.promptBorder,
     }
     : base
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>

@@ -2,13 +2,13 @@ import type { Theme } from './types'
 
 export const lightTheme: Theme = {
   transparentBackground: false,
-  brand: '#0891b2',
-  brandShimmer: '#06b6d4',
+  brand: '#1E293B',
+  brandShimmer: '#15803D',
 
   success: '#16a34a',
   error: '#dc2626',
   warning: '#d97706',
-  info: '#2563eb',
+  info: '#036F8C',
 
   text: '#1e293b',
   inactive: '#94a3b8',
@@ -25,7 +25,7 @@ export const lightTheme: Theme = {
   diffAddedWord: '#16a34a',
   diffRemovedWord: '#dc2626',
 
-  promptBorder: '#94a3b8',
+  promptBorder: '#15803D',
   promptBackground: '#ffffff',
   statusLine: '#475569',
   codeBackground: '#f1f5f9',

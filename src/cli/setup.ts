@@ -30,6 +30,7 @@ import {
   type ApprovalPolicy,
 } from '../shared/agentTypes'
 import { TURBOFLUX_WORDMARK_LINES } from './brand'
+import { TURBOFLUX_ACCENTS } from './theme/palette'
 import {
   DEFAULT_PROFILE,
   PERSONA_DEFINITIONS,
@@ -159,7 +160,7 @@ function renderSetupLogoLine(line: string): string {
   let out = ''
   for (const ch of line) {
     if ('_/\\'.includes(ch)) {
-      out += chalk.hex('#d6d6d6').bold(ch)
+      out += chalk.hex('#D6D6D6').bold(ch)
     } else if ('-`.\''.includes(ch)) {
       out += chalk.hex('#777777')(ch)
     } else {
@@ -181,7 +182,7 @@ function printBanner(profile = loadProfile()): void {
   console.log('')
   console.log(TURBOFLUX_WORDMARK_LINES.map(line => `  ${renderSetupLogoLine(line)}`).join('\n'))
   console.log('')
-  console.log(`  ${chalk.white.bold('TurboFlux Setup')} ${chalk.dim('v0.1.5')} ${chalk.gray(`- ${title}`)}`)
+  console.log(`  ${chalk.hex(TURBOFLUX_ACCENTS.neonGreen).bold('TurboFlux Setup')} ${chalk.hex(TURBOFLUX_ACCENTS.cyan)(`v0.1.5`)} ${chalk.gray(`- ${title}`)}`)
   console.log(`  ${chalk.gray(subtitle)}`)
   console.log(`  ${chalk.dim('─'.repeat(72))}`)
   console.log('')
