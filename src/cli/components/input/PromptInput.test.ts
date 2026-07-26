@@ -5,7 +5,9 @@ import {
   getImageTokenRangeAfterDelete,
   getImageTokenRangeBeforeDelete,
   isImagePasteShortcut,
+  resolvePromptChrome,
 } from './PromptInput'
+import { darkTheme } from '../../theme/index'
 
 describe('isImagePasteShortcut', () => {
   it('accepts common terminal encodings for image paste shortcuts', () => {
@@ -39,5 +41,17 @@ describe('image token navigation', () => {
     expect(getImageTokenRangeAfterDelete('see [Image #1] now', 3)).toEqual({ start: 3, end: 14 })
     expect(getImageTokenRangeBeforeDelete('see [Image #1] ', 'see [Image #1] '.length)).toEqual({ start: 3, end: 15 })
     expect(getImageTokenRangeAfterDelete('see [Image #1] ', 4)).toEqual({ start: 4, end: 15 })
+  })
+})
+
+describe('prompt appearance', () => {
+  it('keeps the landing prompt opaque under a transparent terminal theme', () => {
+    const transparentTheme = { ...darkTheme, transparentBackground: true }
+
+    expect(resolvePromptChrome(transparentTheme, 'default').backgroundColor).toBeUndefined()
+    expect(resolvePromptChrome(transparentTheme, 'landing')).toEqual({
+      borderColor: darkTheme.brandShimmer,
+      backgroundColor: '#0b0b0b',
+    })
   })
 })

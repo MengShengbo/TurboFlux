@@ -34,6 +34,7 @@ export function LandingView({
       minHeight={0}
       alignItems="center"
       justifyContent="center"
+      backgroundColor="#050505"
     >
       <Header
         workspacePath={workspacePath}
@@ -48,8 +49,8 @@ export function LandingView({
       <Box width={frameWidth} height={5} flexDirection="column" alignItems="center" marginTop={2}>
         {showPrompt ? (
           <>
-            <Text bold>What should we build?</Text>
-            <Box marginTop={1}>{prompt}</Box>
+            <Text bold>我们该构建什么？</Text>
+            <Box marginTop={1} backgroundColor="#050505">{prompt}</Box>
           </>
         ) : null}
       </Box>

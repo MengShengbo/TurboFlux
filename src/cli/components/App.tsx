@@ -1621,6 +1621,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   mode={currentMode}
                   width={landingFrameWidth}
                   placeholder=""
+                  appearance="landing"
                 />
               )}
             />
