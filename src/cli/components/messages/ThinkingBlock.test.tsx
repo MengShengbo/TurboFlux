@@ -12,22 +12,21 @@ describe('ThinkingBlock', () => {
     effort: 'high' as const,
   }
 
-  it('keeps completed reasoning folded by default', () => {
+  it('keeps completed reasoning compact with a visible preview', () => {
     const output = renderToString(<ThinkingBlock trace={trace} expanded={false} />, { columns: 88 })
 
     expect(output).toContain('Thought · high · 4.2s · 128 tokens')
-    expect(output).not.toContain('Inspect architecture')
+    expect(output).toContain('Inspect architecture')
   })
 
-  it('shows reasoning content when expanded', () => {
+  it('shows complete reasoning content when expanded', () => {
     const output = renderToString(<ThinkingBlock trace={trace} expanded />, { columns: 88 })
 
     expect(output).toContain('Inspect architecture')
     expect(output).toContain('▾')
   })
 
-  it('keeps folded reasoning compact and bounds the streaming preview', () => {
-    const folded = renderToString(<ThinkingBlock trace={trace} expanded={false} />, { columns: 88 })
+  it('bounds the streaming preview to the latest reasoning', () => {
     const longContent = `BEGIN-${'x'.repeat(2200)}-END`
     const expanded = renderToString(
       <ThinkingBlock
@@ -39,9 +38,22 @@ describe('ThinkingBlock', () => {
       { columns: 88 },
     )
 
-    expect(folded).not.toContain('┌')
     expect(expanded).not.toContain('BEGIN-')
     expect(expanded).toContain('-END')
-    expect(expanded.length).toBeLessThan(2200)
+    expect(expanded.length).toBeLessThan(1600)
+  })
+
+  it('shows an active timer before the provider emits reasoning text', () => {
+    const output = renderToString(
+      <ThinkingBlock
+        trace={{ content: '', status: 'streaming', startedAt: Date.now() - 1200, effort: 'high' }}
+        expanded
+        streaming
+      />,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('Reasoning · high')
+    expect(output).not.toContain('▾')
   })
 })

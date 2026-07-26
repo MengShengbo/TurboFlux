@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, extractResponsesReasoningSummary, isFastContextPackCurrent, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, extractResponsesReasoningEventDelta, extractResponsesReasoningSummary, isFastContextPackCurrent, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -73,6 +73,22 @@ describe('Responses reasoning summaries', () => {
       { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Inspecting the failure path.' }] },
       { type: 'message', content: [{ type: 'output_text', text: 'Done.' }] },
     ])).toBe('Inspecting the failure path.')
+  })
+
+  it.each([
+    'response.reasoning_summary_text.delta',
+    'response.reasoning_text.delta',
+    'response.reasoning.delta',
+    'response.reasoning_summary.delta',
+    'response.thinking.delta',
+    'response.analysis.delta',
+  ])('accepts streaming reasoning event variant %s', type => {
+    expect(extractResponsesReasoningEventDelta({ type, delta: 'Inspecting now.' })).toBe('Inspecting now.')
+  })
+
+  it('accepts object-shaped reasoning deltas without classifying answer text', () => {
+    expect(extractResponsesReasoningEventDelta({ type: 'response.reasoning.delta', delta: { text: 'Next step.' } })).toBe('Next step.')
+    expect(extractResponsesReasoningEventDelta({ type: 'response.output_text.delta', delta: 'Visible answer.' })).toBe('')
   })
 })
 

@@ -16,7 +16,7 @@ describe('ActiveWorkPanel', () => {
           lastActivity={Date.now()}
           runState={{ phase: 'thinking', updatedAt: Date.now(), detail: 'Planning next step' }}
           verbose={false}
-          showThinking
+          reasoningActive
         />
       </ThemeProvider>,
       { columns: 88 },
@@ -26,5 +26,28 @@ describe('ActiveWorkPanel', () => {
     expect(output).toContain('Answer token')
     expect(output).not.toContain('Planning next step')
     expect(output).not.toContain('THINKING')
+  })
+
+  it('shows live reasoning status before the first reasoning token arrives', () => {
+    const output = renderToString(
+      <ThemeProvider>
+        <ActiveWorkPanel
+          tools={[]}
+          draft={null}
+          streamText=""
+          thinkingText=""
+          thinkingStartedAt={Date.now() - 1200}
+          reasoningEffort="high"
+          reasoningActive
+          lastActivity={Date.now()}
+          runState={{ phase: 'thinking', updatedAt: Date.now(), detail: 'Planning next step' }}
+          verbose={false}
+        />
+      </ThemeProvider>,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('Reasoning · high')
+    expect(output).not.toContain('Planning next step')
   })
 })

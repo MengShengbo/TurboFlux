@@ -28,7 +28,7 @@ interface ActiveWorkPanelProps {
   thinkingText?: string
   thinkingStartedAt?: number
   reasoningEffort?: ReasoningEffort
-  showThinking?: boolean
+  reasoningActive?: boolean
   verbose: boolean
   idleLabel?: string | null
   availableWidth?: number
@@ -66,7 +66,7 @@ export function ActiveWorkPanel({
   thinkingText = '',
   thinkingStartedAt,
   reasoningEffort,
-  showThinking = false,
+  reasoningActive = false,
   verbose,
   idleLabel = 'Thinking...',
   availableWidth,
@@ -96,24 +96,25 @@ export function ActiveWorkPanel({
   if (!activity.visible) return null
 
   const labelWidth = Math.max(12, panelColumns - 14)
-  const hasLiveOutput = Boolean(streamText.trim() || thinkingText.trim())
+  const hasLiveReasoning = reasoningActive || Boolean(thinkingText.trim())
+  const hasLiveOutput = Boolean(streamText.trim()) || hasLiveReasoning
 
   return (
     <Box flexDirection="column" marginBottom={1}>
       {runState && runState.phase !== 'idle' && !hasLiveOutput && (
         <RunStateLine state={runState} now={now} queuedCount={queuedCount} columns={panelColumns} />
       )}
-      {thinkingText && (
+      {hasLiveReasoning && (
         <ThinkingBlock
           trace={{
             content: thinkingText,
             isStreaming: true,
             status: 'streaming',
             startedAt: thinkingStartedAt,
-            tokenCount: Math.max(1, Math.ceil(thinkingText.length / 4)),
+            tokenCount: thinkingText.trim() ? Math.max(1, Math.ceil(thinkingText.length / 4)) : 0,
             ...(reasoningEffort ? { effort: reasoningEffort } : {}),
           } as ThinkingTrace}
-          expanded={showThinking || Boolean(thinkingText)}
+          expanded
           streaming
           lastActivity={lastActivity}
         />
@@ -124,7 +125,7 @@ export function ActiveWorkPanel({
           <SpinnerGlyph lastActivity={getPrimaryActivity(activeTools, draft, lastActivity)} label={cliTruncate(primary, labelWidth, { position: 'middle' })} />
           <TurnTokenCounter tokens={outputTokens} />
         </Box>
-      ) : activity.detail && !streamText ? (
+      ) : activity.detail && !streamText && !hasLiveReasoning ? (
         <Box>
           <Text color={theme.inactive}>Work </Text>
           <SpinnerGlyph lastActivity={lastActivity} label={activity.detail} />

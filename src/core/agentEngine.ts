@@ -156,6 +156,24 @@ export function extractResponsesReasoningSummary(output: unknown): string {
   return summaries.join('\n\n')
 }
 
+export function extractResponsesReasoningEventDelta(event: unknown): string {
+  if (!event || typeof event !== 'object') return ''
+  const record = event as Record<string, unknown>
+  const eventType = typeof record.type === 'string' ? record.type : ''
+  if (!/^response\.(?:reasoning(?:_summary(?:_text)?|_text)?|thinking|analysis)\.delta$/i.test(eventType)) {
+    return ''
+  }
+
+  const delta = record.delta
+  if (typeof delta === 'string') return delta
+  if (!delta || typeof delta !== 'object') return ''
+  const value = delta as Record<string, unknown>
+  for (const candidate of [value.text, value.content, value.reasoning_content, value.reasoning]) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate
+  }
+  return ''
+}
+
 export function normalizeAnthropicToolMessages(
   messages: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
@@ -3480,15 +3498,14 @@ Before retrying:
       try {
         const event = JSON.parse(jsonText) as Record<string, any>
         const eventType = event.type
-        if (eventType === 'response.output_text.delta' || eventType === 'response.refusal.delta') {
+        const reasoningDelta = extractResponsesReasoningEventDelta(event)
+        if (reasoningDelta) {
+          reasoningContent += reasoningDelta
+          this.emit({ type: 'stream:thinking_delta', text: reasoningDelta })
+        } else if (eventType === 'response.output_text.delta' || eventType === 'response.refusal.delta') {
           if (typeof event.delta === 'string' && event.delta) {
             textContent += event.delta
             this.emit({ type: 'stream:delta', text: event.delta })
-          }
-        } else if (eventType === 'response.reasoning_summary_text.delta' || eventType === 'response.reasoning_text.delta') {
-          if (typeof event.delta === 'string' && event.delta) {
-            reasoningContent += event.delta
-            this.emit({ type: 'stream:thinking_delta', text: event.delta })
           }
         } else if (eventType === 'response.output_item.added' || eventType === 'response.output_item.done') {
           if (event.item?.type === 'function_call') ensureToolCall(event.item, event.output_index)
