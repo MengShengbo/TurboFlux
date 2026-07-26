@@ -24,6 +24,13 @@ import { toolsToOpenAIFormat, toolsToAnthropicFormat, getToolByName, validateToo
 import { applyEdit, stripLineNumberPrefix } from './editHelpers'
 import { canComputeDiff, computeHunks, summarizeHunks } from './diffCompute'
 import { ContextManager, extractStructuredSummary, formatSummaryAsContext } from './contextManager'
+import {
+  buildContinuationEvidence,
+  buildContinuationSummaryPrompt,
+  CONTINUATION_SUMMARY_SYSTEM_PROMPT,
+  extractContinuationText,
+  validateContinuationSummary,
+} from './contextCompaction'
 import { autoCompactThreshold, blockingContextLimit, recapThreshold, resolveContextPolicyProfile } from './contextPolicy'
 import { countMessagesTokens, countTurnishTokens } from './tokenCounter'
 import { resolveNativeReasoningRequest } from './modelRegistry'
@@ -768,17 +775,9 @@ export class AgentEngine {
     const endMessageId = lastVisibleOldTurn.id
     const originalCharCount = oldTurns.reduce((sum, t) => sum + this.countTurnChars(t), 0)
 
-    let summary: string
-    let isModelGenerated: boolean
-    try {
-      summary = await this.generateContinuationSummary(oldTurns, recentTurns)
-      if (!summary.trim()) throw new Error('Empty summary')
-      isModelGenerated = true
-    } catch {
-      const structured = extractStructuredSummary(oldTurns)
-      summary = formatSummaryAsContext(structured)
-      isModelGenerated = false
-    }
+    const summary = await this.generateContinuationSummary(oldTurns, recentTurns)
+    const isModelGenerated = true
+    this.preservedFiles = this.collectPreservedFiles(oldTurns)
 
     const existingSegments = this.stateProvider.getContextSegments()
     const alreadyCovered = existingSegments.some(segment =>
@@ -1793,9 +1792,7 @@ export class AgentEngine {
       })
     }
 
-    // Keep the most recent 10 turns intact (matches the rolling-window N=10
-    // from arxiv:2508.21433 — empirically optimal for SWE-bench agents).
-    const keepRecent = 10
+    const keepRecent = resolveContextPolicyProfile(this.config.contextPolicy).keepRecentTurns
     const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
     const { oldTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
 
@@ -1826,19 +1823,8 @@ export class AgentEngine {
       }
     }
 
-    // Generate the continuation summary using the model
-    let summary: string
-    let isModelGenerated: boolean
-
-    try {
-      summary = await this.generateContinuationSummary(oldTurns, recentTurns)
-      if (!summary.trim()) throw new Error('Summary generation returned empty content')
-      isModelGenerated = true
-    } catch {
-      const structured = extractStructuredSummary(oldTurns)
-      summary = formatSummaryAsContext(structured)
-      isModelGenerated = false
-    }
+    const summary = await this.generateContinuationSummary(oldTurns, recentTurns)
+    const isModelGenerated = true
 
     const segment: ContextSegment = {
       startMessageId,
@@ -1856,41 +1842,7 @@ export class AgentEngine {
     this.emit({ type: 'context:segment_created', segment })
     this.addReservoirEntry(startMessageId, endMessageId, oldTurns, 'compact', originalCharCount)
 
-    // Post-compact file recovery: scan old turns for the most recent
-    // read_file results and preserve them so the model doesn't lose
-    // working context. Only the last 5 unique files are kept, capped
-    // at ~5000 tokens each (20k chars) to avoid blowing the budget.
-    const readFilePathByToolCallId = new Map<string, string>()
-    for (const turn of oldTurns) {
-      if (turn.role === 'assistant' && turn.toolCalls) {
-        for (const tc of turn.toolCalls) {
-          if ((tc.name === 'read_file' || tc.name === 'read_file_full') && typeof tc.arguments.path === 'string') {
-            readFilePathByToolCallId.set(tc.id, tc.arguments.path as string)
-          }
-        }
-      }
-    }
-    const preserved: Array<{ path: string; content: string }> = []
-    const seenPaths = new Set<string>()
-    const MAX_PRESERVED_FILES = 5
-    const MAX_PRESERVED_CHARS = 20_000
-    for (let i = oldTurns.length - 1; i >= 0; i--) {
-      const turn = oldTurns[i]
-      if (turn.role !== 'tool_result' || !turn.toolResults) continue
-      for (const tr of turn.toolResults) {
-        if (tr.name !== 'read_file' && tr.name !== 'read_file_full') continue
-        const path = readFilePathByToolCallId.get(tr.toolCallId)
-        if (!path || seenPaths.has(path)) continue
-        seenPaths.add(path)
-        const content = tr.output.length > MAX_PRESERVED_CHARS
-          ? `${tr.output.slice(0, MAX_PRESERVED_CHARS)}\n… <truncated>`
-          : tr.output
-        preserved.push({ path, content })
-        if (preserved.length >= MAX_PRESERVED_FILES) break
-      }
-      if (preserved.length >= MAX_PRESERVED_FILES) break
-    }
-    this.preservedFiles = preserved.reverse() // oldest-first for stable ordering
+    this.preservedFiles = this.collectPreservedFiles(oldTurns)
 
     // Hard-replace: discard old turns from the live session so subsequent
     // buildApiMessages() calls never see them again. The summary is
@@ -1913,131 +1865,112 @@ export class AgentEngine {
 
     if (!activeConfig || !activeConfig.apiKey) throw new Error('No API key configured for continuation summary')
 
-    const provider = activeConfig.provider === 'anthropic' ? 'anthropic' : 'openai'
+    const workspacePath = this.config.workspacePath || ''
+    await Promise.all([
+      workspacePath ? this.maybeBuildWorkspaceSkeleton(workspacePath) : Promise.resolve(),
+      this.maybeRefreshWorkspaceMemory(),
+      this.gitEnabled ? this.refreshGitStatus() : Promise.resolve(),
+    ])
 
-    // Build a compact representation of old turns for the summary prompt
-    const oldTurnsSummary = oldTurns.map(turn => {
-      let line = `[${turn.role}] `
-      if (turn.role === 'assistant') {
-        const clean = (turn.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim()
-        line += clean.slice(0, 300)
-        if (turn.toolCalls) {
-          line += ` [tools: ${turn.toolCalls.map(tc => tc.name).join(', ')}]`
-        }
-      } else {
-        line += (turn.content || '').slice(0, 200)
-      }
-      return line
-    }).join('\n')
-
-    const recentContext = recentTurns.map(turn => {
-      let line = `[${turn.role}] `
-      if (turn.role === 'assistant') {
-        const clean = (turn.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim()
-        line += clean.slice(0, 200)
-      } else {
-        line += (turn.content || '').slice(0, 150)
-      }
-      return line
-    }).join('\n')
-
-    const summaryPrompt = `You are a context compression assistant. Your job is to generate a continuation summary that will be injected into the NEXT context window so the AI can seamlessly continue this conversation.
-
-Based on the conversation history below, produce a structured summary with these sections:
-
-<continuation_summary>
-<conversation_goal>What the user originally asked for and what they're trying to accomplish</conversation_goal>
-<project_state>Current state of the project: what files exist, what's been built, what's working</project_state>
-<current_task>What the AI is currently working on right now</current_task>
-<recent_dialogue>Key points from the most recent exchanges (decisions made, questions answered)</recent_dialogue>
-<files_touched>Files that were read, written, or edited and WHY</files_touched>
-<important_decisions>Key decisions the user made (especially from ask_user responses)</important_decisions>
-<open_questions>Unresolved issues or questions that still need attention</open_questions>
-<rollback_anchor>If a checkpoint was created, note it here so the user can rollback</rollback_anchor>
-<next_step_hint>What the AI should focus on next to continue the task</next_step_hint>
-</continuation_summary>
-
-Rules:
-- Be concise but comprehensive — this summary replaces the full conversation history
-- Focus on WHY things were done, not just WHAT was done
-- Preserve any user preferences, constraints, or style choices mentioned
-- Note any errors encountered and whether they were resolved
-- Keep each section to 2-4 sentences maximum
-
-OLDER CONVERSATION (being summarized):
-${oldTurnsSummary}
-
-RECENT CONVERSATION (still in context):
-${recentContext}`
-
-    // Make a lightweight API call — no tools, just text generation
-    const messages: Array<Record<string, unknown>> = [
-      { role: 'user', content: summaryPrompt },
-    ]
-
-    const url = provider === 'anthropic'
-      ? `${activeConfig.baseUrl.replace(/\/$/, '')}/messages`
-      : `${normalizeBaseUrl(activeConfig.baseUrl)}/chat/completions`
-
-    const headers: Record<string, string> = createTurboFluxRequestHeaders(provider === 'anthropic'
-      ? {
-          'Content-Type': 'application/json',
-          'x-api-key': activeConfig.apiKey,
-          'anthropic-version': '2023-06-01',
-          ...activeConfig.customHeaders,
-        }
-      : {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${activeConfig.apiKey}`,
-          ...activeConfig.customHeaders,
-        })
-
-    if (activeConfig.provider === 'openrouter') {
-      headers['HTTP-Referer'] = 'https://turboflux.dev'
-      headers['X-Title'] = 'Turboflux'
-    }
-
-    const body = provider === 'anthropic'
-      ? JSON.stringify({
-          model: activeConfig.defaultModel,
-          max_tokens: 1500,
-          messages,
-          system: 'You are a context compression assistant. Generate concise, structured continuation summaries.',
-        })
-      : JSON.stringify({
-          model: activeConfig.defaultModel,
-          max_tokens: 1500,
-          temperature: 0.3,
-          messages: [{ role: 'system', content: 'You are a context compression assistant. Generate concise, structured continuation summaries.' }, ...messages],
-        })
-
-    const result = await this.toolExecutor.sendMessage(url, headers, body, {
-      signal: this.abortController?.signal,
+    const evidence = buildContinuationEvidence(oldTurns, recentTurns, {
+      workspacePath,
+      workspaceSkeleton: this.workspaceSkeleton,
+      gitStatus: this.cachedGitStatus,
+      workspaceMemory: this.workspaceMemoryText,
+      taskTree: this.taskManager.getFullTree(),
+      activeTask: this.taskManager.getActiveTaskContext(),
     })
 
-    if (!result.success || !result.data) {
-      throw new Error(result.error || 'Summary generation failed')
+    const firstCandidate = await this.requestContinuationSummary(
+      activeConfig,
+      buildContinuationSummaryPrompt(evidence),
+    )
+    let validation = validateContinuationSummary(firstCandidate)
+    if (!validation.valid) {
+      const repaired = await this.requestContinuationSummary(
+        activeConfig,
+        buildContinuationSummaryPrompt(evidence, `${firstCandidate.slice(0, 20_000)}\nMissing sections: ${validation.missing.join(', ')}`),
+      )
+      validation = validateContinuationSummary(repaired)
     }
-
-    // Extract text from API response
-    let summaryText = ''
-    const responseData = result.data as {
-      content?: Array<{ text?: string }>
-      choices?: Array<{ message?: { content?: string } }>
-    } | string
-    if (provider === 'anthropic' && typeof responseData !== 'string' && responseData.content?.[0]?.text) {
-      summaryText = responseData.content[0].text
-    } else if (typeof responseData !== 'string' && responseData.choices?.[0]?.message?.content) {
-      summaryText = responseData.choices[0].message.content
-    } else if (typeof responseData === 'string') {
-      summaryText = responseData
+    if (!validation.valid) {
+      throw new Error(`Continuation summary contract failed; missing: ${validation.missing.join(', ') || 'valid XML sections'}`)
     }
+    return validation.text
+  }
 
-    if (!summaryText) {
-      throw new Error('Summary generation returned empty content')
+  private async requestContinuationSummary(config: APIConfig, prompt: string): Promise<string> {
+    const protocols = planModelProtocols(config.provider, config.defaultModel)
+    const attempts: ModelProtocolAttempt[] = []
+    for (const protocol of protocols) {
+      const url = buildModelProtocolUrl(config.baseUrl, protocol)
+      const headers = createTurboFluxRequestHeaders(protocol === 'anthropic_messages'
+        ? {
+            'Content-Type': 'application/json',
+            'x-api-key': config.apiKey,
+            'anthropic-version': '2023-06-01',
+            ...(config.provider === 'anthropic' ? {} : { Authorization: `Bearer ${config.apiKey}` }),
+            ...config.customHeaders,
+          }
+        : {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.apiKey}`,
+            ...config.customHeaders,
+          })
+      if (config.provider === 'openrouter') {
+        headers['HTTP-Referer'] = 'https://turboflux.dev'
+        headers['X-Title'] = 'Turboflux'
+      }
+
+      const body = protocol === 'anthropic_messages'
+        ? {
+            model: config.defaultModel,
+            system: CONTINUATION_SUMMARY_SYSTEM_PROMPT,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 2_200,
+          }
+        : protocol === 'openai_responses'
+          ? {
+              model: config.defaultModel,
+              instructions: CONTINUATION_SUMMARY_SYSTEM_PROMPT,
+              input: toResponsesInput([{ role: 'user', content: prompt }]),
+              max_output_tokens: 2_200,
+              store: false,
+            }
+          : {
+              model: config.defaultModel,
+              messages: [
+                { role: 'system', content: CONTINUATION_SUMMARY_SYSTEM_PROMPT },
+                { role: 'user', content: prompt },
+              ],
+              max_tokens: 2_200,
+              stream: false,
+            }
+
+      const result = await this.toolExecutor.sendMessage(url, headers, JSON.stringify(body), {
+        signal: this.abortController?.signal,
+      })
+      if (result.success && result.data) {
+        const text = extractContinuationText(protocol, result.data)
+        if (text.trim()) return text
+        const shapeError = new ModelProtocolRequestError('Continuation summary response omitted text content', {
+          protocol,
+          url,
+          kind: 'response_shape',
+        })
+        attempts.push(toProtocolAttempt(shapeError))
+        continue
+      }
+
+      const error = new ModelProtocolRequestError(result.error || 'Continuation summary request failed', {
+        protocol,
+        url,
+        status: result.status,
+      })
+      attempts.push(toProtocolAttempt(error))
+      if (!shouldFallbackProtocol(error)) break
     }
-
-    return summaryText
+    throw new Error(formatProtocolFailure(attempts))
   }
 
   private countTurnChars(turn: AgentTurn): number {
@@ -2053,6 +1986,39 @@ ${recentContext}`
       }
     }
     return text.length
+  }
+
+  private collectPreservedFiles(turns: AgentTurn[]): Array<{ path: string; content: string }> {
+    const pathByToolCallId = new Map<string, string>()
+    for (const turn of turns) {
+      if (turn.role !== 'assistant' || !turn.toolCalls) continue
+      for (const call of turn.toolCalls) {
+        if ((call.name === 'read_file' || call.name === 'read_file_full') && typeof call.arguments.path === 'string') {
+          pathByToolCallId.set(call.id, call.arguments.path)
+        }
+      }
+    }
+
+    const preserved: Array<{ path: string; content: string }> = []
+    const seenPaths = new Set<string>()
+    const maxFiles = 5
+    const maxChars = 20_000
+    for (let index = turns.length - 1; index >= 0 && preserved.length < maxFiles; index -= 1) {
+      const turn = turns[index]
+      if (turn.role !== 'tool_result' || !turn.toolResults) continue
+      for (const result of turn.toolResults) {
+        if (result.name !== 'read_file' && result.name !== 'read_file_full') continue
+        const path = pathByToolCallId.get(result.toolCallId)
+        if (!path || seenPaths.has(path)) continue
+        seenPaths.add(path)
+        const content = result.output.length > maxChars
+          ? `${result.output.slice(0, maxChars)}\n<recent_file_truncated />`
+          : result.output
+        preserved.push({ path, content })
+        if (preserved.length >= maxFiles) break
+      }
+    }
+    return preserved.reverse()
   }
 
   private addReservoirEntry(
