@@ -131,9 +131,10 @@ function buildToolUsageSection(_mode: AgentMode): string {
 1. Explore (targeted): search_content / search_files / search_symbols / get_codemap -> read_file; use web_search for current/external facts; use read_file_full only when exact whole-file contents are needed before a rewrite
 2. Explore (broad): explore_code for unfamiliar feature/bug/UI/page/component/style/text/entry-point localization, multiple possible names/routes, or after narrow retrieval misses.
 3. Modify: edit_file (small exact edits) -> multi_edit (several exact edits) -> replace_file (whole-file replacement) -> write_file (new files) -> delete_file (caution)
-4. Execute: run_command (only when necessary)
-5. Tasks: create_tasks (batch) -> update_task
-6. Communicate: notify_user (progress) -> ask_user (need reply)
+4. Version control: git_status / git_diff / git_log / git_show for routine inspection; structured Git write tools for normal state changes; run_command only for advanced Git operations not covered by those tools
+5. Execute: run_command (only when necessary)
+6. Tasks: create_tasks (batch) -> update_task
+7. Communicate: notify_user (progress) -> ask_user (need reply)
 </tool_priority>
 
 <tool_rules>
@@ -151,6 +152,8 @@ function buildToolUsageSection(_mode: AgentMode): string {
 - multi_edit: if any exact snippet match fails, do not retry nearly identical snippets. Use replace_file with complete final content.
 - replace_file: use for whole-file rewrites or when exact snippet matching is unreliable; content must be the complete final file.
 - All path parameters are workspace-relative (e.g. src/main/index.ts). No absolute paths.
+- Prefer structured Git tools over shell commands for status, diff, history, staging, commits, branches, stashes, and pushes. They validate arguments, bound output, refresh UI state, and preserve approval policy.
+- Never use git_stage without explicit paths. Use git_commit(paths) to isolate AI-authored files from unrelated staged work. Never force push or discard working-tree content through a structured tool.
 - After all modifications: create_checkpoint, then generate_change_summary (scale detail to change size).
 </tool_rules>
 </tool_usage>`

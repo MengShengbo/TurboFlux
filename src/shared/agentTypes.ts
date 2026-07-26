@@ -260,7 +260,7 @@ export interface AgentConfig {
   enabledSkills?: Array<{ id: string; name: string; command: string; description: string; capabilities?: { can?: string[]; cannot?: string[] }; principles?: string[]; systemPrompt?: string }>
   /** Detected shell id from the main process (e.g. 'pwsh', 'powershell', 'cmd', 'bash', 'zsh'). */
   shell?: string
-  /** When true the engine uses git for checkpoints and injects git status into the system prompt. */
+  /** Enables structured Git context, status UI, and isolated commits for AI-touched paths. */
   gitEnabled?: boolean
 }
 

@@ -22,6 +22,10 @@ const DENY_COMMAND_PATTERNS: CommandPattern[] = [
 const ASK_COMMAND_PATTERNS: CommandPattern[] = [
   { pattern: /\bgit\s+push\s+.*--force/, verdict: 'ask', reason: 'High-risk: force push may overwrite remote history' },
   { pattern: /\bgit\s+push\b/, verdict: 'ask', reason: 'External action: pushes local changes to a remote repository' },
+  { pattern: /\bgit\s+commit\b/, verdict: 'ask', reason: 'Repository state change: use git_commit for isolated, auditable commits' },
+  { pattern: /\bgit\s+(?:switch|checkout|merge|rebase|stash|restore)\b/, verdict: 'ask', reason: 'Repository state change: raw Git command may change the working tree or history' },
+  { pattern: /\bgit\s+reset\b/, verdict: 'ask', reason: 'Repository state change: reset may alter the index, working tree, or history' },
+  { pattern: /\bgit\s+branch\b[^\r\n]*(?:-[dD]|--delete)\b/, verdict: 'ask', reason: 'Repository state change: deletes a Git branch' },
   { pattern: /\bgit\s+reset\s+--hard/, verdict: 'ask', reason: 'High-risk: discards uncommitted changes' },
   { pattern: /\bgit\s+clean\s+-[a-z]*f/, verdict: 'ask', reason: 'High-risk: removes untracked files' },
   { pattern: /\bchmod\s+-R\s+777/, verdict: 'ask', reason: 'High-risk: world-writable permissions' },
@@ -79,6 +83,14 @@ export class PermissionPipeline {
 
     if (toolName.includes('__') && this.approvalPolicy !== 'full') {
       return decide({ verdict: 'ask', reason: 'MCP tools require explicit approval before sharing data or taking action' })
+    }
+
+    if (toolName === 'git_push' && this.approvalPolicy !== 'full') {
+      return decide({ verdict: 'ask', reason: 'External action: pushes local commits to a remote repository' })
+    }
+
+    if (toolName === 'git_commit' && !Array.isArray(args.paths) && this.approvalPolicy !== 'full') {
+      return decide({ verdict: 'ask', reason: 'Repository state change: committing the current index may include user-staged files' })
     }
 
     if (toolName === 'run_command') {
@@ -181,6 +193,12 @@ export class PermissionPipeline {
       'cancel_agent',
       'restore_checkpoint',
       'prune_checkpoints',
+      'git_stage',
+      'git_commit',
+      'git_create_branch',
+      'git_switch_branch',
+      'git_stash',
+      'git_push',
     ].includes(toolName)
   }
 
