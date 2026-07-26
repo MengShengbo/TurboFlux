@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FAST_CONTEXT_TUNING, getFastContextProfile, normalizeFastContextStrategy } from './fastContextTypes'
+import { FAST_CONTEXT_ENGINE_ID, FAST_CONTEXT_TUNING, getFastContextProfile, normalizeFastContextStrategy } from './fastContextTypes'
 import { buildFastContextSystemPrompt } from './subAgent'
 
 describe('FastContext architecture contract', () => {
@@ -28,6 +28,7 @@ describe('FastContext architecture contract', () => {
   })
 
   it('keeps Race as the only profile', () => {
+    expect(FAST_CONTEXT_ENGINE_ID).toBe('fcrace-v1')
     expect(getFastContextProfile().strategy).toBe('autonomous-race')
     expect(normalizeFastContextStrategy('legacy_strategy')).toBe('autonomous-race')
     expect(normalizeFastContextStrategy('unknown')).toBe('autonomous-race')

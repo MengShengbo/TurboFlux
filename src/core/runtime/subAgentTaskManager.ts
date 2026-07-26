@@ -9,6 +9,7 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import type { RuntimeTask, RuntimeTaskKind, RuntimeTaskStatus } from '../../shared/runtimeTaskTypes'
+import type { SubAgentDeliveryMode } from '../../shared/subAgentTypes'
 import type { RuntimeTaskManager } from './runtimeTaskManager'
 
 export interface SubAgentTaskDescriptor {
@@ -19,6 +20,8 @@ export interface SubAgentTaskDescriptor {
   objective: string
   workspacePath: string
   ownerSessionId?: string
+  deliveryMode: SubAgentDeliveryMode
+  parentAgentRunId?: number
   startedAt: number
   transcriptPath: string
 }
@@ -31,7 +34,7 @@ export interface SubAgentTaskSnapshot extends SubAgentTaskDescriptor {
 export type SubAgentTranscriptRecord =
   | { version: 1; type: 'start'; timestamp: number; task: SubAgentTaskDescriptor }
   | { version: 1; type: 'event'; timestamp: number; event: unknown }
-  | { version: 1; type: 'result'; timestamp: number; status: 'completed' | 'failed'; result?: unknown; error?: string }
+  | { version: 1; type: 'result'; timestamp: number; status: 'completed' | 'failed' | 'stopped'; result?: unknown; error?: string }
   | { version: 1; type: 'state'; timestamp: number; status: RuntimeTaskStatus; error?: string }
 
 export interface StartSubAgentTaskContext {
@@ -47,6 +50,8 @@ export interface StartSubAgentTaskInput<TResult> {
   objective: string
   workspacePath: string
   ownerSessionId?: string
+  deliveryMode?: SubAgentDeliveryMode
+  parentAgentRunId?: number
   controller?: AbortController
   timeoutMs?: number
   run: (context: StartSubAgentTaskContext) => Promise<TResult>
@@ -145,6 +150,8 @@ export class SubAgentTaskManager {
       objective: input.objective,
       workspacePath: input.workspacePath,
       ownerSessionId: input.ownerSessionId || this.ownerSessionId,
+      deliveryMode: input.deliveryMode || (input.kind === 'fast_context' ? 'push' : 'pull'),
+      parentAgentRunId: input.parentAgentRunId,
       startedAt,
       transcriptPath,
     }
@@ -204,28 +211,34 @@ export class SubAgentTaskManager {
     }).then(result => {
       const succeeded = input.isSuccess ? input.isSuccess(result) : true
       const error = succeeded ? undefined : input.getError?.(result) || 'Subagent failed'
+      const currentStatus = this.runtimeTaskManager.getTask(id)?.status
+      const stopped = controller.signal.aborted && (currentStatus === 'stopping' || currentStatus === 'stopped')
       this.results.set(id, result)
       this.appendRecord(id, {
         version: 1,
         type: 'result',
         timestamp: this.now(),
-        status: succeeded ? 'completed' : 'failed',
+        status: succeeded ? 'completed' : stopped ? 'stopped' : 'failed',
         result,
         error,
       })
       if (succeeded) this.runtimeTaskManager.completeTask(id)
+      else if (stopped) this.runtimeTaskManager.markStopped(id, error)
       else this.runtimeTaskManager.failTask(id, error || 'Subagent failed')
       return result
     }, error => {
       const message = error instanceof Error ? error.message : String(error)
+      const currentStatus = this.runtimeTaskManager.getTask(id)?.status
+      const stopped = controller.signal.aborted && (currentStatus === 'stopping' || currentStatus === 'stopped')
       this.appendRecord(id, {
         version: 1,
         type: 'result',
         timestamp: this.now(),
-        status: 'failed',
+        status: stopped ? 'stopped' : 'failed',
         error: message,
       })
-      this.runtimeTaskManager.failTask(id, message)
+      if (stopped) this.runtimeTaskManager.markStopped(id, message)
+      else this.runtimeTaskManager.failTask(id, message)
       throw error
     })
     void promise.catch(() => {})
@@ -288,12 +301,16 @@ export class SubAgentTaskManager {
       const records = parseTranscript(readFileSync(transcriptPath, 'utf8'))
       const start = records.find((record): record is Extract<SubAgentTranscriptRecord, { type: 'start' }> => record.type === 'start')
       if (!start?.task?.id || this.runtimeTaskManager.getTask(start.task.id)) continue
-      const descriptor = { ...start.task, transcriptPath }
+      const descriptor: SubAgentTaskDescriptor = {
+        ...start.task,
+        deliveryMode: start.task.deliveryMode || (start.task.kind === 'fast_context' ? 'push' : 'pull'),
+        transcriptPath,
+      }
       this.descriptors.set(descriptor.id, descriptor)
       this.outputBytes.set(descriptor.id, statSync(transcriptPath).size)
 
       let stateStatus: RuntimeTaskStatus | undefined
-      let resultStatus: Extract<RuntimeTaskStatus, 'completed' | 'failed'> | undefined
+      let resultStatus: Extract<RuntimeTaskStatus, 'completed' | 'failed' | 'stopped'> | undefined
       let error: string | undefined
       let result: unknown
       for (const record of records) {

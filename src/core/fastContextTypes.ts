@@ -1,9 +1,10 @@
 export type FastContextScanFileStatus = 'discovered' | 'reading' | 'absorbed' | 'skipped' | 'error'
-export type FastContextScanPhase = 'mapping' | 'ranking' | 'synthesizing' | 'completed' | 'error' | 'scanning'
+export type FastContextScanPhase = 'mapping' | 'ranking' | 'synthesizing' | 'completed' | 'cancelled' | 'error' | 'scanning'
 export type FastContextScanWorkerStatus = 'queued' | 'running' | 'completed' | 'error'
 export type FastContextEvidenceKind = 'entry' | 'implementation' | 'caller' | 'config' | 'schema' | 'test' | 'root_cause' | 'supporting'
 export type FastContextConfidence = 'high' | 'medium' | 'low'
 export type FastContextStrategy = 'autonomous-race'
+export const FAST_CONTEXT_ENGINE_ID = 'fcrace-v1' as const
 
 export interface FastContextTuning {
   maxTurns: number
@@ -66,6 +67,7 @@ export type FastContextScanEvent =
   | { type: 'wave_metrics'; turn: number; calls: number; modelElapsedMs: number; toolElapsedMs: number; totalElapsedMs: number; inputTokens: number; outputTokens: number; cacheReadTokens: number }
 
 export interface FastContextScanResult {
+  engine?: typeof FAST_CONTEXT_ENGINE_ID
   objective: string
   strategy?: FastContextStrategy
   evidencePack: string

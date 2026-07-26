@@ -54,9 +54,10 @@ export function FastContextBanner({ events, summary, isActive }: FastContextBann
     return () => clearInterval(id)
   }, [isActive])
 
-  if (!isActive && state.phase !== 'completed') return null
+  if (!isActive && !['completed', 'cancelled', 'error'].includes(state.phase)) return null
 
   const phaseColor = state.phase === 'completed' ? theme.success
+    : state.phase === 'cancelled' ? theme.inactive
     : state.phase === 'error' ? theme.error
     : theme.brand
 
@@ -65,6 +66,7 @@ export function FastContextBanner({ events, summary, isActive }: FastContextBann
     : state.phase === 'scanning' ? 'SCANNING'
     : state.phase === 'synthesizing' ? 'SYNTHESIZING'
     : state.phase === 'completed' ? 'DONE'
+    : state.phase === 'cancelled' ? 'CANCELLED'
     : 'ERROR'
 
   const activeWorkers = [...state.workers.values()].filter(w => w.status === 'running')

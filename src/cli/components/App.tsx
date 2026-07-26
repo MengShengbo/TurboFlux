@@ -15,6 +15,7 @@ import { MessageList } from './messages/MessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { FastContextScanEvent } from '../../core/fastContextTypes'
+import type { SubAgentEvent } from '../../shared/subAgentTypes'
 import type { AgentAttachment, AgentRunState, AgentTurn, ApprovalPolicy, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
 import type { ContextReservoirEntry, ContextSegment } from '../../state/types'
@@ -101,6 +102,42 @@ type StaticTranscriptItem =
 type QueuedPrompt = {
   prompt: string
   attachments?: AgentAttachment[]
+}
+
+interface SubAgentActivity {
+  id: string
+  label: string
+  objective: string
+  detail: string
+  startedAt: number
+}
+
+function describeSubAgentEvent(event: SubAgentEvent): string {
+  if (event.type === 'turn_start') return `turn ${event.turn}/${event.maxTurns}`
+  if (event.type === 'model_wait') return `waiting for model · ${Math.floor(event.elapsedMs / 1000)}s`
+  if (event.type === 'model_retry') return `retry ${event.attempt} · ${event.reason.slice(0, 72)}`
+  if (event.type === 'tool_call') return event.tool
+  if (event.type === 'tool_result') return event.summary.slice(0, 90)
+  if (event.type === 'evidence') return event.evidence.path
+  if (event.type === 'final') return 'finalizing result'
+  if (event.type === 'error') return event.message.slice(0, 90)
+  return `turn ${event.turn} complete`
+}
+
+function SubAgentProgressLine({ activities }: { activities: SubAgentActivity[] }) {
+  const theme = useTheme()
+  if (activities.length === 0) return null
+  return (
+    <Box flexDirection="column">
+      {activities.slice(-3).map(activity => (
+        <Box key={activity.id}>
+          <Text color={theme.brand}>Subagent </Text>
+          <Text>{activity.label}</Text>
+          <Text dimColor>{` · ${activity.detail || activity.objective} · ${formatElapsed(Date.now() - activity.startedAt)}`}</Text>
+        </Box>
+      ))}
+    </Box>
+  )
 }
 
 function TaskProgressLine({ task }: { task: ActiveTaskContext }) {
@@ -233,6 +270,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
   const [fcSummary, setFcSummary] = useState(createFastContextUiSummary)
   const [fcActive, setFcActive] = useState(false)
+  const [subAgentActivities, setSubAgentActivities] = useState<SubAgentActivity[]>([])
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
   const [activeObjective, setActiveObjective] = useState<{ prompt: string; startedAt: number } | null>(null)
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
@@ -272,6 +310,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const fcEventBufferRef = useRef<FastContextScanEvent[]>([])
   const fcFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcActiveRef = useRef(false)
+  const fcRunIdRef = useRef<string | null>(null)
   const inputRef = useRef('')
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
   const isRunningRef = useRef(false)
@@ -401,6 +440,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const resetFastContextUi = useCallback(() => {
     discardFastContextUiBuffer()
+    fcRunIdRef.current = null
     fcActiveRef.current = false
     setFcEvents([])
     setFcSummary(createFastContextUiSummary())
@@ -655,6 +695,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           markActivity()
           break
         case 'fast_context:event':
+          if (fcRunIdRef.current !== event.runId) {
+            discardFastContextUiBuffer()
+            fcRunIdRef.current = event.runId
+            setFcEvents([])
+            setFcSummary(createFastContextUiSummary())
+          }
           queueFastContextUiEvent(event.event)
           if (!fcActiveRef.current) {
             fcActiveRef.current = true
@@ -662,9 +708,34 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           }
           break
         case 'fast_context:complete':
+          if (fcRunIdRef.current !== event.runId) break
           flushFastContextUi()
           fcActiveRef.current = false
           setFcActive(false)
+          break
+        case 'subagent:start':
+          if (event.runKind === 'spawn_agent') {
+            setSubAgentActivities(current => [
+              ...current.filter(activity => activity.id !== event.agentId),
+              {
+                id: event.agentId,
+                label: event.label,
+                objective: event.objective,
+                detail: 'starting',
+                startedAt: Date.now(),
+              },
+            ])
+          }
+          break
+        case 'subagent:progress':
+          setSubAgentActivities(current => current.map(activity => activity.id === event.agentId
+            ? { ...activity, detail: describeSubAgentEvent(event.event) }
+            : activity))
+          break
+        case 'subagent:end':
+          if (event.runKind === 'spawn_agent') {
+            setSubAgentActivities(current => current.filter(activity => activity.id !== event.agentId))
+          }
           break
         case 'active:task':
           setActiveTask(event.context)
@@ -684,6 +755,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   updatedAt: event.task.updatedAt,
                 }
               : session))
+          }
+          if (event.task.kind === 'agent') {
+            setSubAgentActivities(current => current.filter(activity => activity.id !== event.task.id))
           }
           markActivity()
           break
@@ -1264,9 +1338,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const visibleStreamText = stripTextToolCallMarkup(streamText, { stripIncomplete: true })
   const streamTextForDisplay = visibleStreamText
 
-  const runningNode = isRunning ? (
+  const runningNode = (isRunning || fcActive || subAgentActivities.length > 0) ? (
     <Box flexDirection="column" marginBottom={1}>
       {!noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} summary={fcSummary} isActive={fcActive} />}
+      {!noFlickerActive && <SubAgentProgressLine activities={subAgentActivities} />}
       {!noFlickerActive && activeTask && <TaskProgressLine task={activeTask} />}
       <ActiveWorkPanel
         tools={noFlickerActive ? [] : currentTools}
@@ -1281,7 +1356,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         reasoningEffort={config.reasoning?.effort}
         showThinking={showThinking}
         verbose={verbose}
-        idleLabel={!noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
+        idleLabel={isRunning && !noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
         availableWidth={noFlickerActive
           ? terminal.columns - cockpit.workWidth - cockpit.taskWidth - 8
           : terminal.columns - 4}

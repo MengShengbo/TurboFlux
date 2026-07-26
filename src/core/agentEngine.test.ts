@@ -43,12 +43,12 @@ describe('appendRuntimeContextToLatestUserMessage', () => {
 })
 
 describe('FastContext pack lifecycle', () => {
-  it('accepts a pack only for the user turn and generation that produced it', () => {
-    const pack = { generation: 7, sourceUserTurnId: 'user-2' }
+  it('binds delivery to the owning agent run instead of the latest user message', () => {
+    const pack = { generation: 7, ownerAgentRunId: 2 }
 
-    expect(isFastContextPackCurrent(pack, 7, 'user-2')).toBe(true)
-    expect(isFastContextPackCurrent(pack, 8, 'user-2')).toBe(false)
-    expect(isFastContextPackCurrent(pack, 7, 'user-3')).toBe(false)
+    expect(isFastContextPackCurrent(pack, 7, 2)).toBe(true)
+    expect(isFastContextPackCurrent(pack, 8, 2)).toBe(false)
+    expect(isFastContextPackCurrent(pack, 7, 3)).toBe(false)
   })
 })
 
@@ -454,6 +454,8 @@ describe('AgentEngine FastContext scheduling', () => {
     const executeSingleTool = (engine as unknown as {
       executeSingleTool: (toolCall: ToolCall) => Promise<ToolResult>
     }).executeSingleTool.bind(engine)
+    const events: AgentEventType[] = []
+    const unsubscribe = engine.subscribe(event => events.push(event))
 
     try {
       const result = await executeSingleTool({
@@ -468,8 +470,11 @@ describe('AgentEngine FastContext scheduling', () => {
 
       engine.abort()
       await new Promise(resolve => setTimeout(resolve, 0))
-      expect(engine.isFastContextRunning()).toBe(true)
+      expect(engine.isFastContextRunning()).toBe(false)
+      expect(events.filter(event => event.type === 'fast_context:complete')).toHaveLength(1)
+      expect(events.some(event => event.type === 'fast_context:event' && event.event.type === 'phase' && event.event.phase === 'cancelled')).toBe(true)
     } finally {
+      unsubscribe()
       engine.destroy()
       globalThis.fetch = originalFetch
     }
