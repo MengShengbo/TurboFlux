@@ -36,14 +36,15 @@ import type { MascotMood } from './header/Mascot'
 import { stripTextToolCallMarkup } from '../../shared/toolCallMarkup'
 import { useTerminalSize } from '../hooks/useTerminalSize'
 import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
-import { getSafeFrameWidth, getSafeViewportWidth } from '../terminalLayout'
+import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
-import { CockpitHud, resolveCockpitLayout } from './layout/CockpitRails'
+import { resolveCockpitLayout } from './layout/CockpitRails'
+import { SessionSidebar } from './layout/SessionSidebar'
+import { LandingView } from './layout/LandingView'
 import { getStartupAnimationFrame, shouldAnimateStartup, STARTUP_ANIMATION_MS } from './layout/StartupAnimation'
 import { appendFastContextUiEvents, createFastContextUiSummary, reduceFastContextUiSummary } from './layout/fastContextUi'
 import type { DeveloperSubAgentActivity } from './developerFlowModel'
-import { shouldUseCompactWordmark } from '../brand'
 import { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, parseTerminalMouseWheel, shouldEnableMouseTracking } from '../terminalMouse'
 import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
 import {
@@ -64,9 +65,11 @@ import {
   getEngineUserOrdinalForUiMessage,
   isThinkingToggleShortcut,
   resolveAssistantStreamDisplay,
+  resolveLandingFrameWidth,
   serializeToolArgsForUi,
   selectAutoMountedModel,
   shouldUseNoFlicker,
+  shouldShowLandingView,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
 } from './appHelpers'
@@ -78,7 +81,9 @@ export {
   getEngineUserOrdinalForUiMessage,
   isThinkingToggleShortcut,
   resolveAssistantStreamDisplay,
+  resolveLandingFrameWidth,
   selectAutoMountedModel,
+  shouldShowLandingView,
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
@@ -209,24 +214,6 @@ function SessionPane({ running, visible, children }: { running: boolean; visible
   )
 }
 
-function PromptPlaceholder() {
-  const theme = useTheme()
-  const { columns } = useTerminalSize()
-  return (
-    <Box
-      height={3}
-      width={getSafeFrameWidth(columns, 3)}
-      backgroundColor={resolveBackground(theme, 'promptBackground')}
-    />
-  )
-}
-
-function StatusPlaceholder() {
-  const theme = useTheme()
-  const { columns } = useTerminalSize()
-  return <Box height={1} width={getSafeFrameWidth(columns, 3)} backgroundColor={resolveBackground(theme, 'panelRaised')} />
-}
-
 function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation = true, transparentBackground = false }: AppProps) {
   const { exit } = useApp()
   const layoutBackground = transparentBackground ? undefined : '#000000'
@@ -248,7 +235,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [streamThinkingStartedAt, setStreamThinkingStartedAt] = useState<number | undefined>()
   const [showThinking, setShowThinking] = useState(false)
   const [showToolDetails, setShowToolDetails] = useState(verbose)
-  const [showTasksView, setShowTasksView] = useState(false)
   const [currentTurnOutputTokens, setCurrentTurnOutputTokens] = useState(0)
   const [currentTools, setCurrentTools] = useState<ToolStatus[]>([])
   const [streamingToolDraft, setStreamingToolDraft] = useState<StreamingToolDraft | null>(null)
@@ -878,10 +864,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const transcriptRowBudget = useMemo(() => {
     if (!noFlickerActive) return Number.MAX_SAFE_INTEGER
-    const headerRows = (shouldUseCompactWordmark(terminal.columns, terminal.rows) ? 5 : 9) + (config.apiKey ? 0 : 1) + 2
-    const bottomRows = 6
-    return Math.max(4, terminal.rows - headerRows - bottomRows)
-  }, [noFlickerActive, terminal.rows, terminal.columns, config.apiKey])
+    return Math.max(4, terminal.rows - 5)
+  }, [noFlickerActive, terminal.rows])
   const normalizedScrollRows = noFlickerActive
     ? clampTranscriptScroll(scrollRowsFromBottom, transcriptMetrics.maxScrollRows)
     : 0
@@ -1295,11 +1279,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       return
     }
 
-    if (key.ctrl && ch.toLowerCase() === 't') {
-      setShowTasksView(current => !current)
-      return
-    }
-
     if (key.ctrl && ch.toLowerCase() === 'e') {
       setShowToolDetails(current => !current)
       return
@@ -1308,11 +1287,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (noFlickerActive && !cursorMode && !pendingAsk) {
       const mouseEvents = parseTerminalMouseWheel(ch)
       if (mouseEvents.length > 0) {
-        const compactHeader = shouldUseCompactWordmark(terminal.columns, terminal.rows)
-        const transcriptTop = compactHeader ? 5 : 9
+        const transcriptTop = 1
         const transcriptBottom = terminal.rows - 5
-        const transcriptLeft = cockpit.showWorkRail ? cockpit.workWidth + 1 : 1
-        const transcriptRight = terminal.columns - (cockpit.showTaskRail ? cockpit.taskWidth : 0) - 1
+        const transcriptLeft = 1
+        const transcriptRight = cockpit.contentWidth
         const delta = mouseEvents.reduce((total, event) => {
           const insideTranscript = event.x >= transcriptLeft
             && event.x <= transcriptRight
@@ -1378,6 +1356,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const streamTextForDisplay = visibleStreamText
   const reasoningLabel = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
   const reasoningActive = Boolean(reasoningLabel && reasoningLabel !== 'off' && isRunning && runState.phase === 'thinking')
+  const conversationFrameWidth = Math.max(24, cockpit.contentWidth - 2)
 
   const runningNode = (isRunning || fcActive || subAgentActivities.length > 0) ? (
     <Box flexDirection="column" marginBottom={1}>
@@ -1399,7 +1378,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         verbose={verbose}
         idleLabel={isRunning && !noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
         availableWidth={noFlickerActive
-          ? terminal.columns - cockpit.workWidth - cockpit.taskWidth - 8
+          ? cockpit.contentWidth - 4
           : terminal.columns - 4}
       />
     </Box>
@@ -1428,6 +1407,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             onChange={setAskInput}
             onSubmit={submitAskResponse}
             mode={currentMode}
+            width={conversationFrameWidth}
           />
         </Box>
       )}
@@ -1570,14 +1550,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         onPasteImage={handlePasteImage}
         onPasteText={handlePasteText}
         mode={currentMode}
+        width={conversationFrameWidth}
       />
-    </Box>
-  ) : null
-  const transcriptHint = noFlickerActive && activeOverlay === null && isViewingHistory ? (
-    <Box flexShrink={0}>
-      <Text dimColor>
-          {`HISTORY  ${normalizedScrollRows} rows below  PgDn: latest  ·  Ctrl+E tools  ·  Ctrl+T tasks`}
-      </Text>
     </Box>
   ) : null
   const transcriptNode = (
@@ -1589,7 +1563,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       minHeight={0}
       overflow="hidden"
     >
-      {transcriptHint}
       <TranscriptViewport
         scrollRowsFromBottom={normalizedScrollRows}
         onScrollRowsChange={setScrollRowsFromBottom}
@@ -1614,92 +1587,103 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ], [messages])
   const mcpCount = mcpClient.getAllConnections().filter(connection => connection.status === 'connected').length
   const activeTerminalCount = terminalSessions.filter(session => session.status === 'running' || session.status === 'starting').length
+  const landingFrameWidth = resolveLandingFrameWidth(terminal.columns)
+  const showLandingView = shouldShowLandingView({
+    messageCount: messages.length,
+    isRunning,
+    hasPendingAsk: Boolean(pendingAsk),
+    cursorMode,
+    hasOverlay: overlayNode !== null,
+    queuedCount: queuedPrompts.length,
+  })
   if (noFlickerActive) {
     return (
       <ThemeProvider transparentBackground={transparentBackground}>
         <CockpitRoot width={getSafeViewportWidth(terminal.columns)} height={terminal.rows}>
-          <Box flexShrink={0}>
-            <Header
+          {showLandingView ? (
+            <LandingView
+              frameWidth={landingFrameWidth}
               workspacePath={workspacePath}
               mood={mood}
               hasApiKey={!!config.apiKey}
               logoReveal={startupFrame.logoReveal}
               showVersion={startupFrame.showVersion}
               showWorkspace={startupFrame.showWorkspace}
-            />
-          </Box>
-
-          <Box
-            flexDirection="column"
-            flexBasis={0}
-            flexGrow={1}
-            minHeight={0}
-            overflow="hidden"
-            backgroundColor={layoutBackground}
-          >
-            <Box
-              flexDirection="column"
-              flexBasis={0}
-              flexShrink={1}
-              flexGrow={1}
-              minHeight={0}
-              overflow="hidden"
-              backgroundColor={layoutBackground}
-            >
-              <SessionPane running={isRunning} visible={false}>
-                {overlayNode ?? (
-                  <Box flexDirection="column" flexBasis={0} flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
-                    <CockpitHud
-                      columns={terminal.columns}
-                      workspacePath={workspacePath}
-                      model={config.model}
-                      mode={currentMode}
-                      reasoning={reasoningLabel || undefined}
-                      approvalPolicy={config.approvalPolicy}
-                      isRunning={isRunning}
-                      runState={runState}
-                      tools={currentTools}
-                      draft={streamingToolDraft}
-                      streamText={streamTextForDisplay}
-                      thinkingText={streamThinkingText}
-                      fastContextSummary={fcSummary}
-                      fastContextActive={fcActive}
-                      subagents={subAgentActivities}
-                      queuedCount={queuedPrompts.length}
-                      terminals={terminalSessions}
-                      mcpCount={mcpCount}
-                      task={activeTask}
-                      objective={activeObjective?.prompt}
-                      showTask={showTasksView}
-                    />
-                    {transcriptNode}
-                    {pendingAskNode}
-                  </Box>
-                )}
-              </SessionPane>
-            </Box>
-            <Box
-              flexDirection="column"
-              flexShrink={0}
-              backgroundColor={layoutBackground}
-            >
-              {cursorHint}
-              <AgentActivityLine active={isRunning || startupFrame.shimmerActive} persistent />
-              {startupFrame.showPrompt ? promptNode : showPrompt ? <PromptPlaceholder /> : null}
-              {startupFrame.showStatus ? (
-                <StatusLine
-                  config={config}
-                  tokenUsage={tokenUsage}
+              showPrompt={startupFrame.showPrompt && showPrompt}
+              prompt={(
+                <PromptInput
+                  value={input}
+                  onChange={setComposedInput}
+                  onSubmit={handleSubmit}
+                  onAlternateSubmit={handleAlternateSubmit}
+                  onPasteImage={handlePasteImage}
+                  onPasteText={handlePasteText}
                   mode={currentMode}
-                  viewingHistory={isViewingHistory}
+                  width={landingFrameWidth}
+                  placeholder=""
+                />
+              )}
+            />
+          ) : (
+            <Box flexDirection="row" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden" backgroundColor={layoutBackground}>
+              <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} minHeight={0} overflow="hidden">
+                <SessionPane running={isRunning} visible={false}>
+                  {overlayNode ?? (
+                    <Box flexDirection="column" flexBasis={0} flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+                      {transcriptNode}
+                      {pendingAskNode}
+                    </Box>
+                  )}
+                </SessionPane>
+                <Box flexDirection="column" flexShrink={0} backgroundColor={layoutBackground} paddingX={1}>
+                  {cursorHint}
+                  <AgentActivityLine active={isRunning} persistent width={conversationFrameWidth} />
+                  {promptNode}
+                  {!cockpit.showSidebar && (
+                    <StatusLine
+                      config={config}
+                      tokenUsage={tokenUsage}
+                      mode={currentMode}
+                      viewingHistory={isViewingHistory}
+                      gitEnabled={gitEnabled}
+                      gitSnapshot={gitSnapshot}
+                      mcpCount={mcpCount}
+                      terminalCount={activeTerminalCount}
+                      width={conversationFrameWidth}
+                    />
+                  )}
+                </Box>
+              </Box>
+              {cockpit.showSidebar && (
+                <SessionSidebar
+                  width={cockpit.sidebarWidth}
+                  workspacePath={workspacePath}
+                  model={config.model}
+                  mode={currentMode}
+                  reasoning={reasoningLabel || undefined}
+                  approvalPolicy={config.approvalPolicy}
+                  contextWindow={config.contextWindow}
+                  tokenUsage={tokenUsage}
+                  isRunning={isRunning}
+                  runState={runState}
+                  tools={currentTools}
+                  draft={streamingToolDraft}
+                  streamText={streamTextForDisplay}
+                  thinkingText={streamThinkingText}
+                  fastContextSummary={fcSummary}
+                  fastContextActive={fcActive}
+                  subagents={subAgentActivities}
+                  queuedCount={queuedPrompts.length}
+                  terminals={terminalSessions}
+                  mcpCount={mcpCount}
+                  task={activeTask}
+                  objective={activeObjective?.prompt}
                   gitEnabled={gitEnabled}
                   gitSnapshot={gitSnapshot}
-                  mcpCount={mcpCount}
-                  terminalCount={activeTerminalCount}
                 />
-              ) : <StatusPlaceholder />}
+              )}
             </Box>
-          </Box>
+          )}
         </CockpitRoot>
       </ThemeProvider>
     )

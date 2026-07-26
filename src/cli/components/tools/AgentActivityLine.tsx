@@ -7,6 +7,7 @@ import { useTheme } from '../../theme/index'
 interface AgentActivityLineProps {
   active: boolean
   persistent?: boolean
+  width?: number
 }
 
 interface AgentActivitySegment {
@@ -19,7 +20,7 @@ const SHIMMER_STEP = 2
 const BASE_COLOR = '#075985'
 const SWEEP_COLORS = ['#0e7490', '#0891b2', '#22d3ee', '#67e8f9', '#22d3ee', '#0891b2', '#0e7490']
 
-export function AgentActivityLine({ active, persistent = false }: AgentActivityLineProps) {
+export function AgentActivityLine({ active, persistent = false, width: requestedWidth }: AgentActivityLineProps) {
   const { columns } = useTerminalSize()
   const theme = useTheme()
   const [frame, setFrame] = useState(0)
@@ -37,7 +38,7 @@ export function AgentActivityLine({ active, persistent = false }: AgentActivityL
 
   if (!active && !persistent) return null
 
-  const width = Math.max(0, columns - 3)
+  const width = Math.max(0, Math.min(requestedWidth ?? columns - 3, columns - 3))
   const segments = active
     ? buildAgentActivityLineFrame(width, frame)
     : [{ text: '─'.repeat(width), color: theme.subtle, bold: false }]
