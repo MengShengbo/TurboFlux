@@ -5,12 +5,18 @@ import { resolveBackground, useTheme } from '../../theme/index'
 import type { FastContextScanPhase } from '../../../core/fastContextTypes'
 import type { ActiveTaskContext } from '../../../core/taskManager'
 import type { TerminalSessionInfo } from '../../../shared/terminalTypes'
+import type { AgentRunState } from '../../../shared/agentTypes'
 import type { ToolStatus } from '../tools/ToolCallTree'
 import { formatToolLabelForHistory } from '../tools/ToolCallTree'
 import type { StreamingToolDraft } from '../tools/ActiveWorkPanel'
 import type { FastContextUiSummary } from './fastContextUi'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { TURBOFLUX_VERSION } from '../../brand'
+import {
+  deriveDeveloperFlow,
+  type DeveloperFlowTone,
+  type DeveloperSubAgentActivity,
+} from '../developerFlowModel'
 
 export interface CockpitLayout {
   showWorkRail: boolean
@@ -32,15 +38,19 @@ export interface CockpitHudProps {
   reasoning?: string
   approvalPolicy: string
   isRunning: boolean
+  runState: AgentRunState
   tools: ToolStatus[]
   draft: StreamingToolDraft | null
+  streamText?: string
+  thinkingText?: string
   fastContextSummary: FastContextUiSummary
   fastContextActive: boolean
+  subagents: readonly DeveloperSubAgentActivity[]
+  queuedCount: number
   terminals: TerminalSessionInfo[]
   mcpCount: number
   task: ActiveTaskContext | null
   objective?: string | null
-  objectiveStartedAt?: number
   showTask: boolean
 }
 
@@ -52,15 +62,19 @@ export function CockpitHud({
   reasoning,
   approvalPolicy,
   isRunning,
+  runState,
   tools,
   draft,
+  streamText,
+  thinkingText,
   fastContextSummary,
   fastContextActive,
+  subagents,
+  queuedCount,
   terminals,
   mcpCount,
   task,
   objective,
-  objectiveStartedAt,
   showTask,
 }: CockpitHudProps) {
   const theme = useTheme()
@@ -70,31 +84,37 @@ export function CockpitHud({
   const leftWidth = Math.max(20, Math.floor(availableWidth * 0.56))
   const rightWidth = Math.max(16, availableWidth - leftWidth)
   const activeTerminals = terminals.filter(session => session.status === 'running' || session.status === 'starting').length
-  const activeTool = [...tools].reverse().find(tool => tool.status === 'running')
-  const activity = draft
-    ? `PREPARING ${formatDraft(draft, rightWidth)}`
-    : activeTool
-      ? formatToolLabelForHistory(activeTool.name, activeTool.args)
-      : task && isRunning
-        ? `${Math.round(task.progress)}% ${task.title}`
-        : isRunning
-          ? 'PLANNING NEXT STEP'
-          : 'READY'
-  const fastStatus = fastContextActive
-    ? phaseLabel(fastContextSummary.phase)
-    : fastContextSummary.events > 0
-      ? fastContextSummary.phase === 'error' ? 'ERROR' : 'DONE'
-      : 'READY'
-  const taskGoal = showTask ? getTaskRailGoal(isRunning ? task : null, isRunning ? objective : null) : ''
-  const sessionDetails = [model || 'no model', mode.toUpperCase(), reasoning ? `reason:${reasoning}` : '', `approval:${approvalPolicy}`]
+  const flow = deriveDeveloperFlow({
+    runState,
+    isRunning,
+    tools,
+    draft,
+    streamText,
+    thinkingText,
+    fastContextSummary,
+    fastContextActive,
+    subagents,
+    terminals: activeTerminals,
+    queuedCount,
+    task,
+    objective,
+  })
+  const flowColor = resolveFlowColor(flow.tone, theme)
+  const taskGoal = getTaskRailGoal(isRunning ? task : null, isRunning ? objective : null)
+  const sessionDetails = [
+    model || 'no model',
+    mode.toUpperCase(),
+    reasoning ? `reason:${reasoning}` : '',
+    `approval:${approvalPolicy}`,
+    mcpCount > 0 ? `${mcpCount} MCP` : '',
+  ]
     .filter(Boolean)
     .join(' · ')
-  const resourceDetails = taskGoal || [
-    `FC ${fastStatus}`,
-    `TERM ${activeTerminals || 'OFF'}`,
-    `MCP ${mcpCount || 'OFF'}`,
-    showTask ? '' : 'Ctrl+T TASKS',
-  ].filter(Boolean).join(' · ')
+  const backgroundDetails = showTask && taskGoal
+    ? `Task · ${taskGoal}`
+    : flow.background.length > 0
+      ? flow.background.join(' · ')
+      : isRunning && taskGoal ? `Focus · ${taskGoal}` : ''
 
   return (
     <Box flexDirection="column" flexShrink={0} backgroundColor={resolveBackground(theme, 'panelBackground')} paddingX={1}>
@@ -105,9 +125,12 @@ export function CockpitHud({
           <Text color={theme.text} wrap="truncate-middle">{workspacePath}</Text>
         </Box>
         <Box width={rightWidth} justifyContent="flex-end" overflow="hidden">
-          <Text color={isRunning ? theme.brandShimmer : theme.success} bold wrap="truncate-end">
-            {`${isRunning ? '● RUNNING' : '● READY'}${activity !== 'READY' ? ` · ${activity}` : ''}`}
-          </Text>
+          <Box flexShrink={0}>
+            <Text color={flowColor} bold>{`● ${flow.label}`}</Text>
+          </Box>
+          <Box flexShrink={1} minWidth={0} overflow="hidden">
+            <Text color={theme.text} wrap="truncate-middle">{` · ${flow.detail}`}</Text>
+          </Box>
         </Box>
       </Box>
       <Box flexDirection="row" height={1} overflow="hidden">
@@ -115,7 +138,9 @@ export function CockpitHud({
           <Text color={theme.inactive} wrap="truncate-end">{sessionDetails}</Text>
         </Box>
         <Box width={rightWidth} justifyContent="flex-end" overflow="hidden">
-          <Text color={taskGoal ? theme.brandShimmer : theme.inactive} wrap="truncate-end">{resourceDetails}</Text>
+          {backgroundDetails && (
+            <Text color={theme.inactive} wrap="truncate-middle">{`BG · ${backgroundDetails}`}</Text>
+          )}
         </Box>
       </Box>
     </Box>
@@ -393,6 +418,14 @@ function phaseLabel(phase: FastContextScanPhase): string {
   if (phase === 'synthesizing') return 'SYNTHESIZING'
   if (phase === 'completed') return 'COMPLETE'
   return phase.toUpperCase()
+}
+
+function resolveFlowColor(tone: DeveloperFlowTone, theme: ReturnType<typeof useTheme>): string {
+  if (tone === 'warning') return theme.warning
+  if (tone === 'error') return theme.error
+  if (tone === 'success') return theme.success
+  if (tone === 'idle') return theme.inactive
+  return theme.brandShimmer
 }
 
 function progressBar(progress: number, width: number): string {
