@@ -27,10 +27,11 @@ describe('LandingView', () => {
 
     const lines = output.split('\n')
     const brandRow = lines.findIndex(line => line.includes('TurboFlux'))
-    const promptRow = lines.findIndex(line => line.includes('What should we build?'))
+    const promptRow = lines.findIndex(line => line.includes('我们该构建什么？'))
     expect(lines).toHaveLength(36)
     expect(brandRow).toBeGreaterThan(4)
     expect(promptRow).toBeGreaterThan(brandRow)
+    expect(output).toContain('我们该构建什么？')
     expect(output).toContain('workspace C:/workspace/turboflux')
     expect(output).not.toContain('STATUS')
     expect(lines.every(line => line.length <= 120)).toBe(true)

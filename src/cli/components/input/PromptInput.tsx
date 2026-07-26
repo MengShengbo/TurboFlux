@@ -5,6 +5,9 @@ import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
 import { getSafeFrameWidth } from '../../terminalLayout'
 import { isTerminalMouseInput } from '../../terminalMouse'
+import type { Theme } from '../../theme/types'
+
+type PromptAppearance = 'default' | 'landing'
 
 interface PasteTextResult {
   value: string
@@ -22,6 +25,14 @@ interface PromptInputProps {
   mode?: string
   width?: number
   placeholder?: string
+  appearance?: PromptAppearance
+}
+
+export function resolvePromptChrome(theme: Theme, appearance: PromptAppearance): { borderColor: string; backgroundColor?: string } {
+  if (appearance === 'landing') {
+    return { borderColor: theme.brandShimmer, backgroundColor: '#0b0b0b' }
+  }
+  return { borderColor: theme.promptBorder, backgroundColor: resolveBackground(theme, 'promptBackground') }
 }
 
 export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'meta'>): boolean {
@@ -76,7 +87,7 @@ export function getImageTokenRangeAfterDelete(value: string, offset: number): { 
   return { start: offset, end: fullEnd }
 }
 
-export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode, width, placeholder: requestedPlaceholder }: PromptInputProps) {
+export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode, width, placeholder: requestedPlaceholder, appearance = 'default' }: PromptInputProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -265,6 +276,7 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const placeholder = requestedPlaceholder ?? (mode === 'plan' ? 'Describe what to plan...'
     : 'What are we building today?')
   const frameWidth = Math.max(20, Math.min(width ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
+  const promptChrome = resolvePromptChrome(theme, appearance)
   const cursorChar = value[cursorOffset] ?? ' '
   const beforeCursor = value.slice(0, cursorOffset)
   const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
@@ -289,8 +301,8 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
         paddingRight={1}
         paddingY={1}
         borderStyle="single"
-        borderColor={theme.promptBorder}
-        backgroundColor={resolveBackground(theme, 'promptBackground')}
+        borderColor={promptChrome.borderColor}
+        backgroundColor={promptChrome.backgroundColor}
       >
         <Text bold color={theme.brandShimmer}>{'> '}</Text>
         {value ? (
