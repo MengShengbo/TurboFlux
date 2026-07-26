@@ -247,6 +247,7 @@ export interface AgentConfig {
   sandboxPolicy?: SandboxPolicy
   temperature: number
   maxTokens: number
+  /** Soft progress checkpoint. Productive runs continue; stalled or repetitive runs pause for review. */
   maxTurns: number
   contextWindow?: number
   contextPolicy?: ContextPolicyMode

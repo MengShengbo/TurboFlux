@@ -183,6 +183,69 @@ describe('AgentEngine MCP dispatch', () => {
   })
 })
 
+describe('AgentEngine adaptive run budget', () => {
+  it('continues productive tool work beyond the configured soft checkpoint', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      maxTurns: 2,
+      workspacePath: workspace,
+    }, new NodeToolExecutor(workspace), stateProvider)
+    let modelTurn = 0
+    const callModel = vi.spyOn(engine as any, 'callModel').mockImplementation(async () => {
+      modelTurn++
+      if (modelTurn <= 3) {
+        return {
+          id: `assistant-${modelTurn}`,
+          role: 'assistant',
+          content: '',
+          timestamp: Date.now(),
+          toolCalls: [{
+            id: `tool-${modelTurn}`,
+            name: 'read_file',
+            arguments: { path: `src/file-${modelTurn}.ts` },
+          }],
+        } satisfies AgentTurn
+      }
+      return {
+        id: 'assistant-final',
+        role: 'assistant',
+        content: 'Task complete.',
+        timestamp: Date.now(),
+      } satisfies AgentTurn
+    })
+    vi.spyOn(engine as any, 'executeToolCalls').mockImplementation(async (calls: ToolCall[]) => (
+      calls.map(call => ({ toolCallId: call.id, output: 'ok', isError: false }))
+    ))
+    const notifications: string[] = []
+    engine.subscribe(event => {
+      if (event.type === 'notification') notifications.push(event.message)
+    })
+
+    try {
+      const turns = await engine.run('inspect and finish the task')
+
+      expect(callModel).toHaveBeenCalledTimes(4)
+      expect(turns.some(turn => turn.role === 'assistant' && turn.content === 'Task complete.')).toBe(true)
+      expect(notifications).toContain('Work is still progressing; execution budget extended from 2 to 4 turns.')
+      expect(notifications.some(message => message.includes('Max turns reached'))).toBe(false)
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
 describe('AgentEngine aborted tool execution', () => {
   it('returns cancellation results for every tool that did not run', async () => {
     const workspace = process.cwd()
