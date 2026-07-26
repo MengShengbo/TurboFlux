@@ -282,11 +282,10 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const beforeCursor = value.slice(0, cursorOffset)
   const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
   const landingInnerWidth = Math.max(1, frameWidth - 2)
-  const landingFill = ' '.repeat(landingInnerWidth)
   const editorWidth = value
     ? stringWidth(value) + (cursorOffset >= value.length ? 1 : 0)
     : Math.max(1, stringWidth(placeholder))
-  const landingMiddleFill = ' '.repeat(Math.max(0, landingInnerWidth - 3 - editorWidth))
+  const landingMiddleFill = '█'.repeat(Math.max(0, landingInnerWidth - 3 - editorWidth))
   const editorText = value ? (
     <Text backgroundColor={promptChrome.backgroundColor}>
       {beforeCursor}
@@ -321,14 +320,12 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
           borderColor={promptChrome.borderColor}
           overflow="hidden"
         >
-          <Text backgroundColor={promptChrome.backgroundColor}>{landingFill}</Text>
           <Box width={landingInnerWidth} flexDirection="row" overflow="hidden">
             <Text backgroundColor={promptChrome.backgroundColor}>{' '}</Text>
             <Text bold color={theme.brandShimmer} backgroundColor={promptChrome.backgroundColor}>{'> '}</Text>
             {editorText}
-            <Text backgroundColor={promptChrome.backgroundColor}>{landingMiddleFill}</Text>
+            <Text color="#000000">{landingMiddleFill}</Text>
           </Box>
-          <Text backgroundColor={promptChrome.backgroundColor}>{landingFill}</Text>
         </Box>
       ) : (
         <Box
