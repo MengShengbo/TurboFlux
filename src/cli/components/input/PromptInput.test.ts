@@ -1,5 +1,9 @@
+import React from 'react'
+import { renderToString } from 'ink'
+import stripAnsi from 'strip-ansi'
 import { describe, expect, it } from 'vitest'
 import {
+  PromptInput,
   getImageTokenAfter,
   getImageTokenBefore,
   getImageTokenRangeAfterDelete,
@@ -8,6 +12,7 @@ import {
   resolvePromptChrome,
 } from './PromptInput'
 import { darkTheme } from '../../theme/index'
+import { ThemeProvider } from '../../theme/index'
 
 describe('isImagePasteShortcut', () => {
   it('accepts common terminal encodings for image paste shortcuts', () => {
@@ -53,5 +58,27 @@ describe('prompt appearance', () => {
       borderColor: darkTheme.brandShimmer,
       backgroundColor: '#0b0b0b',
     })
+  })
+
+  it('paints every landing prompt cell instead of leaving layout gaps', () => {
+    const output = renderToString(
+      React.createElement(
+        ThemeProvider,
+        { transparentBackground: true },
+        React.createElement(PromptInput, {
+          value: '',
+          onChange: () => {},
+          onSubmit: () => {},
+          width: 30,
+          placeholder: '',
+          appearance: 'landing',
+        }),
+      ),
+      { columns: 40 },
+    )
+    const lines = stripAnsi(output).split('\n')
+
+    expect(lines).toHaveLength(5)
+    expect(lines.every(line => line.length === 30)).toBe(true)
   })
 })
