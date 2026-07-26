@@ -34,6 +34,7 @@ export type SubAgentDriver = 'main-model' | 'deepseek-flash' | 'deepseek-reasone
  * returns 400. The runner handles this transparently.
  */
 export type SubAgentThinking = 'disabled' | 'high' | 'max'
+export type SubAgentDeliveryMode = 'push' | 'pull'
 
 export interface SubAgentDefinition {
   /** Stable id used by spawn_agent and event metadata, e.g. 'fast_context'. */

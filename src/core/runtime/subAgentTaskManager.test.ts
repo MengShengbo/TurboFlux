@@ -33,6 +33,7 @@ describe('SubAgentTaskManager', () => {
       await started.promise
 
       const snapshot = manager.getTask(started.task.id)
+      expect(snapshot).toMatchObject({ deliveryMode: 'pull' })
       expect(snapshot?.runtimeTask).toMatchObject({ status: 'completed', ownerSessionId: 'conversation-1' })
       expect(snapshot?.result).toMatchObject({ ok: true, finalText: 'Runtime inspected' })
       expect(readFileSync(snapshot!.transcriptPath, 'utf8')).toContain('Runtime inspected')
@@ -79,6 +80,10 @@ describe('SubAgentTaskManager', () => {
         type: 'state',
         status: 'stopped',
       }))
+      expect(manager.readTranscript(started.task.id).records).toContainEqual(expect.objectContaining({
+        type: 'result',
+        status: 'stopped',
+      }))
       manager.destroy()
       const recoveredManager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager: new RuntimeTaskManager() })
       try {
@@ -105,6 +110,8 @@ describe('SubAgentTaskManager', () => {
         label: 'FastContext',
         objective: 'Never finish',
         workspacePath,
+        deliveryMode: 'push',
+        parentAgentRunId: 7,
         timeoutMs: 20,
         run: ({ signal }) => new Promise(() => {
           signal.addEventListener('abort', () => { aborted = true }, { once: true })
@@ -112,6 +119,7 @@ describe('SubAgentTaskManager', () => {
       })
 
       await expect(started.promise).rejects.toThrow('FastContext timed out after 20ms')
+      expect(manager.getTask(started.task.id)).toMatchObject({ deliveryMode: 'push', parentAgentRunId: 7 })
       expect(aborted).toBe(true)
       expect(manager.getTask(started.task.id)?.runtimeTask).toMatchObject({
         status: 'failed',

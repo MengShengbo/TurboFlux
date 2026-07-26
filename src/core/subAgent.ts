@@ -39,6 +39,7 @@ export { type SubAgentDefinition }
 // ── 动态代理注册表 ────────────────────────────────────────────────
 
 const dynamicAgents = new Map<string, LoadedAgent>()
+const PROTECTED_BUILTIN_AGENT_IDS = new Set(['fast_context'])
 
 /**
  * 从 .turboflux/agents/ 加载动态代理定义，合并到注册表
@@ -46,6 +47,7 @@ const dynamicAgents = new Map<string, LoadedAgent>()
 export function loadDynamicAgents(workspacePath: string): void {
   const loaded = loadAgentsFromDir(workspacePath)
   for (const agent of loaded) {
+    if (PROTECTED_BUILTIN_AGENT_IDS.has(agent.id)) continue
     dynamicAgents.set(agent.id, agent)
   }
 }
@@ -99,6 +101,9 @@ function formatCodeMapNode(node: CodeMapNode, lines: string[], depth = 0): void 
  * 如果代理有关联的 skills，会自动注册到 SkillRuntime
  */
 export function registerAgent(def: SubAgentDefinition, skillRuntime?: SkillRuntime): void {
+  if (PROTECTED_BUILTIN_AGENT_IDS.has(def.id)) {
+    throw new Error(`Subagent id "${def.id}" is reserved for the built-in production runtime.`)
+  }
   const loaded = def as LoadedAgent
   dynamicAgents.set(def.id, loaded)
 
@@ -123,7 +128,7 @@ export function registerAgent(def: SubAgentDefinition, skillRuntime?: SkillRunti
  * 获取单个代理定义 — 先查动态，再查硬编码
  */
 export function getSubAgentDefinition(type: string): SubAgentDefinition | undefined {
-  return dynamicAgents.get(type) ?? DEFINITIONS[type]
+  return PROTECTED_BUILTIN_AGENT_IDS.has(type) ? DEFINITIONS[type] : dynamicAgents.get(type) ?? DEFINITIONS[type]
 }
 
 /**
@@ -135,6 +140,7 @@ export function getAllAgentDefinitions(): SubAgentDefinition[] {
     map.set(def.id, def)
   }
   for (const [id, def] of dynamicAgents) {
+    if (PROTECTED_BUILTIN_AGENT_IDS.has(id)) continue
     map.set(id, def)
   }
   return [...map.values()]

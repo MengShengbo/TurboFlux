@@ -4,8 +4,10 @@ import type { FastContextScanHit } from './fastContextTypes'
 import {
   __testBuildEvidencePack,
   __testFastContextDefinition,
+  FAST_CONTEXT_RACE_TOOLS,
   runFastContextSubagent,
 } from './fastContextSubagent'
+import { registerAgent } from './subAgent'
 
 describe('FastContext controller', () => {
   it('uses one model-led adaptive controller', () => {
@@ -19,6 +21,24 @@ describe('FastContext controller', () => {
     expect(definition.systemPrompt).toContain('search_symbol')
     expect(definition.systemPrompt).toContain('exact repeats are cached')
     expect(definition.systemPrompt).not.toContain('request_more_search')
+  })
+
+  it('protects the production FCRace definition from dynamic overrides', () => {
+    expect(() => registerAgent({
+      id: 'fast_context',
+      label: 'Legacy FastContext',
+      description: 'override',
+      driver: 'main-model',
+      systemPrompt: 'legacy',
+      maxTurns: 1,
+      maxParallel: 1,
+    })).toThrow('reserved for the built-in production runtime')
+
+    expect(__testFastContextDefinition()).toMatchObject({
+      label: 'FastContext Controller',
+      maxTurns: 6,
+      maxParallel: 6,
+    })
   })
 
   it('does not touch the workspace without an active model', async () => {
@@ -129,6 +149,8 @@ describe('FastContext controller', () => {
       })
 
       expect(result.evidencePack).toContain('src/owner.ts')
+      expect(result.engine).toBe('fcrace-v1')
+      expect(FAST_CONTEXT_RACE_TOOLS).toEqual(['search_content', 'search_files', 'search_symbol', 'read_file', 'submit_code_map'])
       expect(result.telemetry).toMatchObject({
         toolCalls: 1,
         readCalls: 1,

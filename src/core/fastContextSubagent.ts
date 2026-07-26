@@ -8,7 +8,7 @@ import type {
   FastContextScanResult,
   FastContextStrategy,
 } from './fastContextTypes'
-import { getFastContextProfile } from './fastContextTypes'
+import { FAST_CONTEXT_ENGINE_ID, getFastContextProfile } from './fastContextTypes'
 import {
   getSubAgentDefinition,
   renderSubmittedCodeMap,
@@ -16,6 +16,7 @@ import {
 } from './subAgent'
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 60_000
+export const FAST_CONTEXT_RACE_TOOLS = ['search_content', 'search_files', 'search_symbol', 'read_file', 'submit_code_map'] as const
 
 interface RunParams {
   workspacePath: string
@@ -233,7 +234,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     maxTransientAttempts: 3,
     requireGroundedReport: true,
     maxCandidates: profile.maxCandidates,
-    allowedTools: ['search_content', 'search_files', 'search_symbol', 'read_file', 'submit_code_map'],
+    allowedTools: [...FAST_CONTEXT_RACE_TOOLS],
     userPrompt: [
       `Objective: ${params.objective}`,
       '',
@@ -264,6 +265,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   emit({ type: 'insight', text: `FastContext grounded ${result.codeMap.candidates.length} candidate(s) in ${result.turns} turn(s)`, tone: 'success' })
 
   return {
+    engine: FAST_CONTEXT_ENGINE_ID,
     objective: params.objective,
     strategy,
     evidencePack,
