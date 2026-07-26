@@ -190,50 +190,6 @@ const DEFINITIONS: Record<string, SubAgentDefinition> = {
     maxParallel: FAST_CONTEXT_TUNING.maxParallel,
     temperature: 0,
   },
-  explorer: {
-    id: 'explorer',
-    label: 'Explorer',
-    description: 'Deep multi-file investigation. Use for tracing call chains, understanding a feature end-to-end, or auditing a complex subsystem.',
-    driver: 'deepseek-flash',
-    systemPrompt: `You are a deep-dive code investigator. Trace call chains, read implementations, follow imports, and produce a grounded report with file:line citations.
-
-Tools available: search_content, read_file, search_files.
-Strategy:
-1. Identify entry points via search_content.
-2. Read implementations — follow function calls and imports across files.
-3. Parallelize independent reads in the same turn.
-4. Report findings as concrete file:line references with brief code excerpts.
-Do NOT summarize from filenames alone. Every claim must come from code you read.`,
-    maxTurns: 6,
-    maxParallel: 6,
-    thinking: 'disabled',
-  },
-  reviewer: {
-    id: 'reviewer',
-    label: 'Reviewer',
-    description: 'Code review for bugs, security issues, and design problems.',
-    driver: 'deepseek-flash',
-    systemPrompt: `You are a code reviewer. Read the relevant source files and identify bugs, security vulnerabilities, performance issues, and design problems.
-
-Tools available: search_content, read_file, search_files.
-For each finding, cite the exact file:line and quote the problematic code. Categorize as: bug / security / performance / design. Suggest a concrete fix.`,
-    maxTurns: 5,
-    maxParallel: 6,
-    thinking: 'disabled',
-  },
-  git_inspector: {
-    id: 'git_inspector',
-    label: 'Git Inspector',
-    description: 'Analyze recent git changes: what was modified, why, and what the diff shows.',
-    driver: 'deepseek-flash',
-    systemPrompt: `You analyze git history and diffs to explain recent changes.
-
-Tools available: search_content, read_file, search_files.
-Focus on: what changed, which files were affected, likely intent. Return a concise summary with file:line citations.`,
-    maxTurns: 4,
-    maxParallel: 4,
-    thinking: 'disabled',
-  },
 }
 
 export function buildFastContextSystemPrompt(strategy: FastContextStrategy = 'autonomous-race'): string {

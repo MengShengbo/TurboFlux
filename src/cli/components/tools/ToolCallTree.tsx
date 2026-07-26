@@ -175,6 +175,16 @@ export function formatToolLabelForHistory(name: string, argsJson?: string): stri
       case 'explore_code': return `Explore "${(str('objective') || str('query')).slice(0, 56)}"`
       case 'web_search': return `Web "${str('query').slice(0, 56)}"`
       case 'run_command': return `Run ${str('command').slice(0, 60)}`
+      case 'git_status': return 'Git status'
+      case 'git_diff': return `Git diff${str('scope') ? ` (${str('scope')})` : ''}${str('path') ? ` ${str('path')}` : ''}`
+      case 'git_log': return `Git log${str('path') ? ` ${str('path')}` : ''}`
+      case 'git_show': return `Git show ${str('revision')}`
+      case 'git_stage': return 'Git stage paths'
+      case 'git_commit': return `Git commit: ${str('message').slice(0, 48)}`
+      case 'git_create_branch': return `Git branch +${str('name')}`
+      case 'git_switch_branch': return `Git switch ${str('name')}`
+      case 'git_stash': return `Git stash ${str('action')}`
+      case 'git_push': return `Git push ${str('remote') || 'origin'}${str('branch') ? `/${str('branch')}` : ''}`
       case 'create_checkpoint': return 'Checkpoint'
       case 'create_task': return `Task: ${str('title')}`
       case 'create_tasks': return 'Create tasks'

@@ -6,6 +6,7 @@ import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { getSafeFrameWidth } from '../../terminalLayout'
 import type { TurboFluxConfig } from '../../../core/config'
 import { formatNativeReasoningSetting } from '../../../core/modelRegistry'
+import type { GitSnapshot } from '../../../core/gitService'
 import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
 
 interface StatusLineProps {
@@ -14,6 +15,7 @@ interface StatusLineProps {
   mode?: AgentMode
   viewingHistory?: boolean
   gitEnabled?: boolean
+  gitSnapshot?: GitSnapshot | null
   mcpCount?: number
   terminalCount?: number
 }
@@ -29,6 +31,7 @@ export function StatusLine({
   mode = 'vibe',
   viewingHistory = false,
   gitEnabled = false,
+  gitSnapshot = null,
   mcpCount = 0,
   terminalCount = 0,
 }: StatusLineProps) {
@@ -49,13 +52,22 @@ export function StatusLine({
   const frameWidth = getSafeFrameWidth(columns, 3)
   const modelPart = config.model || 'no model connection'
   const reasoningSetting = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
+  const gitChangedCount = gitSnapshot?.files.length || 0
+  const gitTracking = gitSnapshot
+    ? [gitSnapshot.ahead > 0 ? `+${gitSnapshot.ahead}` : '', gitSnapshot.behind > 0 ? `-${gitSnapshot.behind}` : ''].filter(Boolean).join('/')
+    : ''
+  const gitPart = !gitEnabled
+    ? 'git:off'
+    : !gitSnapshot
+      ? 'git:loading'
+      : `git:${gitSnapshot.branch}${gitTracking ? ` ${gitTracking}` : ''}${gitSnapshot.conflictedCount > 0 ? ` !${gitSnapshot.conflictedCount}` : gitChangedCount > 0 ? ` · ${gitChangedCount} changed` : ' clean'}`
   const primaryParts = [
     modelPart,
     reasoningSetting ? `reason:${reasoningSetting}` : '',
     `approval:${config.approvalPolicy}`,
   ].filter(Boolean)
   const secondaryParts = [
-    `git:${gitEnabled ? 'on' : 'off'}`,
+    gitPart,
     `mcp:${mcpCount > 0 ? mcpCount : 'off'}`,
     terminalCount > 0 ? `term:${terminalCount}` : '',
     viewingHistory ? 'history' : '',
@@ -70,9 +82,10 @@ export function StatusLine({
   const parts = [
     ...primaryParts,
     ...(columns >= 82 ? [contextLabel] : []),
-    ...(columns >= 100 && outputLabel ? [outputLabel] : []),
-    ...(columns >= 100 && cacheLabel ? [cacheLabel] : []),
-    ...(columns >= 112 ? secondaryParts : []),
+    ...(columns >= 100 ? [gitPart] : []),
+    ...(columns >= 145 && outputLabel ? [outputLabel] : []),
+    ...(columns >= 155 && cacheLabel ? [cacheLabel] : []),
+    ...(columns >= 170 ? secondaryParts.filter(part => part !== gitPart) : []),
   ]
   const usageWidth = hasProviderUsage && total > 0 ? barWidth + 7 : 0
   const textWidth = Math.max(12, frameWidth - 9 - usageWidth)

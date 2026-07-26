@@ -163,17 +163,17 @@ commandRegistry.register({
 // /git
 commandRegistry.register({
   name: 'git',
-  description: 'Toggle Git integration (on/off). Enables git-based checkpoints and injects git status into context.',
+  description: 'Toggle structured Git integration, repository context, status UI, and isolated AI auto-commits.',
   type: 'local',
   execute: (args, ctx) => {
     const sub = args.trim().toLowerCase()
     if (sub === 'off' || sub === 'disable') {
       ctx.engine.setGitEnabled(false)
-      return 'Git integration disabled. Checkpoints will use internal snapshots.'
+      return 'Git integration disabled. Local History remains active.'
     }
     if (sub === 'on' || sub === 'enable') {
       ctx.engine.setGitEnabled(true)
-      return 'Git integration enabled. Checkpoints will use git commits.'
+      return 'Git integration enabled. Repository context and isolated AI auto-commits are active.'
     }
     const current = ctx.engine.isGitEnabled()
     const next = !current

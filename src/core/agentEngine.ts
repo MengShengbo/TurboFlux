@@ -78,7 +78,24 @@ import type { ToolExecutor, WebSearchResult } from '../tools/executor'
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
 import type { TreeNode } from '../shared/types'
 import { parseTextToolCalls, stripTextToolCallMarkup } from '../shared/toolCallMarkup'
-import { detectGitRepo, fetchGitInfo, formatGitStatusForPrompt, gitCommitCheckpoint, gitResetToCommit } from './gitService'
+import {
+  detectGitRepo,
+  fetchGitDiff,
+  fetchGitLog,
+  fetchGitShow,
+  fetchGitSnapshot,
+  formatGitSnapshotForPrompt,
+  formatGitSnapshotForTool,
+  gitCommit,
+  gitCommitPaths,
+  gitCreateBranch,
+  gitPush,
+  gitStagePaths,
+  gitStash,
+  gitSwitchBranch,
+  type GitDiffScope,
+  type GitSnapshot,
+} from './gitService'
 import { hashText } from './fileIO'
 import { RuntimeTaskManager } from './runtime/runtimeTaskManager'
 import { SubAgentTaskManager, type SubAgentTaskSnapshot } from './runtime/subAgentTaskManager'
@@ -232,6 +249,7 @@ export type AgentEventType =
   }
   | { type: 'context:segment_created'; segment: ContextSegment }
   | { type: 'checkpoint:attached'; assistantMessageId: string; checkpointId: string; checkpointLabel: string }
+  | { type: 'git:status'; enabled: boolean; snapshot: GitSnapshot | null }
   | { type: 'fast_context:event'; runId: string; event: FastContextScanEvent }
   | { type: 'fast_context:complete'; runId: string; result: FastContextScanResult }
   | { type: 'subagent:start'; agentId: string; agentType: string; label: string; objective: string; runKind: 'fast_context' | 'spawn_agent' }
@@ -415,6 +433,7 @@ export class AgentEngine {
   private workspaceSkeletonPath: string | null = null
   private gitEnabled: boolean = false
   private cachedGitStatus: string | null = null
+  private gitSnapshot: GitSnapshot | null = null
   private gitDetected: boolean = false
   // Workspace long-term memory (M1: static loaders only).
   // Injection text is owned by the main process MemoryService — we just
@@ -772,11 +791,21 @@ export class AgentEngine {
     return this.gitEnabled
   }
 
+  getGitSnapshot(): GitSnapshot | null {
+    return this.gitSnapshot
+  }
+
   setGitEnabled(enabled: boolean): void {
     this.gitEnabled = enabled
     this.config.gitEnabled = enabled
     this.session.gitEnabled = enabled
-    if (!enabled) this.cachedGitStatus = null
+    if (!enabled) {
+      this.cachedGitStatus = null
+      this.gitSnapshot = null
+      this.emit({ type: 'git:status', enabled: false, snapshot: null })
+    } else {
+      void this.refreshGitStatus()
+    }
     this.invalidateStaticPromptCache()
   }
 
@@ -796,8 +825,10 @@ export class AgentEngine {
 
   private async refreshGitStatus(): Promise<void> {
     if (!this.gitEnabled || !this.config.workspacePath) return
-    const info = await fetchGitInfo(this.config.workspacePath, this.toolExecutor).catch(() => null)
-    this.cachedGitStatus = info ? formatGitStatusForPrompt(info) : null
+    const snapshot = await fetchGitSnapshot(this.config.workspacePath, this.toolExecutor).catch(() => null)
+    this.gitSnapshot = snapshot
+    this.cachedGitStatus = snapshot ? formatGitSnapshotForPrompt(snapshot) : null
+    this.emit({ type: 'git:status', enabled: this.gitEnabled, snapshot })
   }
 
   async compactContext(): Promise<void> {
@@ -4091,7 +4122,7 @@ Before retrying:
   /**
    * Build a STABLE workspace skeleton primer for subagent calls.
    *
-   * Used by Fast Context / Explorer / Reviewer to seed a deterministic
+   * Used by FastContext and project-defined agents to seed a deterministic
    * cache prefix unit that DeepSeek V4 can persist (see SubAgentInvocation.codemap).
    *
    * Stability is the whole point — this primer must be IDENTICAL across
@@ -4464,6 +4495,20 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           this.pendingCheckpoint = {
             hash: result.checkpointId,
             message: result.label || `Auto-checkpoint after file operations`,
+          }
+          if (this.gitEnabled) {
+            const gitResult = await gitCommitPaths(
+              this.config.workspacePath,
+              'chore(turboflux): checkpoint AI changes',
+              filePaths,
+              this.toolExecutor,
+            )
+            if (!gitResult.ok) {
+              this.emit({ type: 'notification', level: 'warning', message: `Local checkpoint saved; Git auto-commit skipped: ${gitResult.error}` })
+            } else if (!gitResult.nothingToCommit) {
+              this.emit({ type: 'notification', level: 'success', message: `Git auto-commit ${gitResult.hash?.slice(0, 8) || 'created'}` })
+            }
+            await this.refreshGitStatus()
           }
           this.touchedFilePaths.clear()
           this.filePreimages.clear()
@@ -5331,6 +5376,99 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         return `Memory forgotten: ${id}`
       }
 
+      case 'git_status': {
+        if (!basePath) return 'Error: no workspace selected'
+        const snapshot = await fetchGitSnapshot(basePath, this.toolExecutor)
+        if (!snapshot) return 'Error: workspace is not a readable Git repository'
+        if (this.gitEnabled) {
+          this.gitSnapshot = snapshot
+          this.cachedGitStatus = formatGitSnapshotForPrompt(snapshot)
+          this.emit({ type: 'git:status', enabled: true, snapshot })
+        }
+        return formatGitSnapshotForTool(snapshot)
+      }
+
+      case 'git_diff': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await fetchGitDiff(
+          basePath,
+          this.toolExecutor,
+          (args.scope as GitDiffScope | undefined) || 'working',
+          args.path as string | undefined,
+          args.context_lines as number | undefined,
+        )
+        return result.ok ? result.output || 'No tracked changes.' : `Error: ${result.error}`
+      }
+
+      case 'git_log': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await fetchGitLog(basePath, this.toolExecutor, args.limit as number | undefined, args.path as string | undefined)
+        return result.ok ? result.output || 'No commits found.' : `Error: ${result.error}`
+      }
+
+      case 'git_show': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await fetchGitShow(basePath, this.toolExecutor, args.revision as string, args.path as string | undefined)
+        return result.ok ? result.output || 'No output.' : `Error: ${result.error}`
+      }
+
+      case 'git_stage': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await gitStagePaths(basePath, args.paths as string[], this.toolExecutor)
+        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        return result.ok ? result.output || 'Paths staged.' : `Error: ${result.error}`
+      }
+
+      case 'git_commit': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await gitCommit(basePath, args.message as string, this.toolExecutor, args.paths as string[] | undefined)
+        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        if (!result.ok) return `Error: ${result.error}`
+        if (result.nothingToCommit) return 'Nothing to commit.'
+        return `${result.hash ? `Commit ${result.hash}` : 'Commit created'}${result.output ? `\n${result.output}` : ''}`
+      }
+
+      case 'git_create_branch': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await gitCreateBranch(basePath, args.name as string, this.toolExecutor, args.start_point as string | undefined)
+        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        return result.ok ? result.output || 'Branch created.' : `Error: ${result.error}`
+      }
+
+      case 'git_switch_branch': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await gitSwitchBranch(basePath, args.name as string, this.toolExecutor)
+        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        return result.ok ? result.output || 'Branch switched.' : `Error: ${result.error}`
+      }
+
+      case 'git_stash': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await gitStash(
+          basePath,
+          args.action as 'list' | 'push' | 'apply' | 'pop',
+          this.toolExecutor,
+          {
+            message: args.message as string | undefined,
+            includeUntracked: args.include_untracked === true,
+            stash: args.stash as string | undefined,
+          },
+        )
+        if (result.ok && this.gitEnabled && args.action !== 'list') await this.refreshGitStatus()
+        return result.ok ? result.output || 'Stash operation completed.' : `Error: ${result.error}`
+      }
+
+      case 'git_push': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await gitPush(basePath, this.toolExecutor, {
+          remote: args.remote as string | undefined,
+          branch: args.branch as string | undefined,
+          setUpstream: args.set_upstream === true,
+        })
+        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        return result.ok ? result.output || 'Push completed.' : `Error: ${result.error}`
+      }
+
       case 'run_command': {
         const cwd = args.cwd ? this.resolvePath(basePath, args.cwd as string) : basePath
         const env = args.env as Record<string, string> | undefined
@@ -5730,17 +5868,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           return `No AI-touched files to checkpoint`
         }
 
-        if (this.gitEnabled) {
-          const gitResult = await gitCommitCheckpoint(basePath, checkpointMessage, filePaths, this.toolExecutor)
-          if (!gitResult.ok) return `Error: git checkpoint failed — ${gitResult.error}`
-          if (gitResult.nothingToCommit) return `Checkpoint skipped — nothing to commit`
-          this.pendingCheckpoint = { hash: gitResult.hash || 'HEAD', message: checkpointMessage }
-          this.touchedFilePaths.clear()
-          this.filePreimages.clear()
-          await this.refreshGitStatus()
-          return `Git checkpoint: ${gitResult.hash} — ${checkpointMessage}`
-        }
-
         const preimages = this.filePreimages.size > 0 ? Object.fromEntries(this.filePreimages) : undefined
         const result = await this.toolExecutor.checkpointCreate?.(basePath, checkpointMessage, filePaths, 'explicit', preimages)
         if (!result?.success) {
@@ -5749,9 +5876,17 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const cpResult = result as { checkpointId?: string; label?: string; shortId?: string }
         if (!cpResult.checkpointId) return `No changes to checkpoint`
         this.pendingCheckpoint = { hash: cpResult.checkpointId, message: cpResult.label || checkpointMessage }
+        let gitMessage = ''
+        if (this.gitEnabled) {
+          const gitResult = await gitCommitPaths(basePath, checkpointMessage, filePaths, this.toolExecutor)
+          gitMessage = gitResult.ok
+            ? gitResult.nothingToCommit ? ' Git had no additional changes.' : ` Git commit: ${gitResult.hash || 'created'}.`
+            : ` Git commit skipped: ${gitResult.error}`
+          await this.refreshGitStatus()
+        }
         this.touchedFilePaths.clear()
         this.filePreimages.clear()
-        return `Checkpoint created: ${cpResult.shortId} - ${checkpointMessage}`
+        return `Checkpoint created: ${cpResult.shortId} - ${checkpointMessage}.${gitMessage}`
       }
 
       case 'list_checkpoints': {

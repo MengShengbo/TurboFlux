@@ -77,16 +77,31 @@ describe('StatusLine', () => {
         }}
         tokenUsage={{ source: 'provider', input: 40_000, output: 512, cached: 32_000 }}
         gitEnabled
+        gitSnapshot={{
+          branch: 'main',
+          head: 'abc123',
+          upstream: 'origin/main',
+          ahead: 2,
+          behind: 0,
+          detached: false,
+          clean: false,
+          files: [{ path: 'src/app.ts', indexStatus: '', worktreeStatus: 'M', staged: false, unstaged: true, untracked: false, conflicted: false }],
+          stagedCount: 0,
+          unstagedCount: 1,
+          untrackedCount: 0,
+          conflictedCount: 0,
+          recentCommits: [],
+        }}
         mcpCount={2}
         terminalCount={1}
       />,
-      140,
+      190,
     )
 
     expect(output).toContain('ctx 40.0k/200.0k')
     expect(output).toContain('out 512')
     expect(output).toContain('cache 32.0k')
-    expect(output).toContain('git:on')
+    expect(output).toContain('git:main +2 · 1 changed')
     expect(output).toContain('mcp:2')
     expect(output).toContain('term:1')
   })

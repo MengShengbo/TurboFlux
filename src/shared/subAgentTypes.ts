@@ -1,7 +1,4 @@
-// Generic SubAgent types — the core contract that lets us spin up multiple
-// kinds of read-only retrieval / exploration agents (Fast Context, Explorer,
-// Reviewer, ...) without duplicating the loop code. The first concrete user
-// is Fast Context; spawn_agent exposes more types to the main agent.
+// Generic SubAgent types shared by FastContext and project-defined agents.
 
 /**
  * Subagent driver tag.
@@ -57,8 +54,8 @@ export interface SubAgentDefinition {
   temperature?: number
   /**
    * Reasoning effort. Defaults to 'disabled' if omitted — matches the
-   * previous behavior where Fast Context never asked for thinking, and
-   * keeps cost predictable. Explorer/Reviewer override explicitly.
+   * previous behavior where FastContext never asked for thinking and keeps
+   * cost predictable. Project-defined agents may override it explicitly.
    */
   thinking?: SubAgentThinking
 }

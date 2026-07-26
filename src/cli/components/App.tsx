@@ -23,6 +23,7 @@ import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
 import { formatMarkdown } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
+import type { GitSnapshot } from '../../core/gitService'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
 import type { ActiveTaskContext } from '../../core/taskManager'
 import { applyPreset, saveConfig, setConfigValue, type ModelPreset, type TurboFluxConfig } from '../../core/config'
@@ -254,6 +255,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [tokenUsage, setTokenUsage] = useState<TokenUsage>({ source: 'unknown' })
   const [currentMode, setCurrentMode] = useState<'vibe' | 'plan'>('vibe')
   const [gitEnabled, setGitEnabled] = useState(false)
+  const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null)
   const [modelPresets, setModelPresets] = useState<ModelPreset[]>([])
   const [modelDiscoveryStatus, setModelDiscoveryStatus] = useState({
     isRefreshing: false,
@@ -486,6 +488,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setScrollRowsFromBottom(0)
     setTokenUsage(engine.getContextUsage())
     setGitEnabled(engine.isGitEnabled())
+    setGitSnapshot(engine.getGitSnapshot())
     setCurrentTools([])
     setStreamingToolDraft(null)
     setChangeSummaries([])
@@ -760,6 +763,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'terminal:sessions':
           setTerminalSessions(event.sessions)
           break
+        case 'git:status':
+          setGitEnabled(event.enabled)
+          setGitSnapshot(event.snapshot)
+          break
         case 'runtime-task:finished': {
           const sessionId = event.task.metadata?.sessionId
           if (event.task.kind === 'terminal' && typeof sessionId === 'string') {
@@ -828,6 +835,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'mode:change':
           setCurrentMode(event.to)
           setGitEnabled(engine.isGitEnabled())
+          setGitSnapshot(engine.getGitSnapshot())
           break
       }
     })
@@ -1223,6 +1231,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const result = commandRegistry.execute(trimmed, ctx)
       setTokenUsage(engine.getContextUsage())
       setGitEnabled(engine.isGitEnabled())
+      setGitSnapshot(engine.getGitSnapshot())
       switch (result.type) {
         case 'text':
           appendMessages([{ id: genMsgId(), role: 'system', content: result.text! }])
@@ -1671,6 +1680,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   mode={currentMode}
                   viewingHistory={isViewingHistory}
                   gitEnabled={gitEnabled}
+                  gitSnapshot={gitSnapshot}
                   mcpCount={mcpCount}
                   terminalCount={activeTerminalCount}
                 />
@@ -1732,7 +1742,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
         {/* Status line at bottom */}
-        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} />
+        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} gitSnapshot={gitSnapshot} />
         <AgentActivityLine active={isRunning} />
       </Box>
     </ThemeProvider>

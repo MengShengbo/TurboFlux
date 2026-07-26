@@ -2,6 +2,19 @@ import { describe, it, expect } from 'vitest'
 import { PermissionPipeline } from './permissions'
 
 describe('PermissionPipeline', () => {
+  it('requires approval for structured Git pushes', () => {
+    const pipeline = new PermissionPipeline('agent')
+    const args = { remote: 'origin', branch: 'main' }
+    expect(pipeline.check('git_push', args).verdict).toBe('ask')
+    pipeline.grantRun('git_push', JSON.stringify(args))
+    expect(pipeline.check('git_push', args).verdict).toBe('allow')
+  })
+
+  it('allows isolated commits but asks before committing the current index', () => {
+    const pipeline = new PermissionPipeline('agent')
+    expect(pipeline.check('git_commit', { message: 'safe', paths: ['src/app.ts'] }).verdict).toBe('allow')
+    expect(pipeline.check('git_commit', { message: 'all staged changes' }).verdict).toBe('ask')
+  })
   describe('dangerous command blocking', () => {
     it('denies rm -rf /', () => {
       const pipeline = new PermissionPipeline()
@@ -115,10 +128,10 @@ describe('PermissionPipeline', () => {
       expect(result.verdict).toBe('allow')
     })
 
-    it('allows git commit', () => {
+    it('asks before a raw git commit', () => {
       const pipeline = new PermissionPipeline()
       const result = pipeline.check('run_command', { command: 'git commit -m "feat: add feature"' })
-      expect(result.verdict).toBe('allow')
+      expect(result.verdict).toBe('ask')
     })
 
     it('allows non-command tools', () => {

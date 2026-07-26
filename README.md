@@ -89,9 +89,6 @@ TurboFlux 有两种工作模式：
 内置子代理：
 
 - **fast_context**：在独立上下文中搜索项目，返回相关文件和行号。
-- **explorer**：追踪功能实现、调用链和跨文件关系。
-- **reviewer**：检查代码质量、安全问题和潜在缺陷。
-- **git_inspector**：分析提交记录和代码变更。
 
 FastContext 由主 Agent 按需调用，不提供单独的 `/fastcontext` 命令，并始终跟随当前主模型。
 
@@ -143,9 +140,12 @@ TurboFlux 会根据模型返回的 token 用量管理长会话：
 | `/new` | 开始新会话 |
 | `/mcp` | 查看 MCP 服务与工具 |
 | `/skills` | 查看已加载的 Skills |
+| `/git` | 开关结构化 Git 集成与 AI 变更自动提交 |
 
 > [!NOTE]
-> 文件修改默认保存到本地历史，不创建 Git 提交。在 Git 仓库中使用 `/git on` 后，checkpoint 才会提交本轮 Agent 触碰的文件；不会自动 push。
+> 文件修改始终保存到独立的本地历史。在 Git 仓库中使用 `/git on` 后，TurboFlux 会显示分支与工作树状态，并使用隔离 index 自动提交 Agent 触碰的文件；用户已有的 staged 内容不会混入提交，也不会自动 push。
+
+Agent 可直接使用结构化的 status、diff、log、show、stage、commit、branch、stash 和 push 工具。复杂 Git 操作仍可通过终端完成；push 必须经过审批，强制推送、硬重置和清理工作树不属于结构化工具能力。
 
 ## Skills 与 MCP
 

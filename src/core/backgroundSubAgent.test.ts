@@ -3,6 +3,20 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAgentRuntime } from './runtime/agentRuntime'
+import { registerAgent } from './subAgent'
+
+function registerTestAgent(id: string): void {
+  registerAgent({
+    id,
+    label: id,
+    description: 'Background subagent lifecycle fixture',
+    driver: 'main-model',
+    systemPrompt: 'Complete the requested read-only task and return a concise result.',
+    maxTurns: 2,
+    maxParallel: 2,
+    thinking: 'disabled',
+  })
+}
 
 async function waitForStatus(getStatus: () => string | undefined, expected: string): Promise<void> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -22,6 +36,7 @@ describe('AgentEngine background subagent tools', () => {
 
   it('returns an agent ID immediately, then exposes the persisted result', async () => {
     const workspacePath = mkdtempSync(path.join(tmpdir(), 'turboflux-agent-engine-bg-'))
+    registerTestAgent('background_test_agent')
     const runtime = createAgentRuntime({
       workspacePath,
       workspaceName: 'background-agent-test',
@@ -54,7 +69,7 @@ describe('AgentEngine background subagent tools', () => {
 
     try {
       const launchResult = await dispatchTool('spawn_agent', {
-        agent_type: 'explorer',
+        agent_type: 'background_test_agent',
         objective: 'Find the runtime entry point',
       })
       const agentId = launchResult.match(/Agent ID: ([\w-]+)/)?.[1]
@@ -88,6 +103,7 @@ describe('AgentEngine background subagent tools', () => {
 
   it('cancels a running agent by ID', async () => {
     const workspacePath = mkdtempSync(path.join(tmpdir(), 'turboflux-agent-engine-cancel-'))
+    registerTestAgent('cancel_test_agent')
     const runtime = createAgentRuntime({
       workspacePath,
       workspaceName: 'cancel-agent-test',
@@ -116,7 +132,7 @@ describe('AgentEngine background subagent tools', () => {
 
     try {
       const launchResult = await dispatchTool('spawn_agent', {
-        agent_type: 'reviewer',
+        agent_type: 'cancel_test_agent',
         objective: 'Review cancellation behavior',
       })
       const agentId = launchResult.match(/Agent ID: ([\w-]+)/)?.[1]

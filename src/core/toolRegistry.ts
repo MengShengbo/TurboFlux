@@ -234,6 +234,141 @@ const tools: EnhancedToolDef[] = [
     isConcurrencySafe: true,
   },
   {
+    name: 'git_status',
+    description: 'Read structured repository state: branch, HEAD, upstream divergence, conflicts, staged/unstaged/untracked counts, changed paths, and recent commits.',
+    category: 'read',
+    parameters: [],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+    requiredMode: ['vibe', 'plan'],
+    maxResultSizeChars: 30_000,
+  },
+  {
+    name: 'git_diff',
+    description: 'Read a bounded Git diff without shell quoting. Use working for unstaged changes, staged for the index, or all for both. Untracked file contents are not included.',
+    category: 'read',
+    parameters: [
+      { name: 'scope', type: 'string', description: 'Which changes to compare', required: false, enum: ['working', 'staged', 'all'], default: 'working' },
+      { name: 'path', type: 'string', description: 'Optional workspace-relative path filter', required: false },
+      { name: 'context_lines', type: 'number', description: 'Diff context lines, from 0 to 50', required: false, default: 3 },
+    ],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+    requiredMode: ['vibe', 'plan'],
+    maxResultSizeChars: 60_000,
+  },
+  {
+    name: 'git_log',
+    description: 'Read recent commit history, optionally limited to one path. Returns stable tab-separated commit metadata.',
+    category: 'read',
+    parameters: [
+      { name: 'limit', type: 'number', description: 'Commit count from 1 to 100', required: false, default: 10 },
+      { name: 'path', type: 'string', description: 'Optional workspace-relative path filter', required: false },
+    ],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+    requiredMode: ['vibe', 'plan'],
+    maxResultSizeChars: 30_000,
+  },
+  {
+    name: 'git_show',
+    description: 'Inspect one commit or revision with metadata and patch, optionally filtered to one path. Revisions and paths are validated before Git runs.',
+    category: 'read',
+    parameters: [
+      { name: 'revision', type: 'string', description: 'Commit hash or revision such as HEAD, HEAD~2, main, or origin/main', required: true },
+      { name: 'path', type: 'string', description: 'Optional workspace-relative path filter', required: false },
+    ],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+    requiredMode: ['vibe', 'plan'],
+    maxResultSizeChars: 60_000,
+  },
+  {
+    name: 'git_stage',
+    description: 'Stage an explicit set of workspace paths. Never stages the whole repository implicitly.',
+    category: 'write',
+    parameters: [
+      { name: 'paths', type: 'array', description: 'Workspace-relative paths to stage', required: true, schema: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string' } } },
+    ],
+    isReadOnly: false,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
+    name: 'git_commit',
+    description: 'Create a Git commit. When paths are provided, TurboFlux uses an isolated temporary index and refuses paths with pre-existing staged changes. Without paths, commits the current index.',
+    category: 'manage',
+    parameters: [
+      { name: 'message', type: 'string', description: 'Commit message', required: true },
+      { name: 'paths', type: 'array', description: 'Optional explicit paths for an isolated commit', required: false, schema: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string' } } },
+    ],
+    isReadOnly: false,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
+    name: 'git_create_branch',
+    description: 'Create and switch to a validated branch. Does not force through conflicting working-tree changes.',
+    category: 'manage',
+    parameters: [
+      { name: 'name', type: 'string', description: 'New branch name', required: true },
+      { name: 'start_point', type: 'string', description: 'Optional commit or revision to branch from', required: false },
+    ],
+    isReadOnly: false,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
+    name: 'git_switch_branch',
+    description: 'Switch to an existing validated local branch. Does not use force and Git will refuse changes that would be overwritten.',
+    category: 'manage',
+    parameters: [
+      { name: 'name', type: 'string', description: 'Existing local branch name', required: true },
+    ],
+    isReadOnly: false,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
+    name: 'git_stash',
+    description: 'List, create, apply, or pop Git stashes through validated arguments. Apply/pop may report normal Git conflicts for the agent to resolve.',
+    category: 'manage',
+    parameters: [
+      { name: 'action', type: 'string', description: 'Stash operation', required: true, enum: ['list', 'push', 'apply', 'pop'] },
+      { name: 'message', type: 'string', description: 'Optional message for push', required: false },
+      { name: 'include_untracked', type: 'boolean', description: 'Include untracked files when pushing', required: false, default: false },
+      { name: 'stash', type: 'string', description: 'Validated reference such as stash@{0} for apply/pop', required: false },
+    ],
+    isReadOnly: false,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+    maxResultSizeChars: 30_000,
+  },
+  {
+    name: 'git_push',
+    description: 'Push one branch to a validated remote without force. This external operation always enters the approval flow unless full-access policy is active.',
+    category: 'execute',
+    parameters: [
+      { name: 'remote', type: 'string', description: 'Remote name', required: false, default: 'origin' },
+      { name: 'branch', type: 'string', description: 'Optional local branch name; omit to use Git upstream defaults', required: false },
+      { name: 'set_upstream', type: 'boolean', description: 'Set upstream tracking for the pushed branch', required: false, default: false },
+    ],
+    isReadOnly: false,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+    maxResultSizeChars: 30_000,
+  },
+  {
     name: 'run_command',
     description: 'Run a shell command (foreground by default). Set run_in_background for dev servers/watch mode. High-risk commands trigger a user permission gate.',
     category: 'execute',
@@ -474,9 +609,7 @@ const tools: EnhancedToolDef[] = [
 
 Available types:
 - fast_context: Fast architecture-level code map for normal unfamiliar features, bugs, workflows, or changes that may cross modules.
-- explorer: Deep investigation of a feature, call chain, or subsystem. Reads implementations and follows imports across multiple files.
-- reviewer: Code quality/security/bug review of a specific file or feature area.
-- git_inspector: Analyze recent git changes — what was modified, why, and what the diff shows.
+- custom agents: Project-specific agents loaded from .turboflux/agents/.
 
 When NOT to use spawn_agent:
 - If you know the exact file to read, use read_file directly.
@@ -488,7 +621,7 @@ Each invocation starts in the background and returns an agent ID immediately. Us
 Launch multiple agents concurrently for independent topics and provide a highly specific objective.`,
     category: 'read',
     parameters: [
-      { name: 'agent_type', type: 'string', description: 'Which subagent to spawn. Includes built-in types (fast_context, explorer, reviewer) and any custom agents from .turboflux/agents/.', required: true },
+      { name: 'agent_type', type: 'string', description: 'Which subagent to spawn. Includes fast_context and custom agents from .turboflux/agents/.', required: true },
       { name: 'objective', type: 'string', description: 'Concrete question or task for the subagent. Be specific — include the area of the codebase, the feature, or the change to review.', required: true },
       { name: 'context', type: 'string', description: 'Optional extra context that helps the subagent (related files, prior findings, constraints).', required: false },
     ],
