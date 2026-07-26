@@ -151,6 +151,27 @@ export function shouldUseNoFlicker(interactive: boolean, singleShot?: string, re
   return requested
 }
 
+export function resolveLandingFrameWidth(columns: number): number {
+  const safeColumns = Math.max(24, Math.floor(columns))
+  return Math.max(24, Math.min(96, Math.max(24, Math.floor(safeColumns * 0.64)), safeColumns - 6))
+}
+
+export function shouldShowLandingView(input: {
+  messageCount: number
+  isRunning: boolean
+  hasPendingAsk: boolean
+  cursorMode: boolean
+  hasOverlay: boolean
+  queuedCount: number
+}): boolean {
+  return input.messageCount === 0
+    && !input.isRunning
+    && !input.hasPendingAsk
+    && !input.cursorMode
+    && !input.hasOverlay
+    && input.queuedCount === 0
+}
+
 export function sliceTurnsBeforeNthUserTurn(turns: AgentTurn[], userTurnOrdinal: number): AgentTurn[] {
   if (userTurnOrdinal < 0) return turns
   let seenUsers = 0

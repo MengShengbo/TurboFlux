@@ -6,8 +6,10 @@ import {
   formatTaskToolSummary,
   isThinkingToggleShortcut,
   resolveAssistantStreamDisplay,
+  resolveLandingFrameWidth,
   selectAutoMountedModel,
   shouldUseNoFlicker,
+  shouldShowLandingView,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
 } from './App'
@@ -60,6 +62,29 @@ describe('no-flicker mode selection', () => {
         process.env.TURBOFLUX_NO_FLICKER = previous
       }
     }
+  })
+})
+
+describe('adaptive shell layout', () => {
+  it('keeps the landing prompt centered without overflowing narrow terminals', () => {
+    expect(resolveLandingFrameWidth(30)).toBe(24)
+    expect(resolveLandingFrameWidth(120)).toBe(76)
+    expect(resolveLandingFrameWidth(240)).toBe(96)
+  })
+
+  it('uses the landing view only before a session has meaningful activity', () => {
+    const idle = {
+      messageCount: 0,
+      isRunning: false,
+      hasPendingAsk: false,
+      cursorMode: false,
+      hasOverlay: false,
+      queuedCount: 0,
+    }
+    expect(shouldShowLandingView(idle)).toBe(true)
+    expect(shouldShowLandingView({ ...idle, messageCount: 1 })).toBe(false)
+    expect(shouldShowLandingView({ ...idle, isRunning: true })).toBe(false)
+    expect(shouldShowLandingView({ ...idle, hasOverlay: true })).toBe(false)
   })
 })
 

@@ -20,6 +20,8 @@ interface PromptInputProps {
   onPasteImage?: () => boolean
   onPasteText?: (pastedText: string, nextValue: string) => PasteTextResult | null
   mode?: string
+  width?: number
+  placeholder?: string
 }
 
 export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'meta'>): boolean {
@@ -74,7 +76,7 @@ export function getImageTokenRangeAfterDelete(value: string, offset: number): { 
   return { start: offset, end: fullEnd }
 }
 
-export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode }: PromptInputProps) {
+export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode, width, placeholder: requestedPlaceholder }: PromptInputProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -260,9 +262,9 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     insertText(ch)
   }, { isActive: isInteractive })
 
-  const placeholder = mode === 'plan' ? 'Describe what to plan...'
-    : 'What are we building today?'
-  const frameWidth = getSafeFrameWidth(columns, 3)
+  const placeholder = requestedPlaceholder ?? (mode === 'plan' ? 'Describe what to plan...'
+    : 'What are we building today?')
+  const frameWidth = Math.max(20, Math.min(width ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
   const cursorChar = value[cursorOffset] ?? ' '
   const beforeCursor = value.slice(0, cursorOffset)
   const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''

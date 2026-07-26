@@ -18,6 +18,7 @@ interface StatusLineProps {
   gitSnapshot?: GitSnapshot | null
   mcpCount?: number
   terminalCount?: number
+  width?: number
 }
 
 const MODE_LABELS: Record<AgentMode, string> = {
@@ -34,6 +35,7 @@ export function StatusLine({
   gitSnapshot = null,
   mcpCount = 0,
   terminalCount = 0,
+  width: requestedWidth,
 }: StatusLineProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
@@ -49,7 +51,7 @@ export function StatusLine({
   const bar = '#'.repeat(filled) + '-'.repeat(barWidth - filled)
   const barColor = ratio < 0.5 ? theme.success : ratio < 0.8 ? theme.warning : theme.error
 
-  const frameWidth = getSafeFrameWidth(columns, 3)
+  const frameWidth = Math.max(20, Math.min(requestedWidth ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
   const modelPart = config.model || 'no model connection'
   const reasoningSetting = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
   const gitChangedCount = gitSnapshot?.files.length || 0
