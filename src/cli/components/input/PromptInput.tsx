@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { Box, Text, useInput, usePaste, type Key } from 'ink'
+import stringWidth from 'string-width'
 import { resolveBackground, useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
@@ -280,6 +281,24 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const cursorChar = value[cursorOffset] ?? ' '
   const beforeCursor = value.slice(0, cursorOffset)
   const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
+  const landingInnerWidth = Math.max(1, frameWidth - 2)
+  const landingFill = ' '.repeat(landingInnerWidth)
+  const editorWidth = value
+    ? stringWidth(value) + (cursorOffset >= value.length ? 1 : 0)
+    : Math.max(1, stringWidth(placeholder))
+  const landingMiddleFill = ' '.repeat(Math.max(0, landingInnerWidth - 3 - editorWidth))
+  const editorText = value ? (
+    <Text backgroundColor={promptChrome.backgroundColor}>
+      {beforeCursor}
+      <Text inverse>{cursorChar}</Text>
+      {afterCursor}
+    </Text>
+  ) : (
+    <Text backgroundColor={promptChrome.backgroundColor}>
+      <Text inverse>{placeholder[0] ?? ' '}</Text>
+      <Text color={theme.inactive}>{placeholder.slice(1)}</Text>
+    </Text>
+  )
 
   return (
     <Box flexDirection="column" marginTop={0}>
@@ -294,30 +313,38 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
           ))}
         </Box>
       )}
-      <Box
-        width={frameWidth}
-        flexDirection="row"
-        paddingLeft={1}
-        paddingRight={1}
-        paddingY={1}
-        borderStyle="single"
-        borderColor={promptChrome.borderColor}
-        backgroundColor={promptChrome.backgroundColor}
-      >
-        <Text bold color={theme.brandShimmer}>{'> '}</Text>
-        {value ? (
-          <Text>
-            {beforeCursor}
-            <Text inverse>{cursorChar}</Text>
-            {afterCursor}
-          </Text>
-        ) : (
-          <Text>
-            <Text inverse>{placeholder[0] ?? ' '}</Text>
-            <Text color={theme.inactive}>{placeholder.slice(1)}</Text>
-          </Text>
-        )}
-      </Box>
+      {appearance === 'landing' ? (
+        <Box
+          width={frameWidth}
+          flexDirection="column"
+          borderStyle="single"
+          borderColor={promptChrome.borderColor}
+          overflow="hidden"
+        >
+          <Text backgroundColor={promptChrome.backgroundColor}>{landingFill}</Text>
+          <Box width={landingInnerWidth} flexDirection="row" overflow="hidden">
+            <Text backgroundColor={promptChrome.backgroundColor}>{' '}</Text>
+            <Text bold color={theme.brandShimmer} backgroundColor={promptChrome.backgroundColor}>{'> '}</Text>
+            {editorText}
+            <Text backgroundColor={promptChrome.backgroundColor}>{landingMiddleFill}</Text>
+          </Box>
+          <Text backgroundColor={promptChrome.backgroundColor}>{landingFill}</Text>
+        </Box>
+      ) : (
+        <Box
+          width={frameWidth}
+          flexDirection="row"
+          paddingLeft={1}
+          paddingRight={1}
+          paddingY={1}
+          borderStyle="single"
+          borderColor={promptChrome.borderColor}
+          backgroundColor={promptChrome.backgroundColor}
+        >
+          <Text bold color={theme.brandShimmer}>{'> '}</Text>
+          {editorText}
+        </Box>
+      )}
     </Box>
   )
 }
