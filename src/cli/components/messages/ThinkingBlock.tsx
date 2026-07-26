@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import cliTruncate from 'cli-truncate'
 import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
+import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { formatMarkdown } from '../markdown/index'
 import { SpinnerGlyph } from '../spinner/SpinnerGlyph'
 import type { ThinkingTrace } from '../../../shared/agentTypes'
@@ -15,6 +16,7 @@ interface ThinkingBlockProps {
 
 export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity }: ThinkingBlockProps) {
   const theme = useTheme()
+  const { columns } = useTerminalSize()
   const [now, setNow] = useState(Date.now())
   const startedAt = trace.startedAt ?? 0
   const duration = trace.durationMs ?? (streaming && startedAt > 0 ? now - startedAt : undefined)
@@ -26,41 +28,60 @@ export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity
     return () => clearInterval(timer)
   }, [streaming])
 
-  const label = streaming ? 'Reasoning' : 'Thought'
-  const durationLabel = typeof duration === 'number' ? ` · ${formatDuration(duration)}` : ''
-  const tokenLabel = tokenCount > 0 ? ` · ${formatTokenCount(tokenCount)} tokens` : ''
-  const effortLabel = trace.effort ? ` · ${trace.effort}` : ''
-  const summary = `${label}${effortLabel}${durationLabel}${tokenLabel}`
+  const summary = [
+    streaming ? 'Reasoning' : 'Thought',
+    trace.effort,
+    typeof duration === 'number' ? formatDuration(duration) : '',
+    tokenCount > 0 ? `${formatTokenCount(tokenCount)} tokens` : '',
+    trace.status === 'interrupted' ? 'interrupted' : '',
+  ].filter(Boolean).join(' · ')
   const displayContent = cliTruncate(
     trace.content.trim(),
-    streaming ? 1600 : 6000,
+    streaming ? 1200 : 6000,
     { position: streaming ? 'start' : 'end' },
   )
+  const compactPreview = trace.content.trim().replace(/\s+/g, ' ')
+  const previewWidth = Math.max(12, columns - summary.length - 8)
+
+  if (streaming && !displayContent) {
+    return (
+      <Box>
+        <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
+      </Box>
+    )
+  }
 
   if (!expanded) {
     return (
-      <Box>
+      <Box overflow="hidden">
         {streaming ? (
           <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
         ) : (
-          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▸ ${summary}${trace.status === 'interrupted' ? ' · interrupted' : ''}`}</Text>
+          <>
+            <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▸ ${summary}`}</Text>
+            {compactPreview && (
+              <Box flexShrink={1} minWidth={0} overflow="hidden">
+                <Text color={theme.inactive} wrap="truncate-end">{`  ${cliTruncate(compactPreview, previewWidth)}`}</Text>
+              </Box>
+            )}
+          </>
         )}
       </Box>
     )
   }
 
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor={streaming ? theme.brand : theme.subtle} paddingX={1} marginBottom={1}>
+    <Box flexDirection="column" marginBottom={1}>
       <Box>
         {streaming ? (
           <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
         ) : (
-          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▾ ${summary}${trace.status === 'interrupted' ? ' · interrupted' : ''}`}</Text>
+          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▾ ${summary}`}</Text>
         )}
       </Box>
       {displayContent && (
-        <Box paddingLeft={2} marginTop={1}>
-          <Text color={theme.inactive}>{formatMarkdown(displayContent)}</Text>
+        <Box paddingLeft={2}>
+          <Text color={theme.inactive}>{streaming ? displayContent : formatMarkdown(displayContent)}</Text>
         </Box>
       )}
     </Box>

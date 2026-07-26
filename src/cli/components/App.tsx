@@ -245,7 +245,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [isRunning, setIsRunning] = useState(false)
   const [streamText, setStreamText] = useState('')
   const [streamThinkingText, setStreamThinkingText] = useState('')
-  const [showThinking, setShowThinking] = useState(true)
+  const [streamThinkingStartedAt, setStreamThinkingStartedAt] = useState<number | undefined>()
+  const [showThinking, setShowThinking] = useState(false)
   const [showToolDetails, setShowToolDetails] = useState(verbose)
   const [showTasksView, setShowTasksView] = useState(false)
   const [currentTurnOutputTokens, setCurrentTurnOutputTokens] = useState(0)
@@ -496,6 +497,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     streamBufferRef.current = ''
     streamThinkingBufferRef.current = ''
     streamThinkingStartedAtRef.current = undefined
+    setStreamThinkingStartedAt(undefined)
     clearStreamFlushTimer()
     setStreamText('')
     setStreamThinkingText('')
@@ -574,16 +576,19 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           setLastActivity(event.state.updatedAt)
           if (event.state.phase === 'awaiting_approval' || event.state.phase === 'awaiting_input') setMood('thinking')
           break
-        case 'stream:start':
+        case 'stream:start': {
+          const streamStartedAt = Date.now()
           setIsRunning(true)
           setCurrentTurnOutputTokens(0)
           setStreamingToolDraft(null)
           streamBufferRef.current = ''
           streamThinkingBufferRef.current = ''
-          streamThinkingStartedAtRef.current = undefined
+          streamThinkingStartedAtRef.current = streamStartedAt
+          setStreamThinkingStartedAt(streamStartedAt)
           setStreamThinkingText('')
           clearStreamFlushTimer()
           break
+        }
         case 'stream:delta':
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
           streamBufferRef.current += event.text
@@ -599,7 +604,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'stream:thinking_delta':
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
-          if (!streamThinkingStartedAtRef.current) streamThinkingStartedAtRef.current = Date.now()
+          if (!streamThinkingStartedAtRef.current) {
+            const thinkingStartedAt = Date.now()
+            streamThinkingStartedAtRef.current = thinkingStartedAt
+            setStreamThinkingStartedAt(thinkingStartedAt)
+          }
           streamThinkingBufferRef.current += event.text
           if (!streamFlushTimerRef.current) {
             streamFlushTimerRef.current = setTimeout(() => {
@@ -624,6 +633,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           streamBufferRef.current = ''
           streamThinkingBufferRef.current = ''
           streamThinkingStartedAtRef.current = undefined
+          setStreamThinkingStartedAt(undefined)
           const toolsSnapshot = currentToolsRef.current
           const changesSnapshot = changeSummariesRef.current
           const display = resolveAssistantStreamDisplay(
@@ -823,6 +833,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           streamBufferRef.current = ''
           streamThinkingBufferRef.current = ''
           streamThinkingStartedAtRef.current = undefined
+          setStreamThinkingStartedAt(undefined)
           clearStreamFlushTimer()
       setStreamText('')
       setStreamThinkingText('')
@@ -969,6 +980,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     streamBufferRef.current = ''
     streamThinkingBufferRef.current = ''
     streamThinkingStartedAtRef.current = undefined
+    setStreamThinkingStartedAt(undefined)
     clearStreamFlushTimer()
     setStreamText('')
     setStreamThinkingText('')
@@ -1005,6 +1017,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       streamBufferRef.current = ''
       streamThinkingBufferRef.current = ''
       streamThinkingStartedAtRef.current = undefined
+      setStreamThinkingStartedAt(undefined)
       clearStreamFlushTimer()
       setStreamText('')
       setStreamThinkingText('')
@@ -1363,6 +1376,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const visibleStreamText = stripTextToolCallMarkup(streamText, { stripIncomplete: true })
   const streamTextForDisplay = visibleStreamText
+  const reasoningLabel = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
+  const reasoningActive = Boolean(reasoningLabel && reasoningLabel !== 'off' && isRunning && runState.phase === 'thinking')
 
   const runningNode = (isRunning || fcActive || subAgentActivities.length > 0) ? (
     <Box flexDirection="column" marginBottom={1}>
@@ -1378,9 +1393,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         runState={runState}
         queuedCount={queuedPrompts.length}
         thinkingText={streamThinkingText}
-        thinkingStartedAt={streamThinkingStartedAtRef.current}
+        thinkingStartedAt={streamThinkingStartedAt}
         reasoningEffort={config.reasoning?.effort}
-        showThinking={showThinking}
+        reasoningActive={reasoningActive}
         verbose={verbose}
         idleLabel={isRunning && !noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
         availableWidth={noFlickerActive
@@ -1599,8 +1614,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ], [messages])
   const mcpCount = mcpClient.getAllConnections().filter(connection => connection.status === 'connected').length
   const activeTerminalCount = terminalSessions.filter(session => session.status === 'running' || session.status === 'starting').length
-  const reasoningLabel = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
-
   if (noFlickerActive) {
     return (
       <ThemeProvider transparentBackground={transparentBackground}>
