@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { Box, Text, useInput, usePaste, type Key } from 'ink'
-import { useTheme } from '../../theme/index'
+import { resolveBackground, useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
 import { getSafeFrameWidth } from '../../terminalLayout'
@@ -286,9 +286,11 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
         paddingLeft={1}
         paddingRight={1}
         paddingY={1}
-        backgroundColor={theme.promptBackground}
+        borderStyle="single"
+        borderColor={theme.promptBorder}
+        backgroundColor={resolveBackground(theme, 'promptBackground')}
       >
-        <Text bold color={theme.brand}>{'> '}</Text>
+        <Text bold color={theme.brandShimmer}>{'> '}</Text>
         {value ? (
           <Text>
             {beforeCursor}

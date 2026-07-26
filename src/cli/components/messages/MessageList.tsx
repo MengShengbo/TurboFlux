@@ -15,6 +15,7 @@ interface Props {
   selectedMessageId?: string
   selectedMessageRef?: Ref<DOMElement>
   showThinking?: boolean
+  showToolDetails?: boolean
 }
 
 /** Group consecutive system messages into a single rendered block. */
@@ -56,6 +57,7 @@ export function MessageList({
   selectedMessageId,
   selectedMessageRef,
   showThinking = verbose,
+  showToolDetails = verbose,
 }: Props) {
   const theme = useTheme()
   const grouped = useGroupedMessages(messages)
@@ -150,7 +152,7 @@ export function MessageList({
             borderColor={isSelected ? theme.brand : undefined}
             paddingX={isSelected ? 1 : 0}
           >
-            {msg.tools && msg.tools.length > 0 && <ToolCallTree tools={msg.tools} verbose={verbose} />}
+            {msg.tools && msg.tools.length > 0 && <ToolCallTree tools={msg.tools} verbose={verbose} expanded={showToolDetails} />}
             {msg.changes && msg.changes.length > 0 && msg.changes.map((change, ci) => (
               <Box key={ci}>
                 <DiffCard

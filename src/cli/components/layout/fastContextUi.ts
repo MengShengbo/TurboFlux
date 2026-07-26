@@ -42,6 +42,13 @@ export function reduceFastContextUiSummary(
       }
     }
     if (event.type === 'hit') next.hits += 1
+    if (event.type === 'progress') {
+      next.files = Math.max(next.files, event.files)
+      next.absorbed = Math.max(next.absorbed, event.absorbed)
+      next.hits = Math.max(next.hits, event.hits)
+      if (event.latest) next.latest = event.latest
+      if (event.insight) next.insight = event.insight
+    }
     if (event.type === 'worker' && event.currentPath) next.latest = event.currentPath
     if (event.type === 'insight') next.insight = event.text
   }

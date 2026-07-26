@@ -1,5 +1,5 @@
 import chalk from 'chalk'
-import type { Theme } from './types'
+import type { Theme, ThemeColorKey } from './types'
 
 function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace('#', '')
@@ -10,7 +10,7 @@ function hexToRgb(hex: string): [number, number, number] {
   ]
 }
 
-export function resolveColor(theme: Theme, key: keyof Theme): (text: string) => string {
+export function resolveColor(theme: Theme, key: ThemeColorKey): (text: string) => string {
   const hex = theme[key]
   if (chalk.level >= 3) {
     const [r, g, b] = hexToRgb(hex)
@@ -22,7 +22,7 @@ export function resolveColor(theme: Theme, key: keyof Theme): (text: string) => 
   return (text: string) => text
 }
 
-export function resolveBgColor(theme: Theme, key: keyof Theme): (text: string) => string {
+export function resolveBgColor(theme: Theme, key: ThemeColorKey): (text: string) => string {
   const hex = theme[key]
   if (chalk.level >= 3) {
     const [r, g, b] = hexToRgb(hex)
@@ -32,4 +32,17 @@ export function resolveBgColor(theme: Theme, key: keyof Theme): (text: string) =
     return (text: string) => chalk.bgHex(hex)(text)
   }
   return (text: string) => text
+}
+
+const transparentKeys = new Set<ThemeColorKey>([
+  'background',
+  'panelBackground',
+  'panelRaised',
+  'surface',
+  'promptBackground',
+  'codeBackground',
+])
+
+export function resolveBackground(theme: Theme, key: ThemeColorKey): string | undefined {
+  return theme.transparentBackground && transparentKeys.has(key) ? undefined : theme[key]
 }

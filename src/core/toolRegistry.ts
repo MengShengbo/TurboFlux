@@ -167,11 +167,12 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'explore_code',
-    description: `Start FastContext architecture mapping in the background. Use when a feature, bug, workflow, or change may cross modules, ownership boundaries, implementations, configuration, state, persistence, or failure paths. Its evidence-grounded code map is injected automatically at a safe turn boundary. Continue only non-overlapping work while it runs; never poll it with read_agent/list_agents, duplicate broad retrieval, or call explore_code repeatedly. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
+    description: `Start a background architecture map with FastContext Race. The model chooses query rewrites, evidence reads, next-hop tracing, ranking, and stopping while local tools perform deterministic search and bounded reads. The grounded result is injected automatically at a safe turn boundary. Continue only non-overlapping work while it runs; never poll it with read_agent/list_agents, duplicate broad retrieval, or call explore_code repeatedly. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
     category: 'read',
     parameters: [
       { name: 'objective', type: 'string', description: 'Concrete thing to locate or understand. Include visible UI text, behavior, suspected feature area, symbol names, and what answer should prove.', required: true },
       { name: 'context', type: 'string', description: 'Optional prior findings, paths already checked, or constraints. Do not ask the user for a path before using this when the path can be discovered.', required: false },
+      { name: 'strategy', type: 'string', description: 'Compatibility field. FastContext uses the Race controller.', required: false, enum: ['autonomous-race'], default: 'autonomous-race' },
     ],
     isReadOnly: true,
     isDestructive: false,
@@ -472,7 +473,7 @@ const tools: EnhancedToolDef[] = [
     description: `Launch a specialized subagent to handle a focused task autonomously.
 
 Available types:
-- fast_context: Architecture-level code map. Use for unfamiliar features, bugs, workflows, or changes that may cross modules. It returns grounded architecture nodes and relationships, ownership boundaries, and change-impact evidence.
+- fast_context: Fast architecture-level code map for normal unfamiliar features, bugs, workflows, or changes that may cross modules.
 - explorer: Deep investigation of a feature, call chain, or subsystem. Reads implementations and follows imports across multiple files.
 - reviewer: Code quality/security/bug review of a specific file or feature area.
 - git_inspector: Analyze recent git changes — what was modified, why, and what the diff shows.

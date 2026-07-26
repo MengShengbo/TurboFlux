@@ -191,8 +191,8 @@ describe('FastContext adaptive controller', () => {
       })
 
       expect(requestCount).toBe(3)
-      expect(JSON.stringify(requestBodies[2])).toContain('empty_results: 1')
-      expect(JSON.stringify(requestBodies[2])).not.toContain('do not conclude until one alternate search has run')
+      expect(JSON.stringify(requestBodies[2])).toContain('EVIDENCE_HANDLES')
+      expect(JSON.stringify(requestBodies[2])).not.toContain('trace_symbol')
       expect(result.evidencePack).toContain('src/owner.ts')
     } finally {
       globalThis.fetch = originalFetch
@@ -234,14 +234,14 @@ describe('FastContext adaptive controller', () => {
       })
 
       expect(toolExecutor.readFileRange).toHaveBeenCalledTimes(1)
-      expect(JSON.stringify(requestBodies[2])).toContain('exact_repeated_calls: 1')
-      expect(JSON.stringify(requestBodies[2])).toContain('new_evidence_ranges: 0')
+      expect(JSON.stringify(requestBodies[2])).toContain('[Cached exact repeat; no new execution.]')
+      expect(JSON.stringify(requestBodies[2])).toContain('E1 | read |')
     } finally {
       globalThis.fetch = originalFetch
     }
   })
 
-  it('traces several concrete next-hop symbols concurrently in one wave', async () => {
+  it('searches several concrete next-hop symbols concurrently in one wave', async () => {
     const originalFetch = globalThis.fetch
     let activeSymbolSearches = 0
     let maxActiveSymbolSearches = 0
@@ -272,20 +272,30 @@ describe('FastContext adaptive controller', () => {
       const toolCall = requestCount === 1
         ? call('read-entry', 'read_file', { path: 'src/entry.ts', offset: 1, limit: 10 })
         : requestCount === 2
-          ? call('trace-next-hops', 'trace_symbols', { queries: ['FirstOwner', 'SecondOwner'] })
-          : call('submit-chain', 'submit_code_map', {
-              candidates: [
-                candidate('src/FirstOwner.ts', 'first causal owner', 'owner', 'resolve', 0.92, 0),
-                candidate('src/SecondOwner.ts', 'second causal owner', 'implementation', 'propagate', 0.78, 1),
-              ],
-              relationships: [],
-              frontier_complete: true,
-              unresolved_edit_paths: [],
-              rejected_hypotheses: [],
-              searches_tried: ['FirstOwner', 'SecondOwner'],
-              uncertainty: [],
-            })
-      return response(toolCall)
+          ? null
+          : requestCount === 3
+            ? null
+            : call('submit-chain', 'submit_code_map', {
+                edit_frontier: [
+                  { evidence_ids: ['E4', 'E5'], role: 'causal owners', edit_kind: 'implementation', confidence: 'high', why: 'read-grounded candidate across both implementation files' },
+                ],
+                supporting_context: [],
+                frontier_complete: true,
+                unresolved: [],
+              })
+      if (requestCount === 2) {
+        return responseMany([
+          call('search-first', 'search_symbol', { query: 'FirstOwner' }),
+          call('search-second', 'search_symbol', { query: 'SecondOwner' }),
+        ])
+      }
+      if (requestCount === 3) {
+        return responseMany([
+          call('read-first', 'read_file', { path: 'src/FirstOwner.ts', offset: 1, limit: 10 }),
+          call('read-second', 'read_file', { path: 'src/SecondOwner.ts', offset: 1, limit: 10 }),
+        ])
+      }
+      return response(toolCall!)
     }) as unknown as typeof fetch
 
     try {
@@ -299,7 +309,7 @@ describe('FastContext adaptive controller', () => {
         model: 'gpt-5.5',
       })
 
-      expect(requestCount).toBe(3)
+      expect(requestCount).toBe(4)
       expect(maxActiveSymbolSearches).toBe(2)
       expect(result.evidencePack).toContain('src/FirstOwner.ts')
       expect(result.evidencePack).toContain('src/SecondOwner.ts')
@@ -325,6 +335,18 @@ function response(toolCall: ReturnType<typeof call>): Response {
   }), { status: 200 })
 }
 
+function responseMany(toolCalls: Array<ReturnType<typeof call>>): Response {
+  return new Response(JSON.stringify({
+    output: toolCalls.map(toolCall => ({
+      type: 'function_call',
+      call_id: toolCall.id,
+      name: toolCall.function.name,
+      arguments: toolCall.function.arguments,
+    })),
+    choices: [{ message: { content: '', tool_calls: toolCalls } }],
+  }), { status: 200 })
+}
+
 function call(id: string, name: string, args: Record<string, unknown>) {
   return { id, function: { name, arguments: JSON.stringify(args) } }
 }
@@ -333,9 +355,7 @@ function candidate(
   path: string,
   role: string,
   editKind: string,
-  changeEffect: string,
-  patchProbability: number,
-  causalDistance: number,
+  ..._unused: unknown[]
 ) {
   return {
     path,
@@ -344,9 +364,6 @@ function candidate(
     role,
     edit_kind: editKind,
     confidence: 'high',
-    patch_probability: patchProbability,
-    causal_distance: causalDistance,
-    change_effect: changeEffect,
     why: 'read-grounded candidate',
   }
 }

@@ -22,14 +22,38 @@ export function extractUnsupportedRequestParam(error?: string): string | null {
   if (!/(?:extra inputs?|extra fields?|not permitted|not allowed|unsupported|unrecognized|deprecated)/i.test(error)) return null
   const knownOptionalParams = [
     'cache_control', 'anthropic-beta', 'output_config', 'thinking', 'reasoning_effort',
-    'reasoning', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
+    'reasoning', 'summary', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
     'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store',
   ]
   return knownOptionalParams.find(param => error.toLowerCase().includes(param.toLowerCase())) || null
 }
 
 export function removeOpenAICompatibleRequestParam(body: Record<string, unknown>, param: string): boolean {
-  const rootParam = param.split('.')[0]
+  const pathParts = param.split('.')
+  const rootParam = pathParts[0]
+  if (pathParts.length > 1) {
+    let target: Record<string, unknown> | undefined = body
+    for (const key of pathParts.slice(0, -1)) {
+      const value = target?.[key]
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        target = undefined
+        break
+      }
+      target = value as Record<string, unknown>
+    }
+    const nestedKey = pathParts[pathParts.length - 1]
+    if (target && Object.prototype.hasOwnProperty.call(target, nestedKey)) {
+      delete target[nestedKey]
+      return true
+    }
+  }
+  if (rootParam === 'summary') {
+    const reasoning = body.reasoning
+    if (reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning) && Object.prototype.hasOwnProperty.call(reasoning, 'summary')) {
+      delete (reasoning as Record<string, unknown>).summary
+      return true
+    }
+  }
   const removable = new Set([
     'temperature', 'max_output_tokens', 'max_completion_tokens', 'max_tokens',
     'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls',

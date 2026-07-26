@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -85,6 +85,30 @@ describe.sequential('conversation journal store', () => {
     expect(loadConversation('snapshot-1')?.turns.map(item => item.content)).toEqual(['first', 'second'])
     expect(deleteConversation('snapshot-1')).toBe(true)
     expect(loadConversation('snapshot-1')).toBeNull()
+  })
+
+  it('atomically compacts a completed journal to one current snapshot', () => {
+    const first: PersistedConversation = {
+      ...meta('compact-1'),
+      turnCount: 1,
+      turns: [turn('user-1', 'user', 'first', 100)],
+    }
+    const second: PersistedConversation = {
+      ...first,
+      updatedAt: 200,
+      turnCount: 2,
+      turns: [...first.turns, turn('assistant-1', 'assistant', 'second', 200)],
+    }
+
+    saveConversation(first)
+    appendConversationJournal('compact-1', { version: 1, type: 'stream_start', timestamp: 150 })
+    appendConversationJournal('compact-1', { version: 1, type: 'stream_delta', timestamp: 160, text: 'obsolete partial' })
+    saveConversation(second, { compact: true })
+
+    const lines = readFileSync(join(directory, 'compact-1.jsonl'), 'utf8').trim().split(/\r?\n/)
+    expect(lines).toHaveLength(1)
+    expect(JSON.parse(lines[0]!)).toMatchObject({ type: 'snapshot', conversation: { turnCount: 2 } })
+    expect(loadConversation('compact-1')?.turns.map(item => item.content)).toEqual(['first', 'second'])
   })
 
   it('recovers a partial assistant stream and ignores a damaged tail line', async () => {

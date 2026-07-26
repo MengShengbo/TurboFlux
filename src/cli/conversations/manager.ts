@@ -73,12 +73,12 @@ export class ConversationManager {
         this.append({ version: 1, type: 'stream_end', timestamp, interrupted: true })
         break
       case 'session:complete':
-        this.persist()
+        this.persist(true)
         break
     }
   }
 
-  persist(): void {
+  persist(compact = false): void {
     const session = this.engine.getSession()
     const fullTurns = this.engine.getFullConversationTurns()
     if (fullTurns.length === 0) return
@@ -93,7 +93,7 @@ export class ConversationManager {
       title,
       workspacePath: this.workspacePath,
       createdAt: session.createdAt,
-      updatedAt: Date.now(),
+      updatedAt: session.updatedAt,
       mode: session.mode,
       model: this.config.model,
       provider: this.config.provider,
@@ -107,13 +107,13 @@ export class ConversationManager {
     if (snapshot === this.lastPersistedSnapshot) return
     try {
       this.ensureJournal()
-      saveConversation(conv)
+      saveConversation(conv, { compact })
       this.lastPersistedSnapshot = snapshot
     } catch {}
   }
 
   startNew(): string {
-    this.persist()
+    this.persist(true)
     this.currentId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     this.journalInitialized = false
     this.lastPersistedSnapshot = ''
@@ -125,7 +125,7 @@ export class ConversationManager {
   }
 
   switchTo(id: string): PersistedConversation | null {
-    this.persist()
+    this.persist(true)
     const conv = loadConversation(id)
     if (!conv) return null
     if (!sameWorkspacePath(conv.workspacePath, this.workspacePath)) return null

@@ -10,14 +10,10 @@ import type { ToolStatus } from './ToolCallTree'
 import type { AgentRunState } from '../../../shared/agentTypes'
 import type { ReasoningEffort, ThinkingTrace } from '../../../shared/agentTypes'
 import { ThinkingBlock } from '../messages/ThinkingBlock'
+import { deriveActivityModel } from '../agentActivityModel'
+import type { StreamingToolDraft } from './toolTypes'
 
-export type StreamingToolDraft = {
-  id: string
-  name: string
-  partialJson: string
-  startedAt: number
-  updatedAt: number
-}
+export type { StreamingToolDraft } from './toolTypes'
 
 type WorkGroupKind = 'explore' | 'file' | 'run' | 'other'
 
@@ -85,7 +81,8 @@ export function ActiveWorkPanel({
     return () => clearInterval(timer)
   }, [runState?.phase])
   const activeTools = tools.filter(tool => tool.status === 'running')
-  const groups = buildWorkGroups(tools, verbose)
+  const displayTools = verbose ? tools : tools.filter(tool => tool.status !== 'error')
+  const groups = buildWorkGroups(displayTools, verbose)
   const primary = getPrimaryWorkLabel(activeTools, draft)
   const primaryKind = getPrimaryWorkKind(activeTools, draft)
   const secondaryGroups = groups.filter(group => {
@@ -95,13 +92,16 @@ export function ActiveWorkPanel({
   })
   const hasWork = Boolean(primary) || groups.length > 0
 
-  if (!hasWork && !streamText && !idleLabel) return null
+  const displayRunState = !verbose && runState?.phase === 'recoverable_error' ? undefined : runState
+  const activity = deriveActivityModel({ runState: displayRunState, tools: displayTools, draft, streamText, thinkingText, idleLabel })
+  if (!activity.visible) return null
 
   const labelWidth = Math.max(12, panelColumns - 14)
+  const hasLiveOutput = Boolean(streamText.trim() || thinkingText.trim())
 
   return (
     <Box flexDirection="column" marginBottom={1}>
-      {runState && runState.phase !== 'idle' && (
+      {runState && runState.phase !== 'idle' && !hasLiveOutput && (
         <RunStateLine state={runState} now={now} queuedCount={queuedCount} columns={panelColumns} />
       )}
       {thinkingText && (
@@ -114,7 +114,7 @@ export function ActiveWorkPanel({
             tokenCount: Math.max(1, Math.ceil(thinkingText.length / 4)),
             ...(reasoningEffort ? { effort: reasoningEffort } : {}),
           } as ThinkingTrace}
-          expanded={showThinking}
+          expanded={showThinking || Boolean(thinkingText)}
           streaming
           lastActivity={lastActivity}
         />
@@ -125,10 +125,10 @@ export function ActiveWorkPanel({
           <SpinnerGlyph lastActivity={getPrimaryActivity(activeTools, draft, lastActivity)} label={cliTruncate(primary, labelWidth, { position: 'middle' })} />
           <TurnTokenCounter tokens={outputTokens} />
         </Box>
-      ) : idleLabel && !streamText ? (
+      ) : activity.detail && !streamText ? (
         <Box>
           <Text color={theme.inactive}>Work </Text>
-          <SpinnerGlyph lastActivity={lastActivity} label={idleLabel} />
+          <SpinnerGlyph lastActivity={lastActivity} label={activity.detail} />
           <TurnTokenCounter tokens={outputTokens} />
         </Box>
       ) : null}

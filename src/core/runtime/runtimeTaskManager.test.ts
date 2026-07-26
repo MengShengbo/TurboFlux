@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { RuntimeTaskEvent } from '../../shared/runtimeTaskTypes'
 import { RuntimeTaskManager } from './runtimeTaskManager'
@@ -92,5 +95,60 @@ describe('RuntimeTaskManager', () => {
 
     expect(unchanged).toMatchObject({ status: 'completed', exitCode: 0, outputBytes: 20 })
     expect(finished).toEqual(['completed'])
+  })
+
+  it('persists events and marks active tasks orphaned on recovery', () => {
+    const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-journal-'))
+    const journalPath = join(root, 'runtime', 'journal.jsonl')
+    try {
+      const first = new RuntimeTaskManager({ journalPath, now: () => 100 })
+      const completed = first.createTask({ kind: 'shell', status: 'running' })
+      first.completeTask(completed.id, { exitCode: 0 })
+      first.createTask({ kind: 'agent', status: 'running' })
+
+      const recovered = new RuntimeTaskManager({ journalPath, now: () => 200 })
+      expect(recovered.getTask(completed.id)).toMatchObject({ status: 'completed', exitCode: 0 })
+      expect(recovered.listTasks({ kind: 'agent' })[0]).toMatchObject({
+        status: 'orphaned',
+        error: 'Recovered without an active process lease',
+      })
+      const records = readFileSync(journalPath, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line))
+      expect(records.at(-1)?.event).toMatchObject({
+        type: 'runtime-task:finished',
+        task: { status: 'orphaned', endedAt: 200 },
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('repairs a truncated journal tail', () => {
+    const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-repair-'))
+    const journalPath = join(root, 'journal.jsonl')
+    try {
+      const first = new RuntimeTaskManager({ journalPath, now: () => 100 })
+      first.createTask({ kind: 'shell', status: 'running' })
+      writeFileSync(journalPath, `${readFileSync(journalPath, 'utf8')}broken`, 'utf8')
+      new RuntimeTaskManager({ journalPath, now: () => 200 })
+      expect(readFileSync(journalPath, 'utf8')).toContain('truncated-tail')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reads task output using a resumable byte cursor', () => {
+    const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-output-'))
+    const logPath = join(root, 'task.jsonl')
+    try {
+      writeFileSync(logPath, '0123456789', 'utf8')
+      const manager = new RuntimeTaskManager({ now: () => 100 })
+      const task = manager.createTask({ kind: 'shell', logPath })
+      const first = manager.readTaskOutput(task.id, 2, 4)
+      expect(first).toMatchObject({ offset: 2, nextOffset: 6, content: '2345', eof: false })
+      const second = manager.readTaskOutput(task.id, first.nextOffset, 100)
+      expect(second).toMatchObject({ offset: 6, nextOffset: 10, content: '6789', eof: true })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

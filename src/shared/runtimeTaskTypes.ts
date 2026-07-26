@@ -1,6 +1,6 @@
 export type RuntimeTaskKind = 'shell' | 'terminal' | 'agent' | 'fast_context' | 'mcp' | 'workflow' | 'remote'
 
-export type RuntimeTaskStatus = 'starting' | 'running' | 'stopping' | 'completed' | 'failed' | 'stopped' | 'interrupted'
+export type RuntimeTaskStatus = 'starting' | 'running' | 'stopping' | 'completed' | 'failed' | 'stopped' | 'interrupted' | 'orphaned'
 
 export type RuntimeRestartPolicy = 'never' | 'on-failure' | 'always'
 

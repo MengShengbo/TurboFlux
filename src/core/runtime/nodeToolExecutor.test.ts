@@ -5,19 +5,10 @@ import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { PassThrough } from 'node:stream'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandOutput, Result } from '../../tools/executor.js'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
 import { hashText } from '../fileIO.js'
-import { CodeGraphService } from '../../tools/codeGraph/service.js'
-
-const previousCodeGraphDisabled = process.env.TURBOFLUX_DISABLE_CODEGRAPH
-process.env.TURBOFLUX_DISABLE_CODEGRAPH = '1'
-
-afterAll(() => {
-  if (previousCodeGraphDisabled === undefined) delete process.env.TURBOFLUX_DISABLE_CODEGRAPH
-  else process.env.TURBOFLUX_DISABLE_CODEGRAPH = previousCodeGraphDisabled
-})
 
 function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))
@@ -70,6 +61,15 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(write.success).toBe(true)
     expect(read).toMatchObject({ success: true, data: 'hello' })
     expect(readFileSync(join(workspace, 'nested', 'file.txt'), 'utf-8')).toBe('hello')
+  }))
+
+  it('reports directories as non-file read targets', async () => withWorkspace(async ({ workspace }) => {
+    mkdirSync(join(workspace, 'nested'), { recursive: true })
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const read = await executor.readFile('nested')
+
+    expect(read).toEqual({ success: false, error: 'Path is not a file' })
   }))
 
   it('uses optimistic version checks and preserves concurrent edits', async () => withWorkspace(async ({ workspace }) => {
@@ -209,6 +209,18 @@ describe('NodeToolExecutor sandbox policies', () => {
     ]))
   }))
 
+  it('does not create empty runtime log files for silent commands', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+
+    const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(0)'], workspace)
+    const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
+
+    expect(result.success).toBe(true)
+    expect(runtimeTask?.outputBytes).toBe(0)
+    expect(runtimeTask?.logPath).toBeTruthy()
+    expect(existsSync(runtimeTask!.logPath!)).toBe(false)
+  }))
+
   it('settles after the termination grace period when a timed-out process never closes', async () => withWorkspace(async ({ workspace }) => {
     vi.useFakeTimers()
     try {
@@ -316,31 +328,6 @@ describe('NodeToolExecutor sandbox policies', () => {
       expect.objectContaining({ path: 'src/FluxRunner.ts', title: 'FluxRunner', line: 1 }),
     ]))
     expect(symbols.data?.some(hit => /FluxHidden|FluxShadow/.test(hit.title))).toBe(false)
-  }))
-
-  it('does not start CodeGraph indexing for an ordinary symbol search', async () => withWorkspace(async ({ workspace }) => {
-    mkdirSync(join(workspace, 'src'), { recursive: true })
-    writeFileSync(join(workspace, 'src', 'FastPath.ts'), 'export function fastPath() { return true }\n', 'utf-8')
-    const previous = process.env.TURBOFLUX_DISABLE_CODEGRAPH
-    delete process.env.TURBOFLUX_DISABLE_CODEGRAPH
-    const searchSymbols = vi.fn()
-    const load = vi.spyOn(CodeGraphService, 'load').mockResolvedValue({
-      isInitialized: () => false,
-      searchSymbols,
-    } as unknown as CodeGraphService)
-
-    try {
-      const executor = new NodeToolExecutor(workspace)
-      const result = await executor.searchCodeSymbols({ query: 'fastPath', workspacePath: workspace, exact: true })
-
-      expect(result.success).toBe(true)
-      expect(result.data?.map(hit => hit.title)).toContain('fastPath')
-      expect(searchSymbols).not.toHaveBeenCalled()
-    } finally {
-      load.mockRestore()
-      if (previous === undefined) delete process.env.TURBOFLUX_DISABLE_CODEGRAPH
-      else process.env.TURBOFLUX_DISABLE_CODEGRAPH = previous
-    }
   }))
 
   it('reads bounded line ranges and reports continuation without loading the full file result', async () => withWorkspace(async ({ workspace }) => {

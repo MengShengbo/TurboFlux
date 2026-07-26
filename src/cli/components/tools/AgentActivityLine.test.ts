@@ -2,14 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { buildAgentActivityLineFrame } from './AgentActivityLine'
 
 describe('AgentActivityLine', () => {
-  it('uses caller-provided theme colors while preserving line width', () => {
-    const segments = buildAgentActivityLineFrame(48, 9, {
-      base: '#base',
-      sweep: ['#one', '#two', '#three', '#core', '#five', '#six', '#seven'],
-    })
+  it('renders the July cockpit blue-cyan activity sweep', () => {
+    const segments = buildAgentActivityLineFrame(80, 10)
+    const colors = segments.map(segment => segment.color)
 
-    expect(segments.map(segment => segment.text).join('')).toHaveLength(48)
-    expect(segments.some(segment => segment.color === '#base')).toBe(true)
-    expect(segments.some(segment => segment.color === '#core' && segment.bold)).toBe(true)
+    expect(segments.map(segment => segment.text).join('')).toHaveLength(80)
+    expect(colors).toContain('#075985')
+    expect(colors).toContain('#67e8f9')
+    expect(segments.some(segment => segment.bold)).toBe(true)
   })
 })

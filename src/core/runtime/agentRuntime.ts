@@ -1,4 +1,5 @@
 import type { AgentConfig, AgentMode, ApprovalPolicy, SandboxPolicy } from '../../shared/agentTypes'
+import { join } from 'node:path'
 import { AgentEngine } from '../agentEngine'
 import { McpClient } from '../mcp/client'
 import { loadMcpSettings } from '../mcp/settings'
@@ -63,7 +64,10 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
   const conversationId = options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`
   const stateProvider = new DefaultAgentStateProvider(options.config, options.workspacePath, { conversationId })
   const effectiveApprovalPolicy = options.approvalPolicy || options.config.approvalPolicy || 'ask'
-  const runtimeTaskManager = new RuntimeTaskManager({ defaultOwnerSessionId: conversationId })
+  const runtimeTaskManager = new RuntimeTaskManager({
+    defaultOwnerSessionId: conversationId,
+    journalPath: join(options.workspacePath, '.turboflux', 'runtime', 'journal.jsonl'),
+  })
   const subAgentTaskManager = new SubAgentTaskManager({
     workspacePath: options.workspacePath,
     runtimeTaskManager,

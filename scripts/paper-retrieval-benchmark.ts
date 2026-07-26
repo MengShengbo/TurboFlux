@@ -82,7 +82,7 @@ function parseArgs(): Args {
 }
 
 function effectiveCaseConcurrency(args: Args): number {
-  return args.systems.includes('fastcontext') ? Math.min(args.concurrency, 25) : args.concurrency
+  return args.systems.includes('fastcontext') ? Math.min(args.concurrency, 10) : args.concurrency
 }
 
 function relevantCliVersionsMatch(
@@ -260,7 +260,7 @@ function experimentMetadata(args: Args, manifestPath: string, caseIds: string[])
     notes: [
       'All LLM systems use the active TurboFlux endpoint and gpt-5.5.',
       'Native reasoning is disabled; protocol differences are recorded per run.',
-      `Adaptive case-level concurrency starts at ${Math.min(effectiveCaseConcurrency(args), 4)} and may rise to ${effectiveCaseConcurrency(args)}; FastContext uses one model-led adaptive controller with a hard provider-turn ceiling of ${FAST_CONTEXT_TUNING.maxTurns}. Systems within one case remain sequential and rotated.`,
+      `Adaptive case-level concurrency starts at ${Math.min(effectiveCaseConcurrency(args), 4)} and may rise to ${effectiveCaseConcurrency(args)}; FastContext Race uses a ${FAST_CONTEXT_TUNING.maxTurns}-turn controller. Systems within one case remain sequential and rotated.`,
       args.retryTransient ? `Transient failures are retried up to ${args.transientAttempts} time(s) per run invocation.` : 'Transient retries are disabled.',
       args.command === 'calibrate' ? 'Calibration run; not a final comparative result.' : 'Formal repeated experiment.',
       args.caseOffset > 0 ? `Selection starts after ${args.caseOffset} balanced case(s), allowing a disjoint development slice.` : 'Selection starts at the first balanced case.',

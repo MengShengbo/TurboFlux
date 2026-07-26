@@ -105,6 +105,7 @@ export function turnsToMessages(turns: AgentTurn[]): Message[] {
 
   return turns.flatMap(turn => {
     if (!isMessageRole(turn.role)) return []
+    if (turn.metadata?.internal === true) return []
     const tools = turn.toolCalls?.map(toolCall => {
       const result = resultByToolCallId.get(toolCall.id)
       return {

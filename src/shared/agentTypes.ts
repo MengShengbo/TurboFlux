@@ -110,6 +110,8 @@ export interface AgentTurn {
     thinking?: ThinkingTrace
     rawReasoningPayload?: RawReasoningPayload
     interrupted?: boolean
+    internal?: boolean
+    internalKind?: string
     checkpointId?: string
     checkpointLabel?: string
     attachments?: AgentAttachment[]

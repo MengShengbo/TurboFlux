@@ -3,6 +3,7 @@ import { join, resolve } from 'path'
 import { homedir } from 'os'
 import type { AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
 import type { ConversationJournalEntry, ConversationMeta, PersistedConversation } from './types'
+import { writeFileAtomicSync } from '../../core/fileIO'
 
 const DEFAULT_CONVERSATIONS_DIR = join(homedir(), '.turboflux', 'conversations')
 const CONVERSATION_ID_PATTERN = /^[a-zA-Z0-9._-]+$/
@@ -267,13 +268,21 @@ export function appendConversationJournal(id: string, entry: ConversationJournal
   try { chmodSync(filePath, 0o600) } catch {}
 }
 
-export function saveConversation(conv: PersistedConversation): void {
-  appendConversationJournal(conv.id, {
+export function saveConversation(conv: PersistedConversation, options: { compact?: boolean } = {}): void {
+  const entry: ConversationJournalEntry = {
     version: 1,
     type: 'snapshot',
     timestamp: Date.now(),
     conversation: conv,
-  })
+  }
+  if (!options.compact) {
+    appendConversationJournal(conv.id, entry)
+    return
+  }
+
+  const filePath = conversationPath(conv.id, 'jsonl')
+  writeFileAtomicSync(filePath, `${JSON.stringify(entry)}\n`, 0o600)
+  checkedJournalBoundaries.add(filePath)
 }
 
 export function loadConversation(id: string): PersistedConversation | null {

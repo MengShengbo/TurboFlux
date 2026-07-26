@@ -1,10 +1,10 @@
 import React from 'react'
 import { Text } from 'ink'
 import { useTheme } from '../../theme/index'
-import type { Theme } from '../../theme/types'
+import type { ThemeColorKey } from '../../theme/types'
 
 interface ThemedTextProps {
-  color?: keyof Theme
+  color?: ThemeColorKey
   bold?: boolean
   italic?: boolean
   underline?: boolean

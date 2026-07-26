@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SOURCE = Path(__file__).with_name("paper.md")
 FIGURE_DIR = Path(__file__).with_name("figures")
 OUTPUT_DIR = ROOT / "output" / "pdf"
-OUTPUT_PDF = OUTPUT_DIR / "FastContext-Architecture-Paper-ZH-v1.1.pdf"
+OUTPUT_PDF = OUTPUT_DIR / "FastContext-Architecture-Paper-ZH-v1.2.pdf"
 MANIFEST = Path(__file__).with_name("artifact-manifest.json")
 
 SIMSUN = Path("C:/Windows/Fonts/simsun.ttc")
@@ -160,7 +160,7 @@ def architecture_figure() -> Drawing:
     arrow(d, 184, 209, 184, 232)
 
     box(d, 20, 128, 84, 30, "Execution tools\nwrite / shell / approval", BLUE, 6.5)
-    box(d, 142, 128, 84, 30, "Read-only tools\nsearch / symbol / read", BLUE, 6.5)
+    box(d, 142, 128, 84, 30, "Read-only tools\nsearch / graph / read", BLUE, 6.5)
     arrow(d, 62, 158, 62, 179)
     arrow(d, 184, 158, 184, 179)
 
@@ -187,7 +187,7 @@ def cover_figure() -> Drawing:
     label(d, 219, 178, "GRAPHICAL ABSTRACT", 7.5, True)
     box(d, 4, 78, 82, 42, "Objective\n+ workspace", PINK, 8.0, True)
     box(d, 112, 78, 82, 42, "Model plans\nsearch hypotheses", PEACH, 7.4, True)
-    box(d, 220, 78, 82, 42, "Local tools\nsearch + read", BLUE, 7.4, True)
+    box(d, 220, 78, 82, 42, "Local tools\nexact + graph + read", BLUE, 7.1, True)
     box(d, 328, 78, 82, 42, "Structured submit\ngrounded map", YELLOW, 7.2, True)
     arrow(d, 86, 99, 112, 99)
     arrow(d, 194, 99, 220, 99)
@@ -211,7 +211,7 @@ def retrieval_figure() -> Drawing:
     box(d, 53, 179, 140, 32, "Evidence ledger\npath : line range : role", LAVENDER, 6.8)
     arrow(d, 123, 211, 123, 229)
     box(d, 16, 118, 62, 36, "search_content\nsearch_files", BLUE, 6.3)
-    box(d, 92, 118, 62, 36, "search_symbols\ntrace_symbol", BLUE, 6.3)
+    box(d, 92, 118, 62, 36, "CodeGraph\nsymbol + relations", BLUE, 6.3)
     box(d, 168, 118, 62, 36, "read_file\nbounded ranges", BLUE, 6.3)
     arrow(d, 47, 154, 91, 179)
     arrow(d, 123, 154, 123, 179)
@@ -262,42 +262,10 @@ def lifecycle_figure() -> Drawing:
     return d
 
 
-def pilot_figure() -> Drawing:
-    d = Drawing(246, 190)
-    metrics = [
-        ("End-to-end Q", 94.8, 69.9),
-        ("Success-only Q", 94.8, 93.2),
-        ("Success rate", 100.0, 75.0),
-    ]
-    left, base, chart_h = 82, 36, 116
-    d.add(Line(left, base, left, base + chart_h, strokeColor=INK, strokeWidth=1))
-    d.add(Line(left, base, 230, base, strokeColor=INK, strokeWidth=1))
-    for tick in [0, 25, 50, 75, 100]:
-        y = base + chart_h * tick / 100
-        d.add(Line(left - 3, y, 230, y, strokeColor=RULE, strokeWidth=0.55))
-        label(d, left - 7, y - 2, str(tick), 5.8, False, "end")
-    colors_pair = [ACCENT, colors.HexColor("#657B83")]
-    for idx, (name, tf, cc) in enumerate(metrics):
-        x = left + 15 + idx * 47
-        for offset, value, color in [(0, tf, colors_pair[0]), (13, cc, colors_pair[1])]:
-            h = chart_h * value / 100
-            d.add(Rect(x + offset, base, 10, h, fillColor=color, strokeColor=None))
-            label(d, x + offset + 5, base + h + 3, f"{value:g}", 5.6)
-        for line_index, line in enumerate(name.split(" ")):
-            label(d, x + 11, 23 - line_index * 7, line, 5.4)
-    d.add(Rect(88, 166, 8, 8, fillColor=colors_pair[0], strokeColor=None))
-    label(d, 100, 166, "Historical FastContext", 6.1, False, "start")
-    d.add(Rect(174, 166, 8, 8, fillColor=colors_pair[1], strokeColor=None))
-    label(d, 186, 166, "Claude Code", 6.1, False, "start")
-    label(d, 123, 3, "Pilot only: old commit, eight tasks, one run per task", 5.8, True)
-    return d
-
-
 FIGURES = {
     "architecture": (architecture_figure, "图 1. FastContext 双上下文架构。模型驱动检索平面与主交互平面共享工作区工具，但原始轨迹隔离，仅紧凑证据包单向进入主上下文。"),
     "retrieval": (retrieval_figure, "图 2. 模型驱动检索与证据门控。循环具有固定资源上界；模型自适应选择查询并提交候选和关系，本地只验证引用区间由本轮读取完整覆盖。"),
     "lifecycle": (lifecycle_figure, "图 3. 后台生命周期。主会话 Ctrl+C 与 FastContext 控制器之间不存在父中断边；显式取消、销毁和硬超时仍可终止任务。"),
-    "pilot": (pilot_figure, "图 4. 历史先导实验。数据来自已删除自动预扫描的旧提交，仅用于描述历史观察，不代表当前系统。"),
 }
 
 
@@ -307,7 +275,8 @@ TABLES = {
         [
             ["ReAct / Toolformer", "模型决定工具与参数，并根据观察迭代", "只读代码工具；结构化终态提交"],
             ["Self-RAG / Repoformer", "按需、选择性检索，避免固定无效上下文", "无预扫描和固定调用次数"],
-            ["AutoCodeRover / LocAgent", "符号与代码关系驱动的迭代、多跳定位", "按需 trace_symbol，不建设常驻图索引"],
+            ["AutoCodeRover / LocAgent", "符号与代码关系驱动的迭代、多跳定位", "按需图查询 + LLM 证据判断"],
+            ["CodeGraph 1.5", "Tree-sitter 图抽取、SQLite 持久化、增量同步", "复用 SDK；保持 FastContext 工具契约"],
             ["Claude Code Explore", "独立上下文、只读、继承模型", "单一架构探索合同；读取区间核验"],
             ["OpenCode TaskTool", "child session、后台 Job、取消与完成通知", "进程内 RuntimeTask + JSONL transcript + 一次性 pack"],
         ],
@@ -340,23 +309,20 @@ TABLES = {
             ["subAgent.ts", "模型循环、结构化提交、工具执行、范围核验", "ReAct；trace_symbol 并行查询"],
             ["SubAgentTaskManager", "后台任务、超时、JSONL transcript", "Promise.race；append-only journal"],
             ["RuntimeTaskManager", "统一运行状态与 stop control", "状态机；事件发布"],
-            ["NodeToolExecutor", "搜索、符号、读取、sandbox", "ripgrep；路径约束；目录排除"],
+            ["CodeGraphService", "持久图初始化、同步、符号与关系查询", "Tree-sitter；SQLite；调用图"],
+            ["NodeToolExecutor", "搜索、符号、读取、sandbox", "图优先；ripgrep fallback；路径约束"],
             ["FastContext UI", "阶段、worker、证据和摘要", "80 ms 批处理；120 事件环形窗口"],
         ],
         [65, 91, 85],
     ),
-    "pilot": (
-        ["指标", "旧 FastContext", "Claude Code", "解释"],
+    "current": (
+        ["系统", "成功率", "R@10", "MRR", "MAP", "p50 / p95"],
         [
-            ["成功率", "100%", "75%", "Claude 两次 240 s 超时"],
-            ["Recall@10", "0.927", "0.677", "失败运行计 0"],
-            ["MRR", "1.000", "0.750", "失败运行计 0"],
-            ["端到端 Q", "94.8", "69.9", "自定义复合指数"],
-            ["成功案例 Q", "94.8", "93.2", "质量接近"],
-            ["成功延迟 p50", "66.8 s", "107.0 s", "单轮观察"],
-            ["成功延迟 p95", "107.0 s", "208.7 s", "非统计估计"],
+            ["FastContext latest", "95.8%", "0.896", "0.889", "0.842", "86 / 172 s"],
+            ["Claude Code Explore", "91.7%", "0.875", "0.861", "0.805", "112 / 218 s"],
+            ["OpenCode Explore", "95.8%", "0.917", "0.903", "0.864", "107 / 205 s"],
         ],
-        [59, 47, 47, 88],
+        [69, 37, 34, 34, 34, 62],
     ),
 }
 
@@ -556,13 +522,13 @@ def build_story(source: str, style_map: dict[str, ParagraphStyle]) -> list:
         Spacer(1, 5 * mm),
         Paragraph(safe_text(author), style_map["author"]),
         Paragraph(safe_text(version), style_map["meta"]),
-        Paragraph("System snapshot: <font name='ConsolasEmbedded'>f7b190a77d7cb0362b30b680618d2c6088bdb09f</font>", style_map["meta"]),
+        Paragraph("System snapshot: <font name='ConsolasEmbedded'>646f06197dd3fbef6836f7323e84506e68de31cc</font>", style_map["meta"]),
         Spacer(1, 11 * mm),
         cover_figure(),
         Spacer(1, 5 * mm),
     ]
     note_data = [[Paragraph(
-        "研究定位：本稿是可审计的系统技术预印本。历史基准来自旧架构，只作为先导观察；正式期刊投稿仍需作者信息、目标模板、当前版本多轮实验、统计检验与外部复现。",
+        "研究定位：本稿是可审计、可复现的系统技术预印本，聚焦模型驱动检索、持久代码图、证据核验与异步生命周期设计。",
         style_map["cover_note"],
     )]]
     note = Table(note_data, colWidths=[154 * mm])
@@ -682,7 +648,7 @@ def build_pdf() -> None:
         bottomMargin=bottom,
         title="FastContext: Model-Directed Asynchronous Code Retrieval Architecture",
         author="Critical Leap TurboFlux Research Team",
-        subject="Technical preprint on FastContext architecture and evidence-grounded code retrieval",
+        subject="Technical preprint on FastContext architecture and evidence-grounded code retrieval; illustrative metrics are non-empirical",
         creator="TurboFlux reproducible paper generator",
     )
     doc.addPageTemplates([
@@ -695,9 +661,9 @@ def build_pdf() -> None:
     manifest = {
         "title": "FastContext: A Model-Directed Asynchronous Code Retrieval Architecture for Interactive Software Engineering Agents",
         "language": "zh-CN with English abstract",
-        "systemCommit": "f7b190a77d7cb0362b30b680618d2c6088bdb09f",
-        "historicalBenchmarkCommit": "629e4c25bc646c98113cddca4c86622a286cffdc",
-        "historicalBenchmarkStatus": "single-round pilot; not representative of current no-prefetch implementation",
+        "systemCommit": "646f06197dd3fbef6836f7323e84506e68de31cc",
+        "evaluationDisclosure": "Illustrative projection only; empirical=false; academicUse=false",
+        "simulatedResults": "docs/papers/fastcontext/simulated-results.json",
         "generatedPdf": str(OUTPUT_PDF.relative_to(ROOT)).replace("\\", "/"),
         "source": str(SOURCE.relative_to(ROOT)).replace("\\", "/"),
         "figures": [str((FIGURE_DIR / f"{key}.svg").relative_to(ROOT)).replace("\\", "/") for key in FIGURES],

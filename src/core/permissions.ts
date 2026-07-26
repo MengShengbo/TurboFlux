@@ -47,6 +47,7 @@ export class PermissionPipeline {
   private rules: PermissionRule[] = []
   private sessionGrants = new Map<string, number>()
   private runGrants = new Map<string, number>()
+  private decisionSequence = 0
 
   constructor(private approvalPolicy: ApprovalPolicy = 'agent') {}
 
@@ -59,40 +60,44 @@ export class PermissionPipeline {
   }
 
   check(toolName: string, args: Record<string, unknown>): PermissionCheckResult {
+    const decide = (result: PermissionCheckResult): PermissionCheckResult => ({
+      ...result,
+      decisionId: `policy_${Date.now().toString(36)}_${(++this.decisionSequence).toString(36)}`,
+    })
     if (toolName === 'run_command') {
       const denyResult = this.checkDenyCommandPatterns(args)
-      if (denyResult) return denyResult
+      if (denyResult) return decide(denyResult)
     }
 
     if (this.hasSessionGrant(toolName, args)) {
-      return { verdict: 'allow', reason: 'Previously approved this session' }
+      return decide({ verdict: 'allow', reason: 'Previously approved this session' })
     }
 
     if (this.hasRunGrant(toolName, args)) {
-      return { verdict: 'allow', reason: 'Previously approved for this run' }
+      return decide({ verdict: 'allow', reason: 'Previously approved for this run' })
     }
 
     if (toolName.includes('__') && this.approvalPolicy !== 'full') {
-      return { verdict: 'ask', reason: 'MCP tools require explicit approval before sharing data or taking action' }
+      return decide({ verdict: 'ask', reason: 'MCP tools require explicit approval before sharing data or taking action' })
     }
 
     if (toolName === 'run_command') {
       const askResult = this.checkAskCommandPatterns(args)
-      if (askResult) return askResult
+      if (askResult) return decide(askResult)
     }
 
     for (const rule of this.rules) {
       if (this.matchesRule(rule, toolName, args)) {
         if (this.approvalPolicy === 'full' && rule.verdict === 'ask') continue
-        return { verdict: rule.verdict, rule, reason: rule.reason }
+        return decide({ verdict: rule.verdict, rule, reason: rule.reason })
       }
     }
 
     if (this.approvalPolicy === 'ask' && this.requiresApproval(toolName)) {
-      return { verdict: 'ask', reason: 'Request approval mode: confirm file changes, commands, and external actions' }
+      return decide({ verdict: 'ask', reason: 'Request approval mode: confirm file changes, commands, and external actions' })
     }
 
-    return { verdict: 'allow' }
+    return decide({ verdict: 'allow' })
   }
 
   grantSession(toolName: string, argsFingerprint: string): void {
