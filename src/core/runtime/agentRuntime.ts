@@ -10,7 +10,6 @@ import { RuntimeTaskManager } from './runtimeTaskManager'
 import { SubAgentTaskManager } from './subAgentTaskManager'
 import { DefaultAgentStateProvider, type AgentRuntimeConfig } from './stateProvider'
 import { buildProfileSystemPromptSection, loadProfile } from '../profile'
-import { DEFAULT_AGENT_SOFT_TURN_LIMIT } from '../agentRunBudget'
 
 export interface CreateAgentRuntimeOptions {
   workspacePath: string
@@ -49,7 +48,6 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
     approvalPolicy: options.approvalPolicy || options.config.approvalPolicy || 'ask',
     sandboxPolicy: options.sandboxPolicy || ((options.approvalPolicy || options.config.approvalPolicy) === 'full' ? 'full' : 'workspace'),
     temperature: 0.7,
-    maxTurns: DEFAULT_AGENT_SOFT_TURN_LIMIT,
     workspacePath: options.workspacePath,
     workspaceName: options.workspaceName,
     profileSystemPrompt: buildProfileSystemPromptSection(loadProfile()),

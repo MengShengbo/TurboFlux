@@ -117,11 +117,11 @@ export class TurnStrategyPlanner {
 
   private buildRetrievalPlan(mode: AgentMode, hasEvidence: boolean): string[] {
     const plan = [
-      'For codebase location questions, use semantic judgment to choose search_content/search_files/search_symbols/get_codemap or explore_code before asking the user where code is.',
-      'Use the narrowest tool that can ground the next claim; do not guess file paths or conclude from empty first-pass searches.',
+      'Maximize information gain per model round: batch all independent searches and reads needed for the next decision.',
+      'Use user-provided and tool-returned paths directly. Search only unresolved locations, and do not repeat successful reads without a concrete reason.',
     ]
     if (!hasEvidence) {
-      plan.push('Before making codebase claims, gather direct evidence with search_content/search_files/search_symbols/get_codemap, then read_file at least one high-signal hit.')
+      plan.push('Gather enough direct evidence for the next decision in one batch when dependencies are already known.')
     }
     return plan
   }

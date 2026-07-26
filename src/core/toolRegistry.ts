@@ -4,12 +4,12 @@ import type { EnhancedToolDef } from '../shared/toolTypes'
 const tools: EnhancedToolDef[] = [
   {
     name: 'read_file',
-    description: 'Read a file or line-range slice. Defaults to the first 180 lines when limit is omitted. Output is line-numbered (cat -n style). Continue with offset/limit. Use read_file_full only when exact complete content is required.',
+    description: 'Read a file with line numbers. When offset/limit are omitted, returns up to 2,000 lines so normal source files are available in one call. Use offset/limit only for very large files or a precise range found by search. Independent files or ranges can be read in parallel.',
     category: 'read',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
-      { name: 'offset', type: 'number', description: 'Starting line number (1-based)', required: false },
-      { name: 'limit', type: 'number', description: 'Number of lines to read', required: false },
+      { name: 'offset', type: 'number', description: 'Starting line number (1-based). Omit unless the file is too large or a search identified a precise range.', required: false },
+      { name: 'limit', type: 'number', description: 'Number of lines to read. Omit for normal source files.', required: false },
       { name: 'with_line_numbers', type: 'boolean', description: 'When true (default), prefix each line with its 1-based line number followed by "\u2192". Set false for raw content.', required: false, default: true },
     ],
     isReadOnly: true,
@@ -19,7 +19,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'read_file_full',
-    description: 'Read the entire file in one call. Prefer this when a whole-file rewrite or full-file audit needs exact complete contents. Avoid for very large files unless full contents are truly necessary.',
+    description: 'Read the entire file without the 2,000-line safety window. Use only when exact complete contents of a very large file are required.',
     category: 'read',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },

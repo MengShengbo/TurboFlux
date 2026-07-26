@@ -364,120 +364,55 @@ export function formatSummaryAsContext(summary: StructuredSummary): string {
 
 // ==================== Context Manager ====================
 
-/**
- * Deduplicate read_file results for the same file path.
- *
- * When an agent reads the same file multiple times (read → edit → re-read),
- * the context fills with stale copies of the same content. Only the LATEST
- * read_file result for each path is kept intact; earlier reads are replaced
- * with a short placeholder.
- *
- * Strategy (Cline v3.25, April 2025):
- *   "Cline ends up loading the same file many times... This not only wastes
- *    precious space in the context window, but can lead to certain LLM models
- *    having a harder time identifying correct chunks of the file for editing."
- *
- * This function returns a new array of turns — the original session.turns is
- * never mutated. Only tool_result turns whose toolResults contain read_file
- * outputs are affected.
- */
 function isReadFileTool(name: string): boolean {
   return name === 'read_file' || name === 'read_file_full'
 }
 
-function deduplicateReadFileResults(turns: AgentTurn[]): AgentTurn[] {
-  // First pass: find the LAST occurrence index for each file path in read_file results.
-  // We track by (toolCallId → path) so we can identify which result to keep.
-  const lastReadIndexByPath = new Map<string, number>()
+function deduplicateExactReadFileResults(turns: AgentTurn[]): AgentTurn[] {
+  const readByToolCallId = new Map<string, { key: string; path: string }>()
+  const lastToolCallIdByRead = new Map<string, string>()
 
-  for (let i = 0; i < turns.length; i++) {
-    const turn = turns[i]
-    if (turn.role !== 'tool_result' || !turn.toolResults) continue
-    for (const tr of turn.toolResults) {
-      if (!isReadFileTool(tr.name)) continue
-      // Extract path from the tool call id lookup — we need the corresponding
-      // tool_call to get the path argument. Walk backwards to find it.
-      // Simpler: extract path from the output itself (first line often has it)
-      // or from the toolCallId → match with assistant turn's toolCalls.
-      // We use a heuristic: store by toolCallId, then resolve paths below.
-      lastReadIndexByPath.set(tr.toolCallId, i)
-    }
-  }
-
-  // Build a map from toolCallId → file path by scanning assistant turns
-  const pathByToolCallId = new Map<string, string>()
   for (const turn of turns) {
     if (turn.role !== 'assistant' || !turn.toolCalls) continue
-    for (const tc of turn.toolCalls) {
-      if (!isReadFileTool(tc.name)) continue
-      const path = (tc.arguments.path as string) || ''
-      if (path) pathByToolCallId.set(tc.id, path)
+    for (const toolCall of turn.toolCalls) {
+      if (!isReadFileTool(toolCall.name)) continue
+      const path = (toolCall.arguments.path as string) || ''
+      if (!path) continue
+      const key = JSON.stringify({
+        name: toolCall.name,
+        path,
+        offset: toolCall.arguments.offset ?? null,
+        limit: toolCall.arguments.limit ?? null,
+        withLineNumbers: toolCall.arguments.with_line_numbers ?? null,
+      })
+      readByToolCallId.set(toolCall.id, { key, path })
     }
   }
 
-  // Build a map: path → last turn index that has a read_file result for it
-  const lastTurnIdxByPath = new Map<string, number>()
-  for (let i = 0; i < turns.length; i++) {
-    const turn = turns[i]
+  for (const turn of turns) {
     if (turn.role !== 'tool_result' || !turn.toolResults) continue
-    for (const tr of turn.toolResults) {
-      if (!isReadFileTool(tr.name)) continue
-      const path = pathByToolCallId.get(tr.toolCallId)
-      if (path) lastTurnIdxByPath.set(path, i)
+    for (const result of turn.toolResults) {
+      if (result.isError || !isReadFileTool(result.name)) continue
+      const read = readByToolCallId.get(result.toolCallId)
+      if (read) lastToolCallIdByRead.set(read.key, result.toolCallId)
     }
   }
 
-  // Second pass: build the deduplicated turns array
-  return turns.map((turn, i) => {
+  return turns.map(turn => {
     if (turn.role !== 'tool_result' || !turn.toolResults) return turn
-
     let modified = false
-    const newToolResults = turn.toolResults.map(tr => {
-      if (!isReadFileTool(tr.name)) return tr
-      const path = pathByToolCallId.get(tr.toolCallId)
-      if (!path) return tr
-      const lastIdx = lastTurnIdxByPath.get(path)
-      // If this is NOT the last read of this file, replace with a keyword
-      // bookmark (arxiv:2604.12376 — cooperative paging). The bookmark
-      // preserves the file path and a short keyword hint so the model can
-      // decide whether to re-fetch without wasting tokens on stale content.
-      if (lastIdx !== undefined && lastIdx !== i) {
-        modified = true
-        // Extract a minimal keyword hint from the stale output: grab the
-        // first non-empty line that looks like a declaration or heading.
-        const hint = extractKeywordHint(tr.output)
-        const hintSuffix = hint ? `, keywords: ${hint}` : ''
-        return {
-          ...tr,
-          output: `[evicted: ${path}${hintSuffix} — superseded by a later read; use read_file or read_file_full to retrieve]`,
-        }
+    const toolResults = turn.toolResults.map(result => {
+      if (result.isError || !isReadFileTool(result.name)) return result
+      const read = readByToolCallId.get(result.toolCallId)
+      if (!read || lastToolCallIdByRead.get(read.key) === result.toolCallId) return result
+      modified = true
+      return {
+        ...result,
+        output: `[evicted duplicate read: ${read.path}; the identical later read remains in context]`,
       }
-      return tr
     })
-
-    return modified ? { ...turn, toolResults: newToolResults } : turn
+    return modified ? { ...turn, toolResults } : turn
   })
-}
-
-/**
- * Extract a short keyword hint from a stale tool output.
- * Used to build cooperative-paging bookmarks (arxiv:2604.12376).
- * Returns up to ~40 chars of the most signal-rich content found.
- */
-function extractKeywordHint(output: string): string {
-  if (!output) return ''
-  const lines = output.split(/\r?\n/)
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    // Prefer lines with declarations, exports, class/function names
-    if (/\b(export|class|function|interface|type|const|enum)\b/.test(trimmed)) {
-      return trimmed.slice(0, 40).replace(/\s+/g, ' ')
-    }
-  }
-  // Fallback: first non-empty line
-  const first = lines.find(l => l.trim())
-  return first ? first.trim().slice(0, 40) : ''
 }
 
 function getInputBudget(contextWindow: number, maxOutputTokens: number, policyProfile: ContextPolicyProfile): number {
@@ -560,16 +495,9 @@ export class ContextManager {
     const inputBudget = getInputBudget(contextWindow, maxOutputTokens, policyProfile)
     const segmentContext = this.buildSegmentContext(injectableSegments, policyProfile.maxSegmentTokens, counterOptions)
 
-    // Pre-pass: deduplicate read_file results for the same path.
-    // When the agent reads the same file multiple times (e.g. read → edit →
-    // re-read to verify), only the LATEST read result for each path is kept
-    // intact; earlier reads are replaced with a short placeholder.
-    // This mirrors Cline's "remove outdated file reads" strategy and can
-    // eliminate hundreds of kilobytes of redundant content per session.
-    //
-    // We operate on a shallow copy of the turns array so the original
-    // session.turns is never mutated — the deduplication is view-only.
-    const deduplicatedTurns = deduplicateReadFileResults(turns)
+    // Remove only identical reads. Distinct ranges from one file are separate
+    // evidence and must remain available together for cross-region edits.
+    const deduplicatedTurns = deduplicateExactReadFileResults(turns)
 
     // Alias for the rest of the function — all logic below uses deduplicatedTurns
     const turns_ = deduplicatedTurns
