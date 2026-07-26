@@ -16,8 +16,8 @@ interface AgentActivitySegment {
 }
 
 const SHIMMER_STEP = 2
-const BASE_COLOR = '#242424'
-const SWEEP_COLORS = ['#303030', '#4a4a4a', '#737373', '#f5f5f5', '#bdbdbd', '#737373', '#4a4a4a']
+const BASE_COLOR = '#075985'
+const SWEEP_COLORS = ['#0e7490', '#0891b2', '#22d3ee', '#67e8f9', '#22d3ee', '#0891b2', '#0e7490']
 
 export function AgentActivityLine({ active, persistent = false }: AgentActivityLineProps) {
   const { columns } = useTerminalSize()
@@ -38,12 +38,8 @@ export function AgentActivityLine({ active, persistent = false }: AgentActivityL
   if (!active && !persistent) return null
 
   const width = Math.max(0, columns - 3)
-  const colors = {
-    base: theme.divider,
-    sweep: [theme.divider, theme.subtle, theme.inactive, theme.brandShimmer, theme.text, theme.inactive, theme.subtle],
-  }
   const segments = active
-    ? buildAgentActivityLineFrame(width, frame, colors)
+    ? buildAgentActivityLineFrame(width, frame)
     : [{ text: '─'.repeat(width), color: theme.subtle, bold: false }]
 
   return (
@@ -60,7 +56,6 @@ export function AgentActivityLine({ active, persistent = false }: AgentActivityL
 export function buildAgentActivityLineFrame(
   width: number,
   frame: number,
-  colors: { base: string; sweep: string[] } = { base: BASE_COLOR, sweep: SWEEP_COLORS },
 ): AgentActivitySegment[] {
   const safeWidth = Math.max(0, Math.floor(width))
   if (safeWidth === 0) return []
@@ -73,18 +68,18 @@ export function buildAgentActivityLineFrame(
   for (let index = 0; index < safeWidth; index += 1) {
     const distance = head - index
     const sweepIndex = distance >= 0 && distance < shimmerWidth
-      ? Math.min(colors.sweep.length - 1, Math.floor((distance / shimmerWidth) * colors.sweep.length))
+      ? Math.min(SWEEP_COLORS.length - 1, Math.floor((distance / shimmerWidth) * SWEEP_COLORS.length))
       : -1
     const isCore = sweepIndex === 3
     chars.push(sweepIndex >= 0
       ? {
           text: '-',
-          color: colors.sweep[sweepIndex]!,
+          color: SWEEP_COLORS[sweepIndex]!,
           bold: isCore,
         }
       : {
           text: '-',
-          color: colors.base,
+          color: BASE_COLOR,
           bold: false,
         })
   }

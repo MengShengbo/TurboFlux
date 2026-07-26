@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
-import { useTheme } from '../../theme/index'
+import { resolveBackground, useTheme } from '../../theme/index'
 import type { FastContextScanPhase } from '../../../core/fastContextTypes'
 import type { ActiveTaskContext } from '../../../core/taskManager'
 import type { TerminalSessionInfo } from '../../../shared/terminalTypes'
@@ -9,6 +9,8 @@ import type { ToolStatus } from '../tools/ToolCallTree'
 import { formatToolLabelForHistory } from '../tools/ToolCallTree'
 import type { StreamingToolDraft } from '../tools/ActiveWorkPanel'
 import type { FastContextUiSummary } from './fastContextUi'
+import { useTerminalSize } from '../../hooks/useTerminalSize'
+import { TURBOFLUX_VERSION } from '../../brand'
 
 export interface CockpitLayout {
   showWorkRail: boolean
@@ -18,9 +20,106 @@ export interface CockpitLayout {
 }
 
 export function resolveCockpitLayout(columns: number): CockpitLayout {
-  if (columns >= 126) return { showWorkRail: true, showTaskRail: true, workWidth: 28, taskWidth: 34 }
-  if (columns >= 100) return { showWorkRail: false, showTaskRail: true, workWidth: 0, taskWidth: 32 }
+  void columns
   return { showWorkRail: false, showTaskRail: false, workWidth: 0, taskWidth: 0 }
+}
+
+export interface CockpitHudProps {
+  columns?: number
+  workspacePath: string
+  model: string
+  mode: 'vibe' | 'plan'
+  reasoning?: string
+  approvalPolicy: string
+  isRunning: boolean
+  tools: ToolStatus[]
+  draft: StreamingToolDraft | null
+  fastContextSummary: FastContextUiSummary
+  fastContextActive: boolean
+  terminals: TerminalSessionInfo[]
+  mcpCount: number
+  task: ActiveTaskContext | null
+  objective?: string | null
+  objectiveStartedAt?: number
+  showTask: boolean
+}
+
+export function CockpitHud({
+  columns: requestedColumns,
+  workspacePath,
+  model,
+  mode,
+  reasoning,
+  approvalPolicy,
+  isRunning,
+  tools,
+  draft,
+  fastContextSummary,
+  fastContextActive,
+  terminals,
+  mcpCount,
+  task,
+  objective,
+  objectiveStartedAt,
+  showTask,
+}: CockpitHudProps) {
+  const theme = useTheme()
+  const { columns: terminalColumns } = useTerminalSize()
+  const columns = requestedColumns || terminalColumns
+  const availableWidth = Math.max(40, columns - 6)
+  const leftWidth = Math.max(20, Math.floor(availableWidth * 0.56))
+  const rightWidth = Math.max(16, availableWidth - leftWidth)
+  const activeTerminals = terminals.filter(session => session.status === 'running' || session.status === 'starting').length
+  const activeTool = [...tools].reverse().find(tool => tool.status === 'running')
+  const activity = draft
+    ? `PREPARING ${formatDraft(draft, rightWidth)}`
+    : activeTool
+      ? formatToolLabelForHistory(activeTool.name, activeTool.args)
+      : task && isRunning
+        ? `${Math.round(task.progress)}% ${task.title}`
+        : isRunning
+          ? 'PLANNING NEXT STEP'
+          : 'READY'
+  const fastStatus = fastContextActive
+    ? phaseLabel(fastContextSummary.phase)
+    : fastContextSummary.events > 0
+      ? fastContextSummary.phase === 'error' ? 'ERROR' : 'DONE'
+      : 'READY'
+  const taskGoal = showTask ? getTaskRailGoal(isRunning ? task : null, isRunning ? objective : null) : ''
+  const sessionDetails = [model || 'no model', mode.toUpperCase(), reasoning ? `reason:${reasoning}` : '', `approval:${approvalPolicy}`]
+    .filter(Boolean)
+    .join(' · ')
+  const resourceDetails = taskGoal || [
+    `FC ${fastStatus}`,
+    `TERM ${activeTerminals || 'OFF'}`,
+    `MCP ${mcpCount || 'OFF'}`,
+    showTask ? '' : 'Ctrl+T TASKS',
+  ].filter(Boolean).join(' · ')
+
+  return (
+    <Box flexDirection="column" flexShrink={0} backgroundColor={resolveBackground(theme, 'panelBackground')} paddingX={1}>
+      <Box flexDirection="row" height={1} overflow="hidden">
+        <Box width={leftWidth} overflow="hidden">
+          <Text color={theme.brand} bold>TurboFlux</Text>
+          <Text color={theme.subtle}>{` v${TURBOFLUX_VERSION} · `}</Text>
+          <Text color={theme.text} wrap="truncate-middle">{workspacePath}</Text>
+        </Box>
+        <Box width={rightWidth} justifyContent="flex-end" overflow="hidden">
+          <Text color={isRunning ? theme.brandShimmer : theme.success} bold wrap="truncate-end">
+            {`${isRunning ? '● RUNNING' : '● READY'}${activity !== 'READY' ? ` · ${activity}` : ''}`}
+          </Text>
+        </Box>
+      </Box>
+      <Box flexDirection="row" height={1} overflow="hidden">
+        <Box width={leftWidth} overflow="hidden">
+          <Text color={theme.inactive} wrap="truncate-end">{sessionDetails}</Text>
+        </Box>
+        <Box width={rightWidth} justifyContent="flex-end" overflow="hidden">
+          <Text color={taskGoal ? theme.brandShimmer : theme.inactive} wrap="truncate-end">{resourceDetails}</Text>
+        </Box>
+      </Box>
+    </Box>
+  )
 }
 
 interface WorkRailProps {
@@ -33,6 +132,7 @@ interface WorkRailProps {
   terminals: TerminalSessionInfo[]
   mcpCount: number
   visible?: boolean
+  compact?: boolean
 }
 
 export function WorkRail({
@@ -45,6 +145,7 @@ export function WorkRail({
   terminals,
   mcpCount,
   visible = true,
+  compact = false,
 }: WorkRailProps) {
   const theme = useTheme()
   const fastContext = fastContextSummary
@@ -66,9 +167,10 @@ export function WorkRail({
       borderStyle="single"
       borderTop={false}
       borderBottom={false}
-      borderLeft={false}
+      borderLeft={compact}
       borderColor={theme.divider}
-      backgroundColor={theme.panelBackground}
+      paddingX={compact ? 1 : 0}
+      backgroundColor={resolveBackground(theme, 'panelBackground')}
       overflow="hidden"
     >
       <RailHeader
@@ -124,7 +226,7 @@ export function WorkRail({
 function RailHeader({ title, state, stateColor }: { title: string; state: string; stateColor: string }) {
   const theme = useTheme()
   return (
-    <Box backgroundColor={theme.panelRaised} paddingX={1} marginBottom={1} justifyContent="space-between">
+    <Box backgroundColor={resolveBackground(theme, 'panelRaised')} paddingX={1} marginBottom={1} justifyContent="space-between">
       <Text color={theme.brand} bold>{title}</Text>
       <Text color={stateColor} bold>{`● ${state}`}</Text>
     </Box>
@@ -163,9 +265,10 @@ interface TaskRailProps {
   objectiveStartedAt?: number
   isRunning: boolean
   visible?: boolean
+  compact?: boolean
 }
 
-export function TaskRail({ width, task, objective, objectiveStartedAt, isRunning, visible = true }: TaskRailProps) {
+export function TaskRail({ width, task, objective, objectiveStartedAt, isRunning, visible = true, compact = false }: TaskRailProps) {
   const theme = useTheme()
   const [, setTick] = useState(0)
   const activeTask = isRunning ? task : null
@@ -197,8 +300,10 @@ export function TaskRail({ width, task, objective, objectiveStartedAt, isRunning
       borderTop={false}
       borderBottom={false}
       borderRight={false}
+      borderLeft={compact}
       borderColor={theme.divider}
-      backgroundColor={theme.panelBackground}
+      paddingX={compact ? 1 : 0}
+      backgroundColor={resolveBackground(theme, 'panelBackground')}
       overflow="hidden"
     >
       <RailHeader
@@ -265,7 +370,7 @@ function HiddenRail({ width, side }: { width: number; side: 'left' | 'right' }) 
       borderLeft={side === 'right'}
       borderRight={side === 'left'}
       borderColor={theme.divider}
-      backgroundColor={theme.panelBackground}
+      backgroundColor={resolveBackground(theme, 'panelBackground')}
     />
   )
 }

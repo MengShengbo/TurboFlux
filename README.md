@@ -184,6 +184,18 @@ turboflux . --mcp all
 turboflux . --mcp server-name
 ```
 
+### 终端透明背景
+
+终端模拟器负责真正的透明效果。TurboFlux 的 `--transparent` 只停止绘制大面积背景色，让 iTerm2、Windows Terminal、WezTerm、GNOME Terminal 等模拟器的背景透出：
+
+```bash
+turboflux . --transparent
+# 或
+TURBOFLUX_TRANSPARENT=1 turboflux .
+```
+
+该模式保留文字、边框、diff 和状态颜色；`--transparent` 不会改变终端模拟器自身的透明度设置。若环境变量曾被持久化设置，可用 `turboflux . --opaque` 强制恢复完整深色背景。
+
 ## 开发
 
 ```bash

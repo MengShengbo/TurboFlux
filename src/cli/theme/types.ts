@@ -1,4 +1,5 @@
 export interface Theme {
+  transparentBackground: boolean
   brand: string
   brandShimmer: string
 
@@ -27,5 +28,7 @@ export interface Theme {
   statusLine: string
   codeBackground: string
 }
+
+export type ThemeColorKey = Exclude<keyof Theme, 'transparentBackground'>
 
 export type ThemeName = 'dark' | 'light'

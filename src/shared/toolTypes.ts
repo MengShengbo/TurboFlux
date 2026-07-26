@@ -25,4 +25,5 @@ export interface PermissionCheckResult {
   verdict: PermissionVerdict
   rule?: PermissionRule
   reason?: string
+  decisionId?: string
 }

@@ -35,10 +35,7 @@ export function Header({
   const wordmark = compact
     ? [centerText(revealedWordmark[0] ?? '', width)]
     : centerTextBlock(revealedWordmark, width)
-  const moodColor = mood === 'error' ? theme.error
-    : mood === 'thinking' ? theme.brandShimmer
-    : mood === 'happy' ? theme.success
-    : theme.brand
+  const moodColor = mood === 'error' ? theme.error : theme.brand
 
   return (
     <Box flexDirection="column" marginBottom={1} flexShrink={0} width={width}>

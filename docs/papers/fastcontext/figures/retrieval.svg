@@ -26,8 +26,8 @@
 			<text x="25.46064453125" y="137.64499999999998" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,275) scale(1,-1)">search_content</text>
 			<text x="30.191796875" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">search_files</text>
 			<rect x="92" y="118" width="62" height="36" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
-			<text x="100.2409423828125" y="137.64499999999998" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,275) scale(1,-1)">search_symbols</text>
-			<text x="104.2676513671875" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">trace_symbol</text>
+			<text x="106.71474609375" y="137.64499999999998" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,275) scale(1,-1)">CodeGraph</text>
+			<text x="97.526220703125" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">symbol + relations</text>
 			<rect x="168" y="118" width="62" height="36" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
 			<text x="186.916796875" y="137.64499999999998" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,275) scale(1,-1)">read_file</text>
 			<text x="176.23017578125" y="129.945" style="font-family: ArialEmbedded; font-size: 6.3px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,259) scale(1,-1)">bounded ranges</text>

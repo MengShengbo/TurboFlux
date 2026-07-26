@@ -1,3 +1,5 @@
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type {
   RuntimeRestartPolicy,
   RuntimeTask,
@@ -6,15 +8,26 @@ import type {
   RuntimeTaskKind,
   RuntimeTaskStatus,
 } from '../../shared/runtimeTaskTypes'
+import { getRuntimeInfo, type RuntimeInfo } from '../../platform/runtime'
 
 export interface RuntimeTaskControl {
   stop?: () => Promise<void> | void
   write?: (data: string) => Promise<void> | void
 }
 
+export interface RuntimeTaskOutput {
+  taskId: string
+  offset: number
+  nextOffset: number
+  content: string
+  eof: boolean
+}
+
 export interface RuntimeTaskManagerOptions {
   defaultOwnerSessionId?: string
   now?: () => number
+  journalPath?: string
+  recover?: boolean
 }
 
 export interface CreateRuntimeTaskInput {
@@ -26,6 +39,9 @@ export interface CreateRuntimeTaskInput {
   command?: string
   cwd?: string
   pid?: number
+  logPath?: string
+  outputOffset?: number
+  outputBytes?: number
   startedAt?: number
   interactive?: boolean
   restartPolicy?: RuntimeRestartPolicy
@@ -37,7 +53,16 @@ export type RuntimeTaskUpdate = Partial<Pick<
   'command' | 'cwd' | 'pid' | 'exitCode' | 'logPath' | 'outputOffset' | 'outputBytes' | 'error' | 'metadata'
 >>
 
-const TERMINAL_STATUSES = new Set<RuntimeTaskStatus>(['completed', 'failed', 'stopped', 'interrupted'])
+const TERMINAL_STATUSES = new Set<RuntimeTaskStatus>(['completed', 'failed', 'stopped', 'interrupted', 'orphaned'])
+
+interface JournalRecord {
+  version: 1
+  sequence: number
+  recordedAt: number
+  runtime: RuntimeInfo
+  event?: RuntimeTaskEvent
+  repair?: string
+}
 
 function cloneTask(task: RuntimeTask): RuntimeTask {
   return {
@@ -52,9 +77,14 @@ export class RuntimeTaskManager {
   private listeners = new Set<(event: RuntimeTaskEvent) => void>()
   private sequence = 0
   private readonly now: () => number
+  private readonly journalPath?: string
+  private readonly runtimeInfo: RuntimeInfo
 
   constructor(private options: RuntimeTaskManagerOptions = {}) {
     this.now = options.now || Date.now
+    this.journalPath = options.journalPath
+    this.runtimeInfo = getRuntimeInfo()
+    if (options.recover !== false) this.recoverFromJournal()
   }
 
   createTask(input: CreateRuntimeTaskInput, control?: RuntimeTaskControl): RuntimeTask {
@@ -71,6 +101,9 @@ export class RuntimeTaskManager {
       command: input.command,
       cwd: input.cwd,
       pid: input.pid,
+      logPath: input.logPath,
+      outputOffset: input.outputOffset,
+      outputBytes: input.outputBytes,
       startedAt: now,
       updatedAt: now,
       interactive: input.interactive ?? input.kind === 'terminal',
@@ -86,6 +119,20 @@ export class RuntimeTaskManager {
   getTask(taskId: string): RuntimeTask | null {
     const task = this.tasks.get(taskId)
     return task ? cloneTask(task) : null
+  }
+
+  readTaskOutput(taskId: string, offset = 0, maxBytes = 256 * 1024): RuntimeTaskOutput {
+    const task = this.tasks.get(taskId)
+    if (!task) throw new Error(`Runtime task not found: ${taskId}`)
+    if (!task.logPath || !existsSync(task.logPath)) {
+      return { taskId, offset: Math.max(0, offset), nextOffset: Math.max(0, offset), content: '', eof: true }
+    }
+    const fileSize = statSync(task.logPath).size
+    const start = Math.max(0, Math.min(Math.floor(offset), fileSize))
+    const limit = Math.max(1, Math.min(Math.floor(maxBytes), 2 * 1024 * 1024))
+    const content = readFileSync(task.logPath).subarray(start, start + limit).toString('utf8')
+    const nextOffset = start + Buffer.byteLength(content)
+    return { taskId, offset: start, nextOffset, content, eof: nextOffset >= fileSize }
   }
 
   listTasks(filter: RuntimeTaskFilter = {}): RuntimeTask[] {
@@ -244,6 +291,81 @@ export class RuntimeTaskManager {
   }
 
   private emit(event: RuntimeTaskEvent): void {
+    this.appendJournal(event)
     for (const listener of this.listeners) listener(event)
+  }
+
+  private appendJournal(event: RuntimeTaskEvent): void {
+    if (!this.journalPath) return
+    const record: JournalRecord = {
+      version: 1,
+      sequence: ++this.sequence,
+      recordedAt: this.now(),
+      runtime: this.runtimeInfo,
+      event,
+    }
+    mkdirSync(dirname(this.journalPath), { recursive: true })
+    const fd = openSync(this.journalPath, 'a')
+    try {
+      writeSync(fd, `${JSON.stringify(record)}\n`, undefined, 'utf8')
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+  }
+
+  private recoverFromJournal(): void {
+    if (!this.journalPath || !existsSync(this.journalPath)) return
+    const lines = readFileSync(this.journalPath, 'utf8').split(/\r?\n/)
+    let validLines = 0
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const record = JSON.parse(line) as Partial<JournalRecord>
+        if (record.version !== 1 || typeof record.sequence !== 'number' || (!record.event && !record.repair)) throw new Error('invalid journal record')
+        this.sequence = Math.max(this.sequence, record.sequence)
+        if (record.event) this.applyRecoveredEvent(record.event)
+        validLines += 1
+      } catch {
+        break
+      }
+    }
+    if (validLines < lines.filter(line => line.trim()).length) {
+      const repairRecord = `${JSON.stringify({
+        version: 1,
+        sequence: ++this.sequence,
+        recordedAt: this.now(),
+        runtime: this.runtimeInfo,
+        repair: 'truncated-tail',
+      })}\n`
+      const fd = openSync(this.journalPath, 'a')
+      try {
+        writeSync(fd, repairRecord, undefined, 'utf8')
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
+    }
+    const recoveredOrphans: RuntimeTask[] = []
+    for (const task of this.tasks.values()) {
+      if (!TERMINAL_STATUSES.has(task.status)) {
+        task.status = 'orphaned'
+        task.error = 'Recovered without an active process lease'
+        task.updatedAt = this.now()
+        task.endedAt = task.updatedAt
+        recoveredOrphans.push(cloneTask(task))
+      }
+    }
+    for (const task of recoveredOrphans) {
+      this.appendJournal({ type: 'runtime-task:finished', task })
+    }
+  }
+
+  private applyRecoveredEvent(event: RuntimeTaskEvent): void {
+    if (event.type === 'runtime-task:created' || event.type === 'runtime-task:updated' || event.type === 'runtime-task:finished') {
+      this.tasks.set(event.task.id, cloneTask(event.task))
+      return
+    }
+    this.tasks.delete(event.taskId)
   }
 }

@@ -2,7 +2,7 @@ import React, { useCallback, useRef, useState } from 'react'
 import { Box, Text, useInput } from 'ink'
 import figures from 'figures'
 import cliTruncate from 'cli-truncate'
-import { useTheme } from '../../theme/index'
+import { resolveBackground, useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 
 export type PermissionDecision = 'allow-once' | 'allow-run' | 'allow-session' | 'deny'
@@ -97,7 +97,7 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
         {path && <Text color={theme.inactive}>Target  <Text color={theme.brand}>{path}</Text></Text>}
         <Text color={theme.inactive}>Reason  <Text color={theme.text}>{description}</Text></Text>
         {command && (
-          <Box paddingX={1} backgroundColor={theme.codeBackground}>
+          <Box paddingX={1} backgroundColor={resolveBackground(theme, 'codeBackground')}>
             <Text color={theme.brand} wrap="truncate-end">{command}</Text>
           </Box>
         )}

@@ -2,17 +2,18 @@ import { describe, expect, it } from 'vitest'
 import { getTaskRailGoal, resolveCockpitLayout } from './CockpitRails'
 
 describe('cockpit layout', () => {
-  it('shows both information rails on wide terminals', () => {
+  it('keeps the main conversation full width at every terminal size', () => {
     expect(resolveCockpitLayout(140)).toEqual({
-      showWorkRail: true,
-      showTaskRail: true,
-      workWidth: 28,
-      taskWidth: 34,
+      showWorkRail: false,
+      showTaskRail: false,
+      workWidth: 0,
+      taskWidth: 0,
     })
   })
 
-  it('keeps only the task rail at medium widths', () => {
-    expect(resolveCockpitLayout(110)).toMatchObject({ showWorkRail: false, showTaskRail: true })
+  it('keeps the conversation clear until the task rail has room', () => {
+    expect(resolveCockpitLayout(110)).toMatchObject({ showWorkRail: false, showTaskRail: false })
+    expect(resolveCockpitLayout(116)).toMatchObject({ showWorkRail: false, showTaskRail: false })
   })
 
   it('protects the conversation on narrow terminals', () => {

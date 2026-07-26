@@ -7,8 +7,18 @@ const themes: Record<ThemeName, Theme> = { dark: darkTheme, light: lightTheme }
 
 const ThemeContext = createContext<Theme>(darkTheme)
 
-export function ThemeProvider({ theme = 'dark', children }: { theme?: ThemeName; children: React.ReactNode }) {
-  return <ThemeContext.Provider value={themes[theme]}>{children}</ThemeContext.Provider>
+export function ThemeProvider({ theme = 'dark', transparentBackground = false, children }: { theme?: ThemeName; transparentBackground?: boolean; children: React.ReactNode }) {
+  const base = themes[theme]
+  const value = transparentBackground
+    ? {
+      ...base,
+      transparentBackground: true,
+      divider: theme === 'dark' ? '#707070' : base.divider,
+      subtle: theme === 'dark' ? '#8a8a8a' : base.subtle,
+      promptBorder: theme === 'dark' ? '#8a8a8a' : base.promptBorder,
+    }
+    : base
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
 }
 
 export function useTheme(): Theme {

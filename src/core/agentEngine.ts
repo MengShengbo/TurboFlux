@@ -37,7 +37,7 @@ import {
 } from './requestCompatibility'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
-import { FAST_CONTEXT_TUNING, type FastContextScanEvent, type FastContextScanResult } from './fastContextTypes'
+import { getFastContextProfile, normalizeFastContextStrategy, type FastContextScanEvent, type FastContextScanResult, type FastContextStrategy } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
 import type { RuntimeTask } from '../shared/runtimeTaskTypes'
 import { runFastContextSubagent } from './fastContextSubagent'
@@ -108,6 +108,28 @@ function contentBlocks(message: Record<string, unknown>): Array<Record<string, u
     return [{ type: 'text', text: message.content }]
   }
   return []
+}
+
+export function extractResponsesReasoningSummary(output: unknown): string {
+  if (!Array.isArray(output)) return ''
+  const summaries: string[] = []
+  for (const item of output) {
+    if (!item || typeof item !== 'object' || (item as Record<string, unknown>).type !== 'reasoning') continue
+    const record = item as Record<string, unknown>
+    for (const collection of [record.summary, record.content]) {
+      if (!Array.isArray(collection)) continue
+      for (const part of collection) {
+        if (typeof part === 'string' && part.trim()) {
+          summaries.push(part)
+          continue
+        }
+        if (!part || typeof part !== 'object') continue
+        const text = (part as Record<string, unknown>).text
+        if (typeof text === 'string' && text.trim()) summaries.push(text)
+      }
+    }
+  }
+  return summaries.join('\n\n')
 }
 
 export function normalizeAnthropicToolMessages(
@@ -288,6 +310,7 @@ type FastContextBackgroundStatus = 'started' | 'running' | 'busy' | 'unavailable
 interface FastContextBackgroundStart {
   status: FastContextBackgroundStatus
   objective: string
+  strategy: FastContextStrategy
   promise: Promise<FastContextScanResult | null> | null
   taskId?: string
 }
@@ -324,11 +347,13 @@ export class AgentEngine {
   private toolCallTaskMap: Map<string, string> = new Map()
   private touchedFilePaths: Set<string> = new Set()
   private filePreimages: Map<string, string | null> = new Map()
-  private runtimeAppendSystemPrompt: string | null = null
+  private runtimeContextTurnId: string | null = null
+  private runtimeContextForTurn = ''
   private fastContextObjective: string | null = null
   private fastContextPack: PendingFastContextPack | null = null
   private fastContextRunPromise: Promise<FastContextScanResult | null> | null = null
   private fastContextRunObjective: string | null = null
+  private fastContextRunStrategy: FastContextStrategy = 'autonomous-race'
   private fastContextAbortController: AbortController | null = null
   private fastContextRuntimeTaskId: string | null = null
   private fastContextGeneration = 0
@@ -514,20 +539,21 @@ export class AgentEngine {
     this.fastContextPack = null
   }
 
-  async runFastContextObjective(objective: string): Promise<FastContextScanResult | null> {
-    const run = this.startFastContextBackground(objective)
+  async runFastContextObjective(objective: string, strategy: FastContextStrategy = 'autonomous-race'): Promise<FastContextScanResult | null> {
+    const run = this.startFastContextBackground(objective, strategy)
     return run.promise
   }
 
-  private startFastContextBackground(objective: string): FastContextBackgroundStart {
+  private startFastContextBackground(objective: string, strategy: FastContextStrategy = 'autonomous-race'): FastContextBackgroundStart {
     const nextObjective = objective.trim()
     if (!nextObjective || !this.config.workspacePath) {
-      return { status: 'unavailable', objective: nextObjective, promise: null }
+      return { status: 'unavailable', objective: nextObjective, strategy, promise: null }
     }
     if (this.fastContextRunPromise) {
       return {
         status: this.fastContextRunObjective === nextObjective ? 'running' : 'busy',
         objective: this.fastContextRunObjective || nextObjective,
+        strategy: this.fastContextRunStrategy,
         promise: this.fastContextRunPromise,
         taskId: this.fastContextRuntimeTaskId || undefined,
       }
@@ -535,6 +561,7 @@ export class AgentEngine {
 
     this.setFastContextObjective(nextObjective)
     this.fastContextRunObjective = nextObjective
+    this.fastContextRunStrategy = strategy
     const controller = new AbortController()
     this.fastContextAbortController = controller
 
@@ -549,13 +576,14 @@ export class AgentEngine {
       workspacePath: this.config.workspacePath,
       ownerSessionId: this.config.conversationId,
       controller,
-      timeoutMs: FAST_CONTEXT_TUNING.taskTimeoutMs,
+      timeoutMs: getFastContextProfile(strategy).taskTimeoutMs,
       run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
         signal,
         injectPack: true,
         generation,
         sourceUserTurnId,
         agentId: taskId,
+        strategy,
         recordEvent: event => recordEvent(event),
       }),
       isSuccess: result => result !== null,
@@ -569,6 +597,7 @@ export class AgentEngine {
       const message = error instanceof Error ? error.message : String(error)
       const failedResult: FastContextScanResult = {
         objective: nextObjective,
+        strategy,
         evidencePack: '',
         filesScanned: 0,
         hits: [],
@@ -585,6 +614,7 @@ export class AgentEngine {
       if (this.fastContextRunPromise === promise) {
         this.fastContextRunPromise = null
         this.fastContextRunObjective = null
+        this.fastContextRunStrategy = 'autonomous-race'
         this.fastContextRuntimeTaskId = null
         if (!this.fastContextPack && this.fastContextObjective === nextObjective) {
           this.fastContextObjective = null
@@ -594,7 +624,7 @@ export class AgentEngine {
         this.fastContextAbortController = null
       }
     }).catch(() => {})
-    return { status: 'started', objective: nextObjective, promise, taskId: started.task.id }
+    return { status: 'started', objective: nextObjective, strategy, promise, taskId: started.task.id }
   }
 
   private emitFastContextComplete(result: FastContextScanResult, generation?: number): void {
@@ -635,7 +665,7 @@ export class AgentEngine {
     return Boolean(this.fastContextRunPromise || this.standaloneFastContextRunPromise)
   }
 
-  async runStandaloneFastContextObjective(objective: string): Promise<FastContextScanResult | null> {
+  async runStandaloneFastContextObjective(objective: string, strategy: FastContextStrategy = 'autonomous-race'): Promise<FastContextScanResult | null> {
     const nextObjective = objective.trim()
     if (!nextObjective) return null
     if (this.currentRunPromise) {
@@ -652,11 +682,12 @@ export class AgentEngine {
       workspacePath: this.config.workspacePath || '',
       ownerSessionId: this.config.conversationId,
       controller,
-      timeoutMs: FAST_CONTEXT_TUNING.taskTimeoutMs,
+      timeoutMs: getFastContextProfile(strategy).taskTimeoutMs,
       run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
         signal,
         injectPack: false,
         agentId: taskId,
+        strategy,
         recordEvent: event => recordEvent(event),
       }),
       isSuccess: result => result !== null,
@@ -906,6 +937,8 @@ export class AgentEngine {
   resetContextTracking(): void {
     this.contextManager.reset()
     this.cacheMonitor.reset()
+    this.runtimeContextTurnId = null
+    this.runtimeContextForTurn = ''
   }
 
   restoreFromMessages(messages: Array<{
@@ -967,6 +1000,8 @@ export class AgentEngine {
     this.workspaceMemoryText = null
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
+    this.runtimeContextTurnId = null
+    this.runtimeContextForTurn = ''
     this.pendingAssistantMessageId = null
     this.lastAssistantMessageId = null
 
@@ -1502,7 +1537,8 @@ export class AgentEngine {
     this.permissions.clearRunGrants()
     this.pendingSteeringMessages = []
     this.setRunState('thinking', { detail: 'Preparing the next step' })
-    this.runtimeAppendSystemPrompt = null
+    this.runtimeContextTurnId = null
+    this.runtimeContextForTurn = ''
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
     this.currentRunSuccessfulReadFiles.clear()
@@ -1535,13 +1571,6 @@ export class AgentEngine {
       this.session.turns.push(userTurn)
       this.emit({ type: 'turn:start', turn: userTurn })
       newTurns.push(userTurn)
-    }
-
-    const fastContextPreludeTurn = this.createFastContextPreludeTurn(userMessage)
-    if (fastContextPreludeTurn) {
-      this.session.turns.push(fastContextPreludeTurn)
-      this.emit({ type: 'turn:complete', turn: fastContextPreludeTurn })
-      newTurns.push(fastContextPreludeTurn)
     }
 
     if (this.fastContextObjective && !this.fastContextPack) {
@@ -1637,8 +1666,6 @@ export class AgentEngine {
           break
         }
 
-        this.runtimeAppendSystemPrompt = null
-
         const isOnlyTaskCreation = assistantTurn.toolCalls.every(tc =>
           tc.name === 'create_task' || tc.name === 'create_tasks' || tc.name === 'update_task' || tc.name === 'list_tasks'
         )
@@ -1669,7 +1696,7 @@ export class AgentEngine {
           detail: `Running ${assistantTurn.toolCalls.length} tool${assistantTurn.toolCalls.length === 1 ? '' : 's'}`,
           activeTool: assistantTurn.toolCalls[0]?.name,
         })
-        const toolResults = await this.executeToolCalls(assistantTurn.toolCalls!)
+        let toolResults = await this.executeToolCalls(assistantTurn.toolCalls!)
 
         const errorCount = toolResults.filter(r => r.isError).length
         if (errorCount > 0) {
@@ -1677,7 +1704,7 @@ export class AgentEngine {
           if (consecutiveToolErrors >= MAX_CONSECUTIVE_ERRORS) {
             const retryHint = this.buildToolRetryHint(assistantTurn.toolCalls!, toolResults)
             if (retryHint) {
-              this.runtimeAppendSystemPrompt = retryHint
+              toolResults = this.attachToolRetryHint(toolResults, retryHint)
               consecutiveToolErrors = 0
             }
           }
@@ -2134,6 +2161,19 @@ Before retrying:
 </tool_retry_hint>`
   }
 
+  private attachToolRetryHint(toolResults: ToolResult[], retryHint: string): ToolResult[] {
+    let targetIndex = -1
+    for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+      if (!toolResults[index]?.isError) continue
+      targetIndex = index
+      break
+    }
+    if (targetIndex < 0) return toolResults
+    return toolResults.map((result, index) => index === targetIndex
+      ? { ...result, output: `${result.output}\n\n${retryHint}` }
+      : result)
+  }
+
   private async capturePreimage(filePath: string): Promise<void> {
     if (this.filePreimages.has(filePath)) return
     try {
@@ -2159,6 +2199,7 @@ Before retrying:
   private async runFastContextScan(objective: string, options: {
     signal?: AbortSignal
     injectPack: boolean
+    strategy?: FastContextStrategy
     generation?: number
     sourceUserTurnId?: string | null
     agentId?: string
@@ -2168,17 +2209,44 @@ Before retrying:
     const emitIfCurrent = (event: AgentEventType) => {
       if (isCurrent()) this.emit(event)
     }
+    const aggregate = { files: 0, absorbed: 0, hits: 0, latest: '' }
     const onEvent = (event: FastContextScanEvent) => {
       options.recordEvent?.(event)
+      if (event.type === 'file') {
+        if (event.status === 'discovered') aggregate.files += 1
+        if (event.status === 'absorbed') aggregate.absorbed += 1
+        aggregate.latest = event.path
+        return
+      }
+      if (event.type === 'hit') {
+        aggregate.hits += 1
+        aggregate.latest = event.hit.path
+        return
+      }
+      if (event.type === 'wave_metrics') {
+        emitIfCurrent({ type: 'fast_context:event', event })
+        emitIfCurrent({ type: 'fast_context:event', event: {
+          type: 'progress',
+          files: aggregate.files,
+          absorbed: aggregate.absorbed,
+          hits: aggregate.hits,
+          latest: aggregate.latest,
+          insight: `turn ${event.turn}: ${aggregate.absorbed} evidence range(s)`,
+        } })
+        return
+      }
       emitIfCurrent({ type: 'fast_context:event', event })
     }
 
     // FastContext is intentionally a subagent-only path. Ordinary model
     // turns stay steady and targeted; this mode is the explicit fast lane.
     const startedAt = Date.now()
+    const strategy = options.strategy || 'autonomous-race'
+    const profile = getFastContextProfile(strategy)
     const agentId = options.agentId || `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     let completionResult: FastContextScanResult = {
       objective,
+      strategy,
       evidencePack: '',
       filesScanned: 0,
       hits: [],
@@ -2207,15 +2275,13 @@ Before retrying:
         baseUrl: fastContextConfig?.baseUrl || 'https://api.deepseek.com',
         provider: fastContextConfig?.provider,
         customHeaders: fastContextConfig?.customHeaders,
-        reasoning: {
-          ...(fastContextConfig?.reasoning ?? {}),
-          enabled: true,
-          effort: FAST_CONTEXT_TUNING.reasoningEffort,
-        },
+        reasoning: fastContextConfig?.reasoning,
         modelCapabilities: fastContextConfig?.modelCapabilities,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
         codemap: this.codemapSummary || undefined,
         abortSignal: options.signal,
+        strategy,
+        requestTimeoutMs: profile.requestTimeoutMs,
         onEvent,
       })
       if (options.injectPack && !options.signal?.aborted && isCurrent()) {
@@ -2235,6 +2301,7 @@ Before retrying:
       const message = error instanceof Error ? error.message : String(error)
       const failedResult: FastContextScanResult = {
         objective,
+        strategy,
         evidencePack: '',
         filesScanned: 0,
         hits: [],
@@ -2261,6 +2328,37 @@ Before retrying:
       if (isCurrent()) this.emitFastContextComplete(completionResult, options.generation)
     }
     return null
+  }
+
+  private attachFastContextResult(pack: PendingFastContextPack): void {
+    const toolCallId = `fast-context-${Date.now().toString(36)}`
+    const timestamp = Date.now()
+    const toolCall: ToolCall = {
+      id: toolCallId,
+      name: 'fast_context_result',
+      arguments: { objective: pack.objective },
+    }
+    this.session.turns.push({
+      id: generateTurnId(),
+      role: 'assistant',
+      content: '',
+      timestamp,
+      toolCalls: [toolCall],
+      metadata: { internal: true, internalKind: 'fast_context' },
+    })
+    this.session.turns.push({
+      id: generateTurnId(),
+      role: 'tool_result',
+      content: '',
+      timestamp: timestamp + 1,
+      toolResults: [{
+        toolCallId,
+        name: 'fast_context_result',
+        output: pack.content,
+        isError: false,
+      }],
+      metadata: { internal: true, internalKind: 'fast_context' },
+    })
   }
 
   private async callModel(): Promise<AgentTurn> {
@@ -2295,7 +2393,12 @@ Before retrying:
       this.fastContextPack = null
       if (this.fastContextObjective === pendingFastContextPack.objective) this.fastContextObjective = null
     }
-    const dynamicRuntimeContext = [
+    if (fastContextPackForTurn) {
+      this.attachFastContextResult(fastContextPackForTurn)
+      this.fastContextPack = null
+      if (this.fastContextObjective === fastContextPackForTurn.objective) this.fastContextObjective = null
+    }
+    const runtimeContextCandidate = [
       this.config.workspacePath
         ? this.wrapRuntimeContextSection('current_workspace', [
             `The active workspace is exactly: ${this.config.workspacePath}`,
@@ -2306,13 +2409,12 @@ Before retrying:
         : null,
       this.config.appendSystemPrompt,
       strategyContext,
-      fastContextPackForTurn?.content,
-      this.runtimeAppendSystemPrompt,
       voiceReminderContext,
       this.cachedGitStatus ? this.wrapRuntimeContextSection('git_status', this.cachedGitStatus) : null,
       !skipHeavyContext && this.workspaceMemoryText ? this.wrapRuntimeContextSection('workspace_memory', this.workspaceMemoryText) : null,
       !skipHeavyContext && this.codemapSummary ? this.wrapRuntimeContextSection('codebase_map', this.codemapSummary) : null,
     ].filter(Boolean).join('\n\n') || undefined
+    const dynamicRuntimeContext = this.stabilizeRuntimeContext(currentUserTurnId, runtimeContextCandidate || '')
 
     const systemPrompt = buildSystemPrompt(this.config.mode, {
       workspacePath: this.config.workspacePath,
@@ -2359,10 +2461,6 @@ Before retrying:
             turn = await this.callOpenAICompatibleAPI(activeConfig, activeModel, messagesFor('openai'), startTime, turnStrategy)
           }
           this.emit({ type: 'model:protocol', phase: 'success', protocol, url })
-          if (fastContextPackForTurn && this.fastContextPack === fastContextPackForTurn) {
-            this.fastContextPack = null
-            if (this.fastContextObjective === fastContextPackForTurn.objective) this.fastContextObjective = null
-          }
           return turn
         } catch (error) {
           if ((error as { aborted?: boolean })?.aborted === true || this.abortController?.signal.aborted) {
@@ -3264,7 +3362,7 @@ Before retrying:
     if (maxTokens > 0) body.max_output_tokens = maxTokens
     const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
     const reasoningEffort = reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort
-    if (reasoningEffort) body.reasoning = { effort: reasoningEffort }
+    if (reasoningEffort) body.reasoning = { effort: reasoningEffort, summary: 'detailed' }
     if (reasoningRequest?.omitTemperature) delete body.temperature
     if (responseTools.length > 0) {
       body.tools = responseTools
@@ -3354,6 +3452,16 @@ Before retrying:
     const harvestCompletedOutput = (response: Record<string, any> | undefined) => {
       updateUsage(response?.usage)
       if (!Array.isArray(response?.output)) return
+      const completedReasoning = extractResponsesReasoningSummary(response.output)
+      if (completedReasoning && completedReasoning !== reasoningContent) {
+        const delta = completedReasoning.startsWith(reasoningContent)
+          ? completedReasoning.slice(reasoningContent.length)
+          : reasoningContent
+            ? `\n\n${completedReasoning}`
+            : completedReasoning
+        reasoningContent += delta
+        this.emit({ type: 'stream:thinking_delta', text: delta })
+      }
       for (const item of response.output) {
         if (!item || typeof item !== 'object') continue
         if (item.type === 'function_call') {
@@ -3576,6 +3684,13 @@ Before retrying:
   private wrapRuntimeContextSection(tag: string, content: string): string {
     const trimmed = content.trim()
     return trimmed ? `<${tag}>\n${trimmed}\n</${tag}>` : ''
+  }
+
+  private stabilizeRuntimeContext(userTurnId: string | null, candidate: string): string {
+    if (userTurnId && this.runtimeContextTurnId === userTurnId) return this.runtimeContextForTurn
+    this.runtimeContextTurnId = userTurnId
+    this.runtimeContextForTurn = candidate
+    return candidate
   }
 
   private buildPromptCacheKey(model: string, tools: unknown[]): string {
@@ -3998,7 +4113,6 @@ Before retrying:
         query,
         maxPaths: 6,
         maxChildrenPerPath: 4,
-        preferGraph: false,
       }) as { success: boolean; data?: { map?: CodeMapNode[] | CodeMapNode; relatedPaths?: string[] }; map?: CodeMapNode[] | CodeMapNode; relatedPaths?: string[] }
       const map = response.data?.map ?? response.map
       if (!response.success || !map) return
@@ -4786,7 +4900,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       return {
         toolCallId: toolCall.id,
         name: toolCall.name,
-        output: `Error: Blocked by permission policy. ${result.reason || 'Operation not permitted'}`,
+        output: `Error: Blocked by permission policy [${result.decisionId || 'unknown'}]. ${result.reason || 'Operation not permitted'}`,
         isError: true,
         errorKind: 'permission',
       }
@@ -4978,7 +5092,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.readFile(filePath)
         if (!result.success) {
           const relPath = this.toWorkspaceRelative(basePath, filePath)
-          throw new Error(`File not found — resolved path: ${relPath}. Use search_files or list_directory to verify the correct path.`)
+          throw new Error(`${result.error || 'Unable to read file'} — resolved path: ${relPath}. Use search_files or list_directory to verify the correct path.`)
         }
 
         const rawContent = result.data ?? ''
@@ -5126,7 +5240,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
         const formatTree = (node: TreeNode, depth = 0): string => {
           const indent = '  '.repeat(depth)
-          const lines = [`${indent}[${node.type === 'folder' ? 'DIR' : 'FILE'}] ${node.name}`]
+          const lines = [`${indent}[${node.type === 'file' ? 'FILE' : 'DIR'}] ${node.name}`]
           if (node.children && (args.recursive || depth === 0)) {
             for (const child of node.children) {
               lines.push(formatTree(child, depth + 1))
@@ -5232,11 +5346,12 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!basePath) return `Error: no workspace selected`
         const objective = String(args.objective || '').trim()
         if (!objective) return `Error: objective is required`
+        const strategy = normalizeFastContextStrategy(args.strategy)
         const context = typeof args.context === 'string' && args.context.trim()
           ? `\n\nParent context:\n${args.context.trim()}`
           : ''
         const scanObjective = `${objective}${context}`
-        const background = this.startFastContextBackground(scanObjective)
+        const background = this.startFastContextBackground(scanObjective, strategy)
         if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
         if (background.status === 'busy') {
           return `FastContext is already working on: ${background.objective}\nContinue only non-overlapping work; do not poll it, repeat broad retrieval, or call explore_code again.`
@@ -5845,8 +5960,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!def) return `Error: unknown agent_type "${agentType}". Available: ${getAvailableAgentTypes().join(', ')}.`
         if (def.id === 'fast_context') {
           if (!this.config.workspacePath) return 'Error: no workspace path set'
-          const objective = (args.objective as string | undefined) || 'Locate relevant files for the current task'
-          const background = this.startFastContextBackground(objective)
+          const fastObjective = extraContext
+            ? `${objective}\n\nAdditional context from parent agent:\n${extraContext}`
+            : objective
+          const background = this.startFastContextBackground(fastObjective, 'autonomous-race')
           if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
           if (background.status === 'busy') {
             return `FastContext is already running on: ${background.objective}. Continue useful non-overlapping work; do not call read_agent or list_agents for it.`
@@ -6019,16 +6136,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         ? { attachments: attachments.map(attachment => ({ ...attachment })) }
         : undefined,
     }
-  }
-
-  private createFastContextPreludeTurn(userMessage: string): AgentTurn | null {
-    if (!this.fastContextObjective) return null
-    const objective = this.fastContextObjective || userMessage
-    const hasChinese = /[\u4e00-\u9fa5]/.test(objective)
-    const text = hasChinese
-      ? '我先快速检索相关实现代码。'
-      : "I'll search for the relevant implementation context first."
-    return this.createAssistantTurn(text, undefined, { mode: this.config.mode })
   }
 
   private createAssistantTurn(

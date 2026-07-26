@@ -1,15 +1,14 @@
 {
   "title": "FastContext: A Model-Directed Asynchronous Code Retrieval Architecture for Interactive Software Engineering Agents",
   "language": "zh-CN with English abstract",
-  "systemCommit": "f7b190a77d7cb0362b30b680618d2c6088bdb09f",
-  "historicalBenchmarkCommit": "629e4c25bc646c98113cddca4c86622a286cffdc",
-  "historicalBenchmarkStatus": "single-round pilot; not representative of current no-prefetch implementation",
-  "generatedPdf": "output/pdf/FastContext-Architecture-Paper-ZH-v1.1.pdf",
+  "systemCommit": "646f06197dd3fbef6836f7323e84506e68de31cc",
+  "evaluationDisclosure": "Illustrative projection only; empirical=false; academicUse=false",
+  "simulatedResults": "docs/papers/fastcontext/simulated-results.json",
+  "generatedPdf": "output/pdf/FastContext-Architecture-Paper-ZH-v1.2.pdf",
   "source": "docs/papers/fastcontext/paper.md",
   "figures": [
     "docs/papers/fastcontext/figures/architecture.svg",
     "docs/papers/fastcontext/figures/retrieval.svg",
-    "docs/papers/fastcontext/figures/lifecycle.svg",
-    "docs/papers/fastcontext/figures/pilot.svg"
+    "docs/papers/fastcontext/figures/lifecycle.svg"
   ]
 }

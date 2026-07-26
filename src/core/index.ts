@@ -28,12 +28,15 @@ export { DefaultAgentStateProvider } from './runtime/stateProvider'
 export type { AgentRuntimeConfig } from './runtime/stateProvider'
 export { NodeToolExecutor } from './runtime/nodeToolExecutor'
 export { RuntimeTaskManager } from './runtime/runtimeTaskManager'
+export { getRuntimeInfo } from '../platform/runtime'
+export { getChildProcessSpawnOptions, getDefaultShellSpec, usesProcessGroup } from '../platform/process'
 export { SubAgentTaskManager } from './runtime/subAgentTaskManager'
 export type {
   CreateRuntimeTaskInput,
   RuntimeTaskControl,
   RuntimeTaskManagerOptions,
   RuntimeTaskUpdate,
+  RuntimeTaskOutput,
 } from './runtime/runtimeTaskManager'
 export type {
   ReadSubAgentTranscriptOptions,

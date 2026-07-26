@@ -5,7 +5,8 @@ import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../sha
 import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { ModelCapabilities } from './config'
-import { FAST_CONTEXT_TUNING } from './fastContextTypes'
+import { FAST_CONTEXT_TUNING, type FastContextStrategy } from './fastContextTypes'
+import { FastContextEvidenceLedger, type FastContextEvidenceRecord } from './fastContextEvidenceLedger'
 import { createTurboFluxRequestHeaders } from './clientIdentity'
 import { resolveNativeReasoningRequest } from './modelRegistry'
 import {
@@ -175,14 +176,13 @@ export function syncAgentSkills(skillRuntime: SkillRuntime): void {
 const DEFINITIONS: Record<string, SubAgentDefinition> = {
   fast_context: {
     id: 'fast_context',
-    label: 'FastContext',
+    label: 'FastContext Controller',
     description: 'Low-latency causal code retrieval with parallel tools and read-grounded edit targets.',
     driver: 'main-model',
     systemPrompt: buildFastContextSystemPrompt(),
     maxTurns: FAST_CONTEXT_TUNING.maxTurns,
     maxParallel: FAST_CONTEXT_TUNING.maxParallel,
     temperature: 0,
-    thinking: 'high',
   },
   explorer: {
     id: 'explorer',
@@ -230,37 +230,32 @@ Focus on: what changed, which files were affected, likely intent. Return a conci
   },
 }
 
-export function buildFastContextSystemPrompt(): string {
-  return `You are FastContext, a fast read-only code-retrieval controller. The model owns query rewriting, ownership judgment, next-hop selection, ranking, and stopping. Local tools only search, read, and validate mechanical evidence. Recover the complete minimal edit frontier: every implementation file with meaningful probability of changing, without broad repository touring.
+export function buildFastContextSystemPrompt(strategy: FastContextStrategy = 'autonomous-race'): string {
+  return `You are FastContext, a fast read-only code-retrieval controller. You own query rewriting, ownership judgment, next-hop selection, ranking, and stopping. Local tools only perform deterministic search, bounded reads, and evidence bookkeeping. Recover the complete minimal edit frontier without touring the repository.
 
 Tools:
 - search_content(pattern, path?, file_pattern?, case_sensitive?)
 - search_files(pattern)
-- trace_symbol(query, path?)
-- trace_symbols(queries, path?)
+- search_symbol(query, path?, symbol_kind?)
 - read_file(path, offset?, limit?)
-- submit_code_map(candidates, relationships, frontier_complete, unresolved_edit_paths, rejected_hypotheses, searches_tried, uncertainty)
+- submit_code_map(edit_frontier, supporting_context, unresolved, frontier_complete)
 
 Protocol:
-1. Start with two to four genuinely different discriminative anchors from the issue: exact identifiers, literals, configuration keys, API names, named files, stack frames, or ownership hypotheses. Execute independent searches in parallel. Resolve every explicit implementation clue from the objective or reject it from source evidence; do not silently replace it with a nearby design.
-2. Use trace_symbol for an exact identifier. Leave path unset when locating the implementation owner; path-scoped traces are only for inspecting a file already known to contain the definition. Use trace_symbols for two or three concrete identifiers exposed by source, never generic synonyms.
-3. Read probable direct behavior owners immediately. Exact search and symbol results are valid discovery evidence for tightly coupled mirrors, entrypoints, generated surfaces, and sibling implementations; submit them only when you explicitly judge that the same change propagates there. Prefer implementation and runtime source over documentation, examples, fixtures, and tests unless the issue explicitly targets those surfaces.
-4. Do not let an early textual match become the only hypothesis. If current evidence is only a use site, wrapper, docs example, or test, trace its imported component, hook, handler, dispatcher, schema, or runtime owner without the use-site path restriction.
-5. After every read wave apply the edit counterfactual: if only the current candidates changed, would the reported behavior and all named variants be fixed? Follow only a named unread symbol or path that could change the answer. For compatibility changes, inspect the shared adapter or conversion boundary before duplicating logic across consumers; when that shared boundary preserves existing consumer contracts, rank it ahead of duplicated consumer edits. For commands, backends, generators, platforms, public entrypoints, and source mirrors, batch source-proven siblings when the same semantic change must propagate.
-6. Treat executable examples, scripts, migrations, and generated/runtime mirrors as implementation surfaces when they instantiate the changed contract. Deprioritize only prose documentation and unrelated tests. A complete answer may contain several tightly coupled files; "minimal" means no peripheral context, not one-file bias.
-7. Stop adaptively when no concrete unread owner can materially change the top ten. Do not prove that the whole repository contains no alternative. Direct exact-owner tasks should usually finish in two to four provider turns; use the remaining budget only for a named causal frontier. Empty, repeated, or no-novelty work is a reason to submit, not to invent another search.
-8. Finish with submit_code_map alone. Optimize the ranked top ten for complete edit recall: direct behavior owners first, then required propagation surfaces, then verification. Exclude files that only explain behavior, but do not omit an evidence-grounded candidate merely because one owner looks sufficient. Relationships, rejected hypotheses, searches, ranking metadata, and uncertainty are optional.
+1. Start with two to four independent, discriminative anchors from the objective: exact identifiers, literals, configuration keys, API names, named files, stack frames, or concrete ownership hypotheses. Run independent searches in parallel.
+2. Use search_symbol only for a concrete identifier. Use search_content for literals, references, registrations, imports, and semantic anchors. Search results are discovery evidence, not proof of ownership.
+3. Read probable direct owners immediately. If a hit is only a caller, wrapper, example, test, or registration site, follow the imported or invoked symbol to its implementation owner.
+4. After each read wave apply the edit counterfactual: if only the current edit frontier changed, would the named behavior and variants be fixed? Follow only a concrete unread symbol or path that can change the answer.
+5. Batch independent searches and reads in the same turn. Do not repeat equivalent calls; exact repeats are cached and provide no new information.
+6. Stop when no named unread owner can materially change the ranked edit frontier. Simple exact-owner tasks should finish early; complex tasks may use the full hard turn budget.
+7. Tool results include stable evidence handles such as E1. Finish with submit_code_map alone. Each item must cite evidence_ids; never type a path or line number in the submission. Your item order is the final order.
 
 Rules:
-- Never describe files you have not read.
-- Every candidate and relationship must cite a path and line range covered by search, symbol, trace, or read evidence returned from this run.
-- Read every probable direct behavior owner. Discovery-grounded propagation candidates remain hypotheses for the main agent to verify before editing.
-- Prefer runtime source, contracts, state/config, and failure paths over documentation or generic entry files, while retaining executable entrypoints that must change with the contract.
+- The first edit_frontier item must cite at least one read-confirmed evidence handle.
+- Other edit_frontier items may use exact search evidence when they are tightly coupled propagation surfaces; supporting-only files belong in supporting_context.
+- Prefer runtime source, contracts, state/config, persistence, and failure paths over prose documentation or generic entry files.
 - Prefer narrow, targeted reads (offset+limit) over full-file reads.
 - Do not repeat an equivalent search after it fails; change the semantic hypothesis or follow a concrete next hop.
-- Retrieve a test, contract, mirror, sibling implementation, or generated surface only when the objective or read source shows that the same change must propagate there.
 - Do not enumerate the repository, expand generic synonyms, or collect peripheral context for completeness.
-- Include a non-runtime contract or mirror only when public shape, registration, defaults, or generated types must remain synchronized with the owner.
 - If you cannot produce a grounded submission, fail explicitly. No local semantic fallback exists.
 - Do NOT expose hidden reasoning. Call tools and return concise, evidence-backed findings.`
 }
@@ -313,99 +308,24 @@ export interface SubmittedCandidate {
   path: string
   startLine: number
   endLine: number
+  evidenceIds: string[]
   role: string
   editKind: 'owner' | 'mirror' | 'implementation' | 'consumer' | 'test' | 'supporting'
   confidence: 'high' | 'medium' | 'low'
-  patchProbability: number | null
-  causalDistance: number | null
-  changeEffect: 'resolve' | 'propagate' | 'verify' | 'context' | null
   why: string
-}
-
-export interface SubmittedRelationship {
-  from: string
-  to: string
-  relationship: string
-  evidencePath: string
-  startLine: number
-  endLine: number
 }
 
 export interface SubmittedCodeMap {
   candidates: SubmittedCandidate[]
-  relationships: SubmittedRelationship[]
+  supportingContext: SubmittedCandidate[]
   frontierComplete: boolean
-  unresolvedEditPaths: string[]
-  rejectedHypotheses: string[]
-  searchesTried: string[]
-  uncertainty: string[]
+  unresolved: string[]
 }
 
 type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
 
-const FAST_CONTEXT_WAVE_DELTA_PREFIX = 'FASTCONTEXT_WAVE_DELTA'
-
-export function __testCompactBatchTraceOutput(content: string): string {
-  if (content.length <= 3_200) return content
-  const sourceMarker = '\nSOURCE_EVIDENCE\n'
-  const sourceIndex = content.indexOf(sourceMarker)
-  if (sourceIndex < 0) return `${content.slice(0, 2_500)}\n...[batch trace compacted]...\n${content.slice(-500)}`
-  const discovery = content.slice(0, sourceIndex)
-  const source = content.slice(sourceIndex + sourceMarker.length)
-  const compactDiscovery = discovery.length <= 1_200
-    ? discovery
-    : `${discovery.slice(0, 950)}\n...[trace references compacted]...\n${discovery.slice(-180)}`
-  const compactSource = source.length <= 1_900
-    ? source
-    : `${source.slice(0, 1_450)}\n...[trace source compacted]...\n${source.slice(-350)}`
-  return `${compactDiscovery}${sourceMarker}${compactSource}`
-}
-
-function compactToolHistory(
-  messages: SubAgentMessage[],
-  evidence: SubAgentEvidence[],
-  finalizationOnly: boolean,
-): SubAgentMessage[] {
-  const stableHistory = messages.map(message => ({ ...message }))
-  if (!finalizationOnly) return stableHistory
-  const ledger = evidence
-    .map(item => `${item.path}:${item.startLine}-${item.endLine} | ${item.reason === 'file read' ? 'read' : 'discovered'} | ${item.preview.replace(/\s+/g, ' ').slice(0, 180)}`)
-    .filter((line, index, all) => all.indexOf(line) === index)
-    .slice(0, 40)
-  if (ledger.length === 0) return stableHistory
-  return [...stableHistory, {
-    role: 'user',
-    content: `FINAL EVIDENCE LEDGER\n${ledger.join('\n')}\nUse only these tool-grounded ranges in submit_code_map. Direct behavior owners should be read; exact propagation surfaces may remain discovery-grounded for main-agent verification.`,
-  }]
-}
-
-function buildFastContextEvidenceCheckpoint(evidence: SubAgentEvidence[]): string {
-  const reads = evidence
-    .filter(item => item.reason === 'file read')
-    .map(item => {
-      const source = (item.content || item.preview).replace(/\s+/g, ' ').trim().slice(0, 560)
-      return `${item.path}:${item.startLine}-${item.endLine} | ${source}`
-    })
-    .filter((line, index, all) => all.indexOf(line) === index)
-    .slice(-20)
-  const discoveries = evidence
-    .filter(item => item.reason !== 'file read')
-    .map(item => `${item.path}:${item.startLine} | ${item.reason} | ${item.preview.replace(/\s+/g, ' ').trim().slice(0, 140)}`)
-    .filter((line, index, all) => all.indexOf(line) === index)
-    .slice(-32)
-  if (reads.length === 0 && discoveries.length === 0) return ''
-  return [
-    'FASTCONTEXT_EVIDENCE_CHECKPOINT',
-    'Earlier raw tool messages were mechanically compacted once to bound latency. Preserve these facts and continue from the highest-value named frontier.',
-    'READ_EVIDENCE',
-    ...(reads.length > 0 ? reads : ['none']),
-    'DISCOVERY_EVIDENCE',
-    ...(discoveries.length > 0 ? discoveries : ['none']),
-  ].join('\n')
-}
-
 function boundToolOutput(tool: string, content: string): string {
-  const limit = tool === 'read_file' ? 12_000 : /^trace_symbol/.test(tool) ? 10_000 : 8_000
+  const limit = tool === 'read_file' ? 12_000 : 8_000
   if (content.length <= limit) return content
   const head = Math.floor(limit * 0.8)
   const tail = limit - head - 64
@@ -678,23 +598,6 @@ function stringList(value: unknown, maxItems: number, maxLength = 240): string[]
     .map(item => item.slice(0, maxLength))
 }
 
-function positiveLine(value: unknown, fallback = 1): number {
-  const parsed = Math.floor(Number(value))
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-}
-
-function boundedNumber(value: unknown, minimum: number, maximum: number): number | null {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, parsed)) : null
-}
-
-function normalizeChangeEffect(value: unknown): SubmittedCandidate['changeEffect'] {
-  const normalized = String(value || '').trim().toLowerCase()
-  return ['resolve', 'propagate', 'verify', 'context'].includes(normalized)
-    ? normalized as SubmittedCandidate['changeEffect']
-    : null
-}
-
 function normalizeEditKind(value: unknown, role: string): SubmittedCandidate['editKind'] {
   const normalized = String(value || '').trim().toLowerCase()
   if (['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'].includes(normalized)) {
@@ -708,194 +611,122 @@ function normalizeEditKind(value: unknown, role: string): SubmittedCandidate['ed
   return 'supporting'
 }
 
-function parseSubmittedCodeMap(value: Record<string, any>, workspacePath: string, maxCandidates = 10): SubmittedCodeMap {
-  const candidates = Array.isArray(value.candidates)
-    ? value.candidates.slice(0, Math.max(1, Math.min(40, maxCandidates))).map((candidate: Record<string, any>) => {
-        const startLine = positiveLine(candidate.start_line ?? candidate.startLine)
-        const role = String(candidate.role || '').replace(/\s+/g, ' ').trim().slice(0, 80)
-        return {
-          path: toWorkspaceRelative(workspacePath, String(candidate.path || '').trim()),
-          startLine,
-          endLine: Math.max(startLine, positiveLine(candidate.end_line ?? candidate.endLine, startLine)),
-          role,
-          editKind: normalizeEditKind(candidate.edit_kind ?? candidate.editKind, role.toLowerCase()),
-          confidence: ['high', 'medium', 'low'].includes(candidate.confidence) ? candidate.confidence : 'medium',
-          patchProbability: boundedNumber(candidate.patch_probability ?? candidate.patchProbability, 0, 1),
-          causalDistance: boundedNumber(candidate.causal_distance ?? candidate.causalDistance, 0, 12),
-          changeEffect: normalizeChangeEffect(candidate.change_effect ?? candidate.changeEffect),
-          why: String(candidate.why || '').replace(/\s+/g, ' ').trim().slice(0, 320),
-        } satisfies SubmittedCandidate
-      })
-    : []
-  const relationships = Array.isArray(value.relationships)
-    ? value.relationships.slice(0, 12).map((relationship: Record<string, any>) => {
-        const startLine = positiveLine(relationship.start_line ?? relationship.startLine)
-        return {
-          from: String(relationship.from || '').replace(/\s+/g, ' ').trim().slice(0, 120),
-          to: String(relationship.to || '').replace(/\s+/g, ' ').trim().slice(0, 120),
-          relationship: String(relationship.relationship || '').replace(/\s+/g, ' ').trim().slice(0, 120),
-          evidencePath: toWorkspaceRelative(workspacePath, String(relationship.evidence_path ?? relationship.evidencePath ?? '').trim()),
-          startLine,
-          endLine: Math.max(startLine, positiveLine(relationship.end_line ?? relationship.endLine, startLine)),
-        } satisfies SubmittedRelationship
-      })
+function evidenceIdsForSubmission(
+  candidate: Record<string, any>,
+  workspacePath: string,
+  ledger: FastContextEvidenceLedger,
+): string[] {
+  const explicitIds = stringList(candidate.evidence_ids ?? candidate.evidenceIds, 12, 24)
+    .map(id => id.toUpperCase())
+  if (explicitIds.length > 0) return explicitIds
+
+  const legacyPath = toWorkspaceRelative(workspacePath, String(candidate.path || '').trim()).toLowerCase()
+  if (!legacyPath) return []
+  const startLine = Math.max(1, Math.floor(Number(candidate.start_line ?? candidate.startLine) || 1))
+  const endLine = Math.max(startLine, Math.floor(Number(candidate.end_line ?? candidate.endLine) || startLine))
+  return ledger.records()
+    .filter(record => record.evidence.path.toLowerCase() === legacyPath
+      && record.evidence.startLine <= endLine
+      && record.evidence.endLine >= startLine)
+    .map(record => record.id)
+}
+
+function materializeSubmittedCandidates(
+  value: Record<string, any>,
+  workspacePath: string,
+  ledger: FastContextEvidenceLedger,
+  supporting = false,
+): SubmittedCandidate[] {
+  const evidenceIds = evidenceIdsForSubmission(value, workspacePath, ledger)
+  const records = ledger.resolve(evidenceIds)
+  const role = String(value.role || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+  const editKind = supporting ? 'supporting' : normalizeEditKind(value.edit_kind ?? value.editKind, role.toLowerCase())
+  const confidence = ['high', 'medium', 'low'].includes(value.confidence) ? value.confidence : 'medium'
+  const why = String(value.why || '').replace(/\s+/g, ' ').trim().slice(0, 320)
+
+  if (records.length === 0) {
+    return [{
+      path: '',
+      startLine: 1,
+      endLine: 1,
+      evidenceIds,
+      role,
+      editKind,
+      confidence,
+      why,
+    }]
+  }
+
+  const recordsByPath = new Map<string, FastContextEvidenceRecord[]>()
+  for (const record of records) {
+    const pathRecords = recordsByPath.get(record.evidence.path) || []
+    pathRecords.push(record)
+    recordsByPath.set(record.evidence.path, pathRecords)
+  }
+
+  return [...recordsByPath.values()].map(pathRecords => ({
+    path: pathRecords[0].evidence.path,
+    startLine: Math.min(...pathRecords.map(record => record.evidence.startLine)),
+    endLine: Math.max(...pathRecords.map(record => record.evidence.endLine)),
+    evidenceIds: pathRecords.map(record => record.id),
+    role,
+    editKind,
+    confidence,
+    why,
+  }))
+}
+
+function parseSubmittedCodeMap(
+  value: Record<string, any>,
+  workspacePath: string,
+  ledger: FastContextEvidenceLedger,
+  maxCandidates = 10,
+): SubmittedCodeMap {
+  const editFrontier = Array.isArray(value.edit_frontier ?? value.editFrontier)
+    ? value.edit_frontier ?? value.editFrontier
+    : Array.isArray(value.candidates) ? value.candidates : []
+  const supportingContext = Array.isArray(value.supporting_context ?? value.supportingContext)
+    ? value.supporting_context ?? value.supportingContext
     : []
   return {
-    candidates,
-    relationships,
+    candidates: editFrontier
+      .slice(0, Math.max(1, Math.min(40, maxCandidates)))
+      .flatMap((candidate: Record<string, any>) => materializeSubmittedCandidates(candidate, workspacePath, ledger))
+      .slice(0, Math.max(1, Math.min(40, maxCandidates))),
+    supportingContext: supportingContext
+      .slice(0, 12)
+      .flatMap((candidate: Record<string, any>) => materializeSubmittedCandidates(candidate, workspacePath, ledger, true))
+      .slice(0, 12),
     frontierComplete: value.frontier_complete ?? value.frontierComplete ?? true,
-    unresolvedEditPaths: stringList(value.unresolved_edit_paths ?? value.unresolvedEditPaths, 8),
-    rejectedHypotheses: stringList(value.rejected_hypotheses ?? value.rejectedHypotheses, 8),
-    searchesTried: stringList(value.searches_tried ?? value.searchesTried, 12),
-    uncertainty: stringList(value.uncertainty, 8),
+    unresolved: [
+      ...stringList(value.unresolved, 8),
+      ...stringList(value.unresolved_edit_paths ?? value.unresolvedEditPaths, 8),
+      ...stringList(value.rejected_hypotheses ?? value.rejectedHypotheses, 8),
+      ...stringList(value.uncertainty, 8),
+    ].filter((item, index, all) => all.indexOf(item) === index).slice(0, 12),
   }
 }
 
-interface LineRange {
-  startLine: number
-  endLine: number
+function validateSubmittedCandidate(candidate: SubmittedCandidate, ledger: FastContextEvidenceLedger): string | null {
+  if (!candidate.evidenceIds.length) return 'every submitted item requires at least one evidence_id'
+  const missing = candidate.evidenceIds.filter(id => !ledger.has(id))
+  if (missing.length > 0) return `unknown evidence handle(s): ${missing.join(', ')}`
+  if (!candidate.path) return 'all evidence_ids for one item must resolve to the same file'
+  if (!candidate.role || !candidate.why) return 'every submitted item requires role and why'
+  return null
 }
 
-function mergedReadRanges(path: string, evidence: SubAgentEvidence[]): LineRange[] {
-  const normalizedPath = path.replace(/\\/g, '/')
-  const ranges = evidence
-    .filter(item => item.reason === 'file read' && item.path.replace(/\\/g, '/') === normalizedPath)
-    .map(item => ({ startLine: item.startLine, endLine: item.endLine }))
-    .sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine)
-  const merged: LineRange[] = []
-  for (const range of ranges) {
-    const previous = merged.at(-1)
-    if (!previous || range.startLine > previous.endLine + 1) {
-      merged.push({ ...range })
-      continue
-    }
-    previous.endLine = Math.max(previous.endLine, range.endLine)
-  }
-  return merged
-}
-
-function mergedEvidenceRanges(path: string, evidence: SubAgentEvidence[]): LineRange[] {
-  const normalizedPath = path.replace(/\\/g, '/')
-  const ranges = evidence
-    .filter(item => item.path.replace(/\\/g, '/') === normalizedPath)
-    .map(item => ({ startLine: item.startLine, endLine: item.endLine }))
-    .sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine)
-  const merged: LineRange[] = []
-  for (const range of ranges) {
-    const previous = merged.at(-1)
-    if (!previous || range.startLine > previous.endLine + 1) {
-      merged.push({ ...range })
-      continue
-    }
-    previous.endLine = Math.max(previous.endLine, range.endLine)
-  }
-  return merged
-}
-
-function rangeIsRead(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): boolean {
-  return mergedReadRanges(path, evidence).some(range => startLine >= range.startLine && endLine <= range.endLine)
-}
-
-function rangeIsGrounded(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): boolean {
-  return mergedEvidenceRanges(path, evidence).some(range => startLine >= range.startLine && endLine <= range.endLine)
-}
-
-function readRangesForPath(path: string, evidence: SubAgentEvidence[]): string {
-  const ranges = mergedReadRanges(path, evidence).map(item => `${item.startLine}-${item.endLine}`)
-  return ranges.length > 0 ? ranges.join(', ') : 'none'
-}
-
-function clampNearEvidenceBoundary(path: string, startLine: number, endLine: number, evidence: SubAgentEvidence[]): LineRange | null {
-  const overlaps = mergedEvidenceRanges(path, evidence)
-    .map(range => ({
-      startLine: Math.max(startLine, range.startLine),
-      endLine: Math.min(endLine, range.endLine),
-    }))
-    .filter(range => range.startLine <= range.endLine)
-    .sort((left, right) => (right.endLine - right.startLine) - (left.endLine - left.startLine))
-  const best = overlaps[0]
-  if (!best) return null
-  const requestedLength = endLine - startLine + 1
-  const coveredLength = best.endLine - best.startLine + 1
-  const outsideLines = requestedLength - coveredLength
-  if (outsideLines > 2 || coveredLength / requestedLength < 0.8) return null
-  return best
-}
-
-function normalizeSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): void {
-  const normalizeRange = (item: { path?: string; evidencePath?: string; startLine: number; endLine: number }): void => {
-    const path = item.path || item.evidencePath || ''
-    if (!path || rangeIsGrounded(path, item.startLine, item.endLine, evidence)) return
-    const grounded = clampNearEvidenceBoundary(path, item.startLine, item.endLine, evidence) || mergedEvidenceRanges(path, evidence)[0]
-    if (!grounded) return
-    item.startLine = grounded.startLine
-    item.endLine = grounded.endLine
-  }
-  report.candidates.forEach(normalizeRange)
-  report.relationships.forEach(normalizeRange)
-}
-
-function pruneUngroundedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): void {
-  const candidateCount = report.candidates.length
-  const relationshipCount = report.relationships.length
-  report.candidates = report.candidates.filter(candidate => Boolean(candidate.path && candidate.role && candidate.why)
-    && rangeIsGrounded(candidate.path, candidate.startLine, candidate.endLine, evidence))
-  report.relationships = report.relationships.filter(relationship => Boolean(
-    relationship.from && relationship.to && relationship.relationship && relationship.evidencePath,
-  ) && rangeIsGrounded(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence))
-  const removedCandidates = candidateCount - report.candidates.length
-  const removedRelationships = relationshipCount - report.relationships.length
-  if (removedCandidates > 0 || removedRelationships > 0) {
-    report.uncertainty.push(`evidence gate excluded ${removedCandidates} ungrounded candidate(s) and ${removedRelationships} ungrounded relationship(s)`)
-  }
-}
-
-function rankSubmittedCandidates(report: SubmittedCodeMap): void {
-  const effectRank: Record<NonNullable<SubmittedCandidate['changeEffect']>, number> = {
-    resolve: 4,
-    propagate: 3,
-    verify: 2,
-    context: 1,
-  }
-  report.candidates = report.candidates
-    .map((candidate, discoveryOrder) => ({ candidate, discoveryOrder }))
-    .sort((left, right) => {
-      const leftHasRanking = left.candidate.changeEffect !== null
-        || left.candidate.patchProbability !== null
-        || left.candidate.causalDistance !== null
-      const rightHasRanking = right.candidate.changeEffect !== null
-        || right.candidate.patchProbability !== null
-        || right.candidate.causalDistance !== null
-      if (leftHasRanking !== rightHasRanking) return leftHasRanking ? -1 : 1
-      if (!leftHasRanking) return left.discoveryOrder - right.discoveryOrder
-
-      const effectDelta = (effectRank[right.candidate.changeEffect || 'context'])
-        - (effectRank[left.candidate.changeEffect || 'context'])
-      if (effectDelta !== 0) return effectDelta
-      const probabilityDelta = (right.candidate.patchProbability ?? 0) - (left.candidate.patchProbability ?? 0)
-      if (probabilityDelta !== 0) return probabilityDelta
-      const distanceDelta = (left.candidate.causalDistance ?? 12) - (right.candidate.causalDistance ?? 12)
-      return distanceDelta || left.discoveryOrder - right.discoveryOrder
-    })
-    .map(item => item.candidate)
-}
-
-function validateSubmittedCodeMap(report: SubmittedCodeMap, evidence: SubAgentEvidence[]): string | null {
+function validateSubmittedCodeMap(report: SubmittedCodeMap, ledger: FastContextEvidenceLedger): string | null {
   if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
-  if (!evidence.some(item => item.reason === 'file read')) return 'at least one direct behavior owner must be read before submission'
+  const firstRecords = ledger.resolve(report.candidates[0].evidenceIds)
+  if (!firstRecords.some(record => record.readConfirmed)) return 'the first edit_frontier item must cite read-confirmed evidence'
   for (const candidate of report.candidates) {
-    if (!candidate.path || !candidate.role || !candidate.why) return 'every candidate requires path, role, and why'
-    if (!rangeIsGrounded(candidate.path, candidate.startLine, candidate.endLine, evidence)) {
-      return `candidate ${candidate.path}:${candidate.startLine}-${candidate.endLine} is not covered by tool evidence from this run`
-    }
+    const error = validateSubmittedCandidate(candidate, ledger)
+    if (error) return error
   }
-  for (const relationship of report.relationships) {
-    if (!relationship.from || !relationship.to || !relationship.relationship || !relationship.evidencePath) {
-      return 'every relationship requires from, to, relationship, and evidence_path'
-    }
-    if (!rangeIsGrounded(relationship.evidencePath, relationship.startLine, relationship.endLine, evidence)) {
-      return `relationship evidence ${relationship.evidencePath}:${relationship.startLine}-${relationship.endLine} is not covered by tool evidence from this run`
-    }
+  for (const candidate of report.supportingContext) {
+    const error = validateSubmittedCandidate(candidate, ledger)
+    if (error) return error
   }
   return null
 }
@@ -904,7 +735,7 @@ function validateRequiredAuditPaths(report: SubmittedCodeMap, requiredPaths: str
   if (!requiredPaths?.length) return null
   const normalize = (value: string) => value.replace(/\\/g, '/').toLowerCase()
   const submitted = new Set(report.candidates.map(candidate => normalize(candidate.path)))
-  const rejected = report.rejectedHypotheses.map(item => normalize(item))
+  const rejected = report.unresolved.map(item => normalize(item))
   const missing = [...new Set(requiredPaths.map(normalize))]
     .filter(path => !submitted.has(path) && !rejected.some(reason => reason.includes(path)))
   return missing.length > 0
@@ -923,17 +754,20 @@ function validateRequiredCandidatePaths(report: SubmittedCodeMap, requiredPaths:
 }
 
 export function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
-  const lines = ['RANKED_CODE_MAP']
+  const lines = ['RANKED_CODE_MAP', 'EDIT_FRONTIER']
   report.candidates.forEach((candidate, index) => {
-    lines.push(`${index + 1}. ${candidate.path} L${candidate.startLine}-L${candidate.endLine} kind=${candidate.editKind} role=${candidate.role} confidence=${candidate.confidence}`)
+    lines.push(`${index + 1}. ${candidate.path} L${candidate.startLine}-L${candidate.endLine} kind=${candidate.editKind} role=${candidate.role} confidence=${candidate.confidence} evidence=${candidate.evidenceIds.join(',')}`)
     lines.push(`   why: ${candidate.why}`)
   })
-  lines.push('', 'EXECUTION_FLOW')
-  report.relationships.forEach(item => lines.push(`- ${item.from} -> ${item.to} [${item.relationship}] (${item.evidencePath}:L${item.startLine}-L${item.endLine})`))
-  lines.push('', 'REJECTED_HYPOTHESES')
-  lines.push(...(report.rejectedHypotheses.length > 0 ? report.rejectedHypotheses.map(item => `- ${item}`) : ['- none']))
-  lines.push('', 'SEARCHES_TRIED', ...(report.searchesTried.length > 0 ? report.searchesTried.map(item => `- ${item}`) : ['- not reported']))
-  lines.push('', 'UNCERTAINTY', ...(report.uncertainty.length > 0 ? report.uncertainty.map(item => `- ${item}`) : ['- none reported']))
+  lines.push('', 'SUPPORTING_CONTEXT')
+  lines.push(...(report.supportingContext.length > 0
+    ? report.supportingContext.flatMap(item => [
+        `- ${item.path} L${item.startLine}-L${item.endLine} role=${item.role} evidence=${item.evidenceIds.join(',')}`,
+        `  why: ${item.why}`,
+      ])
+    : ['- none']))
+  lines.push('', 'UNRESOLVED', ...(report.unresolved.length > 0 ? report.unresolved.map(item => `- ${item}`) : ['- none']))
+  lines.push('', `FRONTIER_COMPLETE: ${report.frontierComplete ? 'yes' : 'no'}`)
   return lines.join('\n')
 }
 
@@ -977,7 +811,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Rank the probable direct edit target first; represent supporting architecture through grounded relationships.',
     ].filter(Boolean).join('\n'),
   })
-  const conversationPrefixLength = messages.length
 
   const tools: Array<Record<string, any>> = [
     {
@@ -1000,36 +833,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             file_type: { type: 'string' },
           },
           required: ['pattern'],
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'trace_symbol',
-        description: 'Inspect declarations and exact references together with bounded source evidence. query must be a symbol or identifier; path may narrow to either a directory or a specific file.',
-        parameters: {
-          type: 'object',
-          properties: {
-            query: { type: 'string' },
-            path: { type: 'string' },
-          },
-          required: ['query'],
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'trace_symbols',
-        description: 'Resolve 2-4 concrete next-hop symbols concurrently. Use only for identifiers exposed by read source on the same causal frontier; do not pass generic keywords or speculative synonyms.',
-        parameters: {
-          type: 'object',
-          properties: {
-            queries: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'string' } },
-            path: { type: 'string' },
-          },
-          required: ['queries'],
         },
       },
     },
@@ -1066,8 +869,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     {
       type: 'function',
       function: {
-        name: 'search_symbols',
-        description: 'Search fused exact declarations and persistent graph symbols such as functions, classes, interfaces, types, constants, and components',
+        name: 'search_symbol',
+        description: 'Search deterministic source declarations such as functions, classes, interfaces, types, constants, and components',
         parameters: {
           type: 'object',
           properties: {
@@ -1105,48 +908,38 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         parameters: {
           type: 'object',
           properties: {
-            candidates: {
+            edit_frontier: {
               type: 'array',
               maxItems: Math.max(1, Math.min(40, options.maxCandidates ?? 10)),
               items: {
                 type: 'object',
                 properties: {
-                  path: { type: 'string' },
-                  start_line: { type: 'number' },
-                  end_line: { type: 'number' },
+                  evidence_ids: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^E\\d+$' }, description: 'Evidence handles returned by tools, in order of importance.' },
                   role: { type: 'string' },
                   edit_kind: { type: 'string', enum: ['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'] },
                   confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-                  patch_probability: { type: 'number', minimum: 0, maximum: 1, description: 'Probability that this file must change for the objective.' },
-                  causal_distance: { type: 'number', minimum: 0, maximum: 12, description: 'Semantic hops from the observed symptom to this file; zero is the direct behavior owner.' },
-                  change_effect: { type: 'string', enum: ['resolve', 'propagate', 'verify', 'context'], description: 'Whether changing this file resolves the root issue, propagates a synchronized change, verifies behavior, or only supplies context.' },
                   why: { type: 'string' },
                 },
-                required: ['path', 'start_line', 'end_line', 'role', 'confidence', 'why'],
+                required: ['evidence_ids', 'role', 'confidence', 'why'],
               },
             },
-            relationships: {
+            supporting_context: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  from: { type: 'string' },
-                  to: { type: 'string' },
-                  relationship: { type: 'string' },
-                  evidence_path: { type: 'string' },
-                  start_line: { type: 'number' },
-                  end_line: { type: 'number' },
+                  evidence_ids: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^E\\d+$' } },
+                  role: { type: 'string' },
+                  confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+                  why: { type: 'string' },
                 },
-                required: ['from', 'to', 'relationship', 'evidence_path', 'start_line', 'end_line'],
+                required: ['evidence_ids', 'role', 'why'],
               },
             },
-            frontier_complete: { type: 'boolean', description: 'Optional confidence signal that no named unread owner is likely to change the ranking.' },
-            unresolved_edit_paths: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Optional unresolved paths retained as uncertainty; do not invent exhaustive negative searches.' },
-            rejected_hypotheses: { type: 'array', items: { type: 'string' } },
-            searches_tried: { type: 'array', items: { type: 'string' } },
-            uncertainty: { type: 'array', items: { type: 'string' } },
+            unresolved: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Named paths or hypotheses that remain unresolved.' },
+            frontier_complete: { type: 'boolean', description: 'No named unread owner can change the ranked edit frontier.' },
           },
-          required: ['candidates'],
+          required: ['edit_frontier'],
         },
       },
     })
@@ -1174,24 +967,24 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   let resolvedProtocol: ModelProtocol | null = getCachedProtocol(activeProtocolCacheKey)
   const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
   const turnLimit = definition.maxTurns
-  let forceFinalizationNextTurn = false
-  let consecutiveUnproductiveWaves = 0
-  let historyCheckpointed = false
   const effectiveReasoning: NativeReasoningConfig | undefined = definition.thinking === 'disabled'
     ? { enabled: false, effort: 'none' }
     : definition.thinking === 'high' || definition.thinking === 'max'
       ? { ...reasoning, enabled: true, effort: definition.thinking }
       : reasoning
 
-  const addEvidence = (evidence: SubAgentEvidence): boolean => {
+  const evidenceLedger = new FastContextEvidenceLedger(options.initialEvidence || [])
+
+  const addEvidence = (evidence: SubAgentEvidence): { record: FastContextEvidenceRecord; isNew: boolean } => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
-    if (evidenceKeys.has(key)) return false
+    const registration = evidenceLedger.register(evidence)
+    if (evidenceKeys.has(key)) return registration
     evidenceKeys.add(key)
     collectedEvidence.push(evidence)
-    return true
+    return registration
   }
 
-  const hasModelReadEvidence = (): boolean => collectedEvidence.some(evidence => evidence.reason === 'file read')
+  const hasModelReadEvidence = (): boolean => evidenceLedger.records().some(record => record.readConfirmed)
 
   while (turn < turnLimit) {
     if (abortSignal?.aborted) break
@@ -1201,13 +994,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     let turnInputTokens = 0
     let turnOutputTokens = 0
     let turnCacheReadTokens = 0
-    if (strictFastContext && !historyCheckpointed && turn === 4) {
-      const checkpoint = buildFastContextEvidenceCheckpoint(collectedEvidence)
-      if (checkpoint) {
-        messages.splice(conversationPrefixLength, messages.length - conversationPrefixLength, { role: 'user', content: checkpoint })
-        historyCheckpointed = true
-      }
-    }
     emit({ type: 'turn_start', turn, maxTurns: turnLimit })
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
@@ -1231,9 +1017,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         const url = buildModelProtocolUrl(baseUrl, protocol)
         const finalizationOnly = strictFastContext
           && hasModelReadEvidence()
-          && (options.submissionOnly === true || forceFinalizationNextTurn || turn === turnLimit)
+          && (options.submissionOnly === true || turn === turnLimit)
         const activeSystemPrompt = definition.systemPrompt
-        const activeMessages = compactToolHistory(messages, collectedEvidence, finalizationOnly)
+        const activeMessages = messages.map(message => ({ ...message }))
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
         const requestTools = finalizationOnly
           ? availableTools.filter(tool => tool.function.name === 'submit_code_map')
@@ -1460,11 +1246,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       } catch {
         submissionError = 'submit_code_map arguments are not valid JSON'
       }
-      const report = parseSubmittedCodeMap(submissionArgs, workspacePath, options.maxCandidates)
-      normalizeSubmittedCodeMap(report, collectedEvidence)
-      pruneUngroundedCodeMap(report, collectedEvidence)
-      rankSubmittedCandidates(report)
-      submissionError ||= validateSubmittedCodeMap(report, collectedEvidence) || ''
+      const report = parseSubmittedCodeMap(submissionArgs, workspacePath, evidenceLedger, options.maxCandidates)
+      submissionError ||= validateSubmittedCodeMap(report, evidenceLedger) || ''
       submissionError ||= validateRequiredAuditPaths(report, options.requiredAuditPaths) || ''
       submissionError ||= validateRequiredCandidatePaths(report, options.requiredCandidatePaths) || ''
       if (!submissionError) {
@@ -1533,7 +1316,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: 'Search snippets and paths are not proof. Read the strongest implementation ranges now, then trace the relationships required by the architecture contract.',
+          content: 'Search snippets and paths are not proof. Read the strongest implementation ranges now, then follow only concrete symbols or paths exposed by that source.',
         })
         continue
       }
@@ -1541,7 +1324,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         messages.push({ role: 'assistant', content: messageText })
         messages.push({
           role: 'user',
-          content: 'Do not return a prose report. Finish by calling submit_code_map with only read-confirmed candidates and relationships.',
+          content: 'Do not return a prose report. Finish by calling submit_code_map with evidence_ids from the ledger.',
         })
         reportRecoveryUsed = true
         continue
@@ -1568,8 +1351,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
 
     const toolCalls = responseToolCalls.slice(0, definition.maxParallel)
     messages.push({ role: 'assistant', content: messageText, tool_calls: toolCalls })
-    const knownPathsBefore = new Set(collectedEvidence.map(evidence => evidence.path.toLowerCase()))
-    const readPathsBefore = new Set(collectedEvidence.filter(evidence => evidence.reason === 'file read').map(evidence => evidence.path.toLowerCase()))
     const entries = toolCalls.map(tc => {
       let args: Record<string, any> = {}
       try { args = JSON.parse(tc.function.arguments) } catch {}
@@ -1632,7 +1413,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       }
     }))
 
-    const novelEvidence: SubAgentEvidence[] = []
     for (const { entry, result, reused, elapsedMs } of results) {
       const { tc } = entry
       emit({
@@ -1647,14 +1427,19 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       })
 
       for (const ev of result.evidence) {
-        if (addEvidence(ev)) {
-          novelEvidence.push(ev)
+        const registration = addEvidence(ev)
+        if (registration.isNew) {
           emit({ type: 'evidence', evidence: ev })
         }
       }
 
       const stableOutput = boundToolOutput(tc.function.name, result.output)
-      messages.push({ role: 'tool' as any, tool_call_id: tc.id, content: reused ? `[Cached exact repeat; no new execution.]\n${stableOutput}` : stableOutput })
+      const handles = evidenceLedger.format(result.evidence.map(item => evidenceLedger.register(item).record))
+      messages.push({
+        role: 'tool' as any,
+        tool_call_id: tc.id,
+        content: [reused ? '[Cached exact repeat; no new execution.]' : '', stableOutput, handles].filter(Boolean).join('\n'),
+      })
     }
 
     emit({
@@ -1669,23 +1454,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       cacheReadTokens: turnCacheReadTokens,
     })
 
-    if (strictFastContext) {
-      messages.push({
-        role: 'user',
-        content: buildFastContextWaveDelta({
-          novelEvidence,
-          knownPathsBefore,
-          readPathsBefore,
-          repeatedCalls: results.filter(result => result.reused).length,
-          emptyCalls: results.filter(({ result }) => result.ok && result.evidence.length === 0).length,
-          failedCalls: results.filter(({ result }) => !result.ok).length,
-        }),
-      })
-      const unproductiveResults = results.filter(({ result, reused }) => reused || (result.ok && result.evidence.length === 0)).length
-      const unproductiveWave = novelEvidence.length === 0 && unproductiveResults === results.length
-      consecutiveUnproductiveWaves = unproductiveWave ? consecutiveUnproductiveWaves + 1 : 0
-      if (hasModelReadEvidence() && consecutiveUnproductiveWaves >= 2) forceFinalizationNextTurn = true
-    }
 
     if (strictFastContext && turn === turnLimit - 1) {
       messages.push({
@@ -1723,38 +1491,6 @@ function stableToolValue(value: unknown): unknown {
 
 function toolCallSignature(name: string, args: Record<string, any>): string {
   return `${name}:${JSON.stringify(stableToolValue(args))}`
-}
-
-function formatPathDelta(paths: string[]): string {
-  if (paths.length === 0) return '0'
-  const visible = paths.slice(0, 8)
-  return `${paths.length} [${visible.join(', ')}${paths.length > visible.length ? ', ...' : ''}]`
-}
-
-function buildFastContextWaveDelta(params: {
-  novelEvidence: SubAgentEvidence[]
-  knownPathsBefore: Set<string>
-  readPathsBefore: Set<string>
-  repeatedCalls: number
-  emptyCalls: number
-  failedCalls: number
-}): string {
-  const newReadPaths = [...new Set(params.novelEvidence
-    .filter(evidence => evidence.reason === 'file read' && !params.readPathsBefore.has(evidence.path.toLowerCase()))
-    .map(evidence => evidence.path))]
-  const newDiscoveryPaths = [...new Set(params.novelEvidence
-    .filter(evidence => evidence.reason !== 'file read' && !params.knownPathsBefore.has(evidence.path.toLowerCase()))
-    .map(evidence => evidence.path))]
-  return [
-    FAST_CONTEXT_WAVE_DELTA_PREFIX,
-    `new_read_paths: ${formatPathDelta(newReadPaths)}`,
-    `new_discovery_paths: ${formatPathDelta(newDiscoveryPaths)}`,
-    `new_evidence_ranges: ${params.novelEvidence.length}`,
-    `exact_repeated_calls: ${params.repeatedCalls}`,
-    `empty_results: ${params.emptyCalls}`,
-    `tool_errors: ${params.failedCalls}`,
-    'This is mechanical progress data, not a semantic stopping decision. New paths alone do not prove relevance. Continue only if a concrete unread path or symbol from the objective or latest source can still change the ranked edit set; name that frontier through the next targeted tool call. If no such frontier exists, call submit_code_map now. Do not open a new test/example/neighbor search after owner closure without a source-grounded reason. Batch 2-4 concrete same-frontier symbols with trace_symbols.',
-  ].join('\n')
 }
 
 function buildSearchContentBatchRequest(args: Record<string, any>, workspacePath: string) {
@@ -1992,6 +1728,7 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
       return { ok: true, output: relPaths.join('\n'), summary: `glob "${pattern}" → ${matches.length} files`, evidence }
     }
 
+    case 'search_symbol':
     case 'search_symbols': {
       const query = String(args.query || '').trim()
       if (!query) return { ok: true, output: 'No symbol query provided.', summary: 'symbol search skipped', evidence }
@@ -2024,151 +1761,6 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
         return `${relPath}:${hit.line || hit.startLine || 1}: ${hit.title} (${hit.symbolKind || hit.source}) ${hit.preview || hit.subtitle || ''}`.trim()
       })
       return { ok: true, output: lines.join('\n'), summary: `symbols "${query}" -> ${hits.length} hits`, evidence }
-    }
-
-    case 'trace_symbol': {
-      const query = String(args.query || '').trim()
-      if (!query) return { ok: false, output: 'Symbol query is required.', summary: 'trace skipped: missing symbol', evidence }
-      const pathFilter = typeof args.path === 'string' ? args.path.replace(/\\/g, '/').replace(/^\.\//, '') : ''
-      const pathIsFile = /\.[A-Za-z0-9]{1,12}$/.test(pathFilter.split('/').pop() || '')
-      const basePath = pathFilter && !pathIsFile ? resolveWorkspacePath(workspacePath, pathFilter) : workspacePath
-      const filePattern = pathIsFile ? pathFilter : undefined
-      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const pattern = /^[A-Za-z_$][\w$]*$/.test(query) ? `\\b${escaped}\\b` : escaped
-      const exactIdentifier = /^[A-Za-z_$][\w$]*$/.test(query)
-      const sourceBudget = Math.max(0, Math.min(2, Math.floor(Number(args.__source_budget) || 2)))
-      const [symbolResult, initialReferenceResult] = await Promise.all([
-        executor.searchCodeSymbols({ workspacePath, query, path: typeof args.path === 'string' ? args.path : undefined, limit: 12, exact: exactIdentifier }),
-        executor.searchContentPage
-          ? executor.searchContentPage(pattern, basePath, filePattern, false, { limit: 30, contextBefore: 1, contextAfter: 1 })
-          : executor.searchContent(pattern, basePath, filePattern, false),
-      ])
-      const initialReferencePage = initialReferenceResult.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }> } | Array<{ file: string; line: number; text: string; context?: string }> | undefined
-      const initialReferenceHits = Array.isArray(initialReferencePage) ? initialReferencePage : initialReferencePage?.hits || []
-      const referenceResult = initialReferenceHits.length === 0 && exactIdentifier
-        ? executor.searchContentPage
-          ? await executor.searchContentPage(escaped, basePath, filePattern, false, { limit: 30, contextBefore: 1, contextAfter: 1 })
-          : await executor.searchContent(escaped, basePath, filePattern, false)
-        : initialReferenceResult
-      const symbolHits = normalizeCodeSearchHits(symbolResult.data).slice(0, 10)
-      const referencePage = referenceResult.data as { hits?: Array<{ file: string; line: number; text: string; context?: string }> } | Array<{ file: string; line: number; text: string; context?: string }> | undefined
-      const referenceHits = diversifySearchHits(Array.isArray(referencePage) ? referencePage : referencePage?.hits || [], 30)
-      if (!symbolResult.success && !referenceResult.success) {
-        const error = symbolResult.error || referenceResult.error || 'symbol trace failed'
-        return { ok: false, output: `Symbol trace failed: ${error}`, summary: `trace "${query}" failed`, evidence }
-      }
-      const lines: string[] = ['DEFINITIONS']
-      for (const hit of symbolHits) {
-        const relPath = toWorkspaceRelative(workspacePath, hit.path)
-        const line = hit.startLine || hit.line || 1
-        lines.push(`${relPath}:${line}: ${hit.title} (${hit.symbolKind || hit.source}) ${hit.preview || hit.subtitle || ''}`.trim())
-        evidence.push({
-          path: relPath,
-          startLine: line,
-          endLine: hit.endLine || line,
-          preview: hit.preview || hit.subtitle || hit.title,
-          reason: `symbol: ${query}`,
-          symbol: hit.symbolName || hit.title,
-        })
-      }
-      lines.push('REFERENCES')
-      for (const hit of referenceHits) {
-        const relPath = toWorkspaceRelative(workspacePath, hit.file)
-        lines.push(`${relPath}:${hit.line}: ${hit.text}`)
-        evidence.push({
-          path: relPath,
-          startLine: Math.max(1, hit.line - 1),
-          endLine: hit.line + 1,
-          preview: hit.text,
-          reason: `reference: ${query}`,
-          symbol: query,
-        })
-      }
-      const definitionPaths = new Set<string>()
-      const readTargets: Array<{ path: string; offset: number; limit: number; label: string }> = []
-      for (const hit of symbolHits) {
-        const relPath = toWorkspaceRelative(workspacePath, hit.path)
-        const key = relPath.toLowerCase()
-        if (definitionPaths.has(key) || readTargets.length >= sourceBudget) continue
-        definitionPaths.add(key)
-        const startLine = hit.startLine || hit.line || 1
-        const endLine = hit.endLine || startLine
-        const offset = Math.max(1, startLine - 6)
-        readTargets.push({
-          path: relPath,
-          offset,
-          limit: __testTraceDefinitionReadLimit(hit),
-          label: `definition ${hit.title}`,
-        })
-      }
-      const referencePaths = new Set<string>()
-      for (const hit of referenceHits) {
-        const relPath = toWorkspaceRelative(workspacePath, hit.file)
-        const key = relPath.toLowerCase()
-        if (readTargets.length >= sourceBudget || definitionPaths.has(key) || referencePaths.has(key)) continue
-        referencePaths.add(key)
-        readTargets.push({
-          path: relPath,
-          offset: Math.max(1, hit.line - 12),
-          limit: 36,
-          label: `reference ${query}`,
-        })
-      }
-      const readResults = await Promise.all(readTargets.map(async target => ({
-        target,
-        result: await executeSubAgentTool('read_file', {
-          path: target.path,
-          offset: target.offset,
-          limit: target.limit,
-        }, workspacePath, executor),
-      })))
-      const successfulReads = readResults.filter(item => item.result.ok && item.result.evidence.some(item => item.reason === 'file read'))
-      if (successfulReads.length > 0) {
-        lines.push('SOURCE_EVIDENCE')
-        for (const item of successfulReads) {
-          lines.push(`[${item.target.label}]`)
-          lines.push(item.result.output)
-          for (const readEvidence of item.result.evidence) evidence.push(readEvidence)
-        }
-      }
-      if (symbolHits.length === 0) lines.splice(1, 0, '- none')
-      if (referenceHits.length === 0) lines.push('- none')
-      return {
-        ok: true,
-        output: lines.join('\n'),
-        summary: `trace "${query}" -> ${symbolHits.length} definition(s), ${referenceHits.length} reference(s), ${successfulReads.length} source slice(s)`,
-        evidence,
-        operations: 2 + (initialReferenceHits.length === 0 && exactIdentifier ? 1 : 0) + readResults.reduce((sum, item) => sum + (item.result.operations ?? 1), 0),
-        readOperations: readResults.reduce((sum, item) => sum + (item.result.readOperations ?? 0), 0),
-      }
-    }
-
-    case 'trace_symbols': {
-      const queries = [...new Set((Array.isArray(args.queries) ? args.queries : [])
-        .map((query: unknown) => String(query || '').trim())
-        .filter(Boolean))].slice(0, 3)
-      if (queries.length < 2) {
-        return { ok: false, output: 'At least two concrete symbol queries are required.', summary: 'batch trace skipped: fewer than 2 symbols', evidence }
-      }
-      const traces = await Promise.all(queries.map(async query => ({
-        query,
-        result: await executeSubAgentTool('trace_symbol', { query, path: args.path, __source_budget: 1 }, workspacePath, executor),
-      })))
-      const lines: string[] = []
-      for (const trace of traces) {
-        lines.push(`=== ${trace.query} ===`)
-        lines.push(__testCompactBatchTraceOutput(trace.result.output))
-        for (const item of trace.result.evidence) evidence.push(item)
-      }
-      const failures = traces.filter(trace => !trace.result.ok).length
-      return {
-        ok: failures === 0,
-        output: lines.join('\n'),
-        summary: `batch trace ${queries.length} symbol(s) -> ${evidence.filter(item => item.reason === 'file read').length} source slice(s)${failures > 0 ? `, ${failures} failed` : ''}`,
-        evidence,
-        operations: traces.reduce((sum, trace) => sum + (trace.result.operations ?? 1), 0),
-        readOperations: traces.reduce((sum, trace) => sum + (trace.result.readOperations ?? 0), 0),
-      }
     }
 
     case 'get_codemap': {

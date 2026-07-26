@@ -71,10 +71,10 @@ export function generateReport(options: {
   const totalRepositoryBytes = [...new Map(deduplicated.map(run => [`${run.repository}:${run.caseId}`, run.repositoryBytes])).values()].reduce((sum, value) => sum + value, 0)
   const totalRepositoryFiles = [...new Map(deduplicated.map(run => [`${run.repository}:${run.caseId}`, run.repositoryFiles])).values()].reduce((sum, value) => sum + value, 0)
   const lines = [
-    '# FastContext Repository Retrieval Benchmark',
+    '# TurboFlux Retrieval Benchmark',
     '',
     `- Experiment: \`${metadata.experimentId}\``,
-    `- Model: \`${metadata.model}\`; native reasoning disabled for every LLM system`,
+    `- Model: \`${metadata.model}\`; reasoning profile: ${metadata.reasoning}`,
     `- Completed runs: ${deduplicated.length}/${expected}`,
     `- Dataset cases: ${manifest.cases.length}; repositories: ${repositoryCount}; languages: ${languages.join(', ')}`,
     `- Repository snapshots processed: ${(totalRepositoryFiles / 1_000_000).toFixed(2)}M files, ${(totalRepositoryBytes / 1024 / 1024 / 1024).toFixed(2)} GiB (counts include repeated base commits)`,
@@ -113,7 +113,7 @@ export function generateReport(options: {
   }
 
   lines.push('', '## Paired Tests', '')
-  lines.push('| FastContext system | Comparator | Pairs | Mean R@10 difference | Paired permutation p |')
+  lines.push('| TurboFlux system | Comparator | Pairs | Mean R@10 difference | Paired permutation p |')
   lines.push('|---|---|---:|---:|---:|')
   const fastSystems = metadata.systems.filter(system => system === 'fastcontext')
   const comparators = metadata.systems.filter(system => system !== 'fastcontext')

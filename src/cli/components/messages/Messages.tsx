@@ -1,6 +1,6 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import { useTheme } from '../../theme/index'
+import { resolveBackground, useTheme } from '../../theme/index'
 import { formatMarkdown } from '../markdown/index'
 import { ThinkingBlock } from './ThinkingBlock'
 import type { ToolStatus } from '../tools/ToolCallTree'
@@ -19,8 +19,8 @@ export interface Message {
 export function UserMessage({ content }: { content: string; key?: any }) {
   const theme = useTheme()
   return (
-    <Box backgroundColor={theme.surface} paddingX={1}>
-      <Text color={theme.brand}>{'> '}</Text>
+    <Box backgroundColor={resolveBackground(theme, 'surface')} paddingX={1}>
+      <Text color={theme.brandShimmer}>{'> '}</Text>
       <Text bold>{content}</Text>
     </Box>
   )

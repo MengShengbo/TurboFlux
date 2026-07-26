@@ -13,13 +13,18 @@ export interface ReplOptions {
   approvalPolicy?: ApprovalPolicy
   mcpServers?: string[]
   startupAnimation?: boolean
+  transparentBackground?: boolean
 }
 
 export async function startRepl(options: ReplOptions): Promise<void> {
-  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation } = options
+  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation, transparentBackground } = options
 
   if (!config.apiKey) {
     console.log(chalk.hex('#bdbdbd')('\n  No API key configured. Run "turboflux setup" to connect a model provider.\n'))
+  }
+
+  if (transparentBackground) {
+    console.log(chalk.hex('#8f8f8f')('  Transparent terminal background enabled. Use "turboflux --opaque" to force solid backgrounds.\n'))
   }
 
   if (mcpServers?.length) {
@@ -33,5 +38,5 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation })
+  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation, transparentBackground })
 }

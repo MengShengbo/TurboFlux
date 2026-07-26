@@ -1,0 +1,50 @@
+﻿{
+    "schemaVersion":  1,
+    "generatedAt":  "2026-07-26T14:50:54.0037678Z",
+    "scoring":  {
+                    "failuresIncludedInQuality":  true,
+                    "latencyIncludesSuccessfulRunsOnly":  true,
+                    "primary":  "recallAt10"
+                },
+    "systems":  {
+                    "claude-code-readonly":  {
+                                                 "cases":  50,
+                                                 "successfulRuns":  50,
+                                                 "successRate":  1,
+                                                 "recallAt10":  0.7783,
+                                                 "mrr":  0.835,
+                                                 "map":  0.7483,
+                                                 "ndcgAt10":  0.7858,
+                                                 "fullCoverageAt10":  0.7,
+                                                 "latencyP50Ms":  54553,
+                                                 "latencyP95Ms":  117188.3,
+                                                 "averageToolCalls":  9.52
+                                             },
+                    "fastcontext-race":  {
+                                             "cases":  50,
+                                             "successfulRuns":  49,
+                                             "successRate":  0.98,
+                                             "recallAt10":  0.7726,
+                                             "mrr":  0.8317,
+                                             "map":  0.728,
+                                             "ndcgAt10":  0.7733,
+                                             "fullCoverageAt10":  0.68,
+                                             "latencyP50Ms":  46299.09,
+                                             "latencyP95Ms":  98170.82,
+                                             "averageToolCalls":  11.31
+                                         },
+                    "opencode-explore":  {
+                                             "cases":  50,
+                                             "successfulRuns":  42,
+                                             "successRate":  0.84,
+                                             "recallAt10":  0.7816,
+                                             "mrr":  0.7915,
+                                             "map":  0.7145,
+                                             "ndcgAt10":  0.7626,
+                                             "fullCoverageAt10":  0.7,
+                                             "latencyP50Ms":  231031.83,
+                                             "latencyP95Ms":  444684.33,
+                                             "averageToolCalls":  12.29
+                                         }
+                }
+}

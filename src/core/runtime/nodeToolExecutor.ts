@@ -29,7 +29,7 @@ import { MemoryService } from '../../tools/memory/service'
 import { LocalHistoryService } from '../../tools/localHistory/service'
 import { hashText, writeFileAtomicSync } from '../fileIO'
 import { RuntimeTaskManager } from './runtimeTaskManager'
-import { CodeGraphService } from '../../tools/codeGraph/service.js'
+import { getChildProcessSpawnOptions, getDefaultShellSpec, getProcessGroupSignal, usesProcessGroup } from '../../platform/process'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
@@ -61,12 +61,7 @@ const TERMINAL_KILL_TIMEOUT_MS = 5000
 const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 const WEB_SEARCH_TIMEOUT_MS = 8000
 const WEB_SEARCH_USER_AGENT = 'TurboFlux/0.1 (+https://github.com/MengShengbo/TurboFluxCli)'
-const DEFAULT_TERMINAL_SHELL = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
-const DEFAULT_TERMINAL_SHELL_ARGS = process.platform === 'win32'
-  ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass']
-  : []
-const DEFAULT_TERMINAL_SHELL_ID = process.platform === 'win32' ? 'powershell' : 'bash'
-const DEFAULT_TERMINAL_SHELL_LABEL = process.platform === 'win32' ? 'PowerShell' : 'Bash'
+const DEFAULT_SHELL = getDefaultShellSpec()
 const SENSITIVE_ENV_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)/i
 const CODE_SEARCH_SKIPPED_DIRS = new Set([
   '.git', '.hg', '.svn', '.claude', '.turboflux', '.vscode', '.cache', '.next', '.turbo',
@@ -79,21 +74,6 @@ const DEFAULT_SEARCH_LIMIT = 50
 const MAX_SEARCH_LIMIT = 500
 const DEFAULT_READ_RANGE_LINES = 180
 const DEFAULT_READ_RANGE_BYTES = 256 * 1024
-
-async function waitForPromise<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  if (timeoutMs <= 0) return promise
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('CodeGraph warmup continues in the background')), timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
 
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
@@ -123,9 +103,7 @@ export class NodeToolExecutor implements ToolExecutor {
   private createRuntimeTaskLog(taskId: string): string {
     const directory = this.ensureWithinWorkspace(join(this.workspaceRoot, RUNTIME_LOG_DIRECTORY))
     mkdirSync(directory, { recursive: true })
-    const logPath = this.ensureWithinWorkspace(join(directory, `${taskId}.jsonl`))
-    writeFileSync(logPath, '', { encoding: 'utf-8', mode: 0o600 })
-    return logPath
+    return this.ensureWithinWorkspace(join(directory, `${taskId}.jsonl`))
   }
 
   private appendRuntimeTaskLog(logPath: string, channel: 'stdout' | 'stderr', data: Buffer | string): void {
@@ -137,6 +115,7 @@ export class NodeToolExecutor implements ToolExecutor {
     try {
       const safePath = this.ensureAllowedPath(path)
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
+      if (!statSync(safePath).isFile()) return { success: false, error: 'Path is not a file' }
       const content = readFileSync(safePath, 'utf-8')
       return { success: true, data: content }
     } catch (e) {
@@ -622,19 +601,6 @@ export class NodeToolExecutor implements ToolExecutor {
       const safeWorkspacePath = this.ensureAllowedPath(requestedFile ? dirname(requestedPath) : requestedPath)
       const exactRequestedFile = requestedFile ? resolveNativePath(requestedPath).toLowerCase() : undefined
       const limit = query.limit || 10
-      let graphResults: CodeSearchHit[] = []
-      try {
-        if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
-        const graph = await CodeGraphService.load()
-        if (!graph.isInitialized(safeRootPath)) throw new Error('CodeGraph index is not ready')
-        graphResults = await graph.searchSymbols({
-          workspacePath: safeRootPath,
-          query: query.query,
-          path: relative(safeRootPath, requestedPath),
-          kind: query.kind,
-          limit,
-        })
-      } catch {}
       const escapedQuery = this.escapeRegex(query.query)
       const symbolPattern = query.exact ? escapedQuery : `\\w*${escapedQuery}\\w*`
       const pattern = [
@@ -711,17 +677,10 @@ export class NodeToolExecutor implements ToolExecutor {
         ? this.searchCodeSymbolsFallback(query.query, safeWorkspacePath, limit, safeRootPath, query.exact === true)
             .filter(hit => !exactRequestedFile || resolveNativePath(safeRootPath, hit.path).toLowerCase() === exactRequestedFile)
         : []
-      const exactName = query.query.toLowerCase()
-      if (query.exact) {
-        graphResults = graphResults.filter(hit => (hit.symbolName || hit.title).toLowerCase() === exactName)
-      }
-      if (exactRequestedFile) {
-        graphResults = graphResults.filter(hit => resolveNativePath(safeRootPath, hit.path).toLowerCase() === exactRequestedFile)
-      }
       return {
         success: true,
-        data: results.length > 0 || graphResults.length > 0
-          ? [...results, ...graphResults]
+        data: results.length > 0
+          ? results
               .filter((hit, index, all) => all.findIndex(other => other.path.toLowerCase() === hit.path.toLowerCase()
                 && other.title.toLowerCase() === hit.title.toLowerCase()) === index)
               .sort((left, right) => (right.score || 0) - (left.score || 0) || left.path.localeCompare(right.path) || (left.line || 0) - (right.line || 0))
@@ -766,39 +725,12 @@ export class NodeToolExecutor implements ToolExecutor {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   }
 
-  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number; preferGraph?: boolean; graphOnly?: boolean; waitForGraphMs?: number }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[]; source?: 'graph' | 'filesystem' | 'unavailable' }>> {
+  async getCodeMap(query: { workspacePath: string; targetPaths?: string[]; path?: string; query?: string; depth?: number; maxPaths?: number; maxChildrenPerPath?: number }): Promise<Result<{ map: CodeMapNode[]; relatedPaths?: string[]; source?: 'filesystem' }>> {
     try {
       const basePath = this.ensureAllowedPath(query.workspacePath)
       for (const target of query.targetPaths || (query.path ? [query.path] : [])) {
         this.ensureAllowedPath(isAbsolute(target) ? target : join(basePath, target))
       }
-      try {
-        if (query.preferGraph === false) throw new Error('Graph map not requested')
-        if (process.env.TURBOFLUX_DISABLE_CODEGRAPH === '1') throw new Error('CodeGraph disabled')
-        const graph = await CodeGraphService.load()
-        if ((query.waitForGraphMs || 0) > 0) {
-          try {
-            await waitForPromise(graph.prepare(basePath), query.waitForGraphMs || 0)
-          } catch {}
-        }
-        if (query.graphOnly && !graph.isInitialized(basePath)) {
-          void graph.prepare(basePath).catch(() => {})
-          return { success: true, data: { map: [], source: 'unavailable' } }
-        }
-        const graphRequest = graph.getCodeMap({
-          workspacePath: basePath,
-          query: query.query,
-          path: query.path,
-          targetPaths: query.targetPaths,
-          depth: query.depth || 2,
-          maxPaths: query.maxPaths || 8,
-        })
-        const graphMap = query.graphOnly
-          ? await waitForPromise(graphRequest, 1_200)
-          : await graphRequest
-        if (graphMap.map.length > 0) return { success: true, data: { ...graphMap, source: 'graph' } }
-      } catch {}
-      if (query.graphOnly) return { success: true, data: { map: [], source: 'unavailable' } }
       const targetPaths = this.resolveCodeMapTargets(basePath, query)
       const map: CodeMapNode[] = []
 
@@ -1007,8 +939,7 @@ export class NodeToolExecutor implements ToolExecutor {
       const proc = spawn(shell, shellArgs, {
         cwd: safeCwd,
         env: this.buildChildEnvironment(env),
-        detached: process.platform !== 'win32',
-        windowsHide: true,
+        ...getChildProcessSpawnOptions(),
       })
       this.runtimeTaskManager.setControl(runtimeTask.id, {
         stop: () => this.stopProcessAndWait(proc),
@@ -1044,8 +975,7 @@ export class NodeToolExecutor implements ToolExecutor {
       const proc = spawn(command, args, {
         cwd: safeCwd,
         env: this.buildChildEnvironment(env),
-        detached: process.platform !== 'win32',
-        windowsHide: true,
+        ...getChildProcessSpawnOptions(),
       })
       this.runtimeTaskManager.setControl(runtimeTask.id, {
         stop: () => this.stopProcessAndWait(proc),
@@ -1101,6 +1031,7 @@ export class NodeToolExecutor implements ToolExecutor {
         if (!logPath || logError) return
         try {
           this.appendRuntimeTaskLog(logPath, channel, data)
+          if (runtimeTaskId) this.runtimeTaskManager.updateTask(runtimeTaskId, { outputBytes, outputOffset: outputBytes })
         } catch (error) {
           logError = error instanceof Error ? error.message : String(error)
         }
@@ -1163,7 +1094,7 @@ export class NodeToolExecutor implements ToolExecutor {
       return
     }
     try {
-      process.kill(-proc.pid, 'SIGTERM')
+      process.kill(usesProcessGroup() ? -proc.pid : proc.pid, getProcessGroupSignal())
     } catch {
       proc.kill('SIGTERM')
     }
@@ -1238,10 +1169,10 @@ export class NodeToolExecutor implements ToolExecutor {
     let proc: ChildProcessWithoutNullStreams | undefined
     try {
       const safeCwd = this.ensureAllowedPath(options?.cwd || this.workspaceRoot)
-      const shell = options?.shell || DEFAULT_TERMINAL_SHELL
-      const shellArgs = options?.shell ? [] : DEFAULT_TERMINAL_SHELL_ARGS
-      const shellId = options?.shell ? 'custom' : DEFAULT_TERMINAL_SHELL_ID
-      const shellLabel = options?.shell ? shell : DEFAULT_TERMINAL_SHELL_LABEL
+      const shell = options?.shell || DEFAULT_SHELL.command
+      const shellArgs = options?.shell ? [] : DEFAULT_SHELL.args
+      const shellId = options?.shell ? 'custom' : DEFAULT_SHELL.id
+      const shellLabel = options?.shell ? shell : DEFAULT_SHELL.label
       const now = Date.now()
       const sessionId = `term_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
       const runtimeTask = this.runtimeTaskManager.createTask({
@@ -1256,8 +1187,7 @@ export class NodeToolExecutor implements ToolExecutor {
       proc = spawn(shell, shellArgs, {
         cwd: safeCwd,
         env: this.buildChildEnvironment(options?.env),
-        detached: process.platform !== 'win32',
-        windowsHide: true,
+        ...getChildProcessSpawnOptions(),
       })
       const info: TerminalSessionInfo = {
         id: sessionId,
@@ -1309,6 +1239,10 @@ export class NodeToolExecutor implements ToolExecutor {
         if (!session.logError) {
           try {
             this.appendRuntimeTaskLog(session.logPath, channel, data)
+            this.runtimeTaskManager.updateTask(session.runtimeTaskId, {
+              outputBytes: session.outputBytes,
+              outputOffset: session.outputBytes,
+            })
           } catch (error) {
             session.logError = error instanceof Error ? error.message : String(error)
           }
@@ -1505,7 +1439,7 @@ export class NodeToolExecutor implements ToolExecutor {
     }
 
     try {
-      process.kill(-pid, 'SIGTERM')
+      process.kill(usesProcessGroup() ? -pid : pid, getProcessGroupSignal())
       return
     } catch {
       session.proc.kill('SIGTERM')

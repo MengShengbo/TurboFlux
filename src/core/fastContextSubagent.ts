@@ -6,24 +6,14 @@ import type {
   FastContextScanEvent,
   FastContextScanHit,
   FastContextScanResult,
+  FastContextStrategy,
 } from './fastContextTypes'
-import { FAST_CONTEXT_TUNING } from './fastContextTypes'
+import { getFastContextProfile } from './fastContextTypes'
 import {
-  buildFastContextSystemPrompt,
+  getSubAgentDefinition,
   renderSubmittedCodeMap,
   runSubAgent,
 } from './subAgent'
-
-const FAST_CONTEXT_DEFINITION: SubAgentDefinition = {
-  id: 'fast_context',
-  label: 'FastContext Controller',
-  description: 'Low-latency causal code retrieval with parallel tools and grounded ranking',
-  driver: 'main-model',
-  systemPrompt: buildFastContextSystemPrompt(),
-  maxTurns: FAST_CONTEXT_TUNING.maxTurns,
-  maxParallel: FAST_CONTEXT_TUNING.maxParallel,
-  maxOutputTokens: 4096,
-}
 
 export const FAST_CONTEXT_REQUEST_TIMEOUT_MS = 60_000
 
@@ -41,6 +31,7 @@ interface RunParams {
   codemap?: string
   abortSignal?: AbortSignal
   requestTimeoutMs?: number
+  strategy?: FastContextStrategy
   onEvent?: (event: FastContextScanEvent) => void
 }
 
@@ -107,12 +98,17 @@ export function __testBuildEvidencePack(
   ].filter((line, index, lines) => line || lines[index - 1] !== '').join('\n')
 }
 
-export function __testFastContextDefinition(): SubAgentDefinition {
-  return { ...FAST_CONTEXT_DEFINITION }
+export function __testFastContextDefinition(strategy: FastContextStrategy = 'autonomous-race'): SubAgentDefinition {
+  const definition = getSubAgentDefinition('fast_context')
+  if (!definition) throw new Error(`Missing FastContext definition for ${strategy}`)
+  return { ...definition }
 }
 
 export async function runFastContextSubagent(params: RunParams): Promise<FastContextScanResult> {
   if (!params.model?.trim()) throw new Error('Subagent FastContext Controller requires an active model from the main agent.')
+  const strategy = params.strategy || 'autonomous-race'
+  const profile = getFastContextProfile(strategy)
+  const definition = __testFastContextDefinition(strategy)
 
   const startedAt = Date.now()
   const emit = (event: FastContextScanEvent): void => { params.onEvent?.(event) }
@@ -130,7 +126,6 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
       primer: 0,
       plannedRetrieval: 0,
       dependencyExpansion: 0,
-      contextMaps: 0,
       judge: 0,
       total: 0,
     },
@@ -214,12 +209,12 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     type: 'phase',
     phase: 'mapping',
     wave: 1,
-    maxWaves: FAST_CONTEXT_DEFINITION.maxTurns,
+    maxWaves: definition.maxTurns,
     insight: 'starting one adaptive FastContext controller',
   })
 
   const result = await runSubAgent({
-    definition: FAST_CONTEXT_DEFINITION,
+    definition,
     objective: params.objective,
     workspacePath: params.workspacePath,
     toolExecutor: params.toolExecutor,
@@ -227,16 +222,18 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     baseUrl: params.baseUrl,
     provider: params.provider,
     customHeaders: params.customHeaders,
-    reasoning: params.reasoning,
+    reasoning: profile.reasoning === 'high'
+      ? { ...params.reasoning, enabled: true, effort: 'high' }
+      : params.reasoning,
     modelCapabilities: params.modelCapabilities,
     model: params.model,
     codemap: params.codemap,
     abortSignal: params.abortSignal,
-    requestTimeoutMs: params.requestTimeoutMs ?? FAST_CONTEXT_REQUEST_TIMEOUT_MS,
+    requestTimeoutMs: params.requestTimeoutMs ?? profile.requestTimeoutMs,
     maxTransientAttempts: 3,
     requireGroundedReport: true,
-    maxCandidates: 10,
-    allowedTools: ['search_content', 'search_files', 'trace_symbol', 'trace_symbols', 'read_file', 'submit_code_map'],
+    maxCandidates: profile.maxCandidates,
+    allowedTools: ['search_content', 'search_files', 'search_symbol', 'read_file', 'submit_code_map'],
     userPrompt: [
       `Objective: ${params.objective}`,
       '',
@@ -254,20 +251,21 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   telemetry.stageDurationsMs.total = elapsedMs
   if (!result.ok) emit({ type: 'insight', text: `using grounded candidates from a degraded submission: ${trimText(result.error || 'validation warning', 140)}`, tone: 'warning' })
 
-  emit({ type: 'phase', phase: 'synthesizing', wave: result.turns, maxWaves: FAST_CONTEXT_DEFINITION.maxTurns, insight: 'compacting grounded code map' })
+  emit({ type: 'phase', phase: 'synthesizing', wave: result.turns, maxWaves: definition.maxTurns, insight: 'compacting grounded code map' })
   const finalReport = renderSubmittedCodeMap(result.codeMap)
   const evidencePack = __testBuildEvidencePack(params.objective, candidates, elapsedMs, result.turns, truncated, finalReport)
   emit({
     type: 'phase',
     phase: 'completed',
     wave: result.turns,
-    maxWaves: FAST_CONTEXT_DEFINITION.maxTurns,
+    maxWaves: definition.maxTurns,
     insight: `completed - ${result.codeMap.candidates.length} ranked candidate(s), ${hits.length} evidence range(s)`,
   })
   emit({ type: 'insight', text: `FastContext grounded ${result.codeMap.candidates.length} candidate(s) in ${result.turns} turn(s)`, tone: 'success' })
 
   return {
     objective: params.objective,
+    strategy,
     evidencePack,
     filesScanned: candidates.size,
     hits,

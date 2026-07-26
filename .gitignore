@@ -12,7 +12,6 @@ src-desktop/
 tsconfig.desktop.json
 
 .turboflux/
-.codegraph/
 .claude/
 .vscode/
 
@@ -32,6 +31,12 @@ three.min.js
 claude-code-reference/
 reference/
 system-prompts-and-models-of-ai-tools-main/
+
+benchmark-results/*
+!benchmark-results/formal-fastcontext-race-50/
+!benchmark-results/formal-fastcontext-race-50/**
+media/
+output/
 
 *.node
 *.aar

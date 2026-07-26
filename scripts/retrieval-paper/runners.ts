@@ -149,10 +149,11 @@ function uniquePaths(paths: string[], workspacePath: string): string[] {
   return values
 }
 
-function extractPaths(text: string | undefined, workspacePath: string): string[] {
+export function extractPaths(text: string | undefined, workspacePath: string): string[] {
   if (!text) return []
   const paths: string[] = []
-  const rankedSection = text.split(/\bRANKED_CODE_MAP\b/i)[1]?.split(/\b(?:EXECUTION_FLOW|SEARCHES_TRIED|UNCERTAINTY|REJECTED_HYPOTHESES)\b/i)[0] || text
+  const rankedBody = text.split(/\bRANKED_CODE_MAP\b/i)[1] ?? text
+  const rankedSection = rankedBody.split(/\b(?:SUPPORTING_CONTEXT|UNRESOLVED|EXECUTION_FLOW|SEARCHES_TRIED|UNCERTAINTY|REJECTED_HYPOTHESES)\b/i)[0]
   const pattern = /(?:^|[\s`'"(*])((?:[A-Za-z]:[\\/])?(?:[\w.@()+-]+[\\/])+[\w.@()[\]{}+-]+\.[A-Za-z0-9]+)(?=$|[\s`'"*),:#])/gm
   for (const match of rankedSection.matchAll(pattern)) paths.push(match[1])
   return uniquePaths(paths, workspacePath).slice(0, 20)
@@ -265,13 +266,10 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
   }, context.timeoutMs)
   let observation: FetchObservation | undefined
   const diagnostics = (): FastContextRunDiagnostics => {
-    const contextMaps = events
-      .filter((event): event is Extract<FastContextScanEvent, { type: 'context_maps' }> => event.type === 'context_maps')
-      .at(-1)
     const insightTexts = events
       .filter((event): event is Extract<FastContextScanEvent, { type: 'insight' }> => event.type === 'insight')
       .map(event => event.text)
-    const milestones = insightTexts.filter(text => /semantic plan|planned retrieval completed|dependency frontier|frontier coverage|contextmaps|evidence judgment completed|speculative evidence/i.test(text))
+    const milestones = insightTexts.filter(text => /retrieval plan|frontier coverage|evidence judgment|finalizing/i.test(text))
     const insights = [...new Set([...milestones, ...insightTexts.slice(-24)])].slice(-48)
     const waves = events
       .filter((event): event is Extract<FastContextScanEvent, { type: 'wave_metrics' }> => event.type === 'wave_metrics')
@@ -288,12 +286,6 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
     return {
       eventCount: events.length,
       hitCount: events.filter(event => event.type === 'hit').length,
-      contextMaps: contextMaps ? {
-        state: contextMaps.state,
-        confidence: contextMaps.confidence,
-        nodes: contextMaps.nodes,
-        elapsedMs: contextMaps.elapsedMs,
-      } : undefined,
       insights,
       waves,
     }
@@ -314,6 +306,7 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
         reasoning: { enabled: false, effort: 'none' },
         abortSignal: controller.signal,
         requestTimeoutMs: Math.min(120_000, context.timeoutMs),
+        strategy: 'autonomous-race',
         onEvent: event => {
           events.push(event)
           if (event.type === 'insight' && /retrying model request/i.test(event.text)) current.retries += 1
@@ -352,8 +345,8 @@ async function runFastContext(context: RunContext): Promise<RunnerOutput> {
     return {
       ...base,
       fastContextDiagnostics: diagnostics(),
-      toolCalls: toolCallText.filter(text => /^(?:search_|trace_symbol|get_codemap|read_file):/i.test(text)).length,
-      searchCalls: toolCallText.filter(text => /^(?:search_|trace_symbol|get_codemap):/i.test(text)).length,
+      toolCalls: toolCallText.filter(text => /^(?:search_|get_codemap|read_file):/i.test(text)).length,
+      searchCalls: toolCallText.filter(text => /^(?:search_|get_codemap):/i.test(text)).length,
       readCalls: toolCallText.filter(text => /^read_file:/i.test(text)).length,
       readPaths: uniquePaths(events
         .filter((event): event is Extract<FastContextScanEvent, { type: 'hit' }> => event.type === 'hit' && event.hit.reason === 'file read')
@@ -418,7 +411,7 @@ async function runNeutralToolAgent(context: RunContext): Promise<RunnerOutput> {
       apiRequests: observation.requests,
       apiRetries: observation.retries,
       toolCalls: toolEvents.length,
-      searchCalls: toolEvents.filter(event => /^(?:search_|trace_symbol|get_codemap)/i.test(event.tool)).length,
+      searchCalls: toolEvents.filter(event => /^(?:search_|get_codemap)/i.test(event.tool)).length,
       readCalls: toolEvents.filter(event => event.tool === 'read_file').length,
       rankedPaths: extractPaths(finalText, context.workspacePath),
       readPaths: uniquePaths(result.evidence.filter(item => item.reason === 'file read').map(item => item.path), context.workspacePath),

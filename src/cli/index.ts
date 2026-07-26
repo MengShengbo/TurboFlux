@@ -24,6 +24,8 @@ program
   .option('--scrollback', 'use classic terminal scrollback instead of the fixed cockpit')
   .option('--no-animation', 'skip the startup reveal animation')
   .option('--no-color', 'disable color output')
+  .option('--transparent', 'do not paint terminal background; let emulator transparency show through')
+  .option('--opaque', 'force solid theme backgrounds, overriding TURBOFLUX_TRANSPARENT')
   .option('--approval-policy <policy>', 'tool approval policy: ask, agent, or full')
   .option('--mcp <servers>', 'explicitly start configured MCP servers (comma-separated names or all)')
   .action(async (workspace: string, opts) => {
@@ -53,6 +55,9 @@ program
       approvalPolicy,
       mcpServers,
       startupAnimation: opts.animation !== false,
+      transparentBackground: opts.opaque
+        ? false
+        : Boolean(opts.transparent || /^(1|true|yes|on)$/i.test(String(process.env.TURBOFLUX_TRANSPARENT || ''))),
     })
   })
 

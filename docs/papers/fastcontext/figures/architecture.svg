@@ -38,7 +38,7 @@
 			<text x="30.569580078124996" y="136.77499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,273) scale(1,-1)">write / shell / approval</text>
 			<rect x="142" y="128" width="84" height="30" rx="4" ry="4" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.15; fill: rgb(81%,90%,95%); fill-rule: evenodd;"/>
 			<text x="161.418212890625" y="144.67499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,289) scale(1,-1)">Read-only tools</text>
-			<text x="152.0284423828125" y="136.77499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,273) scale(1,-1)">search / symbol / read</text>
+			<text x="154.010498046875" y="136.77499999999998" style="font-family: ArialEmbedded; font-size: 6.5px;fill: rgb(12%,12%,14%); stroke:none;" transform="translate(0,273) scale(1,-1)">search / graph / read</text>
 			<path d="M 62,158 L 62,179 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>
 			<polygon points="62 179, 59.525 174.5, 64.475 174.5" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1; fill: rgb(12%,12%,14%); fill-rule: evenodd;"/>
 			<path d="M 184,158 L 184,179 Z" style="stroke: rgb(12%,12%,14%); stroke-linecap: butt; stroke-width: 1.1;"/>

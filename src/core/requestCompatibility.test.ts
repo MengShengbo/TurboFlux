@@ -24,6 +24,13 @@ describe('request compatibility', () => {
     expect(body).toEqual({ thinking: { type: 'enabled' }, reasoning_effort: 'high' })
   })
 
+  it('removes an unsupported reasoning summary without disabling effort', () => {
+    const body = { reasoning: { effort: 'xhigh', summary: 'detailed' } }
+
+    expect(removeOpenAICompatibleRequestParam(body, 'reasoning.summary')).toBe(true)
+    expect(body).toEqual({ reasoning: { effort: 'xhigh' } })
+  })
+
   it('strips nested Anthropic cache controls without changing content', () => {
     const body: Record<string, unknown> = {
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }] }],

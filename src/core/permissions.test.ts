@@ -7,6 +7,7 @@ describe('PermissionPipeline', () => {
       const pipeline = new PermissionPipeline()
       const result = pipeline.check('run_command', { command: 'rm -rf /' })
       expect(result.verdict).toBe('deny')
+      expect(result.decisionId).toMatch(/^policy_/)
     })
 
     it('denies format C:', () => {

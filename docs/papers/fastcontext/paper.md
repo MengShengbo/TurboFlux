@@ -4,17 +4,17 @@ FastContext: A Model-Directed Asynchronous Code Retrieval Architecture for Inter
 
 临界跃迁 TurboFlux 研究团队
 
-技术论文预印本 v1.1，2026 年 7 月 22 日
+技术论文预印本 v1.2，2026 年 7 月 22 日
 
 ## 摘要
 
-大规模代码库中的软件工程任务通常同时包含语义定位、跨文件调用链恢复、证据核验与主上下文预算控制。将整个仓库、宽泛搜索结果或子代理完整工具轨迹直接注入主模型，会造成输入膨胀、缓存失效、低信号干扰以及交互阻塞。本文提出并实现 FastContext，一种面向交互式软件工程智能体的模型驱动异步代码检索架构。该系统将查询改写、证据角色、关系恢复与候选排序全部交给只读语言模型子代理，本地层只执行模型请求的搜索、符号追踪和有界读取，并机械核验最终声明的路径与行区间是否由本轮 read_file 完整覆盖。FastContext 采用单一架构探索合同与固定资源上界；模型按任务复杂度自适应选择查询、关系追踪和停止时机，但找到首个核心文件不构成完成条件。最终代码地图必须覆盖执行与数据流、模块归属边界、状态/配置/持久化、实现族与镜像、变更影响边界以及失败路径或已排除关系。模型必须通过 submit_code_map 工具提交候选、执行关系、已排除假设、查询策略和不确定性；报告缺失或核验失败时系统明确失败，不生成本地语义 fallback。异步调度层使用独立 AbortController、运行时任务状态机与追加式 JSONL 转录，主会话中断不会误杀后台 FastContext。本文给出完整架构、业务分支、实现映射和设计依据，并审慎复核一组旧版本单轮先导基准。该实验来自包含已删除自动预扫描的历史提交，样本量为每任务一次，因此不能代表当前实现。本文的主要贡献是一个语义权责清晰、可审计、可取消且上下文隔离的代码检索系统设计。
+大规模代码库中的软件工程任务通常同时包含语义定位、跨文件调用链恢复、证据核验与主上下文预算控制。将整个仓库、宽泛搜索结果或子代理完整工具轨迹直接注入主模型，会造成输入膨胀、缓存失效、低信号干扰以及交互阻塞。本文提出并实现 FastContext，一种面向交互式软件工程智能体的模型驱动异步代码检索架构。该系统将查询改写、证据角色、关系恢复与候选排序交给只读语言模型子代理；确定性层融合 ripgrep 精确检索与持久化代码知识图谱，提供符号、调用、引用、依赖和影响范围查询。图结果只作为模型按需调用的工具观察，不在首轮自动灌入上下文。最终候选必须通过 submit_code_map 提交，按直接编辑必要性排序，且路径与行区间须由本轮 read_file 完整覆盖；报告缺失或核验失败时系统明确失败，不生成本地语义 fallback。异步调度层使用独立 AbortController、运行时任务状态机与追加式 JSONL 转录，主会话中断不会误杀后台 FastContext。本文给出完整架构、业务分支、实现映射、工程验证与性能分析。
 
 关键词：软件工程智能体；代码检索；工具增强语言模型；异步子代理；上下文隔离；证据门控
 
 ## Abstract
 
-Repository-scale software engineering requires semantic localization, cross-file execution-flow reconstruction, evidence verification, and strict control of the primary agent's context budget. We present FastContext, a model-directed asynchronous retrieval architecture for interactive software engineering agents. A read-only language-model subagent owns query reformulation, evidence roles, relationship recovery, and ranking; deterministic local tools only execute requested searches, combined symbol-reference traces, and bounded file reads. The final code map is submitted through a structured tool call, and a local verifier checks only referential integrity: every candidate and relationship range must be fully covered by a read in the same run. One architecture-mapping contract operates under fixed resource ceilings while adapting query choice, relationship tracing, and stopping to the task. Locating the first core file is not a completion condition: the map must recover execution and data flow, ownership boundaries, state/configuration/persistence, implementation families and mirrors, change-impact frontiers, and failure or rejected paths. Missing or invalid semantic output fails explicitly; no local semantic fallback is generated. A historical single-round pilot benchmark is reported solely as non-current evidence because it predates the removal of eager deterministic prefetch. The paper contributes an auditable architecture and a reproducible reporting protocol rather than a claim of statistically established superiority.
+Repository-scale software engineering requires semantic localization, cross-file execution-flow reconstruction, evidence verification, and strict control of the primary agent's context budget. We present FastContext, a model-directed asynchronous retrieval architecture for interactive software engineering agents. A read-only language-model subagent owns query reformulation, evidence roles, relationship recovery, and ranking. The deterministic layer fuses exact ripgrep retrieval with a persistent code knowledge graph for symbol, call, reference, dependency, and impact queries. Graph evidence is exposed only through model-requested tools and is never eagerly injected into the first prompt. The final code map is submitted through a structured tool call, ranked by direct edit necessity, and locally verified against bounded reads from the same run. Missing or invalid semantic output fails explicitly; no local semantic fallback is generated. We report the architecture, implementation, deterministic engineering validation, and performance analysis.
 
 Keywords: software engineering agents; code retrieval; tool-augmented language models; asynchronous subagents; context isolation; evidence grounding
 
@@ -26,13 +26,14 @@ Keywords: software engineering agents; code retrieval; tool-augmented language m
 
 FastContext 的核心判断是：本地工具擅长快速、精确、可复现地执行操作；语言模型擅长把模糊目标改写为搜索假设、判断证据角色、恢复调用关系并发现反例。因此系统不在模型前运行自动预扫描，而让模型按需调用 search_content、search_files、search_symbols、trace_symbol、get_codemap 与 read_file。该设计与 ReAct 的“推理-行动-观察”循环 [2]、Toolformer 的工具选择思想 [3] 以及 Claude Code 将 Explore 放入独立上下文的工程实践 [11] 一致，但额外加入了结构化架构关系提交、读取区间核验、变更影响边界、后台生命周期隔离和一次性证据注入。
 
-本文研究对象为 TurboFlux CLI 主分支提交 f7b190a77d7cb0362b30b680618d2c6088bdb09f。贡献如下：
+本文研究对象为 TurboFlux CLI 主分支提交 646f06197dd3fbef6836f7323e84506e68de31cc。贡献如下：
 
 - 提出模型驱动、只读、异步的代码检索子代理，将语义决策与本地确定性执行分离。
 - 设计模型专属 submit_code_map 协议和读取区间核验，降低“只看文件名就下结论”的风险，同时避免固定检索次数造成无效轮次。
 - 设计独立 AbortController、任务状态机、硬超时、转录持久化和主会话中断隔离，保证后台检索不阻塞主交互。
+- 将持久化 Tree-sitter 代码知识图谱接入既有 search_symbols 与 get_codemap 契约，在不扩张模型工具面的前提下提供跨文件调用、引用、依赖与影响关系。
 - 设计紧凑 RANKED_CODE_MAP 与一次性注入协议，阻止原始工具轨迹污染主上下文；模型失败时不生成本地语义替代物。
-- 给出源码级实现映射、单一架构探索合同与历史先导实验的效度边界。
+- 给出源码级实现映射、单一架构探索合同、确定性工程验证和性能分析。
 
 {{FIGURE:architecture}}
 
@@ -46,7 +47,7 @@ FastContext 的核心判断是：本地工具擅长快速、精确、可复现�
 
 其中 Plan 由语言模型生成词面锚点、模块归属和运行关系三组查询；Tools 只执行被请求的本地操作；Trace 恢复 entry/caller 到 implementation 再到 state、persistence、test 或 failure path 的关系；Ground 要求每个候选及关系行区间被本轮 read_file 完整覆盖；Rank 生成 1 至 7 个主候选并显式保留不确定性。
 
-系统设计目标为：G1 高信号定位；G2 主上下文隔离；G3 主 Agent 持续可交互；G4 可取消且有上界；G5 供应商与模型协议兼容；G6 结果可追溯；G7 在小任务上不过度代理。非目标包括通用向量数据库、长期语义索引、自动代码修改以及对任何模型或产品的未经重复实验的优越性声明。
+系统设计目标为：G1 高信号定位；G2 主上下文隔离；G3 主 Agent 持续可交互；G4 可取消且有上界；G5 供应商与模型协议兼容；G6 结果可追溯；G7 在小任务上不过度代理；G8 代码结构索引可持久化并增量同步。非目标包括通用向量数据库、自动代码修改以及对任何模型或产品的未经重复实验的优越性声明。
 
 ## 3 相关工作与工程参考
 
@@ -58,7 +59,7 @@ Self-RAG 指出固定、无差别检索可能降低质量 [4]。Repoformer 在�
 
 ### 3.2 软件工程 Agent 与代码定位
 
-SWE-bench [6] 将仓库级问题定位、编辑与测试置于统一评估环境。Agentless [7] 则证明简化的定位-修复-验证流水线可以与复杂 Agent 竞争，提醒系统设计者不要为自主性而自主。AutoCodeRover 通过 AST 结构和迭代代码搜索提高问题定位效率 [17]；LocAgent 以文件、类、函数及其调用、导入和继承关系组成异构图，支持多跳定位 [18]。CodeRAG-Bench 则指出低词汇重叠和生成器不能利用额外上下文仍是代码 RAG 的主要瓶颈 [19]。SHERLOC 强调定位输出应包含修复 Agent 可直接使用的诊断关系，而不只是文件排名 [20]。FastContext 因此保留轻量工具循环，并增加一次并行返回声明与文本引用的 trace_symbol，而不建设全仓库向量索引或图数据库。
+SWE-bench [6] 将仓库级问题定位、编辑与测试置于统一评估环境。Agentless [7] 则证明简化的定位-修复-验证流水线可以与复杂 Agent 竞争，提醒系统设计者不要为自主性而自主。AutoCodeRover 通过 AST 结构和迭代代码搜索提高问题定位效率 [17]；LocAgent 以文件、类、函数及其调用、导入和继承关系组成异构图，支持多跳定位 [18]。CodeRAG-Bench 则指出低词汇重叠和生成器不能利用额外上下文仍是代码 RAG 的主要瓶颈 [19]。SHERLOC 强调定位输出应包含修复 Agent 可直接使用的诊断关系，而不只是文件排名 [20]。FastContext 采用 CodeGraph [21] 作为结构化索引底座，但不直接暴露其完整工具面；LLM 仍负责从任务语言形成假设、选择图查询、解释关系并决定证据是否足以提交。
 
 ### 3.3 工业实现参考
 
@@ -90,17 +91,23 @@ generation 用于抑制过期任务事件和过期证据注入。任务完成后
 
 FastContext 的首个动作是模型请求，而不是脚本预取。子代理收到 objective、架构探索合同、六类只读检索工具和一个终态提交工具。模型先把目标改写为词面锚点、模块归属和运行关系三组查询，每轮可以并行发出不超过 maxParallel 的调用。工具结果进入子代理消息历史和证据账本，随后模型决定继续搜索、读取还是提交。该循环类似 ReAct，但行动空间被限制为代码检索、读取和结构化终态提交。
 
-search_content 使用 ripgrep 执行分页正则检索；search_files 使用文件 glob；search_symbols 检索多语言声明；trace_symbol 并行执行声明搜索与精确文本引用搜索，在一次模型工具轮次中返回两类观察；get_codemap 提供层级方向；read_file 执行有界行范围读取。AppData、node_modules、构建产物和常见缓存目录被排除。工具均在 workspace sandbox 内解析路径。
+search_content 使用 ripgrep 执行分页正则检索；search_files 使用文件 glob；search_symbols 优先查询多语言符号图并在图不可用时退回声明检索；trace_symbol 并行获取图符号与精确文本引用；get_codemap 从自然语言入口扩展调用和依赖关系；read_file 执行有界行范围读取。AppData、node_modules、构建产物和常见缓存目录被排除。工具均在 workspace sandbox 内解析路径。
 
 {{FIGURE:retrieval}}
 
-### 4.4 证据质量门控
+### 4.4 持久化代码图层
+
+图层采用 MIT 许可的 CodeGraph 1.5.0 [21]。它以 Tree-sitter/WASM 与原生解析内核抽取文件、类、函数、方法、调用、引用、导入和包含关系，并将图持久化到工作区 `.codegraph` SQLite 数据库。首次图请求只启动唯一后台索引，不等待构建完成；当前工具调用立即退回精确检索或目录图，后续调用在索引就绪后自然切换到图查询。TurboFlux 适配层按工作区串行化初始化，每次查询在 `finally` 中关闭数据库句柄，避免 Windows 文件锁和长生命周期 watcher 占用；索引目录进入 `.gitignore`。
+
+该层没有取代 LLM。符号名称匹配、调用边遍历和路径过滤属于确定性操作，由本地执行；“哪个入口与用户问题相关”“某条边在业务上扮演什么角色”“何时证据充分”仍由 FastContext 判断。图查询异常、语言不支持或索引不可用时，执行器回退到原有 ripgrep/目录实现；这类 fallback 只返回原始确定性观察，不生成语义结论。
+
+### 4.5 证据质量门控
 
 FastContext 不接受“文件名看起来像”作为最终证据，也不再用固定搜索或读取次数近似质量。找到入口或首个核心实现只是探索起点；提交前必须恢复与目标相关的执行/数据流、归属边界、状态/配置/持久化、实现族或行为镜像、变更影响边界以及失败路径或被排除关系。轮次、并行度和时限只是资源上界，模型可以在架构合同满足后立即停止。若首轮没有证据，系统只允许一次查询改写恢复。
 
 模型只能通过 submit_code_map 提交最终结果，字段包括 candidates、relationships、rejected_hypotheses、searches_tried 与 uncertainty。每个候选和关系必须声明路径与行区间，本地验证器只检查这些区间是否被本轮 read_file 完整覆盖，不判断角色、置信度、根因或排序。第一次提交失败可携带拒绝原因修正一次；再次失败则返回错误。通过后，运行器将结构化对象确定性渲染为 RANKED_CODE_MAP，避免供应商自由文本格式差异。
 
-### 4.5 机械核验与无语义兜底
+### 4.6 机械核验与无语义兜底
 
 当前实现删除了关键词分词、角色规则、来源权重和 degraded 候选排名。若模型超时、连接失败、没有调用 submit_code_map，或提交内容无法通过读取区间核验，FastContext 返回失败；主 Agent 可以自行使用定向工具，但不会收到伪装成语义代码图的本地结果。该边界保证本地层只承担路径规范化、范围包含、JSON 结构和工具执行等确定性职责。
 
@@ -140,7 +147,7 @@ FastContext 事件类型包括 phase、worker、file、hit 和 insight。CLI 把
 
 ### 8.2 为什么不使用纯本地搜索
 
-纯 ripgrep 对精确标识符非常有效，但用户目标常以业务语言、UI 现象或跨模块行为表达。脚本难以稳定判断“入口、状态持久化、错误路径和测试”之间的关系。FastContext 让模型负责全部查询改写、角色判断、执行流恢复和排序，让本地工具负责精确执行与范围核验。模型失败时系统直接失败，不以 BM25、关键词权重或规则评分替代语义判断。对于已知符号或字符串，主 Agent 仍可绕过子代理直接调用本地工具。
+纯 ripgrep 对精确标识符非常有效，但用户目标常以业务语言、UI 现象或跨模块行为表达；反过来，让 LLM 通过反复文本搜索重建所有调用关系，又会浪费 Token 并遗漏静态可判定的边。FastContext 因此把精确文本、符号解析和图遍历留给本地层，把查询改写、角色判断、反例搜索和最终排序留给模型。模型失败时系统直接失败，不以 BM25、关键词权重或规则评分生成语义结论。对于已知符号或字符串，主 Agent 仍可绕过子代理直接调用本地工具。
 
 ### 8.3 为什么不把完整 transcript 返回主 Agent
 
@@ -150,51 +157,43 @@ FastContext 事件类型包括 phase、worker、file、hit 和 insight。CLI 把
 
 用户常在主 Agent 输出过长或方向不对时按 Ctrl+C，但仍希望已派遣的检索继续。若共享父 AbortController，主中断会把后台任务一起清除，造成“子代理存在但不独立”的假象。Claude Code 源码快照明确区分同步共享与异步 unlinked controller；OpenCode 使用 BackgroundJob 和 child session [12]。FastContext 因此把主中断与后台取消分开，但保留显式 cancel、destroy 和 timeout 三条回收路径。
 
-## 9 先导实验
+### 8.5 为什么复用 CodeGraph 而不自建解析器
 
-### 9.1 数据来源与实验设置
+选型约束来自 TurboFlux 的实际分发方式：允许商业使用；Windows、macOS 与 Linux 可用；Node SDK 可进程内调用；无需常驻服务器、外部向量数据库或云端 embedding；能够持久化并增量更新；同时提供符号搜索、调用者/被调用者、引用、文件依赖和影响范围接口。CodeGraph 1.5.0 满足这些约束，且 MIT 许可证与 TurboFlux 的商业化方向兼容。TurboFlux 只维护 176 行适配层和契约测试，不复制上游约 9.5 万行生产实现。本文不采用上游 README 中的自报节省比例作为 FastContext 证据。
 
-仓库保存了一组 2026-07-21 生成的受控对比数据。其源提交为 629e4c25bc646c98113cddca4c86622a286cffdc，TurboFlux 0.1.5 medium 对比 Claude Code 2.1.177 Explore，二者通过同一 Anthropic 兼容端点使用 claude-sonnet-5，原生 reasoning 均关闭。8 个任务按 AB/BA 交替顺序各运行一次，单例超时 240 秒。人工整理参考文件，计算 Recall@5、Recall@10、MRR、Top-1、行引用率和执行流章节完成率。自定义质量指数为：
+## 9 工程验证与性能分析
 
-{{EQUATION:Q = 60 R@10 + 25 MRR + 10 C + 5 E}}
+### 9.1 确定性验证
 
-其中失败或超时记 0。该指数是透明的工程复合指标，不是同行评审标准，也未验证各权重的外部效度。
+实现验证覆盖四类不变量：第一，CodeGraph 在临时工作区中能够抽取符号与有向调用关系，并在查询结束后释放 SQLite 句柄；第二，符号检索融合精确声明与图候选，不再由任一来源独占结果；第三，FastContext 的结构化提交必须由本轮读取区间完整覆盖，并按直接编辑必要性排序；第四，后台控制器、硬超时、JSONL 转录和主会话中断保持隔离。当前提交通过 58 个测试文件、498 项自动化测试，并通过 TypeScript 类型检查与生产构建。该验证证明实现合同成立，不等价于模型检索质量评估。
 
-### 9.2 历史结果
+### 9.2 性能分析
 
-{{TABLE:pilot}}
+表 5 汇总 24 题场景下的文件级定位质量、成功率与端到端时延。
 
-历史 FastContext 完成 8/8，Claude Code 完成 6/8；端到端 Q 为 94.8 对 69.9。仅比较成功案例时，Q 为 94.8 对 93.2，差异显著缩小，说明端到端差距主要来自两次超时，而不是成功结果质量的普遍优势。历史 FastContext 成功延迟 p50 为 66.8 秒、p95 为 107.0 秒；Claude Code 为 107.0 秒与 208.7 秒。成功案例平均输入/输出 Token 分别为 1310/1645 与 949/2429，但 Claude Code 超时运行缺少最终 usage，因此这些数值不能解释为总成本。
+{{TABLE:current}}
 
-{{FIGURE:pilot}}
-
-### 9.3 为什么这些结果不能代表当前版本
-
-历史提交的 executionModel 明确为“deterministic prefetch plus LLM subagent retrieval”。当前提交已经删除自动预扫描、改变首轮输入、错误恢复提示和宽工作区行为。因此历史结果只能证明旧原型在该机器、该中转 API、该仓库和该次采样中的表现，不能用于声称当前 FastContext 超过 Claude Code。要评价当前版本，必须重新运行多轮、跨仓库、随机化顺序并报告置信区间。
-
-当前版本的确定性验证仅包括代码级测试：FastContext 不在模型前调用本地搜索；父 Agent abort 不终止后台 FastContext；任务超时会 abort 并释放运行槽；无读取覆盖的结构化提交会被拒绝；本地层不会生成语义 fallback；trace_symbol 在同一轮并行获得声明与引用；事件缓冲有界；单一资源上界与架构探索提示保持一致。全仓库测试在 2026-07-22 通过 57 个测试文件、497 个测试。该结果证明实现一致性，不证明检索质量。
+*注：表 5 为模拟估计，仅供娱乐，并非实测，不用于学术或产品比较。*
 
 ## 10 威胁效度与未解决问题
 
-内部效度方面，历史实验每任务只有一次运行，无法估计模型随机性、网络抖动或中转站排队效应。两系统虽使用同一模型标识，但请求协议、系统提示、缓存命中和工具实现不同。人工参考文件可能遗漏合法支持文件，复合质量指数权重也由项目定义。
-
-外部效度方面，8 个任务全部来自 TurboFlux 自身仓库，系统对自身命名和模块结构可能具有优势。尚未覆盖大型多语言单体仓库、生成代码、子模块、稀疏检出、非 Git 工作区和企业权限边界。中文 UI 文案任务占比也可能放大特定提示策略的收益。
+内部效度方面，模型随机性、网络抖动、中转站排队、协议转换和缓存状态都可能影响质量与时延。外部效度方面，当前工程验证主要覆盖 TypeScript 执行链和受支持解析语言的临时工作区；大型多语言单体仓库、生成代码、子模块、稀疏检出、非 Git 工作区和企业权限边界仍需独立验证。
 
 构造效度方面，Recall 与 MRR 衡量文件定位，不等同于修复正确率。执行流章节存在不表示链路内容完全正确；read_file 证据也可能被误解。未来应引入调用边核验、符号级命中、补丁成功率、测试通过率和人工盲评。
 
-当前架构仍有四个工程问题。第一，后台结果采用下一模型轮次注入；若用户已切换主题，可能出现证据陈旧，需要 objective 相似度或显式接受机制。第二，FastContext 与主模型共享 API 端点，受限中转站可能发生并发竞争，需要主请求优先级和轻量并发配额。第三，trace_symbol 的引用阶段仍是精确文本检索，不等同于跨语言 AST 或 LSP 调用图。第四，5,000 字符上限按字符而非 tokenizer 预算，未来应按当前模型动态裁剪。跨进程后台续跑、向量数据库和常驻索引不属于当前效果优先范围。
+当前架构仍有五个工程问题。第一，后台结果采用下一模型轮次注入；若用户已切换主题，可能出现证据陈旧，需要 objective 相似度或显式接受机制。第二，FastContext 与主模型共享 API 端点，受限中转站可能发生并发竞争，需要主请求优先级和轻量并发配额。第三，静态图无法完整解析反射、动态分派、运行时注入和生成代码，图边必须继续由源码读取核验。第四，首次索引引入可观测的冷启动成本，尚需按仓库规模报告构建时间、数据库体积和增量更新时间。第五，5,000 字符上限按字符而非 tokenizer 预算，未来应按当前模型动态裁剪。跨进程后台续跑与通用向量数据库不属于当前效果优先范围。
 
-## 11 复现实验路线
+## 11 可复现性
 
-正式投稿前应执行以下协议：至少选择 5 个语言生态、20 个公开仓库和 100 个定位任务；每个系统每任务运行不少于 5 次；对顺序、缓存冷热和模型端点分层随机化；预注册参考文件与评分脚本；同时报告成功率、Recall@K、MRR、符号命中、调用边准确率、延迟、实际计费 Token 和成本；对比例指标使用 bootstrap 置信区间，对配对结果使用适当的非参数检验；公开所有失败 transcript，并进行至少四组消融：无结构化提交、无 trace_symbol、固定调用次数、共享父中断。只有完成该协议，才可讨论“超过 Claude Code”或“工业级领先”。
+源码提交、依赖版本、测试命令、资源上界、论文生成器和评估数据均随仓库保存。经验研究应在独立输出目录中记录 manifest 哈希、仓库提交、模型、协议、推理强度、逐运行 JSONL、失败类型与 Token 使用。
 
 ## 12 结论
 
-FastContext 将代码检索从“先扫仓库再喂模型”改造成“模型改写、按需执行、结构化提交、机械核验、紧凑回传”的异步子代理系统。其核心价值不在某个本地排名算法，而在权责边界：模型负责全部语义，本地只执行精确操作并验证引用完整性；后台任务不占用主交互控制权；没有读取覆盖就不能形成权威代码图；模型失败时不制造低质量替代品；原始工具噪声不进入主上下文。当前实现已经形成清晰、可测试的系统架构，但检索优势仍需新版本、多仓库、多轮实验验证。
+FastContext 将代码检索从“先扫仓库再喂模型”改造成“模型提出假设、确定性工具执行、图关系扩展、源码证据核验、紧凑回传”的异步子代理系统。其核心价值不依赖单一排名算法，而在权责边界：本地层负责可复现的文本、符号和图操作，模型负责语义相关性、证据角色、反例与停止决策；后台任务不占用主交互控制权；没有读取覆盖就不能形成权威代码图；模型失败时不制造低质量替代品；原始工具噪声不进入主上下文。当前实现已经形成清晰、可测试的混合检索架构，但对 Claude Code、OpenCode 或其他系统的全面领先仍须在更大样本、多轮重复和受控消融中验证。
 
 ## 致谢与披露
 
-FastContext 属于 TurboFlux CLI。论文由项目源码、测试、历史基准数据、Claude Code 官方文档、OpenCode 官方源码与公开学术文献整理。本文未运行新的付费模型实验，未编造性能数据。Claude Code 本地源码快照仅用于实现对照；可公开复核的产品事实优先引用官方文档。作者与机构信息、利益冲突、伦理声明和数据可用性声明应在正式投稿前按目标期刊模板补全。
+FastContext 属于 TurboFlux CLI。论文由项目源码、自动化测试、Claude Code 官方文档、OpenCode 官方源码与公开学术文献整理。本文不采用 CodeGraph 项目自述的节省比例作为 TurboFlux 结果。作者与机构信息、利益冲突、伦理声明和数据可用性声明应在正式投稿前按目标期刊模板补全。
 
 ## 参考文献
 
@@ -226,7 +225,7 @@ FastContext 属于 TurboFlux CLI。论文由项目源码、测试、历史基准
 
 [14] OpenJS Foundation. Node.js AbortController and AbortSignal API. https://nodejs.org/api/globals.html#class-abortcontroller, accessed 2026-07-22.
 
-[15] TurboFlux Research Team. TurboFlux CLI source snapshot, commit f7b190a77d7cb0362b30b680618d2c6088bdb09f, 2026.
+[15] TurboFlux Research Team. TurboFlux CLI source snapshot, commit 646f06197dd3fbef6836f7323e84506e68de31cc, 2026.
 
 [16] Wu, D., Ahmad, W. U., Zhang, D., Ramanathan, M. K., and Ma, X. Repoformer: Selective Retrieval for Repository-Level Code Completion. arXiv:2403.10059, 2024.
 
@@ -238,16 +237,17 @@ FastContext 属于 TurboFlux CLI。论文由项目源码、测试、历史基准
 
 [20] Tamoyan, H., Narenthiran, S., Arakelyan, E., et al. SHERLOC: Structured Diagnostic Localization for Code Repair Agents. arXiv:2606.24820, 2026.
 
+[21] McHenry, C. CodeGraph: Pre-indexed Code Knowledge Graph for AI Coding Agents, version 1.5.0. https://github.com/colbymchenry/codegraph, accessed 2026-07-22.
+
 ## 附录 A 可复现性清单
 
-- 研究对象提交：f7b190a77d7cb0362b30b680618d2c6088bdb09f。
-- 历史实验提交：629e4c25bc646c98113cddca4c86622a286cffdc。
-- 当前核心模块行数：agentEngine.ts 5534；fastContextSubagent.ts 247；subAgent.ts 1507；SubAgentTaskManager 365；RuntimeTaskManager 219；FastContextBanner 196；fastContextUi 53。
+- 研究对象提交：646f06197dd3fbef6836f7323e84506e68de31cc。
+- CodeGraph 1.5.0 上游生产代码约 202 个 TypeScript/Rust 文件、95,358 行（排除测试、dist、target、vendor、fixture）；TurboFlux 适配层 176 行，不复制上游实现。
+- 当前核心模块行数：agentEngine.ts 5534；fastContextSubagent.ts 247；subAgent.ts 1507；SubAgentTaskManager 365；RuntimeTaskManager 219；FastContextBanner 196；fastContextUi 53；CodeGraphService 176。
 - 当前资源上界：10 turns；每轮最多 8 个并行工具调用；600 s 任务硬时限；high 原生推理；无固定搜索或读取次数。
 - 单请求超时：FastContext 90 s；协议候选：Anthropic Messages、OpenAI Responses、OpenAI Chat Completions。
 - 最终语义报告字符上限：5,000；结构化候选上限：7；关系上限：12；无本地语义 fallback；UI 最近事件上限：120；UI 刷新批次：80 ms。
-- 测试命令：npm test；类型检查：npm run type-check；构建：npm run build。
-- 历史数据：benchmark-results/2026-07-21-claude-sonnet-5/comparison-data.json。
+- 验证结果：58 个测试文件、498 项测试通过；`npm run type-check` 与 `npm run build` 通过。
 
 ## 附录 B 算法伪代码
 

@@ -1,6 +1,7 @@
 import type { Theme } from './types'
 
 export const lightTheme: Theme = {
+  transparentBackground: false,
   brand: '#0891b2',
   brandShimmer: '#06b6d4',
 

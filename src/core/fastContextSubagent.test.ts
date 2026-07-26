@@ -15,9 +15,9 @@ describe('FastContext controller', () => {
     expect(definition.maxTurns).toBe(6)
     expect(definition.maxParallel).toBe(6)
     expect(definition.systemPrompt).toContain('edit counterfactual')
-    expect(definition.systemPrompt).toContain('Relationships, rejected hypotheses')
-    expect(definition.systemPrompt).toContain('Do not let an early textual match become the only hypothesis')
-    expect(definition.systemPrompt).toContain('Empty, repeated, or no-novelty work')
+    expect(definition.systemPrompt).toContain('evidence handles')
+    expect(definition.systemPrompt).toContain('search_symbol')
+    expect(definition.systemPrompt).toContain('exact repeats are cached')
     expect(definition.systemPrompt).not.toContain('request_more_search')
   })
 

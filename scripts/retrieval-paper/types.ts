@@ -61,18 +61,11 @@ export interface RetrievalMetrics {
 export interface FastContextRunDiagnostics {
   eventCount: number
   hitCount: number
-  contextMaps?: {
-    state: 'off' | 'warming' | 'on'
-    confidence?: number
-    nodes?: number
-    elapsedMs?: number
-  }
   stageDurationsMs?: {
     planner: number
     primer: number
     plannedRetrieval: number
     dependencyExpansion: number
-    contextMaps: number
     judge: number
     total: number
   }
@@ -115,7 +108,7 @@ export interface RunRecord {
   repeat: number
   order: number
   model: string | null
-  reasoning: 'disabled'
+  reasoning: 'disabled' | 'high'
   protocol: string
   success: boolean
   failureKind: RunFailureKind
@@ -146,7 +139,7 @@ export interface ExperimentMetadata {
   createdAt: string
   gitCommit: string
   model: string
-  reasoning: 'disabled'
+  reasoning: 'disabled' | 'mixed'
   endpointHost: string
   manifestPath: string
   manifestSha256: string

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, isFastContextPackCurrent, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, extractResponsesReasoningSummary, isFastContextPackCurrent, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -64,6 +64,15 @@ describe('reasoning effort compatibility', () => {
     expect(responses).toEqual({ reasoning: { effort: 'high' } })
     expect(downgradeReasoningEffort(anthropic)).toEqual({ from: 'high', to: 'medium' })
     expect(anthropic).toEqual({ thinking: { type: 'adaptive' }, output_config: { effort: 'medium' } })
+  })
+})
+
+describe('Responses reasoning summaries', () => {
+  it('extracts completed summary blocks from Responses output', () => {
+    expect(extractResponsesReasoningSummary([
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Inspecting the failure path.' }] },
+      { type: 'message', content: [{ type: 'output_text', text: 'Done.' }] },
+    ])).toBe('Inspecting the failure path.')
   })
 })
 
@@ -330,6 +339,76 @@ describe('AgentEngine command output', () => {
       })
 
       expect(result.output).toContain('Log: C:/logs/term-1.jsonl')
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
+describe('AgentEngine filesystem tool output', () => {
+  function createFilesystemHarness(executor: ToolExecutor) {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+    }, executor, stateProvider)
+    const executeSingleTool = (engine as unknown as {
+      executeSingleTool: (toolCall: ToolCall) => Promise<ToolResult>
+    }).executeSingleTool.bind(engine)
+    return { engine, executeSingleTool }
+  }
+
+  it('labels directory nodes as directories', async () => {
+    const { engine, executeSingleTool } = createFilesystemHarness({
+      listTree: vi.fn(async () => ({
+        success: true,
+        data: {
+          name: 'workspace',
+          type: 'directory',
+          children: [{ name: '.workspace', type: 'directory', children: [] }],
+        },
+      })),
+    } as unknown as ToolExecutor)
+
+    try {
+      const result = await executeSingleTool({
+        id: 'list-directory-1',
+        name: 'list_directory',
+        arguments: { path: '.', recursive: false },
+      })
+
+      expect(result.isError).toBe(false)
+      expect(result.output).toContain('[DIR] workspace')
+      expect(result.output).toContain('[DIR] .workspace')
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('preserves the executor reason when read_file fails', async () => {
+    const { engine, executeSingleTool } = createFilesystemHarness({
+      readFile: vi.fn(async () => ({ success: false, error: 'Path is not a file' })),
+    } as unknown as ToolExecutor)
+
+    try {
+      const result = await executeSingleTool({
+        id: 'read-directory-1',
+        name: 'read_file',
+        arguments: { path: '.workspace' },
+      })
+
+      expect(result.isError).toBe(true)
+      expect(result.output).toContain('Path is not a file')
+      expect(result.output).toContain('resolved path: .workspace')
     } finally {
       engine.destroy()
     }
@@ -1061,9 +1140,71 @@ describe('AgentEngine model protocol compatibility', () => {
 
       expect(harness.executor.streamMessage).toHaveBeenCalledOnce()
       expect(requestBody?.prompt_cache_key).toMatch(/^tf:gpt-5\.6-sol:/)
+      expect(requestBody?.reasoning).toMatchObject({ summary: 'detailed' })
       expect(turn.content).toBe('Visible answer.')
       expect(turn.metadata?.thinking?.tokenCount).toBe(384)
       expect(turn.metadata?.tokens).toMatchObject({ input: 12_400, output: 420, cached: 10_000 })
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
+  it('keeps runtime context byte-stable across tool-loop calls in one user turn', async () => {
+    const requestBodies: Array<Record<string, any>> = []
+    const harness = createProtocolHarness('custom', 'gpt-5.5', async (_url, _headers, body, onLine) => {
+      requestBodies.push(JSON.parse(body))
+      onLine(`data: ${JSON.stringify({
+        type: 'response.completed',
+        response: {
+          usage: { input_tokens: 100, output_tokens: 10, input_tokens_details: { cached_tokens: 80 } },
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }],
+        },
+      })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      await harness.callModel()
+      harness.engine.setAppendSystemPrompt('changed-runtime-context')
+      await harness.callModel()
+
+      expect(requestBodies[1]?.input).toEqual(requestBodies[0]?.input)
+      expect(JSON.stringify(requestBodies[1]?.input)).not.toContain('changed-runtime-context')
+
+      harness.engine.getSession().turns.push({
+        id: 'user-protocol-next',
+        role: 'user',
+        content: 'next turn',
+        timestamp: Date.now() + 1,
+      })
+      await harness.callModel()
+
+      expect(JSON.stringify(requestBodies[2]?.input)).toContain('changed-runtime-context')
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
+  it('recovers a reasoning summary delivered only in response.completed', async () => {
+    const harness = createProtocolHarness('custom', 'gpt-5.5', async (_url, _headers, _body, onLine) => {
+      onLine(`data: ${JSON.stringify({
+        type: 'response.completed',
+        response: {
+          usage: { input_tokens: 100, output_tokens: 40, output_tokens_details: { reasoning_tokens: 24 } },
+          output: [
+            { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Checking the completed response.' }] },
+            { type: 'message', content: [{ type: 'output_text', text: 'Visible result.' }] },
+          ],
+        },
+      })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      const turn = await harness.callModel()
+      expect(turn.content).toBe('Visible result.')
+      expect(turn.metadata?.thinking?.content).toBe('Checking the completed response.')
+      expect(harness.events).toContainEqual({ type: 'stream:thinking_delta', text: 'Checking the completed response.' })
     } finally {
       harness.engine.destroy()
     }

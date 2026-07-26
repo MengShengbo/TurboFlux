@@ -5,27 +5,23 @@ import { StatusIcon } from '../design-system/StatusIcon'
 import { SpinnerGlyph } from '../spinner/SpinnerGlyph'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import cliTruncate from 'cli-truncate'
+import type { ToolStatus } from './toolTypes'
 
-export interface ToolStatus {
-  id?: string
-  name: string
-  status: 'running' | 'done' | 'error'
-  output?: string
-  args?: string
-  startTime?: number
-  endTime?: number
-}
+export type { ToolStatus } from './toolTypes'
 
 interface ToolCallTreeProps {
   tools: ToolStatus[]
   verbose: boolean
+  expanded?: boolean
 }
 
-export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
+export function ToolCallTree({ tools, verbose, expanded = verbose }: ToolCallTreeProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
-  const visibleTools = verbose ? tools : tools.filter(tool => shouldPersistToolForHistory(tool))
-  const collapsedReadSearchTools = verbose ? [] : tools.filter(tool => tool.status === 'done' && isCollapsedReadSearchTool(tool.name))
+  const visibleTools = verbose || expanded
+    ? tools
+    : tools.filter(tool => tool.status !== 'error' && shouldPersistToolForHistory(tool))
+  const collapsedReadSearchTools = verbose || expanded ? [] : tools.filter(tool => tool.status === 'done' && isCollapsedReadSearchTool(tool.name))
 
   if (visibleTools.length === 0) {
     if (collapsedReadSearchTools.length === 0) return null
@@ -39,7 +35,7 @@ export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
   }
   const allSettled = visibleTools.every(tool => tool.status !== 'running')
 
-  if (!verbose && allSettled) {
+  if (!verbose && allSettled && !expanded) {
     const failed = visibleTools.filter(tool => tool.status === 'error')
     const summary = summarizeTools(visibleTools, columns)
     return (
@@ -63,7 +59,7 @@ export function ToolCallTree({ tools, verbose }: ToolCallTreeProps) {
               <Text color={theme.subtle}>{connector} </Text>
               <ToolCallStatus tool={tool} columns={columns} />
             </Box>
-            {verbose && tool.output && tool.status !== 'running' && (
+            {expanded && tool.output && tool.status !== 'running' && (
               <Text color={theme.inactive}>
                 {isLast ? '   ' : '|  '} {cliTruncate(tool.output, columns - 8, { position: 'end' })}
               </Text>
