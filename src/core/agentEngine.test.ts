@@ -183,8 +183,8 @@ describe('AgentEngine MCP dispatch', () => {
   })
 })
 
-describe('AgentEngine adaptive run budget', () => {
-  it('continues productive tool work beyond the configured soft checkpoint', async () => {
+describe('AgentEngine user-controlled run length', () => {
+  it('ignores legacy maxTurns values and continues until the model finishes', async () => {
     const workspace = process.cwd()
     const stateProvider = new DefaultAgentStateProvider({
       provider: 'custom',
@@ -238,8 +238,85 @@ describe('AgentEngine adaptive run budget', () => {
 
       expect(callModel).toHaveBeenCalledTimes(4)
       expect(turns.some(turn => turn.role === 'assistant' && turn.content === 'Task complete.')).toBe(true)
-      expect(notifications).toContain('Work is still progressing; execution budget extended from 2 to 4 turns.')
-      expect(notifications.some(message => message.includes('Max turns reached'))).toBe(false)
+      expect(notifications.some(message => /turn|budget/i.test(message))).toBe(false)
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('treats a no-tool response as the model final even when task metadata remains open', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      workspacePath: workspace,
+    }, new NodeToolExecutor(workspace), stateProvider)
+    engine.getTaskManager().createTask({
+      title: 'stale task metadata',
+      description: 'must not force another model request',
+      priority: 'M',
+    })
+    const callModel = vi.spyOn(engine as any, 'callModel').mockResolvedValue({
+      id: 'assistant-final',
+      role: 'assistant',
+      content: 'Done.',
+      timestamp: Date.now(),
+    } satisfies AgentTurn)
+
+    try {
+      const turns = await engine.run('finish naturally')
+
+      expect(callModel).toHaveBeenCalledTimes(1)
+      expect(turns.at(-1)?.content).toBe('Done.')
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
+describe('AgentEngine read bandwidth', () => {
+  it('returns up to 2,000 lines by default instead of paging normal files', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const executor = new NodeToolExecutor(workspace)
+    vi.spyOn(executor, 'readFile').mockResolvedValue({
+      success: true,
+      data: Array.from({ length: 2_100 }, (_, index) => `line ${index + 1}`).join('\n'),
+    })
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      workspacePath: workspace,
+    }, executor, stateProvider)
+    const dispatchTool = (engine as unknown as {
+      dispatchTool: (name: string, args: Record<string, unknown>) => Promise<string>
+    }).dispatchTool.bind(engine)
+
+    try {
+      const output = await dispatchTool('read_file', { path: 'src/example.ts' })
+
+      expect(output).toContain('[lines 1-2000 of 2100;')
+      expect(output).toContain('2000→line 2000')
+      expect(output).not.toContain('2001→line 2001')
     } finally {
       engine.destroy()
     }

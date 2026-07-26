@@ -116,9 +116,9 @@ No write operations before approval.
 </exploration>
 
 <task_management>
-- Decompose complex work into M- (major) / D- (medium) / T- (minor) tasks
-- ALWAYS use create_tasks (plural) for the full sibling group in ONE call
-- Only one task in_progress at a time; mark completed immediately when done (progress=100 auto-promotes)
+- Use tasks only when work has multiple meaningful phases or needs durable progress tracking. Do not create task trees for small, linear changes.
+- When tasks help, create the full sibling group in one create_tasks call and combine bookkeeping with useful execution tools whenever dependencies allow.
+- Keep one task in_progress at a time and mark it complete when its work is actually finished.
 </task_management>
 
 ${modeRules[mode]}
@@ -128,7 +128,7 @@ ${modeRules[mode]}
 function buildToolUsageSection(_mode: AgentMode): string {
   return `<tool_usage>
 <tool_priority>
-1. Explore (targeted): search_content / search_files / search_symbols / get_codemap -> read_file; use web_search for current/external facts; use read_file_full only when exact whole-file contents are needed before a rewrite
+1. Explore (targeted): use known paths directly; otherwise search_content / search_files / search_symbols / get_codemap -> read_file; use web_search for current/external facts
 2. Explore (broad): explore_code for unfamiliar feature/bug/UI/page/component/style/text/entry-point localization, multiple possible names/routes, or after narrow retrieval misses.
 3. Modify: edit_file (small exact edits) -> multi_edit (several exact edits) -> replace_file (whole-file replacement) -> write_file (new files) -> delete_file (caution)
 4. Version control: git_status / git_diff / git_log / git_show for routine inspection; structured Git write tools for normal state changes; run_command only for advanced Git operations not covered by those tools
@@ -138,23 +138,26 @@ function buildToolUsageSection(_mode: AgentMode): string {
 </tool_priority>
 
 <tool_rules>
-- Parallelize ALL independent tool calls in the same turn. Never serialize reads that don't depend on each other.
-- NEVER guess file paths. Verify existence via list_directory or search_files before read_file.
+- Maximize information gained per model round: decide the evidence needed for the next code decision, then issue every independent search, read, and check together.
+- Parallelize ALL independent tool calls in the same turn. Do not split a known evidence set across multiple model turns.
+- Paths supplied by the user or returned by a successful tool are verified anchors: read them directly. Search once when a path is genuinely inferred or unknown.
 - When read_file returns "not found", use search_files to locate - do NOT retry same path.
 - For named code (function/class/export), use search_symbols. For exact strings or regex patterns, use search_content. For mapping a feature area to a small set of files, use get_codemap. These are MUCH cheaper than recursive list_directory + read_file.
 - Avoid recursive list_directory and whole-project scans unless the user explicitly asks for a broad inventory or narrower searches failed.
 - For location requests, choose search_content/search_files/search_symbols/get_codemap or explore_code from the meaning of the request before ask_user. Do not rely on fixed trigger words.
 - For current or external facts, call web_search with a specific query; do not answer from memory when recency or source accuracy matters.
 - When using explore_code, pass the user's real objective and any clues; after it returns, read_file the highest-signal candidate ranges before making detailed claims or editing.
-- read_file without limit returns a bounded slice. Continue with offset/limit for nearby regions; do not page through an entire file unless necessary.
-- read_file_full: use only when exact complete file content is required for a whole-file rewrite, audit, or generated replacement.
+- read_file without offset/limit returns up to 2,000 lines and should cover normal source files in one call. Use ranges only for very large files or precise search hits.
+- Do not reread a successful file range unless an edit changed it, the prior result was truncated/evicted, or a new question needs different lines.
+- Once enough evidence exists to edit safely, edit. Do not emit a promise to edit and then repeat the same reads.
+- read_file_full bypasses the 2,000-line window; reserve it for exact whole-file needs.
 - edit_file: old_content must match exactly and uniquely. Add context lines if ambiguous.
 - multi_edit: if any exact snippet match fails, do not retry nearly identical snippets. Use replace_file with complete final content.
 - replace_file: use for whole-file rewrites or when exact snippet matching is unreliable; content must be the complete final file.
 - All path parameters are workspace-relative (e.g. src/main/index.ts). No absolute paths.
 - Prefer structured Git tools over shell commands for status, diff, history, staging, commits, branches, stashes, and pushes. They validate arguments, bound output, refresh UI state, and preserve approval policy.
 - Never use git_stage without explicit paths. Use git_commit(paths) to isolate AI-authored files from unrelated staged work. Never force push or discard working-tree content through a structured tool.
-- After all modifications: create_checkpoint, then generate_change_summary (scale detail to change size).
+- File modifications are checkpointed automatically by the runtime. Use create_checkpoint only for a deliberate named milestone; summarize completed work directly in the final response.
 </tool_rules>
 </tool_usage>`
 }

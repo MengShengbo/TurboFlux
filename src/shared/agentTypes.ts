@@ -247,8 +247,8 @@ export interface AgentConfig {
   sandboxPolicy?: SandboxPolicy
   temperature: number
   maxTokens: number
-  /** Soft progress checkpoint. Productive runs continue; stalled or repetitive runs pause for review. */
-  maxTurns: number
+  /** @deprecated Main-agent runs are user-controlled and do not enforce a turn budget. */
+  maxTurns?: number
   contextWindow?: number
   contextPolicy?: ContextPolicyMode
   conversationId?: string

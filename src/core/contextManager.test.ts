@@ -191,7 +191,7 @@ describe('ContextManager', () => {
     })
   })
 
-  it('deduplicates read_file_full with later reads of the same path', () => {
+  it('preserves different read ranges from the same path', () => {
     const manager = new ContextManager()
     const turns: AgentTurn[] = [
       userTurn('u1', 'inspect file'),
@@ -228,10 +228,50 @@ describe('ContextManager', () => {
     const messages = manager.buildMessages(turns, 'system prompt', 1_000_000, 'openai', 4096, undefined, undefined, 'gpt-5.5')
     const toolMessages = messages.filter(message => message.role === 'tool')
 
-    expect(toolMessages[0]?.content).toContain('[evicted: src/a.ts')
     expect(toolMessages[0]?.content).toContain('oldHint')
-    expect(toolMessages[0]?.content).not.toContain('large stale body')
+    expect(toolMessages[0]?.content).toContain('large stale body')
     expect(toolMessages[1]?.content).toBe('latest range content')
+  })
+
+  it('deduplicates only identical reads while keeping the latest result', () => {
+    const manager = new ContextManager()
+    const turns: AgentTurn[] = [
+      userTurn('u1', 'inspect file'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        timestamp: 2,
+        toolCalls: [{ id: 'tc-old', name: 'read_file', arguments: { path: 'src/a.ts', offset: 20, limit: 40 } }],
+      },
+      {
+        id: 'tr1',
+        role: 'tool_result',
+        content: '',
+        timestamp: 3,
+        toolResults: [{ toolCallId: 'tc-old', name: 'read_file', output: 'old range content', isError: false }],
+      },
+      {
+        id: 'a2',
+        role: 'assistant',
+        content: '',
+        timestamp: 4,
+        toolCalls: [{ id: 'tc-new', name: 'read_file', arguments: { path: 'src/a.ts', offset: 20, limit: 40 } }],
+      },
+      {
+        id: 'tr2',
+        role: 'tool_result',
+        content: '',
+        timestamp: 5,
+        toolResults: [{ toolCallId: 'tc-new', name: 'read_file', output: 'new range content', isError: false }],
+      },
+    ]
+
+    const messages = manager.buildMessages(turns, 'system prompt', 1_000_000, 'openai', 4096, undefined, undefined, 'gpt-5.5')
+    const toolMessages = messages.filter(message => message.role === 'tool')
+
+    expect(toolMessages[0]?.content).toContain('[evicted duplicate read: src/a.ts')
+    expect(toolMessages[1]?.content).toBe('new range content')
   })
 
   it('budgets messages for smaller model windows by summarizing older live turns', () => {

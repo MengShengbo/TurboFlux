@@ -43,7 +43,6 @@ import {
   shouldOmitSamplingTemperature,
 } from './requestCompatibility'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
-import { AdaptiveAgentTurnBudget } from './agentRunBudget'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import { FAST_CONTEXT_ENGINE_ID, getFastContextProfile, normalizeFastContextStrategy, type FastContextScanEvent, type FastContextScanResult, type FastContextStrategy } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
@@ -1662,19 +1661,11 @@ export class AgentEngine {
       newTurns.push(userTurn)
     }
 
-    const turnBudget = new AdaptiveAgentTurnBudget(this.config.maxTurns || 30)
-
-    let longRunNoticeShown = false
     let consecutiveToolErrors = 0
     const MAX_CONSECUTIVE_ERRORS = 1
 
     try {
-      let turnCount = 0
-      let totalAssistantTurnCount = 0
-      let consecutiveNonExecutionTurns = 0
       const waitedFastContextTaskIds = new Set<string>()
-      const longRunWarningThreshold = Math.max(turnBudget.softLimit * 2, 20)
-      const nonExecutionTurnLimit = 8
 
       while (true) {
         if (this.abortController?.signal.aborted) {
@@ -1685,26 +1676,8 @@ export class AgentEngine {
         this.consumeSteeringMessages(newTurns)
         await this.prepareContextWindow()
 
-        const budgetDecision = turnBudget.beforeModelTurn(totalAssistantTurnCount)
-        if (budgetDecision.kind === 'extend') {
-          this.emit({
-            type: 'notification',
-            message: `Work is still progressing; execution budget extended from ${budgetDecision.previousLimit} to ${budgetDecision.nextLimit} turns.`,
-            level: 'info',
-          })
-        } else if (budgetDecision.kind === 'pause') {
-          const message = budgetDecision.reason === 'hard_limit'
-            ? `Execution safety ceiling reached (${budgetDecision.limit} model turns). Pausing for review.`
-            : budgetDecision.reason === 'repeated_tools'
-              ? `Repeated tool pattern detected near turn ${totalAssistantTurnCount}. Pausing for review.`
-              : `Execution checkpoint reached (${budgetDecision.limit} turns) without enough new successful tool work. Pausing for review.`
-          this.emit({ type: 'notification', message, level: 'warning' })
-          break
-        }
-
         this.setRunState('thinking', { detail: 'Planning the next step' })
         const assistantTurn = await this.callModel()
-        totalAssistantTurnCount++
 
         this.session.turns.push(assistantTurn)
         newTurns.push(assistantTurn)
@@ -1729,64 +1702,7 @@ export class AgentEngine {
             }
           }
 
-          // No tool calls — decide whether to continue or break
-          const hasActiveTasks = this.taskManager.getTasksByStatus('in_progress').length > 0
-          const hasPendingTasks = this.taskManager.getTasksByStatus('pending').length > 0
-          const hasAnyTasks = this.taskManager.getAllTasks().length > 0
-
-          if (!hasActiveTasks && !hasPendingTasks && !hasAnyTasks) {
-            break
-          }
-          consecutiveNonExecutionTurns++
-          if (hasPendingTasks && !hasActiveTasks) {
-            if (consecutiveNonExecutionTurns >= nonExecutionTurnLimit) {
-              this.emit({
-                type: 'notification',
-                message: 'Agent produced narration only — pausing for review.',
-                level: 'warning',
-              })
-              break
-            }
-            continue
-          }
-          if (hasActiveTasks) {
-            if (consecutiveNonExecutionTurns >= nonExecutionTurnLimit) {
-              this.emit({
-                type: 'notification',
-                message: 'No action taken — pausing for review.',
-                level: 'warning',
-              })
-              break
-            }
-            continue
-          }
           break
-        }
-
-        const isOnlyTaskCreation = assistantTurn.toolCalls.every(tc =>
-          tc.name === 'create_task' || tc.name === 'create_tasks' || tc.name === 'update_task' || tc.name === 'list_tasks'
-        )
-        if (isOnlyTaskCreation) {
-          consecutiveNonExecutionTurns++
-          if (consecutiveNonExecutionTurns >= nonExecutionTurnLimit) {
-            this.emit({
-              type: 'notification',
-              message: 'Task tree only — pausing for review.',
-              level: 'warning',
-            })
-            break
-          }
-        } else {
-          consecutiveNonExecutionTurns = 0
-          turnCount++
-          if (!longRunNoticeShown && turnCount >= longRunWarningThreshold) {
-            this.emit({
-              type: 'notification',
-              message: `Long-running session (${turnCount} turns). Consider reviewing progress.`,
-              level: 'info',
-            })
-            longRunNoticeShown = true
-          }
         }
 
         this.setRunState('tool_running', {
@@ -1808,8 +1724,6 @@ export class AgentEngine {
         } else {
           consecutiveToolErrors = Math.max(0, consecutiveToolErrors - 1)
         }
-        turnBudget.recordToolBatch(assistantTurn.toolCalls!, toolResults, !isOnlyTaskCreation)
-
         const resultTurn = this.createToolResultTurn(toolResults)
         this.session.turns.push(resultTurn)
         newTurns.push(resultTurn)
@@ -5060,7 +4974,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const isFullRead = name === 'read_file_full'
         const offset = isFullRead ? undefined : args.offset as number | undefined
         const requestedLimit = isFullRead ? undefined : args.limit as number | undefined
-        const limit = isFullRead ? undefined : requestedLimit ?? 180
+        const limit = isFullRead ? undefined : requestedLimit ?? 2_000
         // with_line_numbers defaults true: cat -n style output makes
         // edit_file / multi_edit far more reliable because the model can
         // see exact line positions when planning targeted edits.
@@ -5090,15 +5004,14 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? slice.map(formatLine).join('\n')
           : slice.join('\n')
 
-        // If there is more content, hint continuation. Default read_file is
-        // intentionally sliced so the model does not pull a huge file into
-        // context when it only needs a local region.
+        // Moderate files should fit in one model round. Very large files retain
+        // an explicit continuation hint so callers can jump to a searched range.
         const truncated = (start + returnedLines) < totalLines
         if (!isFullRead && limit && truncated) {
           const nextOffset = startLine + returnedLines
           const fullHint = requestedLimit
             ? `call read_file with offset=${nextOffset}, limit=${limit} to continue`
-            : `showing the first ${returnedLines} lines by default; call read_file with offset=${nextOffset}, limit=${limit} to continue, or read_file_full only when exact complete file content is required`
+            : `showing the first ${returnedLines} lines; call read_file with offset=${nextOffset}, limit=${limit} to continue, or use a targeted search to jump to the relevant range`
           return `[lines ${startLine}-${startLine - 1 + returnedLines} of ${totalLines}; ${fullHint}]\n${content}`
         }
         return content
