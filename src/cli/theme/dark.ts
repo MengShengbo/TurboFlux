@@ -1,18 +1,19 @@
 import type { Theme } from './types'
+import { TURBOFLUX_ACCENTS } from './palette'
 
 export const darkTheme: Theme = {
   transparentBackground: false,
-  brand: '#e6e6e6',
-  brandShimmer: '#78ff5f',
+  brand: '#E6E6E6',
+  brandShimmer: TURBOFLUX_ACCENTS.neonGreen,
 
-  success: '#62e67b',
+  success: '#5EEA7D',
   error: '#ff4d6d',
   warning: '#ffd166',
-  info: '#4cc9f0',
+  info: TURBOFLUX_ACCENTS.cyan,
 
-  text: '#f1f5f9',
-  inactive: '#94a3b8',
-  subtle: '#62676d',
+  text: '#F1F1F1',
+  inactive: '#999999',
+  subtle: '#626262',
 
   background: '#050505',
   panelBackground: '#0a0a0a',
@@ -25,8 +26,8 @@ export const darkTheme: Theme = {
   diffAddedWord: '#63ff7b',
   diffRemovedWord: '#ff708a',
 
-  promptBorder: '#4a4a4a',
+  promptBorder: TURBOFLUX_ACCENTS.neonGreen,
   promptBackground: '#0b0b0b',
-  statusLine: '#b6b6b6',
+  statusLine: '#B6B6B6',
   codeBackground: '#111111',
 }
