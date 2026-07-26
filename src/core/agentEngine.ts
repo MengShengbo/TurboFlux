@@ -43,6 +43,7 @@ import {
   shouldOmitSamplingTemperature,
 } from './requestCompatibility'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
+import { AdaptiveAgentTurnBudget } from './agentRunBudget'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import { FAST_CONTEXT_ENGINE_ID, getFastContextProfile, normalizeFastContextStrategy, type FastContextScanEvent, type FastContextScanResult, type FastContextStrategy } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
@@ -1661,7 +1662,7 @@ export class AgentEngine {
       newTurns.push(userTurn)
     }
 
-    const effectiveMaxTurns = this.config.maxTurns || 30
+    const turnBudget = new AdaptiveAgentTurnBudget(this.config.maxTurns || 30)
 
     let longRunNoticeShown = false
     let consecutiveToolErrors = 0
@@ -1672,7 +1673,7 @@ export class AgentEngine {
       let totalAssistantTurnCount = 0
       let consecutiveNonExecutionTurns = 0
       const waitedFastContextTaskIds = new Set<string>()
-      const longRunWarningThreshold = Math.max(effectiveMaxTurns, 10)
+      const longRunWarningThreshold = Math.max(turnBudget.softLimit * 2, 20)
       const nonExecutionTurnLimit = 8
 
       while (true) {
@@ -1684,12 +1685,20 @@ export class AgentEngine {
         this.consumeSteeringMessages(newTurns)
         await this.prepareContextWindow()
 
-        if (totalAssistantTurnCount >= effectiveMaxTurns) {
+        const budgetDecision = turnBudget.beforeModelTurn(totalAssistantTurnCount)
+        if (budgetDecision.kind === 'extend') {
           this.emit({
             type: 'notification',
-            message: `Max turns reached (${effectiveMaxTurns}). Pausing.`,
-            level: 'warning',
+            message: `Work is still progressing; execution budget extended from ${budgetDecision.previousLimit} to ${budgetDecision.nextLimit} turns.`,
+            level: 'info',
           })
+        } else if (budgetDecision.kind === 'pause') {
+          const message = budgetDecision.reason === 'hard_limit'
+            ? `Execution safety ceiling reached (${budgetDecision.limit} model turns). Pausing for review.`
+            : budgetDecision.reason === 'repeated_tools'
+              ? `Repeated tool pattern detected near turn ${totalAssistantTurnCount}. Pausing for review.`
+              : `Execution checkpoint reached (${budgetDecision.limit} turns) without enough new successful tool work. Pausing for review.`
+          this.emit({ type: 'notification', message, level: 'warning' })
           break
         }
 
@@ -1799,6 +1808,7 @@ export class AgentEngine {
         } else {
           consecutiveToolErrors = Math.max(0, consecutiveToolErrors - 1)
         }
+        turnBudget.recordToolBatch(assistantTurn.toolCalls!, toolResults, !isOnlyTaskCreation)
 
         const resultTurn = this.createToolResultTurn(toolResults)
         this.session.turns.push(resultTurn)
