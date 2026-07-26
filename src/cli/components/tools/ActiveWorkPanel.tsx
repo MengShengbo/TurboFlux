@@ -92,8 +92,7 @@ export function ActiveWorkPanel({
   })
   const hasWork = Boolean(primary) || groups.length > 0
 
-  const displayRunState = !verbose && runState?.phase === 'recoverable_error' ? undefined : runState
-  const activity = deriveActivityModel({ runState: displayRunState, tools: displayTools, draft, streamText, thinkingText, idleLabel })
+  const activity = deriveActivityModel({ runState, tools: displayTools, draft, streamText, thinkingText, idleLabel })
   if (!activity.visible) return null
 
   const labelWidth = Math.max(12, panelColumns - 14)
@@ -150,19 +149,20 @@ function RunStateLine({ state, now, queuedCount, columns }: { state: AgentRunSta
   const theme = useTheme()
   const labels: Record<AgentRunState['phase'], { label: string; color: string }> = {
     idle: { label: 'READY', color: theme.inactive },
-    thinking: { label: 'THINKING', color: theme.brandShimmer },
-    tool_running: { label: 'RUNNING', color: theme.brand },
-    awaiting_approval: { label: 'REVIEW', color: theme.warning },
-    awaiting_input: { label: 'WAITING', color: theme.warning },
+    thinking: { label: 'PLANNING', color: theme.brandShimmer },
+    tool_running: { label: 'EXECUTING', color: theme.brand },
+    awaiting_approval: { label: 'REVIEW REQUIRED', color: theme.warning },
+    awaiting_input: { label: 'INPUT REQUIRED', color: theme.warning },
     paused: { label: 'PAUSED', color: theme.warning },
     aborting: { label: 'STOPPING', color: theme.error },
-    recoverable_error: { label: 'RECOVERABLE', color: theme.error },
+    recoverable_error: { label: 'RECOVERING', color: theme.error },
     completed: { label: 'DONE', color: theme.success },
   }
   const current = labels[state.phase]
   const elapsed = state.startedAt ? formatElapsed(Math.max(0, now - state.startedAt)) : ''
   const detail = state.detail || ''
-  const detailWidth = Math.max(12, columns - 31 - (queuedCount > 0 ? 12 : 0))
+  const fixedWidth = current.label.length + elapsed.length + (queuedCount > 0 ? 15 : 7)
+  const detailWidth = Math.max(12, columns - fixedWidth)
   return (
     <Box>
       <Text color={current.color} bold>{`● ${current.label}`}</Text>

@@ -41,6 +41,7 @@ import { AgentActivityLine } from './tools/AgentActivityLine'
 import { CockpitHud, resolveCockpitLayout } from './layout/CockpitRails'
 import { getStartupAnimationFrame, shouldAnimateStartup, STARTUP_ANIMATION_MS } from './layout/StartupAnimation'
 import { appendFastContextUiEvents, createFastContextUiSummary, reduceFastContextUiSummary } from './layout/fastContextUi'
+import type { DeveloperSubAgentActivity } from './developerFlowModel'
 import { shouldUseCompactWordmark } from '../brand'
 import { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, parseTerminalMouseWheel, shouldEnableMouseTracking } from '../terminalMouse'
 import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
@@ -104,14 +105,6 @@ type QueuedPrompt = {
   attachments?: AgentAttachment[]
 }
 
-interface SubAgentActivity {
-  id: string
-  label: string
-  objective: string
-  detail: string
-  startedAt: number
-}
-
 function describeSubAgentEvent(event: SubAgentEvent): string {
   if (event.type === 'turn_start') return `turn ${event.turn}/${event.maxTurns}`
   if (event.type === 'model_wait') return `waiting for model · ${Math.floor(event.elapsedMs / 1000)}s`
@@ -124,16 +117,20 @@ function describeSubAgentEvent(event: SubAgentEvent): string {
   return `turn ${event.turn} complete`
 }
 
-function SubAgentProgressLine({ activities }: { activities: SubAgentActivity[] }) {
+function SubAgentProgressLine({ activities }: { activities: DeveloperSubAgentActivity[] }) {
   const theme = useTheme()
   if (activities.length === 0) return null
   return (
     <Box flexDirection="column">
       {activities.slice(-3).map(activity => (
         <Box key={activity.id}>
-          <Text color={theme.brand}>Subagent </Text>
+          <Text color={activity.status === 'failed' ? theme.error : activity.status === 'completed' ? theme.success : theme.brand}>
+            {activity.status === 'failed' ? '! ' : activity.status === 'completed' ? '✓ ' : '● '}
+          </Text>
           <Text>{activity.label}</Text>
-          <Text dimColor>{` · ${activity.detail || activity.objective} · ${formatElapsed(Date.now() - activity.startedAt)}`}</Text>
+          <Text dimColor>{activity.status === 'running'
+            ? ` · ${activity.detail || activity.objective} · ${formatElapsed(Date.now() - activity.startedAt)}`
+            : activity.status === 'completed' ? ' · result ready' : ' · failed'}</Text>
         </Box>
       ))}
     </Box>
@@ -270,7 +267,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
   const [fcSummary, setFcSummary] = useState(createFastContextUiSummary)
   const [fcActive, setFcActive] = useState(false)
-  const [subAgentActivities, setSubAgentActivities] = useState<SubAgentActivity[]>([])
+  const [subAgentActivities, setSubAgentActivities] = useState<DeveloperSubAgentActivity[]>([])
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
   const [activeObjective, setActiveObjective] = useState<{ prompt: string; startedAt: number } | null>(null)
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
@@ -335,6 +332,18 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   useEffect(() => { currentToolsRef.current = currentTools }, [currentTools])
   useEffect(() => { changeSummariesRef.current = changeSummaries }, [changeSummaries])
   useEffect(() => { draftAttachmentsRef.current = draftAttachments }, [draftAttachments])
+  useEffect(() => {
+    const completed = subAgentActivities.filter(activity => activity.status !== 'running' && activity.completedAt)
+    if (completed.length === 0) return
+    const expiresAt = Math.min(...completed.map(activity => activity.completedAt! + 6_000))
+    const timer = setTimeout(() => {
+      const now = Date.now()
+      setSubAgentActivities(current => current.filter(activity =>
+        activity.status === 'running' || !activity.completedAt || activity.completedAt + 6_000 > now
+      ))
+    }, Math.max(0, expiresAt - Date.now()))
+    return () => clearTimeout(timer)
+  }, [subAgentActivities])
 
   const [runtime] = useState(() => createAgentRuntime({
     workspacePath,
@@ -723,18 +732,26 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 objective: event.objective,
                 detail: 'starting',
                 startedAt: Date.now(),
+                status: 'running',
               },
             ])
           }
           break
         case 'subagent:progress':
           setSubAgentActivities(current => current.map(activity => activity.id === event.agentId
-            ? { ...activity, detail: describeSubAgentEvent(event.event) }
+            ? { ...activity, detail: describeSubAgentEvent(event.event), status: 'running' }
             : activity))
           break
         case 'subagent:end':
           if (event.runKind === 'spawn_agent') {
-            setSubAgentActivities(current => current.filter(activity => activity.id !== event.agentId))
+            setSubAgentActivities(current => current.map(activity => activity.id === event.agentId
+              ? {
+                  ...activity,
+                  status: event.ok ? 'completed' : 'failed',
+                  completedAt: Date.now(),
+                  detail: event.ok ? 'result ready' : 'failed',
+                }
+              : activity))
           }
           break
         case 'active:task':
@@ -1618,15 +1635,19 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                       reasoning={reasoningLabel || undefined}
                       approvalPolicy={config.approvalPolicy}
                       isRunning={isRunning}
+                      runState={runState}
                       tools={currentTools}
                       draft={streamingToolDraft}
+                      streamText={streamTextForDisplay}
+                      thinkingText={streamThinkingText}
                       fastContextSummary={fcSummary}
                       fastContextActive={fcActive}
+                      subagents={subAgentActivities}
+                      queuedCount={queuedPrompts.length}
                       terminals={terminalSessions}
                       mcpCount={mcpCount}
                       task={activeTask}
                       objective={activeObjective?.prompt}
-                      objectiveStartedAt={activeObjective?.startedAt}
                       showTask={showTasksView}
                     />
                     {transcriptNode}
