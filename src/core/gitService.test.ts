@@ -116,7 +116,7 @@ describe('Git safety boundaries', () => {
     const { executor, runProcess } = executorWithProcessMock((args, env) => {
       if (args[0] === 'rev-parse') return { success: true, stdout: args[1] === 'HEAD' ? 'abc1234\n' : 'parent\n' }
       if (args[0] === 'commit') {
-        expect(env.GIT_INDEX_FILE).toContain('turboflux-git-index-')
+        expect(env.GIT_INDEX_FILE).toContain(join(process.cwd(), '.turboflux', 'git-index-'))
         return { success: true, stdout: '[main abc1234] checkpoint\n' }
       }
       return { success: true }

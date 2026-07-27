@@ -11,6 +11,7 @@ import type { TerminalSessionInfo } from '../../../shared/terminalTypes'
 import type { ToolStatus } from '../tools/ToolCallTree'
 import { formatToolLabelForHistory } from '../tools/ToolCallTree'
 import type { StreamingToolDraft } from '../tools/ActiveWorkPanel'
+import type { SandboxStatus } from '../../../core/sandbox/types'
 import { deriveDeveloperFlow, type DeveloperSubAgentActivity, type DeveloperFlowTone } from '../developerFlowModel'
 
 interface SessionSidebarProps {
@@ -20,6 +21,7 @@ interface SessionSidebarProps {
   mode: 'vibe' | 'plan'
   reasoning?: string
   approvalPolicy: string
+  sandboxStatus?: SandboxStatus
   contextWindow: number
   tokenUsage: TokenUsage
   isRunning: boolean
@@ -47,6 +49,7 @@ export function SessionSidebar({
   mode,
   reasoning,
   approvalPolicy,
+  sandboxStatus,
   contextWindow,
   tokenUsage,
   isRunning,
@@ -130,6 +133,12 @@ export function SessionSidebar({
         <SidebarRow label="Mode" value={mode.toUpperCase()} width={width} color={mode === 'vibe' ? theme.success : theme.info} />
         <SidebarRow label="Reason" value={reasoning || 'provider'} width={width} color={theme.text} />
         <SidebarRow label="Approval" value={approvalPolicy} width={width} color={theme.text} />
+        {sandboxStatus && <SidebarRow
+          label="Sandbox"
+          value={`${sandboxStatus.policy}/${sandboxStatus.resolvedBackend}${sandboxStatus.available ? '' : ' unavailable'}`}
+          width={width}
+          color={!sandboxStatus.available ? theme.error : sandboxStatus.osIsolation ? theme.success : theme.warning}
+        />}
       </Section>
 
       <Section title="CONTEXT">

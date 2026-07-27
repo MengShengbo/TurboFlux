@@ -5,6 +5,7 @@ import type { ModelPreset, TurboFluxConfig } from '../../core/config'
 import type { ConversationManager } from '../conversations/manager'
 import type { SkillRuntime } from '../../core/skills/runtime'
 import type { McpClient } from '../../core/mcp/client'
+import type { SandboxStatus } from '../../core/sandbox/types'
 
 export type CommandType = 'local' | 'local-jsx' | 'prompt'
 
@@ -20,6 +21,7 @@ export interface CommandContext {
   conversationManager?: ConversationManager
   skillRuntime?: SkillRuntime
   mcpClient?: McpClient
+  sandboxStatus?: SandboxStatus
 }
 
 export interface CommandMeta {

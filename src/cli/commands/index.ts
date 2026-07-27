@@ -292,9 +292,30 @@ commandRegistry.register({
     const next = setConfigValue(ctx.config, 'approvalPolicy', policy)
     ctx.setConfig(next)
     ctx.engine.setApprovalPolicy(policy)
-    return policy === 'full'
-      ? 'Full access selected. Restart TurboFlux to apply the unrestricted filesystem sandbox.'
-      : `Approval policy set to ${APPROVAL_POLICY_LABELS[policy]}.`
+    return `${APPROVAL_POLICY_LABELS[policy]}. Sandbox policy is unchanged.`
+  },
+})
+
+commandRegistry.register({
+  name: 'sandbox',
+  description: 'Show active filesystem and process isolation',
+  type: 'local',
+  execute: (_args, ctx) => {
+    const status = ctx.sandboxStatus
+    if (!status) return 'Sandbox status is unavailable in this runtime.'
+    const lines = [
+      `Policy: ${status.policy}`,
+      `Enforcement: ${status.enforcement}`,
+      `Backend: ${status.resolvedBackend}${status.osIsolation ? ' (OS isolated)' : ' (policy guard only)'}`,
+      `Network: ${status.network}${status.networkIsolated ? ' (isolated)' : ''}`,
+      `Writable roots: ${status.writableRoots.length > 0 ? status.writableRoots.join(', ') : 'none'}`,
+      `Available: ${status.available ? 'yes' : 'no'}`,
+      `Audit: ${status.auditPath || 'unavailable'}`,
+    ]
+    if (status.reason) lines.push(`Reason: ${status.reason}`)
+    if (status.warning) lines.push(`Warning: ${status.warning}`)
+    lines.push('Change persistent settings with /config sandboxPolicy|sandboxEnforcement|sandboxNetwork|sandboxBackend <value>, then restart.')
+    return lines.join('\n')
   },
 })
 

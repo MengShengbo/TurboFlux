@@ -6,6 +6,7 @@ import type { AgentTurn, ApprovalPolicy, ToolCall } from '../shared/agentTypes'
 import { stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import { commandRegistry } from './commands/index'
 import { ConversationManager } from './conversations/manager'
+import type { SandboxOptions } from '../core/sandbox/types'
 
 export interface SingleShotOptions {
   workspacePath: string
@@ -13,6 +14,7 @@ export interface SingleShotOptions {
   prompt: string
   verbose: boolean
   approvalPolicy?: ApprovalPolicy
+  sandbox?: SandboxOptions
   mcpServers?: string[]
   stdout?: Pick<NodeJS.WriteStream, 'write'>
   stderr?: Pick<NodeJS.WriteStream, 'write'>
@@ -103,11 +105,15 @@ export async function runSingleShot(options: SingleShotOptions): Promise<void> {
     config: options.config,
     conversationPrefix: 'cli-command',
     approvalPolicy: options.approvalPolicy,
+    sandbox: options.sandbox,
     connectMcp: Boolean(options.mcpServers?.length),
     mcpServers: options.mcpServers,
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
   })
   const reporter = new SingleShotProgressReporter(writeProgress, options.verbose)
+  const sandboxStatus = runtime.toolExecutor.getSandboxStatus()
+  if (sandboxStatus.warning) writeProgress(`[sandbox] ${sandboxStatus.warning}\n`)
+  if (!sandboxStatus.available) writeProgress(`[sandbox unavailable] ${sandboxStatus.reason}\n`)
   const conversations = new ConversationManager(runtime.engine, options.config, options.workspacePath, error => {
     if (error) writeProgress(`[warning] Conversation history unavailable: ${singleLine(error.message, 240)}\n`)
   })

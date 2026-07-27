@@ -1,11 +1,12 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { McpServerConfig, McpToolInfo } from './types'
+import type { ProcessSandbox } from '../sandbox/processSandbox'
 
 export interface McpConnection {
   name: string
   client: Client
-  transport: StdioClientTransport
+  transport?: StdioClientTransport
   tools: McpToolInfo[]
   status: 'connecting' | 'connected' | 'error' | 'closed'
   error?: string
@@ -13,6 +14,11 @@ export interface McpConnection {
 
 export class McpClient {
   private connections: Map<string, McpConnection> = new Map()
+
+  constructor(
+    private readonly processSandbox?: ProcessSandbox,
+    private readonly workspacePath: string = process.cwd(),
+  ) {}
 
   private buildEnvironment(config: McpServerConfig): Record<string, string> {
     const defaultNames = process.platform === 'win32'
@@ -31,27 +37,39 @@ export class McpClient {
       throw new Error(`MCP server "${name}" has no command configured`)
     }
 
-    const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args || [],
-      env: this.buildEnvironment(config),
-    })
-
     const client = new Client(
       { name: 'turboflux', version: '0.1.5' },
       { capabilities: {} },
     )
-
     const conn: McpConnection = {
       name,
       client,
-      transport,
       tools: [],
       status: 'connecting',
     }
     this.connections.set(name, conn)
 
     try {
+      const environment = this.buildEnvironment(config)
+      const plan = this.processSandbox?.prepare({
+        command: config.command,
+        args: config.args || [],
+        cwd: this.workspacePath,
+        env: environment,
+        trustedEnvironment: true,
+      })
+      const transport = new StdioClientTransport(plan ? {
+        command: plan.command,
+        args: plan.args,
+        env: plan.env as Record<string, string>,
+        cwd: plan.cwd,
+      } : {
+        command: config.command,
+        args: config.args || [],
+        env: environment,
+        cwd: this.workspacePath,
+      })
+      conn.transport = transport
       await client.connect(transport)
       conn.status = 'connected'
       conn.tools = await this.discoverTools(name, client)
@@ -99,7 +117,7 @@ export class McpClient {
     const conn = this.connections.get(name)
     if (!conn) return
     try {
-      await conn.transport.close()
+      await conn.transport?.close()
     } catch {}
     conn.status = 'closed'
     this.connections.delete(name)

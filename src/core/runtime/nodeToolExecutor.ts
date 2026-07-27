@@ -30,12 +30,15 @@ import { LocalHistoryService } from '../../tools/localHistory/service'
 import { hashText, writeFileAtomicSync } from '../fileIO'
 import { RuntimeTaskManager } from './runtimeTaskManager'
 import { getChildProcessSpawnOptions, getDefaultShellSpec, getProcessGroupSignal, usesProcessGroup } from '../../platform/process'
+import { ProcessSandbox } from '../sandbox/processSandbox'
+import type { SandboxOptions, SandboxSpawnPlan, SandboxStatus } from '../sandbox/types'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
 
 export interface NodeToolExecutorOptions {
   sandboxPolicy?: SandboxPolicy
+  sandbox?: SandboxOptions
   runtimeTaskManager?: RuntimeTaskManager
   ownerSessionId?: string
 }
@@ -49,6 +52,8 @@ interface BackgroundTerminalSession {
   runtimeTaskId: string
   logPath: string
   outputBytes: number
+  pendingInput: string
+  spawnPlan: SandboxSpawnPlan
   logError?: string
 }
 
@@ -62,7 +67,6 @@ const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
 const WEB_SEARCH_TIMEOUT_MS = 8000
 const WEB_SEARCH_USER_AGENT = 'TurboFlux/0.1 (+https://github.com/MengShengbo/TurboFluxCli)'
 const DEFAULT_SHELL = getDefaultShellSpec()
-const SENSITIVE_ENV_NAME = /(API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE[_-]?KEY|AUTH)/i
 const CODE_SEARCH_SKIPPED_DIRS = new Set([
   '.git', '.hg', '.svn', '.claude', '.turboflux', '.vscode', '.cache', '.next', '.turbo',
   '.gradle', '.m2', '.npm', '.pnpm-store', '.rustup', '.venv',
@@ -81,6 +85,7 @@ export class NodeToolExecutor implements ToolExecutor {
   private workspaceRoot: string
   private workspaceRealRoot: string
   private sandboxPolicy: SandboxPolicy
+  private processSandbox: ProcessSandbox
   private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
   private activeStreams: Map<number, AbortController> = new Map()
   private runtimeTaskManager: RuntimeTaskManager
@@ -90,7 +95,11 @@ export class NodeToolExecutor implements ToolExecutor {
     this.localHistoryService = new LocalHistoryService(join(homedir(), '.turboflux', 'checkpoints'))
     this.workspaceRoot = resolveNativePath(workspacePath)
     this.workspaceRealRoot = existsSync(this.workspaceRoot) ? realpathSync.native(this.workspaceRoot) : this.workspaceRoot
-    this.sandboxPolicy = options.sandboxPolicy || 'workspace'
+    this.sandboxPolicy = options.sandbox?.policy || options.sandboxPolicy || 'workspace'
+    this.processSandbox = new ProcessSandbox(this.workspaceRoot, {
+      ...options.sandbox,
+      policy: this.sandboxPolicy,
+    })
     this.runtimeTaskManager = options.runtimeTaskManager || new RuntimeTaskManager({
       defaultOwnerSessionId: options.ownerSessionId,
     })
@@ -100,10 +109,18 @@ export class NodeToolExecutor implements ToolExecutor {
     return this.runtimeTaskManager
   }
 
+  getSandboxStatus(): SandboxStatus {
+    return this.processSandbox.getStatus()
+  }
+
+  getProcessSandbox(): ProcessSandbox {
+    return this.processSandbox
+  }
+
   private createRuntimeTaskLog(taskId: string): string {
-    const directory = this.ensureWithinWorkspace(join(this.workspaceRoot, RUNTIME_LOG_DIRECTORY))
+    const directory = this.ensureAllowedIoPath(join(this.workspaceRoot, RUNTIME_LOG_DIRECTORY))
     mkdirSync(directory, { recursive: true })
-    return this.ensureWithinWorkspace(join(directory, `${taskId}.jsonl`))
+    return this.ensureAllowedIoPath(join(directory, `${taskId}.jsonl`))
   }
 
   private appendRuntimeTaskLog(logPath: string, channel: 'stdout' | 'stderr', data: Buffer | string): void {
@@ -113,7 +130,7 @@ export class NodeToolExecutor implements ToolExecutor {
 
   async readFile(path: string): Promise<Result<string>> {
     try {
-      const safePath = this.ensureAllowedPath(path)
+      const safePath = this.ensureAllowedIoPath(path)
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
       if (!statSync(safePath).isFile()) return { success: false, error: 'Path is not a file' }
       const content = readFileSync(safePath, 'utf-8')
@@ -127,7 +144,7 @@ export class NodeToolExecutor implements ToolExecutor {
     let stream: ReturnType<typeof createReadStream> | undefined
     let reader: ReturnType<typeof createInterface> | undefined
     try {
-      const safePath = this.ensureAllowedPath(path)
+      const safePath = this.ensureAllowedIoPath(path)
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
       if (!statSync(safePath).isFile()) return { success: false, error: 'Path is not a file' }
 
@@ -189,9 +206,10 @@ export class NodeToolExecutor implements ToolExecutor {
   async writeFile(path: string, content: string, metadata?: Record<string, unknown>): Promise<Result<void>> {
     try {
       this.ensureWritable()
-      const safePath = this.ensureAllowedPath(path)
+      const safePath = this.ensureAllowedIoPath(path)
       const dir = dirname(safePath)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      this.ensureAllowedIoPath(safePath)
       if (metadata?.expectNotExists === true && existsSync(safePath)) {
         return { success: false, error: `Write conflict: file already exists: ${path}` }
       }
@@ -212,7 +230,7 @@ export class NodeToolExecutor implements ToolExecutor {
   async deleteFile(path: string, options?: { recursive?: boolean; expectedHash?: string }): Promise<Result<void>> {
     try {
       this.ensureWritable()
-      const safePath = this.ensureAllowedPath(path)
+      const safePath = this.ensureAllowedIoPath(path)
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
       const expectedHash = options?.expectedHash
       if (typeof expectedHash === 'string') {
@@ -544,6 +562,11 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   async webSearch(query: { query: string; limit?: number; region?: string; freshness?: string; domains?: string[] }): Promise<Result<{ results: WebSearchResult[]; provider: string; query: string }>> {
+    try {
+      this.processSandbox.assertNetworkToolAccess('web_search')
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
     const searchQuery = String(query.query || '').trim()
     if (!searchQuery) return { success: false, error: 'Search query is required' }
     const limit = Math.max(1, Math.min(10, Number(query.limit) || 5))
@@ -925,27 +948,36 @@ export class NodeToolExecutor implements ToolExecutor {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
-    const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
-    const shellArgs = process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
+    const usesDocker = this.processSandbox.getStatus().resolvedBackend === 'docker'
+    const shell = usesDocker ? '/bin/bash' : process.platform === 'win32' ? 'powershell.exe' : '/bin/bash'
+    const shellArgs = usesDocker ? ['-lc', command] : process.platform === 'win32' ? ['-NoProfile', '-Command', command] : ['-c', command]
+    let spawnPlan: SandboxSpawnPlan
+    try {
+      spawnPlan = this.processSandbox.prepare({ command: shell, args: shellArgs, cwd: safeCwd, env })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { success: false, error: message, data: { stdout: '', stderr: message, exitCode: 1 } }
+    }
     const runtimeTask = this.runtimeTaskManager.createTask({
       kind: 'shell',
       command,
       cwd: safeCwd,
       interactive: false,
+      metadata: this.sandboxTaskMetadata(),
     })
     let logPath: string | undefined
     try {
       logPath = this.createRuntimeTaskLog(runtimeTask.id)
-      const proc = spawn(shell, shellArgs, {
-        cwd: safeCwd,
-        env: this.buildChildEnvironment(env),
+      const proc = spawn(spawnPlan.command, spawnPlan.args, {
+        cwd: spawnPlan.cwd,
+        env: spawnPlan.env,
         ...getChildProcessSpawnOptions(),
       })
       this.runtimeTaskManager.setControl(runtimeTask.id, {
-        stop: () => this.stopProcessAndWait(proc),
+        stop: () => this.stopProcessAndWait(proc, spawnPlan),
       })
       this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
-      return this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
+      return this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath, spawnPlan)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.runtimeTaskManager.failTask(runtimeTask.id, message, { logPath, outputBytes: 0 })
@@ -959,29 +991,26 @@ export class NodeToolExecutor implements ToolExecutor {
     try {
       this.ensureWritable()
       const safeCwd = this.ensureAllowedPath(cwd)
-      const sandboxError = this.checkCommandSandbox(args.join(' '), safeCwd)
-      if (sandboxError) {
-        return { success: false, error: sandboxError, data: { stdout: '', stderr: sandboxError, exitCode: 1 } }
-      }
+      const spawnPlan = this.processSandbox.prepare({ command, args, cwd: safeCwd, env })
       const runtimeTask = this.runtimeTaskManager.createTask({
         kind: 'shell',
         command: [command, ...args].join(' '),
         cwd: safeCwd,
         interactive: false,
-        metadata: { executable: command, args: [...args] },
+        metadata: { executable: command, args: [...args], ...this.sandboxTaskMetadata() },
       })
       runtimeTaskId = runtimeTask.id
       logPath = this.createRuntimeTaskLog(runtimeTask.id)
-      const proc = spawn(command, args, {
-        cwd: safeCwd,
-        env: this.buildChildEnvironment(env),
+      const proc = spawn(spawnPlan.command, spawnPlan.args, {
+        cwd: spawnPlan.cwd,
+        env: spawnPlan.env,
         ...getChildProcessSpawnOptions(),
       })
       this.runtimeTaskManager.setControl(runtimeTask.id, {
-        stop: () => this.stopProcessAndWait(proc),
+        stop: () => this.stopProcessAndWait(proc, spawnPlan),
       })
       this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
-      return await this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
+      return await this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath, spawnPlan)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (runtimeTaskId) this.runtimeTaskManager.failTask(runtimeTaskId, message, { logPath, outputBytes: 0 })
@@ -989,7 +1018,7 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  private collectProcess(proc: ChildProcessWithoutNullStreams, timeout: number, runtimeTaskId?: string, logPath?: string): Promise<Result<CommandOutput>> {
+  private collectProcess(proc: ChildProcessWithoutNullStreams, timeout: number, runtimeTaskId?: string, logPath?: string, spawnPlan?: SandboxSpawnPlan): Promise<Result<CommandOutput>> {
     return new Promise(resolve => {
       let stdout = ''
       let stderr = ''
@@ -1020,6 +1049,7 @@ export class NodeToolExecutor implements ToolExecutor {
         proc.stderr.off('data', onStderr)
         proc.off('error', onError)
         proc.off('close', onClose)
+        this.cleanupSandboxProcess(spawnPlan, false)
         const finalizedResult: Result<CommandOutput> = result.data
           ? { ...result, data: { ...result.data, logPath, outputBytes } }
           : result
@@ -1064,7 +1094,8 @@ export class NodeToolExecutor implements ToolExecutor {
       timeoutTimer = setTimeout(() => {
         timedOut = true
         try {
-          this.terminateProcessTree(proc)
+          if (spawnPlan) this.terminateProcessTree(proc, spawnPlan)
+          else this.terminateProcessTree(proc)
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           finish({
@@ -1086,7 +1117,8 @@ export class NodeToolExecutor implements ToolExecutor {
     })
   }
 
-  private terminateProcessTree(proc: ChildProcessWithoutNullStreams): void {
+  private terminateProcessTree(proc: ChildProcessWithoutNullStreams, spawnPlan?: SandboxSpawnPlan): void {
+    this.cleanupSandboxProcess(spawnPlan, true)
     if (!proc.pid) return
     if (process.platform === 'win32') {
       const killer = spawn('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
@@ -1100,7 +1132,35 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  private stopProcessAndWait(proc: ChildProcessWithoutNullStreams): Promise<void> {
+  private cleanupSandboxProcess(spawnPlan: SandboxSpawnPlan | undefined, force: boolean): void {
+    const cleanup = spawnPlan?.cleanup
+    if (!cleanup || cleanup.kind !== 'docker') return
+    const attempt = () => {
+      if (!existsSync(cleanup.cidFile)) return false
+      try {
+        const containerId = readFileSync(cleanup.cidFile, 'utf-8').trim()
+        if (force && /^[a-f0-9]{12,64}$/i.test(containerId)) {
+          const cleaner = spawn('docker', ['rm', '-f', containerId], {
+            cwd: spawnPlan.cwd,
+            env: spawnPlan.env,
+            windowsHide: true,
+            stdio: 'ignore',
+          })
+          cleaner.on('error', () => {})
+          cleaner.unref()
+        }
+      } catch {}
+      rmSync(cleanup.cidFile, { force: true })
+      return true
+    }
+    const cleaned = attempt()
+    if (force && !cleaned) {
+      const retry = setTimeout(attempt, 250)
+      retry.unref?.()
+    }
+  }
+
+  private stopProcessAndWait(proc: ChildProcessWithoutNullStreams, spawnPlan?: SandboxSpawnPlan): Promise<void> {
     if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve()
     return new Promise((resolve, reject) => {
       let settled = false
@@ -1121,7 +1181,7 @@ export class NodeToolExecutor implements ToolExecutor {
       proc.once('close', onClose)
       proc.once('error', onError)
       try {
-        this.terminateProcessTree(proc)
+        this.terminateProcessTree(proc, spawnPlan)
       } catch (error) {
         finish(error instanceof Error ? error : new Error(String(error)))
       }
@@ -1156,8 +1216,7 @@ export class NodeToolExecutor implements ToolExecutor {
   private validateCommandSync(command: string, cwd: string): { success: true; cwd: string } | { success: false; error: string } {
     try {
       const safeCwd = this.ensureAllowedPath(cwd)
-      const sandboxError = this.checkCommandSandbox(command, safeCwd)
-      if (sandboxError) return { success: false, error: sandboxError }
+      this.processSandbox.validateCommand(command, safeCwd)
       return { success: true, cwd: safeCwd }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
@@ -1167,12 +1226,17 @@ export class NodeToolExecutor implements ToolExecutor {
   async ptyCreate(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session: TerminalSessionInfo }>> {
     let runtimeTaskId: string | undefined
     let proc: ChildProcessWithoutNullStreams | undefined
+    let spawnPlan: SandboxSpawnPlan | undefined
     try {
       const safeCwd = this.ensureAllowedPath(options?.cwd || this.workspaceRoot)
-      const shell = options?.shell || DEFAULT_SHELL.command
-      const shellArgs = options?.shell ? [] : DEFAULT_SHELL.args
-      const shellId = options?.shell ? 'custom' : DEFAULT_SHELL.id
-      const shellLabel = options?.shell ? shell : DEFAULT_SHELL.label
+      const usesDocker = this.processSandbox.getStatus().resolvedBackend === 'docker'
+      const defaultShell = usesDocker
+        ? { command: '/bin/bash', args: [] as string[], id: 'docker-bash', label: 'Docker Bash' }
+        : DEFAULT_SHELL
+      const shell = options?.shell || defaultShell.command
+      const shellArgs = options?.shell ? [] : defaultShell.args
+      const shellId = options?.shell ? 'custom' : defaultShell.id
+      const shellLabel = options?.shell ? shell : defaultShell.label
       const now = Date.now()
       const sessionId = `term_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
       const runtimeTask = this.runtimeTaskManager.createTask({
@@ -1180,13 +1244,20 @@ export class NodeToolExecutor implements ToolExecutor {
         command: shell,
         cwd: safeCwd,
         interactive: true,
-        metadata: { sessionId, shellId },
+        metadata: { sessionId, shellId, ...this.sandboxTaskMetadata() },
       })
       runtimeTaskId = runtimeTask.id
       const logPath = this.createRuntimeTaskLog(runtimeTask.id)
-      proc = spawn(shell, shellArgs, {
+      spawnPlan = this.processSandbox.prepare({
+        command: shell,
+        args: shellArgs,
         cwd: safeCwd,
-        env: this.buildChildEnvironment(options?.env),
+        env: options?.env,
+        interactive: true,
+      })
+      proc = spawn(spawnPlan.command, spawnPlan.args, {
+        cwd: spawnPlan.cwd,
+        env: spawnPlan.env,
         ...getChildProcessSpawnOptions(),
       })
       const info: TerminalSessionInfo = {
@@ -1213,6 +1284,8 @@ export class NodeToolExecutor implements ToolExecutor {
         runtimeTaskId: runtimeTask.id,
         logPath,
         outputBytes: 0,
+        pendingInput: '',
+        spawnPlan,
       }
       this.backgroundTerminals.set(sessionId, session)
       this.runtimeTaskManager.setControl(runtimeTask.id, {
@@ -1282,6 +1355,7 @@ export class NodeToolExecutor implements ToolExecutor {
         })
       })
       proc.on('close', (code, signal) => {
+        this.cleanupSandboxProcess(session.spawnPlan, false)
         session.info.status = 'exited'
         session.info.exitCode = code
         session.info.exitSignal = signal ?? null
@@ -1306,7 +1380,7 @@ export class NodeToolExecutor implements ToolExecutor {
       return { success: true, data: { sessionId, session: info }, session, sessionId }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      if (proc) this.terminateProcessTree(proc)
+      if (proc) this.terminateProcessTree(proc, spawnPlan)
       if (runtimeTaskId) this.runtimeTaskManager.failTask(runtimeTaskId, message)
       return { success: false, error: message }
     }
@@ -1318,9 +1392,27 @@ export class NodeToolExecutor implements ToolExecutor {
     if (session.info.status !== 'running') return { success: false, error: `Terminal ${sessionId} is ${session.info.status}` }
 
     try {
-      session.proc.stdin.write(data)
+      const status = this.processSandbox.getStatus()
+      const shouldBuffer = status.policy === 'workspace' && status.resolvedBackend === 'guarded'
+        && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(data)
+      let payload = data
+      if (shouldBuffer) {
+        const combined = session.pendingInput + data
+        const lastNewline = Math.max(combined.lastIndexOf('\n'), combined.lastIndexOf('\r'))
+        if (lastNewline < 0) {
+          session.pendingInput = combined
+          return { success: true }
+        }
+        payload = combined.slice(0, lastNewline + 1)
+        session.pendingInput = combined.slice(lastNewline + 1)
+      } else {
+        payload = session.pendingInput + data
+        session.pendingInput = ''
+      }
+      this.processSandbox.validateTerminalInput(payload, session.info.cwd)
+      session.proc.stdin.write(payload)
       session.info.updatedAt = Date.now()
-      const firstLine = data.split(/\r?\n/).find(line => line.trim())
+      const firstLine = payload.split(/\r?\n/).find(line => line.trim())
       if (firstLine) {
         session.info.title = firstLine.trim()
         this.runtimeTaskManager.updateTask(session.runtimeTaskId, { command: firstLine.trim() })
@@ -1422,6 +1514,7 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private async killTerminalProcessTree(session: BackgroundTerminalSession): Promise<void> {
+    this.cleanupSandboxProcess(session.spawnPlan, true)
     const pid = session.info.pid
     if (!pid) {
       session.proc.kill()
@@ -1950,6 +2043,15 @@ export class NodeToolExecutor implements ToolExecutor {
     return this.ensureWithinWorkspace(resolvedPath)
   }
 
+  private ensureAllowedIoPath(path: string): string {
+    const resolvedPath = this.resolveAgainstWorkspace(path)
+    if (this.sandboxPolicy === 'full') return resolvedPath
+    const canonicalPath = this.resolveRealPath(resolvedPath)
+    const relativePath = relative(this.workspaceRealRoot, canonicalPath)
+    if (relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))) return canonicalPath
+    throw new Error(`Path outside workspace: ${path}`)
+  }
+
   private ensureWithinWorkspace(path: string): string {
     const resolvedPath = this.resolveAgainstWorkspace(path)
     const canonicalPath = this.resolveRealPath(resolvedPath)
@@ -1978,73 +2080,6 @@ export class NodeToolExecutor implements ToolExecutor {
     return isAbsolute(path)
       ? resolveNativePath(path)
       : resolveNativePath(this.workspaceRoot, path || '.')
-  }
-
-  private checkCommandSandbox(command: string, cwd: string): string | null {
-    if (this.sandboxPolicy === 'readonly') {
-      return 'Sandbox is read-only: command execution is disabled'
-    }
-    if (this.sandboxPolicy === 'full') return null
-
-    for (const candidate of this.extractAbsolutePathCandidates(command)) {
-      try {
-        this.ensureWithinWorkspace(candidate)
-      } catch {
-        return `Sandbox blocked command because it references a path outside the workspace: ${candidate}`
-      }
-    }
-
-    for (const candidate of this.extractRelativeTraversalCandidates(command)) {
-      const resolvedCandidate = resolveNativePath(cwd, candidate)
-      try {
-        this.ensureWithinWorkspace(resolvedCandidate)
-      } catch {
-        return `Sandbox blocked command because it references a relative path outside the workspace: ${candidate}`
-      }
-    }
-
-    return null
-  }
-
-  private extractAbsolutePathCandidates(command: string): string[] {
-    const candidates = new Set<string>()
-    const windowsPath = /\b[A-Za-z]:[\\/][^\s"'`|;&<>)]*/g
-    for (const match of command.matchAll(windowsPath)) {
-      candidates.add(match[0])
-    }
-
-    if (process.platform === 'win32') return [...candidates]
-
-    const posixPath = /(^|[\s"'`=])\/[^\s"'`|;&<>)]*/g
-    for (const match of command.matchAll(posixPath)) {
-      const value = match[0].trim().replace(/^["'`=]/, '')
-      if (value.startsWith('//') || value.startsWith('/?')) continue
-      candidates.add(value)
-    }
-
-    return [...candidates]
-  }
-
-  private extractRelativeTraversalCandidates(command: string): string[] {
-    const candidates = new Set<string>()
-    const tokenPattern = /[^\s"'`|;&<>]+/g
-
-    for (const match of command.matchAll(tokenPattern)) {
-      for (const rawPart of match[0].split('=')) {
-        const value = rawPart.replace(/^[([{]+/, '').replace(/[)\]},]+$/, '')
-        const normalized = value.replace(/\\/g, '/')
-        if (
-          normalized === '..'
-          || normalized.startsWith('../')
-          || normalized.includes('/../')
-          || normalized.endsWith('/..')
-        ) {
-          candidates.add(value)
-        }
-      }
-    }
-
-    return [...candidates]
   }
 
   private buildTree(dirPath: string, maxDepth: number, depth = 0): TreeNode {
@@ -2191,12 +2226,15 @@ export class NodeToolExecutor implements ToolExecutor {
     return name === '.env' || name === '.env.local' || /^\.env\..+\.local$/i.test(name)
   }
 
-  private buildChildEnvironment(overrides?: Record<string, string>): NodeJS.ProcessEnv {
-    const environment: NodeJS.ProcessEnv = {}
-    for (const [name, value] of Object.entries(process.env)) {
-      if (!SENSITIVE_ENV_NAME.test(name)) environment[name] = value
+  private sandboxTaskMetadata(): Record<string, unknown> {
+    const status = this.processSandbox.getStatus()
+    return {
+      sandboxPolicy: status.policy,
+      sandboxEnforcement: status.enforcement,
+      sandboxBackend: status.resolvedBackend,
+      sandboxNetwork: status.network,
+      sandboxOsIsolation: status.osIsolation,
     }
-    return { ...environment, ...overrides }
   }
 
   private delay(ms: number, signal?: AbortSignal): Promise<void> {

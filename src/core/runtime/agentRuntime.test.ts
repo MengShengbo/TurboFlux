@@ -5,6 +5,31 @@ import { describe, expect, it } from 'vitest'
 import { createAgentRuntime } from './agentRuntime'
 
 describe('createAgentRuntime runtime tasks', () => {
+  it('does not turn full approval into unrestricted filesystem access', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
+    const runtime = createAgentRuntime({
+      workspacePath: workspace,
+      workspaceName: 'runtime-test',
+      approvalPolicy: 'full',
+      config: {
+        provider: 'custom',
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        contextWindow: 100_000,
+        maxTokens: 4096,
+        approvalPolicy: 'full',
+      },
+    })
+
+    try {
+      expect(runtime.toolExecutor.getSandboxStatus().policy).toBe('workspace')
+    } finally {
+      await runtime.destroy()
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   it('shares one task manager and assigns command ownership to the conversation', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
     const runtime = createAgentRuntime({

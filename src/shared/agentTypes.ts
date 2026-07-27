@@ -6,6 +6,20 @@ export type LegacyApprovalPolicy = 'request' | 'auto'
 
 export type SandboxPolicy = 'workspace' | 'readonly' | 'full'
 
+export type SandboxEnforcement = 'guarded' | 'strict'
+
+export type SandboxNetworkPolicy = 'allow' | 'deny'
+
+export type SandboxBackend = 'auto' | 'guarded' | 'bubblewrap' | 'sandbox-exec' | 'docker'
+
+export interface SandboxConfig {
+  policy: SandboxPolicy
+  enforcement: SandboxEnforcement
+  network: SandboxNetworkPolicy
+  backend: SandboxBackend
+  dockerImage?: string
+}
+
 export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 export type ReasoningEffort = typeof REASONING_EFFORTS[number]
@@ -246,6 +260,10 @@ export interface AgentConfig {
   mode: AgentMode
   approvalPolicy?: ApprovalPolicy
   sandboxPolicy?: SandboxPolicy
+  sandboxEnforcement?: SandboxEnforcement
+  sandboxNetwork?: SandboxNetworkPolicy
+  sandboxBackend?: SandboxBackend
+  sandboxDockerImage?: string
   temperature: number
   maxTokens: number
   /** @deprecated Main-agent runs are user-controlled and do not enforce a turn budget. */
@@ -285,13 +303,13 @@ export const MODE_DESCRIPTIONS: Record<AgentMode, string> = {
 export const APPROVAL_POLICY_LABELS: Record<ApprovalPolicy, string> = {
   ask: 'Request approval',
   agent: 'Approve low risk',
-  full: 'Full access',
+  full: 'Skip approvals',
 }
 
 export const APPROVAL_POLICY_DESCRIPTIONS: Record<ApprovalPolicy, string> = {
   ask: 'Ask before file changes, commands, MCP tools, and external actions.',
   agent: 'Continue with low-risk workspace actions and ask only when risk is detected.',
-  full: 'Allow unrestricted local and network access; catastrophic operations remain blocked.',
+  full: 'Skip approval prompts for allowed operations; deny rules and sandbox boundaries remain active.',
 }
 
 export function normalizeApprovalPolicy(value: unknown, fallback: ApprovalPolicy = 'ask'): ApprovalPolicy {

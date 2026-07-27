@@ -4,7 +4,14 @@ import { Command } from 'commander'
 import { startRepl } from './repl'
 import { loadConfig, redactConfig, saveConfig, setConfigValue } from '../core/config'
 import { runSetup } from './setup'
-import { normalizeApprovalPolicy, type ApprovalPolicy } from '../shared/agentTypes'
+import {
+  normalizeApprovalPolicy,
+  type ApprovalPolicy,
+  type SandboxBackend,
+  type SandboxEnforcement,
+  type SandboxNetworkPolicy,
+  type SandboxPolicy,
+} from '../shared/agentTypes'
 import { configureNetworkProxy } from '../core/networkProxy'
 
 configureNetworkProxy()
@@ -27,6 +34,11 @@ program
   .option('--transparent', 'do not paint terminal background; let emulator transparency show through')
   .option('--opaque', 'force solid theme backgrounds, overriding TURBOFLUX_TRANSPARENT')
   .option('--approval-policy <policy>', 'tool approval policy: ask, agent, or full')
+  .option('--sandbox <policy>', 'filesystem sandbox: readonly, workspace, or full')
+  .option('--sandbox-enforcement <level>', 'process isolation: guarded or strict')
+  .option('--sandbox-network <policy>', 'sandboxed tool network: allow or deny')
+  .option('--sandbox-backend <backend>', 'sandbox backend: auto, guarded, bubblewrap, sandbox-exec, or docker')
+  .option('--sandbox-docker-image <image>', 'container image used by the Docker sandbox backend')
   .option('--mcp <servers>', 'explicitly start configured MCP servers (comma-separated names or all)')
   .action(async (workspace: string, opts) => {
     const workspacePath = resolve(workspace)
@@ -45,6 +57,13 @@ program
     const mcpServers = typeof opts.mcp === 'string'
       ? opts.mcp.split(',').map((name: string) => name.trim()).filter(Boolean)
       : undefined
+    const sandbox = {
+      policy: parseChoice<SandboxPolicy>('sandbox policy', opts.sandbox, ['readonly', 'workspace', 'full']),
+      enforcement: parseChoice<SandboxEnforcement>('sandbox enforcement', opts.sandboxEnforcement, ['guarded', 'strict']),
+      network: parseChoice<SandboxNetworkPolicy>('sandbox network policy', opts.sandboxNetwork, ['allow', 'deny']),
+      backend: parseChoice<SandboxBackend>('sandbox backend', opts.sandboxBackend, ['auto', 'guarded', 'bubblewrap', 'sandbox-exec', 'docker']),
+      dockerImage: typeof opts.sandboxDockerImage === 'string' ? opts.sandboxDockerImage.trim() || undefined : undefined,
+    }
 
     await startRepl({
       workspacePath,
@@ -53,6 +72,7 @@ program
       verbose: opts.verbose || false,
       noFlicker: opts.scrollback !== true,
       approvalPolicy,
+      sandbox,
       mcpServers,
       startupAnimation: opts.animation !== false,
       transparentBackground: opts.opaque
@@ -129,3 +149,10 @@ program
   })
 
 program.parse(process.argv)
+
+function parseChoice<T extends string>(label: string, value: unknown, allowed: readonly T[]): T | undefined {
+  if (value === undefined) return undefined
+  const normalized = String(value).trim().toLowerCase() as T
+  if (!allowed.includes(normalized)) throw new Error(`Invalid ${label}: ${String(value)}. Use: ${allowed.join(', ')}`)
+  return normalized
+}

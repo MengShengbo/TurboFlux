@@ -4,6 +4,7 @@ import type { TurboFluxConfig } from '../core/config'
 import type { ApprovalPolicy } from '../shared/agentTypes'
 import { loadMcpSettings } from '../core/mcp/settings'
 import { runSingleShot } from './singleShot'
+import type { SandboxOptions } from '../core/sandbox/types'
 
 export interface ReplOptions {
   workspacePath: string
@@ -12,17 +13,18 @@ export interface ReplOptions {
   verbose: boolean
   noFlicker?: boolean
   approvalPolicy?: ApprovalPolicy
+  sandbox?: SandboxOptions
   mcpServers?: string[]
   startupAnimation?: boolean
   transparentBackground?: boolean
 }
 
 export async function startRepl(options: ReplOptions): Promise<void> {
-  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation, transparentBackground } = options
+  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, sandbox, mcpServers, startupAnimation, transparentBackground } = options
 
   if (singleShot) {
     try {
-      await runSingleShot({ workspacePath, config, prompt: singleShot, verbose, approvalPolicy, mcpServers })
+      await runSingleShot({ workspacePath, config, prompt: singleShot, verbose, approvalPolicy, sandbox, mcpServers })
     } catch (error) {
       process.stderr.write(`TurboFlux command failed: ${error instanceof Error ? error.message : String(error)}\n`)
       process.exitCode = 1
@@ -49,5 +51,5 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation, transparentBackground })
+  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, sandbox, mcpServers, startupAnimation, transparentBackground })
 }
