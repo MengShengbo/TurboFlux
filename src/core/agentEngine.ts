@@ -4685,9 +4685,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     }
 
     if (decision === 'allow-run') {
-      this.permissions.grantRun(toolCall.name, this.computePermissionFingerprint(toolCall))
+      this.permissions.grantRun(toolCall.name, toolCall.arguments)
     } else if (decision === 'allow-session') {
-      this.permissions.grantSession(toolCall.name, this.computePermissionFingerprint(toolCall))
+      this.permissions.grantSession(toolCall.name, toolCall.arguments)
     }
 
     return null
@@ -4706,16 +4706,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     }
     if (['allow-once', 'yes', 'y', '1', 'once', '本次允许'].includes(normalized)) return 'allow-once'
     return 'deny'
-  }
-
-  private computePermissionFingerprint(toolCall: ToolCall): string {
-    if (toolCall.name === 'run_command') {
-      return String(toolCall.arguments.command || '').trim().slice(0, 100)
-    }
-    if (toolCall.name === 'delete_file') {
-      return String(toolCall.arguments.path || '')
-    }
-    return JSON.stringify(toolCall.arguments).slice(0, 200)
   }
 
   private emitSubAgentProgress(agentId: string, agentType: string, label: string, event: SubAgentEvent): void {

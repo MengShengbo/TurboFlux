@@ -35,10 +35,13 @@ describe('MCP tool bridge', () => {
     expect(unknown.isDestructive).toBe(true)
   })
 
-  it('validates required and unexpected top-level arguments', () => {
+  it('validates nested required fields, types, and unexpected arguments', () => {
     expect(validateMcpToolArgs(nestedTool.inputSchema, {})).toMatchObject({ valid: false })
     expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: {}, surprise: true })).toMatchObject({ valid: false, error: 'Unexpected parameter: surprise' })
-    expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: {} })).toEqual({ valid: true })
+    expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: {} })).toMatchObject({ valid: false, error: 'Missing required parameter: edit.path' })
+    expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: { path: 42, content: 'next' } })).toMatchObject({ valid: false, error: 'Invalid type for edit.path: expected string' })
+    expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: { path: 'a.ts', content: 'next', extra: true } })).toMatchObject({ valid: false, error: 'Unexpected parameter: edit.extra' })
+    expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: { path: 'a.ts', content: 'next' } })).toEqual({ valid: true })
   })
 
   it('dispatches namespaced tools to the selected MCP server', async () => {
