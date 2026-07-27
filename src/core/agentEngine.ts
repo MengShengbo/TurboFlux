@@ -362,6 +362,7 @@ interface PendingFastContextPack {
   objective: string
   generation: number
   ownerAgentRunId: number | null
+  isError?: boolean
 }
 
 export function isFastContextPackCurrent(
@@ -688,7 +689,21 @@ export class AgentEngine {
     message: string,
     phase: 'cancelled' | 'error',
   ): void {
-    if (this.fastContextRun === run) this.fastContextRun = null
+    const canDeliverFailure = phase === 'error'
+      && run.mode === 'agent'
+      && run.ownerAgentRunId === this.agentRunGeneration
+    if (canDeliverFailure) {
+      run.phase = 'delivering'
+      run.delivery = {
+        content: `FastContext failed: ${message}\nContinue with targeted search and read tools from the main agent. Do not assume retrieval completed.`,
+        objective: run.objective,
+        generation: run.generation,
+        ownerAgentRunId: run.ownerAgentRunId,
+        isError: true,
+      }
+    } else if (this.fastContextRun === run) {
+      this.fastContextRun = null
+    }
     this.emit({
       type: 'fast_context:event',
       runId: run.id,
@@ -2158,7 +2173,7 @@ Before retrying:
         toolCallId,
         name: 'fast_context_result',
         output: pack.content,
-        isError: false,
+        isError: pack.isError === true,
       }],
       metadata: { internal: true, internalKind: 'fast_context' },
     })

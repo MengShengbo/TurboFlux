@@ -1,12 +1,52 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { __testClearSubAgentProtocolCache, __testTraceDefinitionReadLimit, buildFastContextSystemPrompt, runSubAgent } from './subAgent'
+import { __testClearSubAgentProtocolCache, __testTraceDefinitionReadLimit, buildFastContextSystemPrompt, getSubAgentDefinition, loadDynamicAgents, registerAgent, runSubAgent } from './subAgent'
 import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
+
+describe('subagent registry isolation', () => {
+  it('replaces workspace agents without removing programmatic registrations', () => {
+    const firstWorkspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-first-'))
+    const secondWorkspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-second-'))
+    mkdirSync(join(firstWorkspace, '.turboflux', 'agents'), { recursive: true })
+    writeFileSync(join(firstWorkspace, '.turboflux', 'agents', 'first.md'), [
+      '---',
+      'name: first_workspace_agent',
+      'description: first workspace only',
+      '---',
+      'Inspect the first workspace.',
+    ].join('\n'))
+    registerAgent({
+      id: 'registered_agent_fixture',
+      label: 'Registered fixture',
+      description: 'process registration',
+      driver: 'main-model',
+      systemPrompt: 'Stay registered.',
+      maxTurns: 1,
+      maxParallel: 1,
+    })
+
+    try {
+      loadDynamicAgents(firstWorkspace)
+      expect(getSubAgentDefinition('first_workspace_agent')).toBeDefined()
+
+      loadDynamicAgents(secondWorkspace)
+      expect(getSubAgentDefinition('first_workspace_agent')).toBeUndefined()
+      expect(getSubAgentDefinition('registered_agent_fixture')).toBeDefined()
+    } finally {
+      loadDynamicAgents(secondWorkspace)
+      rmSync(firstWorkspace, { recursive: true, force: true })
+      rmSync(secondWorkspace, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('runSubAgent', () => {
   it('reads structural symbol definitions deeply enough to expose their stored representation', () => {
