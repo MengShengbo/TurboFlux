@@ -635,6 +635,43 @@ describe('AgentEngine FastContext scheduling', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  it('delivers FastContext failures back to the owning main agent', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+    }, {} as ToolExecutor, stateProvider)
+    ;(engine as any).agentRunGeneration = 7
+    vi.spyOn(engine as any, 'runFastContextScan').mockRejectedValue(new Error('gateway unavailable'))
+
+    try {
+      const started = (engine as any).startFastContextRun('locate the runtime owner', 'autonomous-race', 'agent')
+      await started.promise.catch(() => null)
+
+      const run = (engine as any).fastContextRun
+      expect(run).toMatchObject({ phase: 'delivering', ownerAgentRunId: 7 })
+      expect(run.delivery).toMatchObject({ isError: true, content: expect.stringContaining('gateway unavailable') })
+
+      ;(engine as any).attachFastContextResult(run.delivery)
+      expect(engine.getSession().turns.at(-1)?.toolResults?.[0]).toMatchObject({
+        name: 'fast_context_result',
+        isError: true,
+        output: expect.stringContaining('Continue with targeted search'),
+      })
+    } finally {
+      engine.destroy()
+    }
+  })
 })
 
 describe('AgentEngine permission requests', () => {

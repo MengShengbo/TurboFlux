@@ -38,7 +38,8 @@ export { type SubAgentDefinition }
 
 // ── 动态代理注册表 ────────────────────────────────────────────────
 
-const dynamicAgents = new Map<string, LoadedAgent>()
+const registeredAgents = new Map<string, LoadedAgent>()
+let workspaceAgents = new Map<string, LoadedAgent>()
 const PROTECTED_BUILTIN_AGENT_IDS = new Set(['fast_context'])
 
 /**
@@ -46,10 +47,12 @@ const PROTECTED_BUILTIN_AGENT_IDS = new Set(['fast_context'])
  */
 export function loadDynamicAgents(workspacePath: string): void {
   const loaded = loadAgentsFromDir(workspacePath)
+  const nextWorkspaceAgents = new Map<string, LoadedAgent>()
   for (const agent of loaded) {
     if (PROTECTED_BUILTIN_AGENT_IDS.has(agent.id)) continue
-    dynamicAgents.set(agent.id, agent)
+    nextWorkspaceAgents.set(agent.id, agent)
   }
+  workspaceAgents = nextWorkspaceAgents
 }
 
 function resolveWorkspacePath(workspacePath: string, pathValue: unknown): string {
@@ -105,7 +108,7 @@ export function registerAgent(def: SubAgentDefinition, skillRuntime?: SkillRunti
     throw new Error(`Subagent id "${def.id}" is reserved for the built-in production runtime.`)
   }
   const loaded = def as LoadedAgent
-  dynamicAgents.set(def.id, loaded)
+  registeredAgents.set(def.id, loaded)
 
   // 自动注册代理关联的 skills
   if (loaded.skills && loaded.skills.length > 0 && skillRuntime) {
@@ -128,7 +131,9 @@ export function registerAgent(def: SubAgentDefinition, skillRuntime?: SkillRunti
  * 获取单个代理定义 — 先查动态，再查硬编码
  */
 export function getSubAgentDefinition(type: string): SubAgentDefinition | undefined {
-  return PROTECTED_BUILTIN_AGENT_IDS.has(type) ? DEFINITIONS[type] : dynamicAgents.get(type) ?? DEFINITIONS[type]
+  return PROTECTED_BUILTIN_AGENT_IDS.has(type)
+    ? DEFINITIONS[type]
+    : workspaceAgents.get(type) ?? registeredAgents.get(type) ?? DEFINITIONS[type]
 }
 
 /**
@@ -139,7 +144,11 @@ export function getAllAgentDefinitions(): SubAgentDefinition[] {
   for (const def of Object.values(DEFINITIONS)) {
     map.set(def.id, def)
   }
-  for (const [id, def] of dynamicAgents) {
+  for (const [id, def] of registeredAgents) {
+    if (PROTECTED_BUILTIN_AGENT_IDS.has(id)) continue
+    map.set(id, def)
+  }
+  for (const [id, def] of workspaceAgents) {
     if (PROTECTED_BUILTIN_AGENT_IDS.has(id)) continue
     map.set(id, def)
   }
@@ -158,7 +167,8 @@ export function getAvailableAgentTypes(): string[] {
  * 在 SkillRuntime 初始化后调用一次即可
  */
 export function syncAgentSkills(skillRuntime: SkillRuntime): void {
-  for (const [, agent] of dynamicAgents) {
+  for (const definition of getAllAgentDefinitions()) {
+    const agent = definition as LoadedAgent
     const loaded = agent as LoadedAgent
     if (!loaded.skills || loaded.skills.length === 0) continue
 
