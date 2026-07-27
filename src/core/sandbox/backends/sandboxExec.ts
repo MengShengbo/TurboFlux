@@ -1,4 +1,3 @@
-import { dirname } from 'node:path'
 import type { SandboxBackendAdapter } from '../types'
 
 function quoteProfilePath(path: string): string {
@@ -9,14 +8,14 @@ export const sandboxExecBackend: SandboxBackendAdapter = {
   id: 'sandbox-exec',
   build(request, context) {
     const workspace = quoteProfilePath(context.workspacePath)
-    const homeParent = quoteProfilePath(dirname(process.env.HOME || context.sandboxHome))
+    const hostHome = quoteProfilePath(context.hostHome)
     const profile = [
       '(version 1)',
       '(allow default)',
       context.status.policy === 'workspace' ? '(deny file-write*)' : '',
       context.status.policy === 'workspace' ? `(allow file-write* (subpath "${workspace}") (subpath "/private/tmp") (subpath "/tmp"))` : '',
-      `(deny file-read* (subpath "${homeParent}"))`,
-      `(allow file-read* (subpath "${workspace}"))`,
+      context.status.policy === 'workspace' ? `(deny file-read* (subpath "${hostHome}"))` : '',
+      context.status.policy === 'workspace' ? `(allow file-read* (subpath "${workspace}"))` : '',
       context.status.network === 'deny' ? '(deny network*)' : '',
     ].filter(Boolean).join('\n')
     return {

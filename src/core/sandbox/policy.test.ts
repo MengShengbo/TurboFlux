@@ -69,4 +69,13 @@ describe('sandbox backend resolution', () => {
 
     expect(status).toMatchObject({ available: true, writableRoots: [], networkIsolated: true })
   })
+
+  it('does not report read-only networking as isolated when web access is allowed', () => {
+    const status = resolveSandboxStatus('/workspace', {
+      policy: 'readonly',
+      network: 'allow',
+    })
+
+    expect(status.networkIsolated).toBe(false)
+  })
 })

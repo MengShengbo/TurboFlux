@@ -33,7 +33,7 @@ TurboFlux 将审批和沙箱视为两个独立安全层：审批决定操作是�
 
 | 平台 | 后端 | 文件隔离 | 网络隔离 | 说明 |
 | --- | --- | --- | --- | --- |
-| Linux | Bubblewrap | 工作区外只读并隐藏用户目录 | 是 | `auto` 优先选择 `bwrap` |
+| Linux | Bubblewrap | 工作区外只读并隐藏用户目录 | 是 | `strict` 或禁网时，`auto` 优先选择 `bwrap` |
 | macOS | `sandbox-exec` | 工作区外禁止写入并隐藏用户目录 | 是 | 允许系统运行时文件 |
 | Windows/macOS/Linux | Docker | 是 | 是 | 需要显式配置镜像；容器根文件系统只读 |
 | 全平台 | Guarded | 策略检查 | 否 | 兼容模式，不应作为不可信代码的最终边界 |

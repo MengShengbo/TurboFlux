@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -52,6 +52,16 @@ describe('ProcessSandbox', () => {
 
     expect(plan.env.SERVICE_API_KEY).toBe('configured-secret')
     expect(plan.env.PATH).toBe(process.env.PATH || '')
+  })
+
+  it('allows system executables but rejects arbitrary absolute executables', () => {
+    const root = workspace()
+    const outsideExecutable = join(root, '..', `${root.split(/[\\/]/).pop()}-tool.exe`)
+    const sandbox = new ProcessSandbox(root)
+
+    expect(() => sandbox.prepare({ command: process.execPath, args: ['--version'], cwd: root })).not.toThrow()
+    expect(() => sandbox.prepare({ command: outsideExecutable, args: [], cwd: root }))
+      .toThrow('blocked executable outside the workspace')
   })
 
   it('blocks all process execution when strict mode cannot resolve a backend', () => {
@@ -116,6 +126,66 @@ describe('ProcessSandbox', () => {
     expect(plan.args).not.toEqual(expect.arrayContaining(['--env', 'PATH']))
     expect(plan.args).toEqual(expect.arrayContaining(['--env', 'SERVICE_API_KEY']))
     expect(plan.env.SERVICE_API_KEY).toBe('configured-secret')
+  })
+
+  it('maps workspace paths carried by Docker environment variables', () => {
+    const root = workspace()
+    const sandbox = new ProcessSandbox(root, {
+      policy: 'workspace',
+      enforcement: 'strict',
+      backend: 'docker',
+      dockerImage: 'turboflux/sandbox:test',
+    }, {
+      executableAvailable: name => name === 'docker',
+    })
+
+    const plan = sandbox.prepare({
+      command: 'git',
+      args: ['status'],
+      cwd: root,
+      env: { GIT_INDEX_FILE: join(root, '.turboflux', 'git-index', 'index') },
+    })
+
+    expect(plan.env.GIT_INDEX_FILE).toBe('/workspace/.turboflux/git-index/index')
+  })
+
+  it('maps workspace paths carried by Bubblewrap environment variables', () => {
+    const root = workspace()
+    const sandbox = new ProcessSandbox(root, {
+      policy: 'workspace',
+      enforcement: 'strict',
+      backend: 'bubblewrap',
+    }, {
+      platform: 'linux',
+      executableAvailable: name => name === 'bwrap',
+    })
+
+    const plan = sandbox.prepare({
+      command: 'git',
+      args: ['status'],
+      cwd: root,
+      env: { GIT_INDEX_FILE: join(root, '.turboflux', 'git-index', 'index') },
+    })
+
+    expect(plan.env.GIT_INDEX_FILE).toBe('/workspace/.turboflux/git-index/index')
+  })
+
+  it('removes completed Docker cidfiles through the shared cleanup path', () => {
+    const root = workspace()
+    const sandbox = new ProcessSandbox(root, {
+      policy: 'workspace',
+      enforcement: 'strict',
+      backend: 'docker',
+      dockerImage: 'turboflux/sandbox:test',
+    }, {
+      executableAvailable: name => name === 'docker',
+    })
+    const plan = sandbox.prepare({ command: 'node', args: [], cwd: root })
+    writeFileSync(plan.cleanup!.cidFile, '0123456789ab', 'utf-8')
+
+    sandbox.cleanupProcess(plan)
+
+    expect(existsSync(plan.cleanup!.cidFile)).toBe(false)
   })
 
   it('writes audit records with a digest instead of raw command text', () => {

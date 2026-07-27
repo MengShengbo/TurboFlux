@@ -59,7 +59,7 @@ export const dockerBackend: SandboxBackendAdapter = {
     if (context.status.network === 'deny') args.push('--network', 'none')
     const containerEnvironment: NodeJS.ProcessEnv = {}
     for (const [name, value] of Object.entries(request.env || {})) {
-      if (!HOST_PATH_ENV.test(name)) containerEnvironment[name] = value
+      if (!HOST_PATH_ENV.test(name)) containerEnvironment[name] = mapWorkspaceValue(value, context.workspacePath)
     }
     Object.assign(containerEnvironment, {
       HOME: `${CONTAINER_WORKSPACE}/.turboflux/sandbox/home`,

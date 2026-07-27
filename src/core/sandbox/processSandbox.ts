@@ -1,7 +1,8 @@
 import { dirname, join, resolve } from 'node:path'
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
+import { spawn } from 'node:child_process'
 import type { SandboxOptions, SandboxProcessRequest, SandboxSpawnPlan, SandboxStatus } from './types'
 import { resolveSandboxStatus, type ResolveSandboxDependencies } from './policy'
 import { buildSandboxEnvironment } from './environment'
@@ -77,7 +78,7 @@ export class ProcessSandbox {
     const displayCommand = [request.command, ...request.args].join(' ')
     try {
       this.assertAvailable()
-      this.guard.validate(displayCommand, request.cwd)
+      this.guard.validateProcess(request.command, request.args, request.cwd)
       const environment = buildSandboxEnvironment(this.workspacePath, this.status, request.env, process.env, request.trustedEnvironment === true)
       if (request.trustedEnvironment !== true) {
         for (const [name, value] of Object.entries(request.env || {})) {
@@ -94,6 +95,34 @@ export class ProcessSandbox {
     } catch (error) {
       this.audit('spawn', displayCommand, request.cwd, 'deny', error)
       throw error
+    }
+  }
+
+  cleanupProcess(plan: SandboxSpawnPlan | undefined, force = false): void {
+    const cleanup = plan?.cleanup
+    if (!cleanup || cleanup.kind !== 'docker') return
+    const attempt = () => {
+      if (!existsSync(cleanup.cidFile)) return false
+      try {
+        const containerId = readFileSync(cleanup.cidFile, 'utf-8').trim()
+        if (force && /^[a-f0-9]{12,64}$/i.test(containerId)) {
+          const cleaner = spawn('docker', ['rm', '-f', containerId], {
+            cwd: plan.cwd,
+            env: dockerCleanupEnvironment(plan.env),
+            windowsHide: true,
+            stdio: 'ignore',
+          })
+          cleaner.on('error', () => {})
+          cleaner.unref()
+        }
+      } catch {}
+      rmSync(cleanup.cidFile, { force: true })
+      return true
+    }
+    const cleaned = attempt()
+    if (force && !cleaned) {
+      const retry = setTimeout(attempt, 250)
+      retry.unref?.()
     }
   }
 
@@ -123,4 +152,16 @@ export class ProcessSandbox {
       appendFileSync(this.auditPath, `${JSON.stringify(record)}\n`, { encoding: 'utf-8', mode: 0o600 })
     } catch {}
   }
+}
+
+function dockerCleanupEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const names = process.platform === 'win32'
+    ? ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC', 'TEMP', 'TMP']
+    : ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL']
+  const result: NodeJS.ProcessEnv = {}
+  for (const name of names) {
+    const value = environment[name]
+    if (value !== undefined) result[name] = value
+  }
+  return result
 }
