@@ -6,7 +6,7 @@ describe('PermissionPipeline', () => {
     const pipeline = new PermissionPipeline('agent')
     const args = { remote: 'origin', branch: 'main' }
     expect(pipeline.check('git_push', args).verdict).toBe('ask')
-    pipeline.grantRun('git_push', JSON.stringify(args))
+    pipeline.grantRun('git_push', args)
     expect(pipeline.check('git_push', args).verdict).toBe('allow')
   })
 
@@ -71,6 +71,15 @@ describe('PermissionPipeline', () => {
       const pipeline = new PermissionPipeline('ask')
       const result = pipeline.check('write_terminal', { session_id: 'term-1', data: 'npm publish\n' })
       expect(result.verdict).toBe('ask')
+    })
+
+    it('applies command risk checks to terminal stdin', () => {
+      const agentPipeline = new PermissionPipeline('agent')
+      const fullPipeline = new PermissionPipeline('full')
+
+      expect(agentPipeline.check('write_terminal', { session_id: 'term-1', data: 'npm publish\n' }).verdict).toBe('ask')
+      expect(fullPipeline.check('write_terminal', { session_id: 'term-1', data: 'rm -r -f /\n' }).verdict).toBe('deny')
+      expect(agentPipeline.check('write_terminal', { session_id: 'term-1', data: 'y\n' }).verdict).toBe('allow')
     })
 
     it('asks before cancelling a background subagent', () => {
@@ -144,14 +153,14 @@ describe('PermissionPipeline', () => {
   describe('session grants', () => {
     it('allows previously granted commands', () => {
       const pipeline = new PermissionPipeline()
-      pipeline.grantSession('run_command', 'rm -rf dist')
+      pipeline.grantSession('run_command', { command: 'rm -rf dist' })
       const result = pipeline.check('run_command', { command: 'rm -rf dist' })
       expect(result.verdict).toBe('allow')
     })
 
     it('clears session grants', () => {
       const pipeline = new PermissionPipeline()
-      pipeline.grantSession('run_command', 'rm -rf dist')
+      pipeline.grantSession('run_command', { command: 'rm -rf dist' })
       pipeline.clearSessionGrants()
       const result = pipeline.check('run_command', { command: 'rm -rf dist' })
       expect(result.verdict).toBe('ask')
@@ -159,14 +168,14 @@ describe('PermissionPipeline', () => {
 
     it('does not let session grants bypass hard deny commands', () => {
       const pipeline = new PermissionPipeline()
-      pipeline.grantSession('run_command', 'rm -rf /')
+      pipeline.grantSession('run_command', { command: 'rm -rf /' })
       const result = pipeline.check('run_command', { command: 'rm -rf /' })
       expect(result.verdict).toBe('deny')
     })
 
     it('shares a session grant across file write and edit tools', () => {
       const pipeline = new PermissionPipeline('ask')
-      pipeline.grantSession('write_file', JSON.stringify({ path: 'a.ts', content: 'a' }))
+      pipeline.grantSession('write_file', { path: 'a.ts', content: 'a' })
 
       expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('allow')
       expect(pipeline.check('edit_file', { path: 'c.ts', old_string: 'a', new_string: 'b' }).verdict).toBe('allow')
@@ -174,7 +183,7 @@ describe('PermissionPipeline', () => {
 
     it('shares a run grant across file write and edit tools', () => {
       const pipeline = new PermissionPipeline('ask')
-      pipeline.grantRun('write_file', JSON.stringify({ path: 'a.ts', content: 'a' }))
+      pipeline.grantRun('write_file', { path: 'a.ts', content: 'a' })
 
       expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('allow')
       expect(pipeline.check('edit_file', { path: 'c.ts', old_string: 'a', new_string: 'b' }).verdict).toBe('allow')
@@ -182,7 +191,7 @@ describe('PermissionPipeline', () => {
 
     it('clears run grants independently from session grants', () => {
       const pipeline = new PermissionPipeline('ask')
-      pipeline.grantRun('write_file', JSON.stringify({ path: 'a.ts', content: 'a' }))
+      pipeline.grantRun('write_file', { path: 'a.ts', content: 'a' })
       pipeline.clearRunGrants()
 
       expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('ask')
@@ -207,6 +216,26 @@ describe('PermissionPipeline', () => {
 
       expect(pipeline.check('run_command', { command: 'curl https://example.com' }).verdict).toBe('ask')
       expect(pipeline.check('run_command', { command: 'git push origin main' }).verdict).toBe('ask')
+    })
+
+    it('asks before commands that resolve paths outside the workspace dynamically', () => {
+      const pipeline = new PermissionPipeline('agent')
+
+      expect(pipeline.check('run_command', { command: 'Get-Content $env:USERPROFILE/.ssh/id_rsa' }).verdict).toBe('ask')
+      expect(pipeline.check('run_command', { command: 'cat $HOME/.ssh/id_rsa' }).verdict).toBe('ask')
+      expect(pipeline.check('run_command', { command: 'cat ~/private.txt' }).verdict).toBe('ask')
+    })
+
+    it('does not reuse an approval for commands with the same long prefix', () => {
+      const pipeline = new PermissionPipeline('agent')
+      const prefix = `Write-Output ${'x'.repeat(150)}`
+      const approved = { command: `${prefix}; curl https://approved.example` }
+      const different = { command: `${prefix}; curl https://different.example` }
+
+      pipeline.grantSession('run_command', approved)
+
+      expect(pipeline.check('run_command', approved).verdict).toBe('allow')
+      expect(pipeline.check('run_command', different).verdict).toBe('ask')
     })
 
     it('ask policy asks before write tools', () => {
@@ -245,6 +274,15 @@ describe('PermissionPipeline', () => {
       const pipeline = new PermissionPipeline('full')
       const result = pipeline.check('run_command', { command: 'rm -rf /' })
       expect(result.verdict).toBe('deny')
+    })
+
+    it.each([
+      'rm -r -f /',
+      'Remove-Item C:\\ -Recurse -Force',
+      'rd /s /q C:\\',
+    ])('full policy blocks root deletion variant: %s', command => {
+      const pipeline = new PermissionPipeline('full')
+      expect(pipeline.check('run_command', { command }).verdict).toBe('deny')
     })
   })
 

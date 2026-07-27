@@ -1,5 +1,6 @@
 import type { ApprovalPolicy } from '../shared/agentTypes'
 import type { PermissionRule, PermissionCheckResult, PermissionVerdict } from '../shared/toolTypes'
+import { createHash } from 'node:crypto'
 
 // ─── Dangerous Command Patterns ─────────────────────────────────────────────
 
@@ -10,8 +11,9 @@ interface CommandPattern {
 }
 
 const DENY_COMMAND_PATTERNS: CommandPattern[] = [
-  { pattern: /\brm\s+(-[a-z]*f[a-z]*\s+)?\/(\/?\s*$|\*)/, verdict: 'deny', reason: 'Destructive: removes filesystem root' },
-  { pattern: /^\s*del\s+\/s\s+\/q\s+[A-Z]:\\\s*$/i, verdict: 'deny', reason: 'Destructive: recursively deletes drive root' },
+  { pattern: /\brm\s+(?:(?:--[a-z-]+|-[a-z]+)\s+)*\/(?:\*|\s*(?:$|[;&|]))/i, verdict: 'deny', reason: 'Destructive: removes filesystem root' },
+  { pattern: /\b(?:del|rmdir|rd)\s+(?:(?:\/[a-z]+|-[a-z]+)\s+)*[A-Z]:\\(?:\*\s*)?(?:$|[;&|])/i, verdict: 'deny', reason: 'Destructive: recursively deletes drive root' },
+  { pattern: /\bRemove-Item\b(?=[^\r\n;&|]*-(?:Recurse|r)\b)[^\r\n;&|]*(?:[A-Z]:\\(?:\*)?|\/(?:\*)?)(?:\s|$)/i, verdict: 'deny', reason: 'Destructive: recursively deletes filesystem root' },
   { pattern: /\bformat\s+[A-Z]:/i, verdict: 'deny', reason: 'Destructive: formats entire drive' },
   { pattern: /\bmkfs\b/, verdict: 'deny', reason: 'Destructive: creates filesystem (erases partition)' },
   { pattern: /\bdd\s+if=.*\s+of=\/dev\/[sh]d/, verdict: 'deny', reason: 'Destructive: raw disk write' },
@@ -36,6 +38,7 @@ const ASK_COMMAND_PATTERNS: CommandPattern[] = [
   { pattern: /\bRemove-Item\s+.*-Recurse/i, verdict: 'ask', reason: 'High-risk: recursive deletion (PowerShell)' },
   { pattern: /\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod)\b/i, verdict: 'ask', reason: 'External action: sends a request over the network' },
   { pattern: /\b(?:ssh|scp|sftp|rsync)\b/i, verdict: 'ask', reason: 'External action: connects to a remote system' },
+  { pattern: /(?:\$(?:env:)?(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)\b|\$\{(?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)%|(?:^|\s)~[\\/])/i, verdict: 'ask', reason: 'Dynamic path: command may access files outside the active workspace' },
 ]
 
 const SESSION_GRANT_GROUPS = new Map<string, string>([
@@ -68,7 +71,7 @@ export class PermissionPipeline {
       ...result,
       decisionId: `policy_${Date.now().toString(36)}_${(++this.decisionSequence).toString(36)}`,
     })
-    if (toolName === 'run_command') {
+    if (toolName === 'run_command' || toolName === 'write_terminal') {
       const denyResult = this.checkDenyCommandPatterns(args)
       if (denyResult) return decide(denyResult)
     }
@@ -93,7 +96,7 @@ export class PermissionPipeline {
       return decide({ verdict: 'ask', reason: 'Repository state change: committing the current index may include user-staged files' })
     }
 
-    if (toolName === 'run_command') {
+    if (toolName === 'run_command' || toolName === 'write_terminal') {
       const askResult = this.checkAskCommandPatterns(args)
       if (askResult) return decide(askResult)
     }
@@ -112,22 +115,22 @@ export class PermissionPipeline {
     return decide({ verdict: 'allow' })
   }
 
-  grantSession(toolName: string, argsFingerprint: string): void {
+  grantSession(toolName: string, args: Record<string, unknown>): void {
     const group = SESSION_GRANT_GROUPS.get(toolName)
     if (group) {
       this.sessionGrants.set(`group:${group}`, Date.now())
       return
     }
-    this.sessionGrants.set(`${toolName}:${argsFingerprint}`, Date.now())
+    this.sessionGrants.set(`${toolName}:${this.computeFingerprint(toolName, args)}`, Date.now())
   }
 
-  grantRun(toolName: string, argsFingerprint: string): void {
+  grantRun(toolName: string, args: Record<string, unknown>): void {
     const group = SESSION_GRANT_GROUPS.get(toolName)
     if (group) {
       this.runGrants.set(`group:${group}`, Date.now())
       return
     }
-    this.runGrants.set(`${toolName}:${argsFingerprint}`, Date.now())
+    this.runGrants.set(`${toolName}:${this.computeFingerprint(toolName, args)}`, Date.now())
   }
 
   grantCommandPattern(pattern: string): void {
@@ -148,7 +151,7 @@ export class PermissionPipeline {
   }
 
   private checkDenyCommandPatterns(args: Record<string, unknown>): PermissionCheckResult | null {
-    const command = (args.command as string || '').trim()
+    const command = this.commandText(args)
     if (!command) return null
 
     for (const { pattern, verdict, reason } of DENY_COMMAND_PATTERNS) {
@@ -161,7 +164,7 @@ export class PermissionPipeline {
   }
 
   private checkAskCommandPatterns(args: Record<string, unknown>): PermissionCheckResult | null {
-    const command = (args.command as string || '').trim()
+    const command = this.commandText(args)
     if (!command) return null
 
     if (this.approvalPolicy === 'full') return null
@@ -218,12 +221,21 @@ export class PermissionPipeline {
 
   private computeFingerprint(toolName: string, args: Record<string, unknown>): string {
     if (toolName === 'run_command') {
-      return (args.command as string || '').trim().slice(0, 100)
+      return createHash('sha256').update((args.command as string || '').trim()).digest('hex')
     }
     if (toolName === 'delete_file') {
-      return (args.path as string || '')
+      return createHash('sha256').update(args.path as string || '').digest('hex')
     }
-    return JSON.stringify(args).slice(0, 200)
+    return createHash('sha256').update(stableSerialize(args)).digest('hex')
+  }
+
+  private commandText(args: Record<string, unknown>): string {
+    const value = typeof args.command === 'string'
+      ? args.command
+      : typeof args.data === 'string'
+        ? args.data
+        : ''
+    return value.trim()
   }
 
   private matchesRule(rule: PermissionRule, toolName: string, args: Record<string, unknown>): boolean {
@@ -246,6 +258,15 @@ export class PermissionPipeline {
       case 'session': return 3
     }
   }
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableSerialize(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? String(value)
 }
 
 export function createDefaultPipeline(policy?: ApprovalPolicy): PermissionPipeline {
