@@ -8,7 +8,9 @@ import {
   getImageTokenBefore,
   getImageTokenRangeAfterDelete,
   getImageTokenRangeBeforeDelete,
+  getPromptEditorViewport,
   isImagePasteShortcut,
+  navigatePromptHistory,
   resolvePromptChrome,
 } from './PromptInput'
 import { darkTheme } from '../../theme/index'
@@ -128,5 +130,58 @@ describe('prompt appearance', () => {
     )
 
     expect(stripAnsi(output).split('\n')[2]).toContain('> hello')
+  })
+
+  it('keeps long input framed while showing the cursor-side tail', () => {
+    const output = renderToString(
+      React.createElement(
+        ThemeProvider,
+        { transparentBackground: true },
+        React.createElement(PromptInput, {
+          value: 'a'.repeat(40) + 'visible-tail',
+          onChange: () => {},
+          onSubmit: () => {},
+          width: 30,
+          appearance: 'default',
+        }),
+      ),
+      { columns: 40 },
+    )
+    const lines = stripAnsi(output).split('\n')
+
+    expect(lines.every(line => line.length === 30)).toBe(true)
+    expect(lines[2]).toContain('visible-tail')
+  })
+})
+
+describe('prompt history navigation', () => {
+  it('walks older entries and restores the draft on return', () => {
+    const history = ['first', 'second', 'third']
+    const latest = navigatePromptHistory(history, -1, '', 'unfinished draft', 'older')
+    const older = navigatePromptHistory(history, latest.index, latest.draft, latest.value, 'older')
+    const newer = navigatePromptHistory(history, older.index, older.draft, older.value, 'newer')
+    const draft = navigatePromptHistory(history, newer.index, newer.draft, newer.value, 'newer')
+
+    expect([latest.value, older.value, newer.value, draft.value]).toEqual(['third', 'second', 'third', 'unfinished draft'])
+    expect(draft.index).toBe(-1)
+  })
+})
+
+describe('prompt editor viewport', () => {
+  it('keeps the cursor visible when long input exceeds the frame', () => {
+    const atEnd = getPromptEditorViewport('0123456789abcdefghijklmnop', 26, 10)
+    const inMiddle = getPromptEditorViewport('0123456789abcdefghijklmnop', 13, 10)
+
+    expect(atEnd.beforeCursor).toBe('hijklmnop')
+    expect(atEnd.cursorChar).toBe(' ')
+    expect(atEnd.width).toBe(10)
+    expect(`${inMiddle.beforeCursor}${inMiddle.cursorChar}${inMiddle.afterCursor}`).toContain('d')
+    expect(inMiddle.width).toBeLessThanOrEqual(10)
+  })
+
+  it('measures wide characters without overflowing the editor width', () => {
+    const viewport = getPromptEditorViewport('中文输入测试', '中文输入'.length, 7)
+    expect(viewport.cursorChar).toBe('测')
+    expect(viewport.width).toBeLessThanOrEqual(7)
   })
 })
