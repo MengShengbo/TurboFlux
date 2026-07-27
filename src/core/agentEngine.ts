@@ -23,7 +23,7 @@ import { CacheMonitor } from './cacheMonitor'
 import { toolsToOpenAIFormat, toolsToAnthropicFormat, getToolByName, validateToolArgs } from './toolRegistry'
 import { applyEdit, stripLineNumberPrefix } from './editHelpers'
 import { canComputeDiff, computeHunks, summarizeHunks } from './diffCompute'
-import { ContextManager, extractStructuredSummary, formatSummaryAsContext } from './contextManager'
+import { ContextManager } from './contextManager'
 import {
   buildContinuationEvidence,
   buildContinuationSummaryPrompt,
@@ -31,7 +31,7 @@ import {
   extractContinuationText,
   validateContinuationSummary,
 } from './contextCompaction'
-import { autoCompactThreshold, blockingContextLimit, recapThreshold, resolveContextPolicyProfile } from './contextPolicy'
+import { autoCompactThreshold, blockingContextLimit, resolveContextPolicyProfile } from './contextPolicy'
 import { countMessagesTokens, countTurnishTokens } from './tokenCounter'
 import { resolveNativeReasoningRequest } from './modelRegistry'
 import {
@@ -835,51 +835,7 @@ export class AgentEngine {
   }
 
   async compactContext(): Promise<void> {
-    const keepRecent = resolveContextPolicyProfile(this.config.contextPolicy).keepRecentTurns
-    const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
-    if (nonSystemTurns.length <= keepRecent) return
-
-    const { oldTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
-    if (oldTurns.length === 0) return
-
-    const firstVisibleOldTurn = oldTurns.find(turn => turn.role === 'user' || turn.role === 'assistant')
-    const lastVisibleOldTurn = [...oldTurns].reverse().find(turn => turn.role === 'user' || turn.role === 'assistant')
-    if (!firstVisibleOldTurn || !lastVisibleOldTurn) return
-
-    const startMessageId = firstVisibleOldTurn.id
-    const endMessageId = lastVisibleOldTurn.id
-    const originalCharCount = oldTurns.reduce((sum, t) => sum + this.countTurnChars(t), 0)
-
-    const summary = await this.generateContinuationSummary(oldTurns, recentTurns)
-    const isModelGenerated = true
-    this.preservedFiles = this.collectPreservedFiles(oldTurns)
-
-    const existingSegments = this.stateProvider.getContextSegments()
-    const alreadyCovered = existingSegments.some(segment =>
-      segment.startMessageId === startMessageId && segment.endMessageId === endMessageId
-    )
-    if (!alreadyCovered) {
-      const segment: ContextSegment = {
-        startMessageId,
-        endMessageId,
-        summary,
-        isModelGenerated,
-        kind: isModelGenerated ? 'compact' : 'structured',
-        originalCharCount,
-        isValid: true,
-        createdAt: Date.now(),
-        coveredTurnIds: oldTurns.map(turn => turn.id),
-      }
-      this.stateProvider.addContextSegment(segment)
-      this.emit({ type: 'context:segment_created', segment })
-    }
-
-    this.addReservoirEntry(startMessageId, endMessageId, oldTurns, 'manual', originalCharCount)
-
-    const systemTurns = this.session.turns.filter(t => t.role === 'system')
-    this.session.turns = [...systemTurns, ...recentTurns]
-    this.contextManager.reset()
-    this.cacheMonitor.resetBaseline()
+    await this.performContextCompaction('manual')
   }
 
   getTokenUsage(): { input: number; output: number } {
@@ -1474,10 +1430,8 @@ export class AgentEngine {
     if (currentTurnCount === this.compressionPreparedTurnCount) return
     if (this.shouldCompactFromProviderUsage()) {
       await this.ensureContextWindow(true)
-    } else if (this.shouldRecapFromProviderUsage()) {
-      await this.createCacheSafeRecap()
     }
-    this.compressionPreparedTurnCount = currentTurnCount
+    this.compressionPreparedTurnCount = this.session.turns.length
   }
 
   private currentContextWindowSettings(): { contextWindow: number; maxOutputTokens: number; model?: string; provider?: string } {
@@ -1506,13 +1460,6 @@ export class AgentEngine {
     return providerTokens >= autoCompactThreshold(settings.contextWindow, settings.maxOutputTokens, this.config.contextPolicy)
   }
 
-  private shouldRecapFromProviderUsage(): boolean {
-    const providerTokens = this.currentContextTokensWithTokenizerTail()
-    if (providerTokens <= 0 || !Number.isFinite(providerTokens)) return false
-    const settings = this.currentContextWindowSettings()
-    return providerTokens >= recapThreshold(settings.contextWindow, settings.maxOutputTokens, this.config.contextPolicy)
-  }
-
   private currentContextTokensWithTokenizerTail(): number {
     const providerTokens = this.providerContextTokens()
     if (providerTokens <= 0) return 0
@@ -1537,56 +1484,6 @@ export class AgentEngine {
       }
     }
     return -1
-  }
-
-  private async createCacheSafeRecap(): Promise<void> {
-    const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
-    const keepRecent = resolveContextPolicyProfile(this.config.contextPolicy).recapKeepRecentTurns
-    if (nonSystemTurns.length <= keepRecent + 4) return
-
-    const { oldTurns: recapTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
-    const firstVisibleTurn = recapTurns.find(turn => turn.role === 'user' || turn.role === 'assistant')
-    const lastVisibleTurn = [...recapTurns].reverse().find(turn => turn.role === 'user' || turn.role === 'assistant')
-    if (!firstVisibleTurn || !lastVisibleTurn) return
-
-    const startMessageId = firstVisibleTurn.id
-    const endMessageId = lastVisibleTurn.id
-    const existingSegments = this.stateProvider.getContextSegments()
-    const alreadyCovered = existingSegments.some(segment =>
-      segment.startMessageId === startMessageId && segment.endMessageId === endMessageId
-    )
-    if (alreadyCovered) return
-
-    let summary: string
-    let isModelGenerated: boolean
-    try {
-      summary = await this.generateContinuationSummary(recapTurns, recentTurns)
-      if (!summary.trim()) throw new Error('Recap generation returned empty content')
-      isModelGenerated = true
-    } catch {
-      const structured = extractStructuredSummary(recapTurns)
-      summary = formatSummaryAsContext(structured)
-      isModelGenerated = false
-    }
-
-    const segment: ContextSegment = {
-      startMessageId,
-      endMessageId,
-      summary: `<cache_safe_recap>\n${summary.trim()}\n</cache_safe_recap>`,
-      isModelGenerated,
-      kind: 'recap',
-      originalCharCount: recapTurns.reduce((sum, turn) => sum + this.countTurnChars(turn), 0),
-      isValid: true,
-      createdAt: Date.now(),
-      coveredTurnIds: recapTurns.map(turn => turn.id),
-    }
-    this.stateProvider.addContextSegment(segment)
-    this.emit({ type: 'context:segment_created', segment })
-    this.emit({
-      type: 'notification',
-      message: 'Cache-safe recap saved; keeping full conversation prefix intact.',
-      level: 'info',
-    })
   }
 
   async waitUntilIdle(): Promise<void> {
@@ -1618,7 +1515,6 @@ export class AgentEngine {
     this.currentRunExplorePacks.clear()
     this.conclusionGuardAttempts = 0
     this.contextLimitRetryInProgress = false
-    this.preservedFiles = []
     this.workspaceMemoryText = null
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
@@ -1789,68 +1685,65 @@ export class AgentEngine {
       })
     }
 
+    await this.performContextCompaction('compact')
+  }
+
+  private async performContextCompaction(source: ContextReservoirEntry['source']): Promise<boolean> {
     const keepRecent = resolveContextPolicyProfile(this.config.contextPolicy).keepRecentTurns
-    const nonSystemTurns = this.session.turns.filter(t => t.role !== 'system')
+    const nonSystemTurns = this.session.turns.filter(turn => turn.role !== 'system')
+    if (nonSystemTurns.length <= keepRecent) return false
+
     const { oldTurns, recentTurns } = splitTurnsForCompaction(nonSystemTurns, keepRecent)
+    if (oldTurns.length === 0) return false
 
-    if (oldTurns.length === 0) return
-
-    // Segment boundaries must be real ChatMessage ids so chatStore can
-    // invalidate them after visible message edits/deletes. Hidden tool_result
-    // turns are still covered because they sit between these boundary turns.
     const firstVisibleOldTurn = oldTurns.find(turn => turn.role === 'user' || turn.role === 'assistant')
     const lastVisibleOldTurn = [...oldTurns].reverse().find(turn => turn.role === 'user' || turn.role === 'assistant')
-    if (!firstVisibleOldTurn || !lastVisibleOldTurn) return
+    if (!firstVisibleOldTurn || !lastVisibleOldTurn) return false
 
     const startMessageId = firstVisibleOldTurn.id
     const endMessageId = lastVisibleOldTurn.id
-    const originalCharCount = oldTurns.reduce((sum, t) => sum + this.countTurnChars(t), 0)
-    const existingSegments = this.stateProvider.getContextSegments()
-    const alreadyCovered = existingSegments.some(segment =>
-      segment.startMessageId === startMessageId && segment.endMessageId === endMessageId
+    const originalCharCount = oldTurns.reduce((sum, turn) => sum + this.countTurnChars(turn), 0)
+    const existingSegment = this.stateProvider.getContextSegments().find(segment =>
+      segment.isValid
+      && segment.summary.trim().length > 0
+      && segment.startMessageId === startMessageId
+      && segment.endMessageId === endMessageId
     )
-    if (alreadyCovered) return
 
-    // Find the last checkpoint in the old turns
-    let checkpointId: string | undefined
-    for (let i = oldTurns.length - 1; i >= 0; i--) {
-      if (oldTurns[i].metadata?.checkpointId) {
-        checkpointId = oldTurns[i].metadata!.checkpointId
-        break
+    if (!existingSegment) {
+      let checkpointId: string | undefined
+      for (let index = oldTurns.length - 1; index >= 0; index -= 1) {
+        if (oldTurns[index].metadata?.checkpointId) {
+          checkpointId = oldTurns[index].metadata!.checkpointId
+          break
+        }
       }
+
+      const summary = await this.generateContinuationSummary(oldTurns, recentTurns)
+      const segment: ContextSegment = {
+        startMessageId,
+        endMessageId,
+        summary,
+        isModelGenerated: true,
+        kind: 'compact',
+        checkpointId,
+        originalCharCount,
+        isValid: true,
+        createdAt: Date.now(),
+        coveredTurnIds: oldTurns.map(turn => turn.id),
+      }
+      this.stateProvider.addContextSegment(segment)
+      this.emit({ type: 'context:segment_created', segment })
     }
 
-    const summary = await this.generateContinuationSummary(oldTurns, recentTurns)
-    const isModelGenerated = true
-
-    const segment: ContextSegment = {
-      startMessageId,
-      endMessageId,
-      summary,
-      isModelGenerated,
-      kind: isModelGenerated ? 'compact' : 'structured',
-      checkpointId,
-      originalCharCount,
-      isValid: true,
-      createdAt: Date.now(),
-      coveredTurnIds: oldTurns.map(turn => turn.id),
-    }
-    this.stateProvider.addContextSegment(segment)
-    this.emit({ type: 'context:segment_created', segment })
-    this.addReservoirEntry(startMessageId, endMessageId, oldTurns, 'compact', originalCharCount)
-
+    this.addReservoirEntry(startMessageId, endMessageId, oldTurns, source, originalCharCount)
     this.preservedFiles = this.collectPreservedFiles(oldTurns)
 
-    // Hard-replace: discard old turns from the live session so subsequent
-    // buildApiMessages() calls never see them again. The summary is
-    // persisted in chatStore via the context:segment_created event above
-    // and will be injected into the system prompt by buildMessages().
-    // The original turns remain in chatStore.messages for UI display,
-    // rollback, and edit — they are just no longer sent to the API.
-    const systemTurns = this.session.turns.filter(t => t.role === 'system')
+    const systemTurns = this.session.turns.filter(turn => turn.role === 'system')
     this.session.turns = [...systemTurns, ...recentTurns]
     this.contextManager.reset()
     this.cacheMonitor.resetBaseline()
+    return true
   }
 
   /**

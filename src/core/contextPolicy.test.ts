@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { autoCompactThreshold, blockingContextLimit, effectiveInputWindow, recapThreshold } from './contextPolicy'
+import { autoCompactThreshold, blockingContextLimit, effectiveInputWindow } from './contextPolicy'
 
 describe('contextPolicy', () => {
   it('reserves output tokens before calculating the effective input window', () => {
@@ -12,7 +12,6 @@ describe('contextPolicy', () => {
 
   it('uses a more conservative quality-first autocompact threshold', () => {
     expect(autoCompactThreshold(200_000, 32_000, 'qualityFirst')).toBeLessThan(autoCompactThreshold(200_000, 32_000, 'normal'))
-    expect(recapThreshold(200_000, 32_000, 'qualityFirst')).toBeLessThan(recapThreshold(200_000, 32_000, 'normal'))
   })
 
   it('keeps a manual compact buffer before the hard blocking limit', () => {
