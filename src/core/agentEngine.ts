@@ -70,9 +70,7 @@ import {
   type ModelProtocol,
   type ModelProtocolAttempt,
 } from './modelProtocol'
-import {
-  formatCodeMap,
-} from './toolDispatcher'
+import { formatCodeMap } from './toolDispatcher'
 import { getSubAgentDefinition, runSubAgent, loadDynamicAgents, getAvailableAgentTypes } from './subAgent'
 import type { ToolExecutor, WebSearchResult } from '../tools/executor'
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
@@ -421,21 +419,10 @@ export class AgentEngine {
   private agentBackgroundSessions: Map<string, { command: string; startedAt: number }> = new Map()
   private turnStrategyPlanner: TurnStrategyPlanner = new TurnStrategyPlanner()
   private currentTurnStrategy: TurnStrategy | null = null
-  private codemapSummary: string | null = null
-  // Bug 4 fix: previously a boolean "fetched once per run" flag meant the
-  // model was stuck with the codemap of whatever the first user message
-  // happened to be — switching topics mid-conversation never refreshed it.
-  // Now we store a stable cache key derived from (route + workspace +
-  // normalized query tokens) and only re-fetch when that key changes,
-  // keeping per-turn cost low while staying responsive to topic shifts.
-  private codemapCacheKey: string | null = null
   /**
    * Workspace skeleton — a STABLE per-workspace primer fed to Fast Context
    * (and other subagents) ahead of any objective.
-   *
-   * Why separate from `codemapSummary`? codemapSummary is query-aware — it
-   * mutates with every topic shift, which destroys DeepSeek V4's prefix-
-   * cache locality. The skeleton is intentionally objective-agnostic:
+   * The skeleton is intentionally objective-agnostic:
    * top-level directory tree only, computed once per workspace, kept
    * deterministic so V4's cache prefix detector recognizes the same
    * unit across every Fast Context call. Once persisted, every later
@@ -1084,8 +1071,6 @@ export class AgentEngine {
     this.currentRunExplorePacks.clear()
     this.conclusionGuardAttempts = 0
     this.compressionPreparedTurnCount = 0
-    this.codemapSummary = null
-    this.codemapCacheKey = null
     this.workspaceMemoryText = null
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
@@ -1636,8 +1621,6 @@ export class AgentEngine {
     this.conclusionGuardAttempts = 0
     this.contextLimitRetryInProgress = false
     this.preservedFiles = []
-    this.codemapSummary = null
-    this.codemapCacheKey = null
     this.workspaceMemoryText = null
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
@@ -2172,12 +2155,6 @@ Before retrying:
     return { addedLines: stats.added, removedLines: stats.removed }
   }
 
-  private invalidateCodeLookupAfterFileChange(workspacePath: string, _filePaths: string[]): void {
-    if (!workspacePath) return
-    this.codemapSummary = null
-    this.codemapCacheKey = null
-  }
-
   private async runFastContextScan(objective: string, options: {
     signal?: AbortSignal
     runId: string
@@ -2229,6 +2206,7 @@ Before retrying:
       if (options.signal?.aborted) throw new Error('FastContext cancelled before start')
       const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
       const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
+      const workspaceSkeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
 
       emitIfCurrent({
         type: 'subagent:start',
@@ -2250,7 +2228,7 @@ Before retrying:
         reasoning: fastContextConfig?.reasoning,
         modelCapabilities: fastContextConfig?.modelCapabilities,
         model: fastContextModel?.id || fastContextConfig?.defaultModel,
-        codemap: this.codemapSummary || undefined,
+        codemap: workspaceSkeleton,
         abortSignal: options.signal,
         strategy,
         requestTimeoutMs: profile.requestTimeoutMs,
@@ -2305,18 +2283,16 @@ Before retrying:
 
     const turnStrategy = this.turnStrategyPlanner.plan(this.session, this.config.mode)
     this.currentTurnStrategy = turnStrategy
-    // Strategy can skip heavyweight context for pure chat, but it never
-    // controls tool visibility. Modes and permission policy own that.
-    const skipHeavyContext = !turnStrategy?.needsWorkspaceContext
-    await Promise.all([
-      skipHeavyContext ? Promise.resolve() : this.maybeFetchCodemapSummary(turnStrategy),
-      skipHeavyContext ? Promise.resolve() : this.maybeRefreshWorkspaceMemory(),
-      skipHeavyContext ? Promise.resolve() : this.maybeBuildWorkspaceSkeleton(this.config.workspacePath || '').then(() => undefined),
-      this.refreshGitStatus(),
-    ])
+    const currentUserTurnId = [...this.session.turns].reverse().find(turn => turn.role === 'user')?.id || null
+    const needsRuntimePreparation = currentUserTurnId !== this.runtimeContextTurnId
+    if (needsRuntimePreparation) {
+      await Promise.all([
+        this.maybeRefreshWorkspaceMemory(),
+        this.refreshGitStatus(),
+      ])
+    }
     // Long-conversation persona drift reminder — empty string when below threshold.
     const voiceReminderContext: string | null = null
-    const strategyContext = this.turnStrategyPlanner.buildStrategyContext(turnStrategy)
     const pendingFastContextRun = this.fastContextRun
     const pendingFastContextPack = pendingFastContextRun?.phase === 'delivering'
       ? pendingFastContextRun.delivery
@@ -2332,7 +2308,6 @@ Before retrying:
     } else if (pendingFastContextRun?.phase === 'delivering') {
       this.fastContextRun = null
     }
-    const currentUserTurnId = [...this.session.turns].reverse().find(turn => turn.role === 'user')?.id || null
     const runtimeContextCandidate = [
       this.config.workspacePath
         ? this.wrapRuntimeContextSection('current_workspace', [
@@ -2343,11 +2318,9 @@ Before retrying:
           ].join('\n'))
         : null,
       this.config.appendSystemPrompt,
-      strategyContext,
       voiceReminderContext,
       this.cachedGitStatus ? this.wrapRuntimeContextSection('git_status', this.cachedGitStatus) : null,
-      !skipHeavyContext && this.workspaceMemoryText ? this.wrapRuntimeContextSection('workspace_memory', this.workspaceMemoryText) : null,
-      !skipHeavyContext && this.codemapSummary ? this.wrapRuntimeContextSection('codebase_map', this.codemapSummary) : null,
+      this.workspaceMemoryText ? this.wrapRuntimeContextSection('workspace_memory', this.workspaceMemoryText) : null,
     ].filter(Boolean).join('\n\n') || undefined
     const dynamicRuntimeContext = this.stabilizeRuntimeContext(currentUserTurnId, runtimeContextCandidate || '')
 
@@ -4007,59 +3980,6 @@ Before retrying:
     return ''
   }
 
-  private latestUserContent(): string {
-    for (let index = this.session.turns.length - 1; index >= 0; index -= 1) {
-      const turn = this.session.turns[index]
-      if (turn.role === 'user' && turn.content.trim()) return turn.content.trim()
-    }
-    return ''
-  }
-
-  private async maybeFetchCodemapSummary(strategy?: TurnStrategy | null): Promise<void> {
-    if (!strategy?.needsCodeMap) return
-    const workspace = this.stateProvider.getWorkspace()
-    const basePath = workspace?.path || ''
-    const query = this.latestUserContent()
-    if (!basePath || !query) return
-
-    // Bug 4 fix: build a cache key that captures (route + workspace +
-    // top-N normalized query tokens). Re-fetch when the topic shifts
-    // (different route or different significant tokens) but skip the
-    // network call when the user is just nudging the same topic.
-    const tokens = query
-      .toLowerCase()
-      .replace(/[^a-z0-9_\u4e00-\u9fa5]+/g, ' ')
-      .split(/\s+/)
-      .filter(t => t.length > 1)
-      .slice(0, 6)
-      .sort()
-      .join(',')
-    const cacheKey = `${strategy.intent}:${strategy.scope}|${basePath}|${tokens}`
-    if (this.codemapCacheKey === cacheKey && this.codemapSummary) return
-
-    // Optimistically claim the key so concurrent turns don't race the IPC.
-    // If the fetch fails we leave codemapSummary null but keep the key —
-    // the next user message with different tokens will retry naturally.
-    this.codemapCacheKey = cacheKey
-    try {
-      const response = await this.toolExecutor.getCodeMap({
-        workspacePath: basePath,
-        query,
-        maxPaths: 6,
-        maxChildrenPerPath: 4,
-      }) as { success: boolean; data?: { map?: CodeMapNode[] | CodeMapNode; relatedPaths?: string[] }; map?: CodeMapNode[] | CodeMapNode; relatedPaths?: string[] }
-      const map = response.data?.map ?? response.map
-      if (!response.success || !map) return
-      const nodes = Array.isArray(map) ? map : [map]
-      if (nodes.length === 0) return
-      const relatedPaths = response.data?.relatedPaths ?? response.relatedPaths
-      const related = relatedPaths?.length ? `\nRelated paths:\n${relatedPaths.map((p: string) => `- ${p}`).join('\n')}` : ''
-      this.codemapSummary = `${nodes.map(node => this.formatCodeMap(node)).join('\n')}${related}`.slice(0, 5000)
-    } catch (err) {
-      this.emit({ type: 'error', error: `CodeMap refresh failed: ${err instanceof Error ? err.message : String(err)}` })
-    }
-  }
-
   /**
    * Build a STABLE workspace skeleton primer for subagent calls.
    *
@@ -5027,7 +4947,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File written: ${args.path}` : `Error: ${result.error}`
       }
@@ -5046,7 +4965,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File replaced: ${args.path}` : `Error: ${result.error}`
       }
@@ -5073,7 +4991,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         })
         if (writeResult.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return writeResult.success
           ? `File edited: ${args.path}${replaceAll ? ` (${editResult.replacements} replacements)` : ''}`
@@ -5118,7 +5035,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         })
         if (writeResult.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return writeResult.success
           ? `File edited: ${args.path} (${rawEdits.length} edits applied: ${summary.join(', ')})`
@@ -5571,7 +5487,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         })
         if (result.success) {
           this.touchedFilePaths.add(filePath)
-          this.invalidateCodeLookupAfterFileChange(basePath, [filePath])
         }
         return result.success ? `File deleted: ${args.path}` : `Error: ${result.error}`
       }
@@ -5844,8 +5759,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!basePath) return 'Error: no workspace selected'
         const result = await this.toolExecutor.checkpointRestore?.(basePath, args.checkpoint_id as string)
         if (!result?.success) return `Error: ${result?.error || 'checkpoint restore failed'}`
-        this.codemapSummary = null
-        this.codemapCacheKey = null
         const restored = result.data?.restoredFiles || []
         const safety = result.data?.safetyCheckpointId ? `\nSafety checkpoint: ${result.data.safetyCheckpointId}` : ''
         return `Restored ${restored.length} file(s) from checkpoint.${safety}`
@@ -5856,20 +5769,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const keepCount = typeof args.keep_count === 'number' ? args.keep_count : 50
         const result = await this.toolExecutor.checkpointPrune?.(basePath, keepCount)
         return result?.success ? `Kept the newest ${keepCount} checkpoint(s).` : `Error: ${result?.error || 'checkpoint prune failed'}`
-      }
-
-      case 'generate_change_summary': {
-        const filesChanged = args.files_changed as string[]
-        const summary = args.summary as string
-        const reason = args.reason as string | undefined
-        const risks = args.risks as string | undefined
-
-        let output = `## Change Summary\n\n${summary}\n\n`
-        output += `**Files changed:** ${filesChanged.join(', ')}\n`
-        if (reason) output += `**Reason:** ${reason}\n`
-        if (risks) output += `**Risks:** ${risks}\n`
-
-        return output
       }
 
       case 'list_agents': {

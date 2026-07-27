@@ -7,7 +7,6 @@ export interface TurnStrategy {
   intent: TurnIntent
   scope: TurnScope
   needsWorkspaceContext: boolean
-  needsCodeMap: boolean
   requiresEvidence: boolean
   allowWrites: boolean
   confidence: number
@@ -71,7 +70,6 @@ export class TurnStrategyPlanner {
     const hasTasks = hasOpenWork(session)
     const canWriteByMode = mode === 'vibe'
     const needsWorkspaceContext = true
-    const needsCodeMap = true
     const requiresEvidence = false
 
     const reasons = [
@@ -79,14 +77,13 @@ export class TurnStrategyPlanner {
       hasTasks ? 'active task exists' : 'no active task',
       errors.length > 0 ? `recent tool errors=${errors.length}` : 'no recent tool errors',
       hasEvidence ? 'recent code evidence exists' : 'no recent code evidence',
-      'workspace context enabled by default',
+      'workspace rules available without automatic repository mapping',
     ]
 
     return {
       intent: 'model_decides',
       scope: 'model_decides',
       needsWorkspaceContext,
-      needsCodeMap,
       requiresEvidence,
       allowWrites: canWriteByMode,
       confidence: 1,

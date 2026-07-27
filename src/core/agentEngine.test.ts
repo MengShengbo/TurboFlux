@@ -1039,6 +1039,9 @@ describe('AgentEngine model protocol compatibility', () => {
     const executor = {
       streamMessage: vi.fn(streamMessage),
       streamAbort: vi.fn(async () => {}),
+      getCodeMap: vi.fn(async () => {
+        throw new Error('main model calls must not auto-build a code map')
+      }),
     } as unknown as ToolExecutor
     const engine = new AgentEngine({
       mode: 'vibe',
@@ -1331,6 +1334,7 @@ describe('AgentEngine model protocol compatibility', () => {
 
       expect(requestBodies[1]?.input).toEqual(requestBodies[0]?.input)
       expect(JSON.stringify(requestBodies[1]?.input)).not.toContain('changed-runtime-context')
+      expect(harness.executor.getCodeMap).not.toHaveBeenCalled()
 
       harness.engine.getSession().turns.push({
         id: 'user-protocol-next',
