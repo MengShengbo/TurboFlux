@@ -11,6 +11,7 @@ import { SubAgentTaskManager } from './subAgentTaskManager'
 import { DefaultAgentStateProvider, type AgentRuntimeConfig } from './stateProvider'
 import { buildProfileSystemPromptSection, loadProfile } from '../profile'
 import type { SandboxOptions } from '../sandbox/types'
+import { createOffSecurityProfile } from '../../shared/securityTypes'
 
 export interface CreateAgentRuntimeOptions {
   workspacePath: string
@@ -63,6 +64,7 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
     contextPolicy: 'normal',
     maxTokens: options.config.maxTokens,
     shell: options.shell || getDefaultShell(),
+    securityProfile: createOffSecurityProfile(),
   }
 }
 

@@ -11,6 +11,8 @@ import { guardedBackend } from './backends/guarded'
 import { bubblewrapBackend } from './backends/bubblewrap'
 import { sandboxExecBackend } from './backends/sandboxExec'
 import { dockerBackend } from './backends/docker'
+import type { SecurityMode } from '../../shared/securityTypes'
+import { securityTargetDigest } from '../security/researchMode'
 
 const BACKENDS = {
   guarded: guardedBackend,
@@ -24,6 +26,7 @@ export class ProcessSandbox {
   private readonly status: SandboxStatus
   private readonly guard: GuardedCommandPolicy
   private readonly auditPath: string
+  private securityAuditContext: { mode: SecurityMode; engagementId?: string; targets: string[] } = { mode: 'off', targets: [] }
 
   constructor(
     workspacePath: string,
@@ -45,6 +48,14 @@ export class ProcessSandbox {
       ...this.status,
       writableRoots: [...this.status.writableRoots],
       auditPath: this.auditPath,
+    }
+  }
+
+  setSecurityAuditContext(context: { mode: SecurityMode; engagementId?: string; targets: string[] }): void {
+    this.securityAuditContext = {
+      mode: context.mode,
+      engagementId: context.engagementId,
+      targets: [...context.targets],
     }
   }
 
@@ -148,6 +159,12 @@ export class ProcessSandbox {
         cwd,
         commandDigest: createHash('sha256').update(command).digest('hex'),
         reason: message,
+        securityMode: this.securityAuditContext.mode,
+        engagementId: this.securityAuditContext.engagementId,
+        targetCount: this.securityAuditContext.targets.length,
+        targetDigest: this.securityAuditContext.targets.length > 0
+          ? securityTargetDigest(this.securityAuditContext.targets)
+          : undefined,
       }
       appendFileSync(this.auditPath, `${JSON.stringify(record)}\n`, { encoding: 'utf-8', mode: 0o600 })
     } catch {}

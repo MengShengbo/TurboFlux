@@ -2,6 +2,8 @@ import type { TreeNode } from '../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../shared/memoryTypes'
 import type { TerminalBufferResult, TerminalSessionInfo } from '../shared/terminalTypes'
+import type { SecurityResearchProfile } from '../shared/securityTypes'
+import type { SandboxStatus } from '../core/sandbox/types'
 
 export interface Result<T = any> {
   success: boolean
@@ -92,6 +94,10 @@ export interface CheckpointResult {
 }
 
 export interface ToolExecutor {
+  setSecurityProfile?(profile: SecurityResearchProfile): void
+  getSecurityProfile?(): SecurityResearchProfile
+  getSandboxStatus?(): SandboxStatus
+
   // File operations
   readFile(path: string): Promise<Result<string>>
   readFileRange?(path: string, offset?: number, limit?: number, maxBytes?: number): Promise<Result<FileRangeResult>>

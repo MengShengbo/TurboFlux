@@ -32,6 +32,9 @@ import { RuntimeTaskManager } from './runtimeTaskManager'
 import { getChildProcessSpawnOptions, getDefaultShellSpec, getProcessGroupSignal, usesProcessGroup } from '../../platform/process'
 import { ProcessSandbox } from '../sandbox/processSandbox'
 import type { SandboxOptions, SandboxSpawnPlan, SandboxStatus } from '../sandbox/types'
+import type { SecurityResearchProfile } from '../../shared/securityTypes'
+import { createOffSecurityProfile } from '../../shared/securityTypes'
+import { assertSecurityCommandScope } from '../security/researchMode'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
@@ -89,6 +92,7 @@ export class NodeToolExecutor implements ToolExecutor {
   private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
   private activeStreams: Map<number, AbortController> = new Map()
   private runtimeTaskManager: RuntimeTaskManager
+  private securityProfile: SecurityResearchProfile = createOffSecurityProfile()
 
   constructor(private workspacePath: string, options: NodeToolExecutorOptions = {}) {
     this.memoryService = new MemoryService()
@@ -115,6 +119,19 @@ export class NodeToolExecutor implements ToolExecutor {
 
   getProcessSandbox(): ProcessSandbox {
     return this.processSandbox
+  }
+
+  setSecurityProfile(profile: SecurityResearchProfile): void {
+    this.securityProfile = { ...profile, targets: [...profile.targets] }
+    this.processSandbox.setSecurityAuditContext({
+      mode: profile.mode,
+      engagementId: profile.engagementId,
+      targets: profile.targets,
+    })
+  }
+
+  getSecurityProfile(): SecurityResearchProfile {
+    return { ...this.securityProfile, targets: [...this.securityProfile.targets] }
   }
 
   private createRuntimeTaskLog(taskId: string): string {
@@ -1188,6 +1205,7 @@ export class NodeToolExecutor implements ToolExecutor {
   private validateCommandSync(command: string, cwd: string): { success: true; cwd: string } | { success: false; error: string } {
     try {
       const safeCwd = this.ensureAllowedPath(cwd)
+      assertSecurityCommandScope(command, this.securityProfile)
       this.processSandbox.validateCommand(command, safeCwd)
       return { success: true, cwd: safeCwd }
     } catch (error) {
@@ -2206,6 +2224,9 @@ export class NodeToolExecutor implements ToolExecutor {
       sandboxBackend: status.resolvedBackend,
       sandboxNetwork: status.network,
       sandboxOsIsolation: status.osIsolation,
+      securityMode: this.securityProfile.mode,
+      securityEngagementId: this.securityProfile.engagementId,
+      securityTargetCount: this.securityProfile.targets.length,
     }
   }
 

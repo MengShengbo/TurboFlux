@@ -63,6 +63,21 @@ describe('StatusLine', () => {
     expect(output).not.toContain('mcp:4')
   })
 
+  it('surfaces an active security engagement in the primary status line', () => {
+    const output = renderStatus(
+      <StatusLine
+        config={{
+          provider: 'openai', apiKey: 'test', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6',
+          contextWindow: 200_000, maxTokens: 16_384, approvalPolicy: 'ask',
+        }}
+        tokenUsage={{ source: 'unknown' }}
+        securityProfile={{ mode: 'red', active: true, engagementId: 'sec-test', targets: ['example.com'] }}
+      />,
+      120,
+    )
+    expect(output).toContain('security:red')
+  })
+
   it('adds secondary runtime state when space is available', () => {
     const output = renderStatus(
       <StatusLine

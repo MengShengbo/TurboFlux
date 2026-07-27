@@ -12,6 +12,7 @@ import type { ToolStatus } from '../tools/ToolCallTree'
 import { formatToolLabelForHistory } from '../tools/ToolCallTree'
 import type { StreamingToolDraft } from '../tools/ActiveWorkPanel'
 import type { SandboxStatus } from '../../../core/sandbox/types'
+import type { SecurityResearchProfile } from '../../../shared/securityTypes'
 import { deriveDeveloperFlow, type DeveloperSubAgentActivity, type DeveloperFlowTone } from '../developerFlowModel'
 
 interface SessionSidebarProps {
@@ -22,6 +23,7 @@ interface SessionSidebarProps {
   reasoning?: string
   approvalPolicy: string
   sandboxStatus?: SandboxStatus
+  securityProfile?: SecurityResearchProfile
   contextWindow: number
   tokenUsage: TokenUsage
   isRunning: boolean
@@ -50,6 +52,7 @@ export function SessionSidebar({
   reasoning,
   approvalPolicy,
   sandboxStatus,
+  securityProfile,
   contextWindow,
   tokenUsage,
   isRunning,
@@ -133,6 +136,12 @@ export function SessionSidebar({
         <SidebarRow label="Mode" value={mode.toUpperCase()} width={width} color={mode === 'vibe' ? theme.success : theme.info} />
         <SidebarRow label="Reason" value={reasoning || 'provider'} width={width} color={theme.text} />
         <SidebarRow label="Approval" value={approvalPolicy} width={width} color={theme.text} />
+        {securityProfile?.active && <SidebarRow
+          label="Security"
+          value={`${securityProfile.mode.toUpperCase()} · ${securityProfile.targets.length} target${securityProfile.targets.length === 1 ? '' : 's'}`}
+          width={width}
+          color={securityProfile.mode === 'red' ? theme.error : theme.info}
+        />}
         {sandboxStatus && <SidebarRow
           label="Sandbox"
           value={`${sandboxStatus.policy}/${sandboxStatus.resolvedBackend}${sandboxStatus.available ? '' : ' unavailable'}`}
