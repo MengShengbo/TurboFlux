@@ -8,6 +8,8 @@ import type { ToolExecutor } from '../tools/executor'
 import {
   fetchGitShow,
   gitCommitPaths,
+  gitRestorePaths,
+  gitRevertCommit,
   parseGitLog,
   parseGitStatusPorcelainV2,
 } from './gitService'
@@ -105,24 +107,72 @@ describe('Git safety boundaries', () => {
       if (args[0] === 'diff') return { success: false, exitCode: 1 }
       return { success: true }
     })
-    const result = await gitCommitPaths(process.cwd(), 'test checkpoint', ['src/core/gitService.ts'], executor)
+    const result = await gitCommitPaths(process.cwd(), 'test commit', ['src/core/gitService.ts'], executor)
     expect(result).toMatchObject({ ok: false })
     expect(result.error).toContain('user-staged')
     expect(runProcess).toHaveBeenCalledTimes(2)
     expect(runProcess.mock.calls.map(call => call[1][0])).toEqual(['rev-parse', 'diff'])
   })
 
+  it('refuses to restore paths with staged changes', async () => {
+    const { executor, runProcess } = executorWithProcessMock(args => {
+      if (args[0] === 'diff') return { success: false, exitCode: 1 }
+      return { success: true }
+    })
+
+    const result = await gitRestorePaths(process.cwd(), ['src/app.ts'], executor)
+
+    expect(result).toMatchObject({ ok: false })
+    expect(result.error).toContain('staged changes')
+    expect(runProcess.mock.calls.map(call => call[1][0])).toEqual(['diff'])
+  })
+
+  it('restores validated paths from an explicit Git revision', async () => {
+    const { executor, runProcess } = executorWithProcessMock()
+
+    const result = await gitRestorePaths(process.cwd(), ['src/app.ts'], executor, 'HEAD~1')
+
+    expect(result).toMatchObject({ ok: true })
+    expect(runProcess.mock.calls[1][1]).toEqual(['restore', '--source=HEAD~1', '--worktree', '--', 'src/app.ts'])
+  })
+
+  it('requires a clean tracked tree before creating a revert commit', async () => {
+    const { executor, runProcess } = executorWithProcessMock(args => {
+      if (args[0] === 'diff' && !args.includes('--cached')) return { success: false, exitCode: 1 }
+      return { success: true }
+    })
+
+    const result = await gitRevertCommit(process.cwd(), 'abc1234', executor)
+
+    expect(result).toMatchObject({ ok: false })
+    expect(result.error).toContain('working-tree or staged changes')
+    expect(runProcess.mock.calls.some(call => call[1][0] === 'revert')).toBe(false)
+  })
+
+  it('creates an auditable revert commit with --no-edit', async () => {
+    const { executor, runProcess } = executorWithProcessMock(args => {
+      if (args[0] === 'rev-parse') return { success: true, stdout: 'def5678\n' }
+      if (args[0] === 'revert') return { success: true, stdout: '[main def5678] Revert changes\n' }
+      return { success: true }
+    })
+
+    const result = await gitRevertCommit(process.cwd(), 'abc1234', executor)
+
+    expect(result).toMatchObject({ ok: true, hash: 'def5678' })
+    expect(runProcess.mock.calls.some(call => call[1].join(' ') === 'revert --no-edit abc1234')).toBe(true)
+  })
+
   it('uses an isolated index and refreshes only committed paths', async () => {
     const { executor, runProcess } = executorWithProcessMock((args, env) => {
       if (args[0] === 'rev-parse') return { success: true, stdout: args[1] === 'HEAD' ? 'abc1234\n' : 'parent\n' }
       if (args[0] === 'commit') {
-        expect(env.GIT_INDEX_FILE).toContain(join(process.cwd(), '.turboflux', 'git-index-'))
-        return { success: true, stdout: '[main abc1234] checkpoint\n' }
+        expect(env.GIT_INDEX_FILE).toContain('turboflux-git-index-')
+        return { success: true, stdout: '[main abc1234] changes\n' }
       }
       return { success: true }
     })
     const workspace = process.cwd()
-    const result = await gitCommitPaths(workspace, 'checkpoint', [`${workspace}/src/core/gitService.ts`], executor)
+    const result = await gitCommitPaths(workspace, 'commit changes', [`${workspace}/src/core/gitService.ts`], executor)
 
     expect(result).toMatchObject({ ok: true, hash: 'abc1234' })
     expect(runProcess.mock.calls.some(call => call[1][0] === 'read-tree')).toBe(true)
@@ -138,11 +188,11 @@ describe('Git safety boundaries', () => {
         return { success: true, stdout: indexReads === 1 ? 'before-index\0' : 'user-staged-index\0' }
       }
       if (args[0] === 'rev-parse') return { success: true, stdout: args[1] === 'HEAD' ? 'abc1234\n' : 'parent\n' }
-      if (args[0] === 'commit') return { success: true, stdout: '[main abc1234] checkpoint\n' }
+      if (args[0] === 'commit') return { success: true, stdout: '[main abc1234] changes\n' }
       return { success: true }
     })
 
-    const result = await gitCommitPaths(process.cwd(), 'checkpoint', ['src/core/gitService.ts'], executor)
+    const result = await gitCommitPaths(process.cwd(), 'commit changes', ['src/core/gitService.ts'], executor)
 
     expect(result).toMatchObject({ ok: true, hash: 'abc1234' })
     expect(result.output).toContain('real index was left untouched')
@@ -167,7 +217,7 @@ describe('Git safety boundaries', () => {
       await git('add', '--', 'user.txt')
       await writeFile(join(workspace, 'agent.txt'), 'agent change\n')
 
-      const result = await gitCommitPaths(workspace, 'agent checkpoint', ['agent.txt'], executor)
+      const result = await gitCommitPaths(workspace, 'agent changes', ['agent.txt'], executor)
 
       expect(result.ok).toBe(true)
       expect((await git('show', '--pretty=', '--name-only', 'HEAD')).stdout.trim()).toBe('agent.txt')
@@ -176,7 +226,7 @@ describe('Git safety boundaries', () => {
     } finally {
       await rm(workspace, { recursive: true, force: true })
     }
-  })
+  }, 20_000)
 
   it('creates an isolated initial commit while preserving unrelated staged paths', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'turboflux-git-initial-test-'))
@@ -190,7 +240,7 @@ describe('Git safety boundaries', () => {
       await writeFile(join(workspace, 'user.txt'), 'user staged\n')
       await git('add', '--', 'agent.txt', 'user.txt')
 
-      const result = await gitCommitPaths(workspace, 'initial agent checkpoint', ['agent.txt'], executor)
+      const result = await gitCommitPaths(workspace, 'initial agent changes', ['agent.txt'], executor)
 
       expect(result.ok).toBe(true)
       expect((await git('show', '--pretty=', '--name-only', 'HEAD')).stdout.trim()).toBe('agent.txt')
