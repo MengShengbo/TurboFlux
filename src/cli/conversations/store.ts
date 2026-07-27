@@ -9,6 +9,54 @@ const DEFAULT_CONVERSATIONS_DIR = join(homedir(), '.turboflux', 'conversations')
 const CONVERSATION_ID_PATTERN = /^[a-zA-Z0-9._-]+$/
 const checkedJournalBoundaries = new Set<string>()
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isJournalEntry(value: unknown): value is ConversationJournalEntry {
+  if (!isRecord(value) || value.version !== 1 || typeof value.type !== 'string' || !Number.isFinite(value.timestamp)) return false
+
+  switch (value.type) {
+    case 'meta':
+      return isRecord(value.meta)
+        && typeof value.meta.id === 'string'
+        && typeof value.meta.workspacePath === 'string'
+    case 'snapshot':
+      return isRecord(value.conversation)
+        && typeof value.conversation.id === 'string'
+        && Array.isArray(value.conversation.turns)
+    case 'turn':
+      return isRecord(value.turn)
+        && typeof value.turn.id === 'string'
+        && typeof value.turn.role === 'string'
+        && typeof value.turn.content === 'string'
+        && Number.isFinite(value.turn.timestamp)
+    case 'stream_start':
+    case 'stream_end':
+      return value.type !== 'stream_end' || typeof value.interrupted === 'boolean'
+    case 'stream_delta':
+    case 'stream_thinking_delta':
+      return typeof value.text === 'string'
+    case 'tool_call':
+      return isRecord(value.toolCall)
+        && typeof value.toolCall.id === 'string'
+        && typeof value.toolCall.name === 'string'
+        && isRecord(value.toolCall.arguments)
+    case 'tool_result':
+      return isRecord(value.toolResult)
+        && typeof value.toolResult.toolCallId === 'string'
+        && typeof value.toolResult.name === 'string'
+        && typeof value.toolResult.output === 'string'
+        && typeof value.toolResult.isError === 'boolean'
+    case 'state':
+      return Array.isArray(value.activeTurns)
+        && Array.isArray(value.contextSegments)
+        && Array.isArray(value.contextReservoir)
+    default:
+      return false
+  }
+}
+
 function conversationsDir(): string {
   return process.env.TURBOFLUX_CONVERSATIONS_DIR || DEFAULT_CONVERSATIONS_DIR
 }
@@ -58,8 +106,8 @@ function readJournal(id: string): { entries: ConversationJournalEntry[]; truncat
   for (const line of lines) {
     if (!line.trim()) continue
     try {
-      const entry = JSON.parse(line) as ConversationJournalEntry
-      if (entry.version !== 1 || typeof entry.type !== 'string') throw new Error('Unsupported journal entry')
+      const entry: unknown = JSON.parse(line)
+      if (!isJournalEntry(entry)) throw new Error('Invalid journal entry')
       entries.push(entry)
     } catch {
       truncated = true

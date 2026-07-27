@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -43,5 +43,29 @@ describe.sequential('ConversationManager journal integration', () => {
     expect(recovered?.title).toBe('hello')
     expect(recovered?.turns.map(turn => turn.content)).toEqual(['hello', 'partial'])
     expect(recovered?.recovery?.interrupted).toBe(true)
+  })
+
+  it('reports journal persistence failures instead of silently losing recovery data', () => {
+    const turns: AgentTurn[] = [{ id: 'user-1', role: 'user', content: 'hello', timestamp: 101 }]
+    const engine = {
+      getSession: () => ({ id: 'session-1', mode: 'vibe', turns, createdAt: 100 }),
+      getFullConversationTurns: () => turns,
+      getContextSegments: () => [],
+      getContextReservoir: () => [],
+    } as unknown as AgentEngine
+    const statuses: Array<Error | null> = []
+    rmSync(directory, { recursive: true, force: true })
+    writeFileSync(directory, 'not a directory', 'utf-8')
+    const manager = new ConversationManager(
+      engine,
+      { model: 'test-model', provider: 'custom' } as TurboFluxConfig,
+      process.cwd(),
+      status => statuses.push(status),
+    )
+
+    manager.recordEvent({ type: 'turn:start', turn: turns[0]! })
+
+    expect(statuses).toHaveLength(1)
+    expect(statuses[0]).toBeInstanceOf(Error)
   })
 })

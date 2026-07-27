@@ -131,6 +131,25 @@ describe.sequential('conversation journal store', () => {
     expect(recovered?.recovery).toMatchObject({ interrupted: true, truncatedJournal: true })
   })
 
+  it('skips structurally invalid journal events without losing later valid turns', () => {
+    appendConversationJournal('invalid-event-1', { version: 1, type: 'meta', timestamp: 100, meta: meta('invalid-event-1') })
+    appendFileSync(join(directory, 'invalid-event-1.jsonl'), '{"version":1,"type":"turn","timestamp":101}\n', 'utf-8')
+    appendConversationJournal('invalid-event-1', {
+      version: 1,
+      type: 'turn',
+      timestamp: 102,
+      turn: turn('user-1', 'user', 'survived', 102),
+    })
+
+    const recovered = loadConversation('invalid-event-1')
+
+    expect(recovered?.turns.map(item => item.content)).toEqual([
+      'survived',
+      'Interrupted: assistant response was not recorded before restart.',
+    ])
+    expect(recovered?.recovery?.truncatedJournal).toBe(true)
+  })
+
   it('recovers interrupted provider reasoning separately from the answer', () => {
     appendConversationJournal('thinking-1', { version: 1, type: 'meta', timestamp: 100, meta: meta('thinking-1') })
     appendConversationJournal('thinking-1', { version: 1, type: 'turn', timestamp: 101, turn: turn('user-1', 'user', 'inspect it', 101) })

@@ -265,6 +265,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [interruptHint, setInterruptHint] = useState<string | null>(null)
   const [exitHint, setExitHint] = useState<string | null>(null)
   const [runControlHint, setRunControlHint] = useState<string | null>(null)
+  const [persistenceWarning, setPersistenceWarning] = useState<string | null>(null)
   const [pendingAsk, setPendingAsk] = useState<{
     id: string
     question: string
@@ -345,7 +346,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
-  const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath))
+  const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath, error => {
+    setPersistenceWarning(error ? `Conversation history unavailable: ${error.message}` : null)
+  }))
 
   useEffect(() => {
     if (!startupAnimationEnabled) {
@@ -1530,10 +1533,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ) : null
   const promptNode = showPrompt ? (
     <Box flexDirection="column">
-      {(isRunning || queuedPrompts.length > 0 || interruptHint || exitHint || runControlHint) && (
+      {(isRunning || queuedPrompts.length > 0 || interruptHint || exitHint || runControlHint || persistenceWarning) && (
         <Box paddingLeft={1}>
-          <Text dimColor>
-            {interruptHint || exitHint || runControlHint || (isRunning
+          <Text dimColor={!persistenceWarning}>
+            {persistenceWarning || interruptHint || exitHint || runControlHint || (isRunning
               ? `Enter guide current run · Ctrl/⌘+Enter queue next${queuedPrompts.length > 0 ? ` · ${queuedPrompts.length} queued` : ''}`
               : `${queuedPrompts.length} queued - will run after current agent turn`)}
           </Text>
