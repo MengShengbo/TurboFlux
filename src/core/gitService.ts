@@ -5,6 +5,7 @@ import type { ToolExecutor } from '../tools/executor'
 
 const DEFAULT_OUTPUT_LIMIT = 60_000
 const MAX_PATHS_PER_OPERATION = 200
+const MAX_GIT_PATH_LENGTH = 1_024
 
 export type GitDiffScope = 'working' | 'staged' | 'all'
 
@@ -215,7 +216,9 @@ function normalizeWorkspacePaths(workspacePath: string, filePaths: string[]): st
   if (filePaths.length > MAX_PATHS_PER_OPERATION) throw new Error(`At most ${MAX_PATHS_PER_OPERATION} paths may be changed at once`)
   const workspaceRoot = resolve(workspacePath)
   return [...new Set(filePaths.map(filePath => {
-    if (typeof filePath !== 'string' || !filePath.trim() || /[\0\r\n]/.test(filePath)) throw new Error('Invalid Git path')
+    if (typeof filePath !== 'string' || !filePath.trim() || filePath.length > MAX_GIT_PATH_LENGTH || /[\u0000-\u001f\u007f]/.test(filePath)) {
+      throw new Error(`Invalid Git path: expected 1-${MAX_GIT_PATH_LENGTH} printable characters`)
+    }
     const absolutePath = isAbsolute(filePath) ? resolve(filePath) : resolve(workspaceRoot, filePath)
     const relativePath = relative(workspaceRoot, absolutePath)
     if (!relativePath || relativePath === '..' || relativePath.startsWith(`..\\`) || relativePath.startsWith('../') || isAbsolute(relativePath)) {
@@ -416,18 +419,20 @@ export async function gitCommitPaths(
   try {
     const paths = normalizeWorkspacePaths(workspacePath, filePaths)
     const safeMessage = validateCommitMessage(message)
-    const stagedCheck = await runGit(workspacePath, ['diff', '--cached', '--quiet', '--', ...paths], executor)
-    if (stagedCheck.exitCode === 1) {
-      return { ok: false, error: 'Refusing to commit: one or more selected paths already contain user-staged changes.' }
+    const head = await runGit(workspacePath, ['rev-parse', '--verify', 'HEAD'], executor, { timeout: 3_000 })
+    if (head.ok) {
+      const stagedCheck = await runGit(workspacePath, ['diff', '--cached', '--quiet', '--', ...paths], executor)
+      if (stagedCheck.exitCode === 1) {
+        return { ok: false, error: 'Refusing to commit: one or more selected paths already contain user-staged changes.' }
+      }
+      if (!stagedCheck.ok) return { ok: false, error: commandError(stagedCheck, 'Unable to inspect staged paths') }
     }
-    if (!stagedCheck.ok) return { ok: false, error: commandError(stagedCheck, 'Unable to inspect staged paths') }
     const indexBefore = await runGit(workspacePath, ['ls-files', '-s', '-z', '--', ...paths], executor)
     if (!indexBefore.ok) return { ok: false, error: commandError(indexBefore, 'Unable to snapshot the real Git index') }
 
     temporaryDirectory = await mkdtemp(join(tmpdir(), 'turboflux-git-index-'))
     const indexPath = join(temporaryDirectory, 'index')
     const env = { GIT_INDEX_FILE: indexPath }
-    const head = await runGit(workspacePath, ['rev-parse', '--verify', 'HEAD'], executor, { timeout: 3_000 })
     const readTree = await runGit(workspacePath, head.ok ? ['read-tree', 'HEAD'] : ['read-tree', '--empty'], executor, { env })
     if (!readTree.ok) return { ok: false, error: commandError(readTree, 'Unable to initialize isolated Git index') }
     const add = await runGit(workspacePath, ['add', '--', ...paths], executor, { env })
@@ -448,6 +453,8 @@ export async function gitCommitPaths(
         output: `${commit.output || 'Commit created.'}\nWarning: commit succeeded, but the real index was left untouched because ${detail}.`,
       }
     }
+
+    if (!head.ok) return commit
 
     const syncIndex = await runGit(workspacePath, ['reset', '--mixed', 'HEAD', '--', ...paths], executor)
     if (!syncIndex.ok) {

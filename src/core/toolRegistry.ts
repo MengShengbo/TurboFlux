@@ -1,5 +1,6 @@
 ﻿import type { AgentMode, ToolCategory, ToolParameter } from '../shared/agentTypes'
 import type { EnhancedToolDef } from '../shared/toolTypes'
+import { validateSchemaValue } from './schemaValidation'
 
 const tools: EnhancedToolDef[] = [
   {
@@ -290,7 +291,7 @@ const tools: EnhancedToolDef[] = [
     description: 'Stage an explicit set of workspace paths. Never stages the whole repository implicitly.',
     category: 'write',
     parameters: [
-      { name: 'paths', type: 'array', description: 'Workspace-relative paths to stage', required: true, schema: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string' } } },
+      { name: 'paths', type: 'array', description: 'Workspace-relative paths to stage', required: true, schema: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string', minLength: 1, maxLength: 1024 } } },
     ],
     isReadOnly: false,
     isDestructive: false,
@@ -303,7 +304,7 @@ const tools: EnhancedToolDef[] = [
     category: 'manage',
     parameters: [
       { name: 'message', type: 'string', description: 'Commit message', required: true },
-      { name: 'paths', type: 'array', description: 'Optional explicit paths for an isolated commit', required: false, schema: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string' } } },
+      { name: 'paths', type: 'array', description: 'Optional explicit paths for an isolated commit. Do not stage these paths first; call git_commit(paths) directly.', required: false, schema: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string', minLength: 1, maxLength: 1024 } } },
     ],
     isReadOnly: false,
     isDestructive: false,
@@ -748,17 +749,6 @@ function parameterSchema(parameter: ToolParameter, strict: boolean): Record<stri
   return { ...base, description: parameter.description }
 }
 
-function paramTypeMatches(declared: ToolParameter['type'], value: unknown): boolean {
-  switch (declared) {
-    case 'string':  return typeof value === 'string'
-    case 'number':  return typeof value === 'number' && Number.isFinite(value)
-    case 'boolean': return typeof value === 'boolean'
-    case 'array':   return Array.isArray(value)
-    case 'object':  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    default:        return true
-  }
-}
-
 export function validateToolArgs(toolName: string, args: Record<string, unknown>): { valid: boolean; error?: string } {
   const tool = getToolByName(toolName)
   if (!tool) {
@@ -775,16 +765,13 @@ export function validateToolArgs(toolName: string, args: Record<string, unknown>
     if (param.required && !provided) {
       return { valid: false, error: `Missing required parameter: ${param.name}` }
     }
-    if (provided && !paramTypeMatches(param.type, value)) {
-      return {
-        valid: false,
-        error: `Invalid type for ${param.name}: expected ${param.type}, got ${Array.isArray(value) ? 'array' : typeof value}`,
-      }
-    }
-    if (param.enum && provided) {
-      if (typeof value !== 'string' || !param.enum.includes(value)) {
-        return { valid: false, error: `Invalid value for ${param.name}: ${String(value)}. Expected one of: ${param.enum.join(', ')}` }
-      }
+    if (provided) {
+      const schema: Record<string, unknown> = param.schema
+        ? { ...param.schema }
+        : { type: param.type }
+      if (param.enum) schema.enum = param.enum
+      const validation = validateSchemaValue(schema, value, param.name)
+      if (!validation.valid) return validation
     }
   }
 

@@ -31,6 +31,16 @@ describe('tool mode boundaries', () => {
     expect(validateToolArgs('read_file', { path: 'a.ts', surprise: true })).toEqual({ valid: false, error: 'Unexpected parameter: surprise' })
   })
 
+  it('enforces nested array schemas before a tool reaches its executor', () => {
+    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: [] })).toMatchObject({ valid: false })
+    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: [42] })).toMatchObject({
+      valid: false,
+      error: 'Invalid type for paths[0]: expected string',
+    })
+    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: ['x'.repeat(1_025)] })).toMatchObject({ valid: false })
+    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: ['src/app.ts'] })).toEqual({ valid: true })
+  })
+
   it('exposes validated terminal stdin writes only in vibe mode', () => {
     expect(getToolsForMode('vibe').some(tool => tool.name === 'write_terminal')).toBe(true)
     expect(getToolsForMode('plan').some(tool => tool.name === 'write_terminal')).toBe(false)

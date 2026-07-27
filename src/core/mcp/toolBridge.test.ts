@@ -44,6 +44,24 @@ describe('MCP tool bridge', () => {
     expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: { path: 'a.ts', content: 'next' } })).toEqual({ valid: true })
   })
 
+  it('enforces common string, number, and array constraints', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        names: { type: 'array', minItems: 1, maxItems: 2, items: { type: 'string', minLength: 2, maxLength: 4 } },
+        count: { type: 'integer', minimum: 1, maximum: 3 },
+      },
+      required: ['names', 'count'],
+      additionalProperties: false,
+    }
+
+    expect(validateMcpToolArgs(schema, { names: [], count: 1 })).toMatchObject({ valid: false })
+    expect(validateMcpToolArgs(schema, { names: ['a'], count: 1 })).toMatchObject({ valid: false })
+    expect(validateMcpToolArgs(schema, { names: ['alpha'], count: 1 })).toMatchObject({ valid: false })
+    expect(validateMcpToolArgs(schema, { names: ['ok'], count: 4 })).toMatchObject({ valid: false })
+    expect(validateMcpToolArgs(schema, { names: ['ok', 'go'], count: 2 })).toEqual({ valid: true })
+  })
+
   it('dispatches namespaced tools to the selected MCP server', async () => {
     const callTool = vi.fn(async () => ({ content: 'done', isError: false }))
     const client = { callTool } as unknown as McpClient

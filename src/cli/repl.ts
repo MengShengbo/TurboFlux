@@ -3,6 +3,7 @@ import { startInkApp } from './components/App'
 import type { TurboFluxConfig } from '../core/config'
 import type { ApprovalPolicy } from '../shared/agentTypes'
 import { loadMcpSettings } from '../core/mcp/settings'
+import { runSingleShot } from './singleShot'
 
 export interface ReplOptions {
   workspacePath: string
@@ -18,6 +19,16 @@ export interface ReplOptions {
 
 export async function startRepl(options: ReplOptions): Promise<void> {
   const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation, transparentBackground } = options
+
+  if (singleShot) {
+    try {
+      await runSingleShot({ workspacePath, config, prompt: singleShot, verbose, approvalPolicy, mcpServers })
+    } catch (error) {
+      process.stderr.write(`TurboFlux command failed: ${error instanceof Error ? error.message : String(error)}\n`)
+      process.exitCode = 1
+    }
+    return
+  }
 
   if (!config.apiKey) {
     console.log(chalk.hex('#bdbdbd')('\n  No API key configured. Run "turboflux setup" to connect a model provider.\n'))
