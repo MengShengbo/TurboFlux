@@ -421,6 +421,8 @@ export async function gitCommitPaths(
       return { ok: false, error: 'Refusing to commit: one or more selected paths already contain user-staged changes.' }
     }
     if (!stagedCheck.ok) return { ok: false, error: commandError(stagedCheck, 'Unable to inspect staged paths') }
+    const indexBefore = await runGit(workspacePath, ['ls-files', '-s', '-z', '--', ...paths], executor)
+    if (!indexBefore.ok) return { ok: false, error: commandError(indexBefore, 'Unable to snapshot the real Git index') }
 
     temporaryDirectory = await mkdtemp(join(tmpdir(), 'turboflux-git-index-'))
     const indexPath = join(temporaryDirectory, 'index')
@@ -435,6 +437,17 @@ export async function gitCommitPaths(
       runProcess: (command, args, cwd, _ignoredEnv, timeout) => executor.runProcess!(command, args, cwd, env, timeout),
     })
     if (!commit.ok || commit.nothingToCommit) return commit
+
+    const indexAfter = await runGit(workspacePath, ['ls-files', '-s', '-z', '--', ...paths], executor)
+    if (!indexAfter.ok || indexAfter.stdout !== indexBefore.stdout) {
+      const detail = !indexAfter.ok
+        ? commandError(indexAfter, 'index snapshot failed')
+        : 'selected paths were staged concurrently'
+      return {
+        ...commit,
+        output: `${commit.output || 'Commit created.'}\nWarning: commit succeeded, but the real index was left untouched because ${detail}.`,
+      }
+    }
 
     const syncIndex = await runGit(workspacePath, ['reset', '--mixed', 'HEAD', '--', ...paths], executor)
     if (!syncIndex.ok) {

@@ -129,6 +129,26 @@ describe('Git safety boundaries', () => {
     expect(runProcess.mock.calls.some(call => call[1].join(' ') === 'reset --mixed HEAD -- src/core/gitService.ts')).toBe(true)
   })
 
+  it('preserves selected paths staged concurrently while the isolated commit runs', async () => {
+    let indexReads = 0
+    const { executor, runProcess } = executorWithProcessMock(args => {
+      if (args[0] === 'ls-files') {
+        indexReads += 1
+        return { success: true, stdout: indexReads === 1 ? 'before-index\0' : 'user-staged-index\0' }
+      }
+      if (args[0] === 'rev-parse') return { success: true, stdout: args[1] === 'HEAD' ? 'abc1234\n' : 'parent\n' }
+      if (args[0] === 'commit') return { success: true, stdout: '[main abc1234] checkpoint\n' }
+      return { success: true }
+    })
+
+    const result = await gitCommitPaths(process.cwd(), 'checkpoint', ['src/core/gitService.ts'], executor)
+
+    expect(result).toMatchObject({ ok: true, hash: 'abc1234' })
+    expect(result.output).toContain('real index was left untouched')
+    expect(result.output).toContain('staged concurrently')
+    expect(runProcess.mock.calls.some(call => call[1][0] === 'reset')).toBe(false)
+  })
+
   it('commits AI paths without consuming unrelated staged content in a real repository', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'turboflux-git-test-'))
     const executor = realGitExecutor()

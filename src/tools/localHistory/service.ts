@@ -486,9 +486,14 @@ export class LocalHistoryService {
     let safetyCheckpointId: string | undefined
     if (filesToSnapshot.length > 0) {
       const safetyResult = await this.createSafetySnapshot(workspacePath, filesToSnapshot)
-      if (safetyResult.checkpointId) {
-        safetyCheckpointId = safetyResult.checkpointId
+      if (!safetyResult.success || !safetyResult.checkpointId) {
+        return {
+          success: false,
+          error: `Restore aborted because the safety snapshot could not be created${safetyResult.error ? `: ${safetyResult.error}` : ''}`,
+          restoredFiles: [],
+        }
       }
+      safetyCheckpointId = safetyResult.checkpointId
     }
 
     // Restore each file

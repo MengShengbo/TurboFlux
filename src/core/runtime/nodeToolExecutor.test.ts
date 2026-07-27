@@ -504,6 +504,24 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(readFileSync(filePath, 'utf-8')).toBe('checkpoint version')
   }))
 
+  it('does not overwrite files when the pre-restore safety snapshot fails', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'inside.txt')
+    writeFileSync(filePath, 'checkpoint version', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+    const created = await executor.checkpointCreate(workspace, 'restorable', [filePath], 'explicit', { [filePath]: 'before' })
+    writeFileSync(filePath, 'important newer work', 'utf-8')
+    vi.spyOn((executor as any).localHistoryService, 'createSafetySnapshot').mockResolvedValue({
+      success: false,
+      error: 'disk full',
+    })
+
+    const restored = await executor.checkpointRestore(workspace, created.checkpointId)
+
+    expect(restored.success).toBe(false)
+    expect(restored.error).toContain('safety snapshot')
+    expect(readFileSync(filePath, 'utf-8')).toBe('important newer work')
+  }))
+
   it('discovers useful dot-directories but skips secret env files', async () => withWorkspace(async ({ workspace }) => {
     mkdirSync(join(workspace, '.github', 'workflows'), { recursive: true })
     writeFileSync(join(workspace, '.github', 'workflows', 'ci.yml'), 'name: ci', 'utf-8')
