@@ -97,6 +97,70 @@ describe('SubAgentTaskManager', () => {
     }
   })
 
+  it('keeps a stopped task stopped when its runner resolves successfully after abort', async () => {
+    const workspacePath = createWorkspace()
+    const runtimeTaskManager = new RuntimeTaskManager()
+    const manager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager })
+
+    try {
+      const started = manager.startTask({
+        kind: 'agent',
+        agentType: 'worker',
+        label: 'Worker',
+        objective: 'Finish while stopping',
+        workspacePath,
+        run: ({ signal }) => new Promise<{ ok: boolean }>(resolve => {
+          signal.addEventListener('abort', () => resolve({ ok: true }), { once: true })
+        }),
+        isSuccess: result => result.ok,
+      })
+
+      await Promise.resolve()
+      await manager.stopTask(started.task.id)
+      await started.promise
+
+      expect(manager.getTask(started.task.id)?.runtimeTask.status).toBe('stopped')
+      expect(manager.readTranscript(started.task.id).records).toContainEqual(expect.objectContaining({
+        type: 'result',
+        status: 'stopped',
+      }))
+    } finally {
+      manager.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('aborts active tasks and rejects new work after destruction', async () => {
+    const workspacePath = createWorkspace()
+    const runtimeTaskManager = new RuntimeTaskManager()
+    const manager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager })
+    const started = manager.startTask({
+      kind: 'agent',
+      agentType: 'worker',
+      label: 'Worker',
+      objective: 'Wait for shutdown',
+      workspacePath,
+      run: ({ signal }) => new Promise<{ ok: boolean }>(resolve => {
+        signal.addEventListener('abort', () => resolve({ ok: false }), { once: true })
+      }),
+    })
+
+    await Promise.resolve()
+    manager.destroy()
+    await started.promise
+
+    expect(runtimeTaskManager.getTask(started.task.id)?.status).toBe('stopped')
+    expect(() => manager.startTask({
+      kind: 'agent',
+      agentType: 'worker',
+      label: 'Worker',
+      objective: 'Too late',
+      workspacePath,
+      run: async () => ({ ok: true }),
+    })).toThrow('destroyed')
+    rmSync(workspacePath, { recursive: true, force: true })
+  })
+
   it('aborts and releases a subagent that exceeds its runtime deadline', async () => {
     const workspacePath = createWorkspace()
     const runtimeTaskManager = new RuntimeTaskManager()
@@ -131,7 +195,7 @@ describe('SubAgentTaskManager', () => {
     }
   })
 
-  it('recovers completed results and marks unfinished tasks interrupted', async () => {
+  it('recovers completed and explicitly stopped tasks', async () => {
     const workspacePath = createWorkspace()
     const firstRuntime = new RuntimeTaskManager()
     const firstManager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager: firstRuntime })
@@ -166,13 +230,10 @@ describe('SubAgentTaskManager', () => {
           runtimeTask: { status: 'completed' },
           result: { ok: true, finalText: 'Persisted result' },
         })
-        expect(recoveredManager.getTask(unfinished.task.id)?.runtimeTask).toMatchObject({
-          status: 'interrupted',
-          error: 'Subagent runtime restarted before this task completed',
-        })
+        expect(recoveredManager.getTask(unfinished.task.id)?.runtimeTask.status).toBe('stopped')
         expect(recoveredManager.readTranscript(unfinished.task.id).records).toContainEqual(expect.objectContaining({
           type: 'state',
-          status: 'interrupted',
+          status: 'stopped',
         }))
       } finally {
         recoveredManager.destroy()

@@ -206,7 +206,10 @@ export class RuntimeTaskManager {
 
     this.markStopping(taskId)
     try {
-      await control.stop()
+      const stopResult = control.stop()
+      if (stopResult && typeof (stopResult as Promise<void>).then === 'function') {
+        await stopResult
+      }
       return this.markStopped(taskId, reason) || cloneTask(task)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
