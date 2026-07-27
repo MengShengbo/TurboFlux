@@ -1,12 +1,47 @@
-<h1 align="center">TurboFlux CLI</h1>
+<h1 align="center">TurboFlux</h1>
 
-<p align="center">TurboFlux CLI 是一个开源的终端 AI Coding Agent。</p>
+<p align="center"><strong>全新的开源终端 AI Agent，为真实的软件工程工作流而生。</strong></p>
+
+<p align="center">
+  在一个完整的 TUI 中理解代码、推进任务、执行工具、审阅 diff，并把每一步发生了什么清楚地交给开发者。
+</p>
 
 <p align="center">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-20242a?logo=node.js" />
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-20242a?logo=typescript" />
   <img alt="License" src="https://img.shields.io/badge/License-MIT-20242a" />
 </p>
+
+TurboFlux 不是把聊天窗口简单搬进终端。它把 Agent 的思考、检索、文件修改、命令执行、Git 变更和验证过程组织成一个持续可见的工程工作台：你负责目标和判断，TurboFlux 负责在真实项目里把事情做完。
+
+> [!IMPORTANT]
+> TurboFlux 正在快速演进中。当前版本以完整的终端用户界面（TUI）作为核心产品形态，交互设计、运行时与 Agent 能力仍会持续打磨。
+
+## 为什么是 TurboFlux
+
+- **TUI 原生，而非聊天框套壳**：会话、任务、工具活动、终端进程、上下文与 diff 在同一界面中协同呈现。
+- **执行过程不再黑盒**：文件读取、代码编辑和命令调用从开始到结束都有明确状态，长任务也能持续追踪。
+- **为代码审阅而设计**：完整展示文件 diff，以文件、hunk 和变更类型组织修改，而不是只告诉你“已经完成”。
+- **结构化 Git 联动**：围绕 status、diff、commit、restore、revert、branch、stash 和 push 构建可审计的工程流程。
+- **面向长时间工作**：支持后台终端任务、会话恢复、上下文压缩和项目记忆，让 Agent 可以持续推进复杂任务。
+- **开放的模型与工具生态**：支持多种 API Provider、OpenAI-compatible 接口、Skills、MCP 与自定义子代理。
+
+## 一分钟开始
+
+```bash
+npm install -g github:MengShengbo/TurboFluxCli
+turboflux setup
+cd your-project
+turboflux
+```
+
+进入界面后，直接描述一个完整目标：
+
+```text
+检查用户登录流程，修复会话过期后无法重新认证的问题，并运行相关测试。
+```
+
+TurboFlux 会探索项目、制定执行路径、修改代码、运行验证，并把工具活动和最终变更完整呈现在 TUI 中。
 
 ## 安装
 
@@ -53,7 +88,7 @@ turboflux setup approval     # 工具审批策略
 turboflux setup show         # 查看当前配置
 ```
 
-## 使用
+## 使用方式
 
 ```bash
 # 在当前目录启动
@@ -69,28 +104,28 @@ turboflux /path/to/project --command "检查登录流程并修复问题"
 turboflux /path/to/project --approval-policy agent
 ```
 
-TurboFlux 可以搜索和阅读代码、编辑文件、运行命令、启动后台终端、查看 diff、管理任务，并在完成后继续验证结果。
+TurboFlux 可以搜索和阅读代码、编辑文件、运行命令、启动后台终端、查看完整 diff、管理任务，并在完成后继续验证结果。工具一经调用就会出现在工作区中，并在执行完成前保持动态状态；你不需要通过静止的聊天记录猜测 Agent 是否仍在工作。
 
 会话会自动保存。使用 `/resume` 恢复历史会话，或在输入框中连续按两次 `Esc` 回到之前的某条消息。
 
 启动时会读取当前 API 可用的模型；尚未指定模型时自动使用发现结果中的第一个。模型发现不可用时可执行 `/model add <模型ID>`，无法取得上下文上限时使用 200K 默认值。
 
-## Agents
+## Agent 工作流
 
 TurboFlux 有两种工作模式：
 
-- **vibe**：默认模式，直接完成检索、修改和验证。
+- **vibe**：默认模式，自主完成检索、修改和验证。
 - **plan**：只读分析并制定计划；切换到 `/vibe` 后执行修改。
 
 在会话中使用 `/vibe` 和 `/plan` 切换。输入 `/effort` 可直接选择当前模型原生支持的推理档位，`Ctrl+O` 展开或折叠模型 reasoning。
 
-审批策略分为 `ask`（写文件和执行命令前询问）、`agent`（低风险操作自动继续，检测到风险时询问）和 `full`（跳过审批提示；拒绝规则与沙箱边界仍然生效）。
+审批策略分为 `ask`（写文件和执行命令前询问）、`agent`（低风险操作自动继续，检测到风险时询问）和 `full`（跳过审批提示；通用危险命令规则仍然生效）。
 
-内置子代理：
+内置上下文子代理：
 
-- **fast_context**：在独立上下文中搜索项目，返回相关文件和行号。
+- **fast_context**：在独立上下文中快速搜索项目，向主 Agent 返回相关文件、行号和检索结论。
 
-FastContext 由主 Agent 按需调用，不提供单独的 `/fastcontext` 命令，并始终跟随当前主模型。
+FastContext 由主 Agent 按需调用，不提供单独的 `/fastcontext` 命令，并始终跟随当前主模型。启动、检索阶段、工具活动和完成结果会进入专门的 TUI 工作区，主 Agent 随后继续基于检索结果推进任务。
 
 项目还可以从 `.turboflux/agents/*.md` 加载自定义子代理。
 
@@ -134,19 +169,18 @@ TurboFlux 会根据模型返回的 token 用量管理长会话：
 | `/vibe` | 切换到自主执行模式 |
 | `/effort` | 调整当前模型的原生推理强度 |
 | `/approval` | 设置工具审批策略 |
-| `/sandbox` | 查看文件、进程和网络隔离状态 |
 | `/context` | 查看上下文用量 |
 | `/compact` | 压缩当前会话 |
 | `/resume` | 恢复历史会话 |
 | `/new` | 开始新会话 |
 | `/mcp` | 查看 MCP 服务与工具 |
 | `/skills` | 查看已加载的 Skills |
-| `/git` | 开关结构化 Git 集成与 AI 变更自动提交 |
+| `/git [on\|off\|refresh]` | 查看、开关或刷新结构化 Git 集成 |
 
 > [!NOTE]
-> 文件修改始终保存到独立的本地历史。在 Git 仓库中使用 `/git on` 后，TurboFlux 会显示分支与工作树状态，并使用隔离 index 自动提交 Agent 触碰的文件；用户已有的 staged 内容不会混入提交，也不会自动 push。
+> Git 仓库默认启用结构化联动。TurboFlux 会显示检测、就绪、同步、错误等明确状态，并使用隔离 index 自动提交 Agent 触碰的文件；用户已有的 staged 内容不会混入提交，也不会自动 push。Git 是文件变更追踪与恢复的唯一基础设施。
 
-Agent 可直接使用结构化的 status、diff、log、show、stage、commit、branch、stash 和 push 工具。复杂 Git 操作仍可通过终端完成；push 必须经过审批，强制推送、硬重置和清理工作树不属于结构化工具能力。
+Agent 可直接使用结构化的 status、diff、log、show、stage、commit、restore、revert、branch、stash 和 push 工具。`git_restore` 拒绝覆盖已有 staged 变更，`git_revert` 通过新提交保留审计历史；push 必须经过审批，强制推送、硬重置和清理工作树不属于结构化工具能力。
 
 ## Skills 与 MCP
 
@@ -185,7 +219,7 @@ turboflux . --mcp all
 turboflux . --mcp server-name
 ```
 
-### 终端透明背景
+## 终端透明背景
 
 终端模拟器负责真正的透明效果。TurboFlux 的 `--transparent` 只停止绘制大面积背景色，让 iTerm2、Windows Terminal、WezTerm、GNOME Terminal 等模拟器的背景透出：
 
@@ -210,15 +244,11 @@ npm run build
 主要目录：
 
 ```text
-src/cli/          Ink 终端界面
+src/cli/          Ink TUI 与交互状态
 src/core/         Agent 循环、上下文、模型与子代理
-src/tools/        工具、本地历史与记忆
+src/tools/        工具执行与记忆
 src/shared/       共享类型
 ```
-
-## 沙箱
-
-生产配置、后端能力和威胁边界见 [`docs/sandbox.md`](docs/sandbox.md)。
 
 ## License
 
