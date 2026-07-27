@@ -46,7 +46,7 @@ export function LandingView({
         showWorkspace={showWorkspace}
         showConnector
       />
-      <Box width={frameWidth} height={5} flexDirection="column" alignItems="center" marginTop={2}>
+      <Box width={frameWidth} flexDirection="column" alignItems="center" marginTop={2} flexShrink={0}>
         {showPrompt ? (
           <>
             <Text bold>我们该构建什么？</Text>
