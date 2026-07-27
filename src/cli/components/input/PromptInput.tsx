@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback, type MutableRefObject } from 'react'
 import { Box, Text, useInput, usePaste, type Key } from 'ink'
 import stringWidth from 'string-width'
+import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
@@ -370,6 +371,12 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const editorViewportWidth = Math.max(1, (appearance === 'landing' ? landingInnerWidth : defaultInnerWidth) - 3)
   const editorViewport = getPromptEditorViewport(value, cursorOffset, editorViewportWidth)
   const visiblePlaceholder = fitText(placeholder, editorViewportWidth)
+  const completionLimit = appearance === 'landing' ? 3 : 6
+  const completionStart = Math.max(0, Math.min(
+    selectedIdx - Math.floor(completionLimit / 2),
+    completions.length - completionLimit,
+  ))
+  const visibleCompletions = completions.slice(completionStart, completionStart + completionLimit)
   const editorWidth = value
     ? editorViewport.width
     : Math.max(1, stringWidth(visiblePlaceholder))
@@ -392,13 +399,18 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     <Box flexDirection="column" marginTop={0}>
       {showCompletions && (
         <Box flexDirection="column" marginBottom={0} paddingLeft={2}>
-          {completions.slice(0, 6).map((cmd, i) => (
+          {visibleCompletions.map((cmd, visibleIndex) => {
+            const index = completionStart + visibleIndex
+            const selected = index === selectedIdx
+            const line = `${selected ? '> ' : '  '}/${cmd.name} - ${cmd.description}`
+            return (
             <Box key={cmd.name}>
-              <Text color={i === selectedIdx ? theme.brandShimmer : theme.text}>
-                {i === selectedIdx ? '> ' : '  '}/{cmd.name} <Text color={theme.inactive}>- {cmd.description}</Text>
+              <Text color={selected ? theme.brandShimmer : theme.inactive}>
+                {cliTruncate(line, Math.max(8, frameWidth - 4), { position: 'end' })}
               </Text>
             </Box>
-          ))}
+            )
+          })}
         </Box>
       )}
       {appearance === 'landing' ? (

@@ -15,6 +15,7 @@ import {
 } from './PromptInput'
 import { darkTheme } from '../../theme/index'
 import { ThemeProvider } from '../../theme/index'
+import '../../commands/index'
 
 describe('isImagePasteShortcut', () => {
   it('accepts common terminal encodings for image paste shortcuts', () => {
@@ -151,6 +152,28 @@ describe('prompt appearance', () => {
 
     expect(lines.every(line => line.length === 30)).toBe(true)
     expect(lines[2]).toContain('visible-tail')
+  })
+
+  it('bounds landing completions without hiding the prompt frame', () => {
+    const output = renderToString(
+      React.createElement(
+        ThemeProvider,
+        null,
+        React.createElement(PromptInput, {
+          value: '/',
+          onChange: () => {},
+          onSubmit: () => {},
+          width: 30,
+          appearance: 'landing',
+        }),
+      ),
+      { columns: 30 },
+    )
+    const lines = stripAnsi(output).split('\n')
+
+    expect(lines).toHaveLength(8)
+    expect(lines.every(line => line.length <= 30)).toBe(true)
+    expect(lines.some(line => line.includes('> /'))).toBe(true)
   })
 })
 
