@@ -177,7 +177,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   const theme = useTheme()
   return (
     <Box flexDirection="column" marginTop={1} flexShrink={0}>
-      <Text color={theme.subtle} bold>{title}</Text>
+      <Text color={theme.info} bold>{title}</Text>
       {children}
     </Box>
   )
@@ -205,7 +205,7 @@ function flowColor(tone: DeveloperFlowTone, theme: ReturnType<typeof useTheme>):
 function contextColor(ratio: number, theme: ReturnType<typeof useTheme>): string {
   if (ratio >= 0.8) return theme.error
   if (ratio >= 0.5) return theme.warning
-  return theme.success
+  return theme.info
 }
 
 function progressBar(ratio: number, width: number): string {

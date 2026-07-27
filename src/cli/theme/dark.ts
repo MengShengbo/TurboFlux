@@ -3,7 +3,7 @@ import { TURBOFLUX_ACCENTS } from './palette'
 
 export const darkTheme: Theme = {
   transparentBackground: false,
-  brand: '#E6E6E6',
+  brand: TURBOFLUX_ACCENTS.cyanBright,
   brandShimmer: TURBOFLUX_ACCENTS.neonGreen,
 
   success: '#5EEA7D',
@@ -26,8 +26,8 @@ export const darkTheme: Theme = {
   diffAddedWord: '#63ff7b',
   diffRemovedWord: '#ff708a',
 
-  promptBorder: TURBOFLUX_ACCENTS.neonGreen,
-  promptBackground: '#0b0b0b',
+  promptBorder: '#000000',
+  promptBackground: '#000000',
   statusLine: '#B6B6B6',
   codeBackground: '#111111',
 }

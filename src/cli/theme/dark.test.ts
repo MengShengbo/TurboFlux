@@ -31,7 +31,6 @@ function contrast(foreground: string, background: string): number {
 describe('dark terminal theme', () => {
   it('keeps the structural palette neutral and layered', () => {
     const neutralColors = [
-      darkTheme.brand,
       darkTheme.text,
       darkTheme.inactive,
       darkTheme.subtle,
@@ -40,6 +39,7 @@ describe('dark terminal theme', () => {
       darkTheme.panelRaised,
       darkTheme.surface,
       darkTheme.divider,
+      darkTheme.promptBorder,
       darkTheme.promptBackground,
       darkTheme.statusLine,
       darkTheme.codeBackground,
@@ -58,7 +58,8 @@ describe('dark terminal theme', () => {
     const [cyanRed, cyanGreen, cyanBlue] = rgb(darkTheme.info)
 
     expect(darkTheme.brandShimmer).toBe(TURBOFLUX_ACCENTS.neonGreen)
-    expect(darkTheme.promptBorder).toBe(TURBOFLUX_ACCENTS.neonGreen)
+    expect(darkTheme.brand).toBe(TURBOFLUX_ACCENTS.cyanBright)
+    expect(darkTheme.promptBorder).toBe('#000000')
     expect(darkTheme.info).toBe(TURBOFLUX_ACCENTS.cyan)
     expect(green).toBeGreaterThan(greenRed)
     expect(green).toBeGreaterThan(greenBlue)
