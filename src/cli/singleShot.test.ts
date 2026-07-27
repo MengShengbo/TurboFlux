@@ -1,0 +1,46 @@
+import { describe, expect, it } from 'vitest'
+import type { AgentEventType } from '../core/agentEngine'
+import { SingleShotProgressReporter } from './singleShot'
+
+describe('single-shot progress reporting', () => {
+  it('emits compact lifecycle updates without dumping large tool arguments', () => {
+    const output: string[] = []
+    let now = 1_000
+    const reporter = new SingleShotProgressReporter(text => output.push(text), false, () => now)
+
+    reporter.start('gpt-test', 'C:\\workspace')
+    reporter.handle({ type: 'run:state', state: { phase: 'running', updatedAt: now } } as AgentEventType)
+    reporter.handle({
+      type: 'tool:call',
+      toolCall: { id: 'tool-1', name: 'write_file', arguments: { path: 'src/app.ts', content: 'secret'.repeat(500) } },
+    })
+    now += 1_250
+    reporter.handle({
+      type: 'tool:result',
+      toolResult: { toolCallId: 'tool-1', name: 'write_file', output: 'done', isError: false },
+    })
+    now += 5_000
+    reporter.handle({ type: 'stream:thinking_delta', text: 'working' })
+
+    const rendered = output.join('')
+    expect(rendered).toContain('[TurboFlux] gpt-test')
+    expect(rendered).toContain('[running]')
+    expect(rendered).toContain('→ write_file · src/app.ts')
+    expect(rendered).toContain('✓ write_file · 1.3s')
+    expect(rendered).toContain('[thinking]')
+    expect(rendered).not.toContain('secret')
+  })
+
+  it('surfaces failures and truncates multiline output', () => {
+    const output: string[] = []
+    const reporter = new SingleShotProgressReporter(text => output.push(text))
+
+    reporter.handle({
+      type: 'tool:result',
+      toolResult: { toolCallId: 'missing', name: 'git_commit', output: `bad\n${'x'.repeat(300)}`, isError: true },
+    })
+
+    expect(output.join('')).toContain('✗ git_commit · bad ')
+    expect(output.join('').length).toBeLessThan(220)
+  })
+})

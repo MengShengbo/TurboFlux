@@ -159,7 +159,7 @@ function buildToolUsageSection(_mode: AgentMode): string {
 - replace_file: use for whole-file rewrites or when exact snippet matching is unreliable; content must be the complete final file.
 - All path parameters are workspace-relative (e.g. src/main/index.ts). No absolute paths.
 - Prefer structured Git tools over shell commands for status, diff, history, staging, commits, branches, stashes, and pushes. They validate arguments, bound output, refresh UI state, and preserve approval policy.
-- Never use git_stage without explicit paths. Use git_commit(paths) to isolate AI-authored files from unrelated staged work. Never force push or discard working-tree content through a structured tool.
+- Never use git_stage without explicit paths. For an isolated commit, call git_commit(paths) directly and do not stage those paths first. Use git_commit without paths only when the user explicitly wants the existing index committed. Never force push or discard working-tree content through a structured tool.
 - File modifications are checkpointed automatically by the runtime. Use create_checkpoint only for a deliberate named milestone; summarize completed work directly in the final response.
 - Run the narrowest relevant verification after edits. Do not rerun a successful check unless a later edit can affect it.
 - Put independent shell checks in parallel tool calls. When shell steps depend on each other and can share one failure boundary, chain them in one run_command instead of spending one model round per step.

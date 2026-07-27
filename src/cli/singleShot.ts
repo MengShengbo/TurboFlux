@@ -1,0 +1,155 @@
+import { basename } from 'node:path'
+import type { AgentEventType } from '../core/agentEngine'
+import type { TurboFluxConfig } from '../core/config'
+import { createAgentRuntime } from '../core/runtime/agentRuntime'
+import type { AgentTurn, ApprovalPolicy, ToolCall } from '../shared/agentTypes'
+import { stripTextToolCallMarkup } from '../shared/toolCallMarkup'
+import { commandRegistry } from './commands/index'
+import { ConversationManager } from './conversations/manager'
+
+export interface SingleShotOptions {
+  workspacePath: string
+  config: TurboFluxConfig
+  prompt: string
+  verbose: boolean
+  approvalPolicy?: ApprovalPolicy
+  mcpServers?: string[]
+  stdout?: Pick<NodeJS.WriteStream, 'write'>
+  stderr?: Pick<NodeJS.WriteStream, 'write'>
+}
+
+type OutputWriter = (text: string) => void
+
+export class SingleShotProgressReporter {
+  private readonly startedTools = new Map<string, number>()
+  private lastPhase = ''
+  private lastThinkingUpdate = 0
+
+  constructor(
+    private readonly write: OutputWriter,
+    private readonly verbose = false,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  start(model: string, workspacePath: string): void {
+    this.write(`[TurboFlux] ${model} · ${workspacePath}\n`)
+  }
+
+  handle(event: AgentEventType): void {
+    switch (event.type) {
+      case 'run:state':
+        if (event.state.phase !== this.lastPhase && event.state.phase !== 'idle') {
+          this.lastPhase = event.state.phase
+          this.write(`[${event.state.phase}]\n`)
+        }
+        break
+      case 'stream:thinking_delta': {
+        const timestamp = this.now()
+        if (timestamp - this.lastThinkingUpdate >= 5_000) {
+          this.lastThinkingUpdate = timestamp
+          this.write('[thinking]\n')
+        }
+        break
+      }
+      case 'tool:call':
+        this.startedTools.set(event.toolCall.id, this.now())
+        this.write(`→ ${event.toolCall.name}${summarizeToolCall(event.toolCall, this.verbose)}\n`)
+        break
+      case 'tool:result': {
+        const startedAt = this.startedTools.get(event.toolResult.toolCallId)
+        this.startedTools.delete(event.toolResult.toolCallId)
+        const elapsed = startedAt === undefined ? '' : ` · ${formatElapsed(this.now() - startedAt)}`
+        const failure = event.toolResult.isError ? ` · ${singleLine(event.toolResult.output, 160)}` : ''
+        this.write(`${event.toolResult.isError ? '✗' : '✓'} ${event.toolResult.name}${elapsed}${failure}\n`)
+        break
+      }
+      case 'model:protocol':
+        if (event.phase === 'fallback') this.write(`[protocol fallback] ${event.message || event.url}\n`)
+        break
+      case 'fast_context:event':
+        if (event.event.type === 'phase') this.write(`[FastContext] ${event.event.phase}\n`)
+        break
+      case 'subagent:start':
+        if (event.runKind === 'spawn_agent') this.write(`[agent] ${event.label} started\n`)
+        break
+      case 'subagent:end':
+        if (event.runKind === 'spawn_agent') this.write(`[agent] ${event.agentType} ${event.ok ? 'completed' : 'failed'} · ${formatElapsed(event.elapsedMs)}\n`)
+        break
+      case 'notification':
+        if (event.level === 'warning' || event.level === 'error') this.write(`[${event.level}] ${singleLine(event.message, 240)}\n`)
+        break
+      case 'ask:user':
+        this.write(`[input required] ${singleLine(event.question, 240)}\n`)
+        break
+      case 'error':
+        this.write(`[error] ${singleLine(event.error, 240)}\n`)
+        break
+    }
+  }
+}
+
+export async function runSingleShot(options: SingleShotOptions): Promise<void> {
+  const stdout = options.stdout || process.stdout
+  const stderr = options.stderr || process.stderr
+  const writeProgress = (text: string) => { stderr.write(text) }
+
+  if (!options.config.apiKey) throw new Error('No API key configured. Run "turboflux setup" first.')
+  if (!options.config.model) throw new Error('No model is mounted. Configure a model or run TurboFlux interactively and use /model.')
+
+  const workspaceName = basename(options.workspacePath) || 'workspace'
+  const runtime = createAgentRuntime({
+    workspacePath: options.workspacePath,
+    workspaceName,
+    config: options.config,
+    conversationPrefix: 'cli-command',
+    approvalPolicy: options.approvalPolicy,
+    connectMcp: Boolean(options.mcpServers?.length),
+    mcpServers: options.mcpServers,
+    registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
+  })
+  const reporter = new SingleShotProgressReporter(writeProgress, options.verbose)
+  const conversations = new ConversationManager(runtime.engine, options.config, options.workspacePath, error => {
+    if (error) writeProgress(`[warning] Conversation history unavailable: ${singleLine(error.message, 240)}\n`)
+  })
+  const unsubscribe = runtime.engine.subscribe(event => {
+    conversations.recordEvent(event)
+    reporter.handle(event)
+  })
+
+  reporter.start(options.config.model, options.workspacePath)
+  try {
+    const turns = await runtime.engine.run(options.prompt)
+    const finalText = finalAssistantText(turns)
+    if (finalText) stdout.write(`${finalText}\n`)
+  } finally {
+    unsubscribe()
+    conversations.destroy()
+    await runtime.destroy()
+  }
+}
+
+function finalAssistantText(turns: AgentTurn[]): string {
+  const finalTurn = [...turns].reverse().find(turn => turn.role === 'assistant' && turn.content.trim())
+  return finalTurn
+    ? stripTextToolCallMarkup(finalTurn.content, { stripIncomplete: true }).trim()
+    : ''
+}
+
+function summarizeToolCall(toolCall: ToolCall, verbose: boolean): string {
+  if (verbose) return ` ${singleLine(JSON.stringify(toolCall.arguments), 320)}`
+  const args = toolCall.arguments
+  const value = args.path ?? args.command ?? args.query ?? args.pattern ?? args.title ?? args.message
+  return typeof value === 'string' && value.trim()
+    ? ` · ${singleLine(value, 120)}`
+    : ''
+}
+
+function singleLine(value: string, limit: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}…`
+}
+
+function formatElapsed(milliseconds: number): string {
+  if (milliseconds < 1_000) return `${Math.max(0, milliseconds)}ms`
+  return `${(milliseconds / 1_000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`
+}

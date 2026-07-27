@@ -108,7 +108,8 @@ describe('Git safety boundaries', () => {
     const result = await gitCommitPaths(process.cwd(), 'test checkpoint', ['src/core/gitService.ts'], executor)
     expect(result).toMatchObject({ ok: false })
     expect(result.error).toContain('user-staged')
-    expect(runProcess).toHaveBeenCalledTimes(1)
+    expect(runProcess).toHaveBeenCalledTimes(2)
+    expect(runProcess.mock.calls.map(call => call[1][0])).toEqual(['rev-parse', 'diff'])
   })
 
   it('uses an isolated index and refreshes only committed paths', async () => {
@@ -172,6 +173,29 @@ describe('Git safety boundaries', () => {
       expect((await git('show', '--pretty=', '--name-only', 'HEAD')).stdout.trim()).toBe('agent.txt')
       expect((await git('diff', '--cached', '--name-only')).stdout.trim()).toBe('user.txt')
       expect(await readFile(join(workspace, 'agent.txt'), 'utf8')).toBe('agent change\n')
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('creates an isolated initial commit while preserving unrelated staged paths', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'turboflux-git-initial-test-'))
+    const executor = realGitExecutor()
+    const git = async (...args: string[]) => execFileAsync('git', args, { cwd: workspace, env: process.env })
+    try {
+      await git('init')
+      await git('config', 'user.name', 'TurboFlux Test')
+      await git('config', 'user.email', 'test@turboflux.local')
+      await writeFile(join(workspace, 'agent.txt'), 'agent change\n')
+      await writeFile(join(workspace, 'user.txt'), 'user staged\n')
+      await git('add', '--', 'agent.txt', 'user.txt')
+
+      const result = await gitCommitPaths(workspace, 'initial agent checkpoint', ['agent.txt'], executor)
+
+      expect(result.ok).toBe(true)
+      expect((await git('show', '--pretty=', '--name-only', 'HEAD')).stdout.trim()).toBe('agent.txt')
+      expect((await git('diff', '--cached', '--name-only')).stdout.trim()).toBe('user.txt')
+      expect((await git('status', '--short')).stdout).toContain('A  user.txt')
     } finally {
       await rm(workspace, { recursive: true, force: true })
     }
