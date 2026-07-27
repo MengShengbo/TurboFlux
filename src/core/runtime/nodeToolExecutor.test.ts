@@ -584,6 +584,29 @@ it('aborts only the requested streaming response', async () => withWorkspace(asy
   }
 }))
 
+it('distinguishes request deadlines from user cancellation', async () => withWorkspace(async ({ workspace }) => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+    const signal = init?.signal
+    signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+  }))
+  const executor = new NodeToolExecutor(workspace)
+
+  try {
+    await expect(executor.streamMessage(
+      'https://example.test/v1/responses',
+      {},
+      '{}',
+      () => {},
+      { timeoutMs: 5 },
+    )).resolves.toMatchObject({
+      success: false,
+      error: 'Request timed out after 5ms',
+    })
+  } finally {
+    fetchMock.mockRestore()
+  }
+}))
+
 it('does not replay a model request after receiving partial stream bytes', async () => withWorkspace(async ({ workspace }) => {
   const encoder = new TextEncoder()
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({

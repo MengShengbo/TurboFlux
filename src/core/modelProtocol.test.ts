@@ -65,6 +65,21 @@ describe('model protocol fallback safety', () => {
     expect(shouldFallbackProtocol(error(404, 'route not found', true))).toBe(false)
   })
 
+  it('allows fallback after a streamed response-shape failure with no usable output', () => {
+    const shapeError = new ModelProtocolRequestError('Responses stream ended before a terminal event', {
+      protocol: 'openai_responses',
+      url: 'https://example.test/v1/responses',
+      kind: 'response_shape',
+      receivedStreamData: true,
+    })
+
+    expect(shouldFallbackProtocol(shapeError)).toBe(true)
+  })
+
+  it('recognizes rejected Responses instructions as a protocol mismatch', () => {
+    expect(shouldFallbackProtocol(error(400, 'unknown parameter: instructions'))).toBe(true)
+  })
+
   it('formats every attempted protocol and URL in the final diagnostic', () => {
     const first = toProtocolAttempt(error(404, 'route not found'))
     const second = toProtocolAttempt(new ModelProtocolRequestError('invalid input schema', {
