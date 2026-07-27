@@ -81,7 +81,7 @@ describe('prompt appearance', () => {
     )
     const lines = stripAnsi(output).split('\n')
 
-    expect(lines).toHaveLength(3)
+    expect(lines).toHaveLength(5)
     expect(lines.every(line => line.length === 30)).toBe(true)
     expect(lines[1]).toContain('█')
   })
@@ -127,6 +127,6 @@ describe('prompt appearance', () => {
       { columns: 40 },
     )
 
-    expect(stripAnsi(output).split('\n')[1]).toContain('> hello')
+    expect(stripAnsi(output).split('\n')[2]).toContain('> hello')
   })
 })
