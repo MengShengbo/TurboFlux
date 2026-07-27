@@ -3,16 +3,20 @@ import type { TurboFluxConfig } from '../../core/config'
 import type { ConversationJournalEntry, PersistedConversation, ConversationMeta } from './types'
 import { appendConversationJournal, saveConversation, loadConversation, listConversations, deleteConversation, sameWorkspacePath } from './store'
 
+export type ConversationPersistenceStatusHandler = (error: Error | null) => void
+
 export class ConversationManager {
   private currentId: string
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private journalInitialized = false
   private lastPersistedSnapshot = ''
+  private persistenceError: Error | null = null
 
   constructor(
     private engine: AgentEngine,
     private config: TurboFluxConfig,
     private workspacePath: string,
+    private onPersistenceStatus?: ConversationPersistenceStatusHandler,
   ) {
     this.currentId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   }
@@ -109,7 +113,10 @@ export class ConversationManager {
       this.ensureJournal()
       saveConversation(conv, { compact })
       this.lastPersistedSnapshot = snapshot
-    } catch {}
+      this.reportPersistenceSuccess()
+    } catch (error) {
+      this.reportPersistenceFailure(error)
+    }
   }
 
   startNew(): string {
@@ -183,9 +190,24 @@ export class ConversationManager {
   private append(entry: ConversationJournalEntry): boolean {
     try {
       appendConversationJournal(this.currentId, entry)
+      this.reportPersistenceSuccess()
       return true
-    } catch {
+    } catch (error) {
+      this.reportPersistenceFailure(error)
       return false
     }
+  }
+
+  private reportPersistenceFailure(error: unknown): void {
+    const normalized = error instanceof Error ? error : new Error(String(error))
+    if (this.persistenceError?.message === normalized.message) return
+    this.persistenceError = normalized
+    this.onPersistenceStatus?.(normalized)
+  }
+
+  private reportPersistenceSuccess(): void {
+    if (!this.persistenceError) return
+    this.persistenceError = null
+    this.onPersistenceStatus?.(null)
   }
 }
