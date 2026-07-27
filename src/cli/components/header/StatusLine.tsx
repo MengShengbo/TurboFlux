@@ -8,6 +8,7 @@ import type { TurboFluxConfig } from '../../../core/config'
 import { formatNativeReasoningSetting } from '../../../core/modelRegistry'
 import type { GitSnapshot } from '../../../core/gitService'
 import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
+import type { SandboxStatus } from '../../../core/sandbox/types'
 
 interface StatusLineProps {
   config: TurboFluxConfig
@@ -19,6 +20,7 @@ interface StatusLineProps {
   mcpCount?: number
   terminalCount?: number
   width?: number
+  sandboxStatus?: SandboxStatus
 }
 
 const MODE_LABELS: Record<AgentMode, string> = {
@@ -36,6 +38,7 @@ export function StatusLine({
   mcpCount = 0,
   terminalCount = 0,
   width: requestedWidth,
+  sandboxStatus,
 }: StatusLineProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
@@ -73,6 +76,7 @@ export function StatusLine({
     `mcp:${mcpCount > 0 ? mcpCount : 'off'}`,
     terminalCount > 0 ? `term:${terminalCount}` : '',
     viewingHistory ? 'history' : '',
+    sandboxStatus ? `sandbox:${sandboxStatus.policy}/${sandboxStatus.resolvedBackend}${sandboxStatus.available ? '' : '!'}` : '',
   ].filter(Boolean)
   const contextLabel = `ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : 'unknown'}`
   const cacheLabel = hasProviderUsage && (tokenUsage.cached ?? 0) > 0

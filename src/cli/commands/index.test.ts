@@ -215,3 +215,26 @@ describe('native effort and approval commands', () => {
     expect(enginePolicy).toBe('agent')
   })
 })
+
+describe('/sandbox', () => {
+  it('reports when the runtime only has policy guards', () => {
+    const result = commandRegistry.execute('/sandbox', fullContext({
+      sandboxStatus: {
+        policy: 'workspace',
+        enforcement: 'guarded',
+        network: 'allow',
+        backend: 'auto',
+        resolvedBackend: 'guarded',
+        available: true,
+        osIsolation: false,
+        networkIsolated: false,
+        writableRoots: [process.cwd()],
+        warning: 'Guarded mode is not an OS security boundary.',
+      },
+    }))
+
+    expect(result.text).toContain('workspace')
+    expect(result.text).toContain('policy guard only')
+    expect(result.text).toContain('not an OS security boundary')
+  })
+})

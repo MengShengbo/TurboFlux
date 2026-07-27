@@ -10,6 +10,7 @@ import { RuntimeTaskManager } from './runtimeTaskManager'
 import { SubAgentTaskManager } from './subAgentTaskManager'
 import { DefaultAgentStateProvider, type AgentRuntimeConfig } from './stateProvider'
 import { buildProfileSystemPromptSection, loadProfile } from '../profile'
+import type { SandboxOptions } from '../sandbox/types'
 
 export interface CreateAgentRuntimeOptions {
   workspacePath: string
@@ -20,6 +21,7 @@ export interface CreateAgentRuntimeOptions {
   mode?: AgentMode
   approvalPolicy?: ApprovalPolicy
   sandboxPolicy?: SandboxPolicy
+  sandbox?: SandboxOptions
   shell?: string
   connectMcp?: boolean
   mcpServers?: string[]
@@ -43,10 +45,15 @@ function getDefaultShell(): string {
 }
 
 function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
+  const sandbox = getSandboxOptions(options)
   return {
     mode: options.mode || 'vibe',
     approvalPolicy: options.approvalPolicy || options.config.approvalPolicy || 'ask',
-    sandboxPolicy: options.sandboxPolicy || ((options.approvalPolicy || options.config.approvalPolicy) === 'full' ? 'full' : 'workspace'),
+    sandboxPolicy: sandbox.policy,
+    sandboxEnforcement: sandbox.enforcement,
+    sandboxNetwork: sandbox.network,
+    sandboxBackend: sandbox.backend,
+    sandboxDockerImage: sandbox.dockerImage,
     temperature: 0.7,
     workspacePath: options.workspacePath,
     workspaceName: options.workspaceName,
@@ -59,10 +66,19 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
   }
 }
 
+function getSandboxOptions(options: CreateAgentRuntimeOptions): SandboxOptions {
+  return {
+    policy: options.sandbox?.policy || options.sandboxPolicy || options.config.sandboxPolicy || 'workspace',
+    enforcement: options.sandbox?.enforcement || options.config.sandboxEnforcement || 'guarded',
+    network: options.sandbox?.network || options.config.sandboxNetwork || 'allow',
+    backend: options.sandbox?.backend || options.config.sandboxBackend || 'auto',
+    dockerImage: options.sandbox?.dockerImage || options.config.sandboxDockerImage,
+  }
+}
+
 export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRuntime {
   const conversationId = options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`
   const stateProvider = new DefaultAgentStateProvider(options.config, options.workspacePath, { conversationId })
-  const effectiveApprovalPolicy = options.approvalPolicy || options.config.approvalPolicy || 'ask'
   const runtimeTaskManager = new RuntimeTaskManager({
     defaultOwnerSessionId: conversationId,
     journalPath: join(options.workspacePath, '.turboflux', 'runtime', 'journal.jsonl'),
@@ -73,13 +89,14 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
     ownerSessionId: conversationId,
   })
   const toolExecutor = new NodeToolExecutor(options.workspacePath, {
-    sandboxPolicy: options.sandboxPolicy || (effectiveApprovalPolicy === 'full' ? 'full' : 'workspace'),
+    sandbox: getSandboxOptions(options),
     runtimeTaskManager,
   })
   const engine = new AgentEngine(
     {
       ...toEngineConfig(options),
       conversationId,
+      appendSystemPrompt: buildSandboxSystemPrompt(toolExecutor.getSandboxStatus()),
     },
     toolExecutor,
     stateProvider,
@@ -104,7 +121,7 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
     })),
   )
 
-  const mcpClient = new McpClient()
+  const mcpClient = new McpClient(toolExecutor.getProcessSandbox(), options.workspacePath)
   engine.setMcpClient(mcpClient)
 
   if (options.connectMcp === true) {
@@ -139,4 +156,15 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
       engine.destroy()
     },
   }
+}
+
+function buildSandboxSystemPrompt(status: ReturnType<NodeToolExecutor['getSandboxStatus']>): string {
+  const boundary = status.osIsolation ? 'OS-isolated' : 'policy-guarded only'
+  const availability = status.available ? 'available' : `unavailable: ${status.reason || 'backend unavailable'}`
+  return [
+    '<sandbox>',
+    `Policy: ${status.policy}; enforcement: ${status.enforcement}; backend: ${status.resolvedBackend} (${boundary}); network: ${status.network}; execution: ${availability}.`,
+    'Treat sandbox denials as hard boundaries. Do not retry equivalent path, environment, or network escapes.',
+    '</sandbox>',
+  ].join('\n')
 }

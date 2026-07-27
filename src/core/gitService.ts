@@ -1,6 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
 import type { ToolExecutor } from '../tools/executor'
 
 const DEFAULT_OUTPUT_LIMIT = 60_000
@@ -430,7 +429,9 @@ export async function gitCommitPaths(
     const indexBefore = await runGit(workspacePath, ['ls-files', '-s', '-z', '--', ...paths], executor)
     if (!indexBefore.ok) return { ok: false, error: commandError(indexBefore, 'Unable to snapshot the real Git index') }
 
-    temporaryDirectory = await mkdtemp(join(tmpdir(), 'turboflux-git-index-'))
+    const isolatedIndexRoot = join(resolve(workspacePath), '.turboflux')
+    await mkdir(isolatedIndexRoot, { recursive: true, mode: 0o700 })
+    temporaryDirectory = await mkdtemp(join(isolatedIndexRoot, 'git-index-'))
     const indexPath = join(temporaryDirectory, 'index')
     const env = { GIT_INDEX_FILE: indexPath }
     const readTree = await runGit(workspacePath, head.ok ? ['read-tree', 'HEAD'] : ['read-tree', '--empty'], executor, { env })

@@ -25,6 +25,7 @@ import { formatMarkdown } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
 import type { GitSnapshot } from '../../core/gitService'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
+import type { SandboxOptions } from '../../core/sandbox/types'
 import type { ActiveTaskContext } from '../../core/taskManager'
 import { applyPreset, saveConfig, setConfigValue, type ModelPreset, type TurboFluxConfig } from '../../core/config'
 import { discoverModelPresets, readCachedModelDiscovery } from '../../core/modelDiscovery'
@@ -97,6 +98,7 @@ interface AppProps {
   verbose: boolean
   noFlicker: boolean
   approvalPolicy?: ApprovalPolicy
+  sandbox?: SandboxOptions
   mcpServers?: string[]
   startupAnimation?: boolean
   transparentBackground?: boolean
@@ -214,7 +216,7 @@ function SessionPane({ running, visible, children }: { running: boolean; visible
   )
 }
 
-function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation = true, transparentBackground = false }: AppProps) {
+function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, sandbox, mcpServers, startupAnimation = true, transparentBackground = false }: AppProps) {
   const { exit } = useApp()
   const layoutBackground = transparentBackground ? undefined : '#000000'
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -343,11 +345,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     config: initialConfig,
     conversationPrefix: 'cli',
     approvalPolicy,
+    sandbox,
     connectMcp: Boolean(mcpServers?.length),
     mcpServers,
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
+  const sandboxStatus = runtime.toolExecutor.getSandboxStatus()
   const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath, error => {
     setPersistenceWarning(error ? `Conversation history unavailable: ${error.message}` : null)
   }))
@@ -1241,6 +1245,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         conversationManager: convManager,
         skillRuntime,
         mcpClient,
+        sandboxStatus,
       }
       const result = commandRegistry.execute(trimmed, ctx)
       setTokenUsage(engine.getContextUsage())
@@ -1670,6 +1675,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                       mcpCount={mcpCount}
                       terminalCount={activeTerminalCount}
                       width={conversationFrameWidth}
+                      sandboxStatus={sandboxStatus}
                     />
                   )}
                 </Box>
@@ -1682,6 +1688,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   mode={currentMode}
                   reasoning={reasoningLabel || undefined}
                   approvalPolicy={config.approvalPolicy}
+                  sandboxStatus={sandboxStatus}
                   contextWindow={config.contextWindow}
                   tokenUsage={tokenUsage}
                   isRunning={isRunning}
@@ -1759,7 +1766,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
         {/* Status line at bottom */}
-        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} gitSnapshot={gitSnapshot} />
+        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} gitSnapshot={gitSnapshot} sandboxStatus={sandboxStatus} />
         <AgentActivityLine active={isRunning} />
       </Box>
     </ThemeProvider>
@@ -1773,6 +1780,7 @@ export function startInkApp(options: {
   verbose: boolean
   noFlicker?: boolean
   approvalPolicy?: ApprovalPolicy
+  sandbox?: SandboxOptions
   mcpServers?: string[]
   startupAnimation?: boolean
   transparentBackground?: boolean
@@ -1789,6 +1797,7 @@ export function startInkApp(options: {
       verbose={options.verbose}
       noFlicker={noFlicker}
       approvalPolicy={options.approvalPolicy}
+      sandbox={options.sandbox}
       mcpServers={options.mcpServers}
       startupAnimation={options.startupAnimation}
       transparentBackground={options.transparentBackground}

@@ -149,7 +149,7 @@ Runtime 需要提供：
 1. Hook Runtime：工具、权限、用户提交、压缩、会话和子代理生命周期。
 2. MCP：SSE、Streamable HTTP、WebSocket、OAuth、resources、prompts、elicitation 和重连。
 3. 权限规则真实加载，并接入项目、用户和企业策略来源。
-4. 使用 OS 级 sandbox，替换命令字符串路径扫描。
+4. [x] 统一文件、前台进程、后台终端和 MCP stdio 沙箱；严格模式接入 Bubblewrap、sandbox-exec 与 Docker，并在后端不可用时 fail-closed。
 5. API Key 接入系统安全存储。
 
 ## 上下文管理改进
@@ -179,5 +179,6 @@ TurboFlux 已具备 context segments、reservoir、文件恢复、手动 compact
 3. [x] 命令输出落盘、完成事件和 stdin 工具。
 4. [x] append-only 会话 journal 与崩溃恢复。
 5. [x] 后台及可恢复子代理。
-6. [ ] Runtime Daemon 与 detach/attach。
-7. [ ] Hooks、完整 MCP、sandbox、LSP 和远程调度。
+6. [x] 统一沙箱策略、环境净化、网络隔离和审计日志。
+7. [ ] Runtime Daemon 与 detach/attach。
+8. [ ] Hooks、完整 MCP、LSP 和远程调度。

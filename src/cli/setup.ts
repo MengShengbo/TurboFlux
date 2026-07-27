@@ -233,6 +233,9 @@ function printSummary(config: TurboFluxConfig, profile: TurboFluxProfile): void 
   console.log(`  maxTokens:         ${config.maxTokens.toLocaleString()}`)
   console.log(`  reasoning:         ${formatNativeReasoningSetting(config.model, config.reasoning, config.provider) || '(provider default)'}`)
   console.log(`  approvalPolicy:    ${APPROVAL_POLICY_LABELS[config.approvalPolicy]} (${config.approvalPolicy})`)
+  console.log(`  sandbox:           ${config.sandboxPolicy || 'workspace'}/${config.sandboxEnforcement || 'guarded'}`)
+  console.log(`  sandboxBackend:    ${config.sandboxBackend || 'auto'}`)
+  console.log(`  sandboxNetwork:    ${config.sandboxNetwork || 'allow'}`)
   console.log('  fastContextModel:  跟随主模型')
   console.log(`  interfaceLanguage: ${profile.interfaceLanguage}`)
   console.log(`  aiOutputLanguage:  ${outputLanguage}`)
@@ -802,7 +805,7 @@ async function configureApprovalPolicy(options: SetupOptions = {}): Promise<Turb
     const labels: Record<ApprovalPolicy, { zh: string; en: string }> = {
       ask: { zh: '请求批准 - 修改文件、执行命令和外部操作前询问', en: 'Request approval - ask before changes, commands, and external actions' },
       agent: { zh: '替我审批 - 低风险工作区操作自动继续，检测到风险时询问', en: 'Approve low risk - continue routine workspace actions and ask on risk' },
-      full: { zh: '完全访问权限 - 不限制本地和网络访问，灾难性命令仍会阻止', en: 'Full access - unrestricted local and network access; catastrophic commands stay blocked' },
+      full: { zh: '跳过审批提示 - 拒绝规则与沙箱边界仍然生效', en: 'Skip approval prompts - deny rules and sandbox boundaries remain active' },
     }
     approvalPolicy = await promptSelect('审批策略', (['ask', 'agent', 'full'] as ApprovalPolicy[]).map(policy => ({
       name: zh(profile, labels[policy].zh, labels[policy].en),

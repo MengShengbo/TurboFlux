@@ -270,9 +270,12 @@ describe('NodeToolExecutor sandbox policies', () => {
       const executor = new NodeToolExecutor(workspace)
       const hidden = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.TURBOFLUX_TEST_SECRET || "missing")'], workspace)
       const explicit = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.EXPLICIT_VALUE || "missing")'], workspace, { EXPLICIT_VALUE: 'allowed' })
+      const rejected = await executor.runProcess(process.execPath, ['-e', 'process.exit(0)'], workspace, { SERVICE_API_KEY: 'must-not-pass' })
 
       expect(hidden.data?.stdout).toBe('missing')
       expect(explicit.data?.stdout).toBe('allowed')
+      expect(rejected.success).toBe(false)
+      expect(rejected.error).toContain('sensitive environment override')
     } finally {
       delete process.env.TURBOFLUX_TEST_SECRET
     }
@@ -718,6 +721,39 @@ it('runs and inspects an agent background terminal session', async () => withWor
     exitCode: 0,
   })
   expect(readFileSync(runtimeTask!.logPath!, 'utf-8')).toContain('turbo-terminal-ok')
+}))
+
+it('revalidates complete commands written into a guarded background terminal', async () => withWorkspace(async ({ workspace, outside }) => {
+  const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+  const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh'
+  const created = await executor.ptyCreate?.({ cwd: workspace, shell })
+  const sessionId = created?.data?.sessionId
+  expect(sessionId).toBeTruthy()
+
+  const outsideFile = join(outside, 'escaped.txt')
+  const command = process.platform === 'win32'
+    ? `echo escaped > "${outsideFile}"`
+    : `printf escaped > "${outsideFile}"`
+  const midpoint = Math.max(1, Math.floor(command.length / 2))
+  const first = await executor.ptyWrite?.(sessionId!, command.slice(0, midpoint))
+  const blocked = await executor.ptyWrite?.(sessionId!, `${command.slice(midpoint)}\n`)
+
+  expect(first?.success).toBe(true)
+  expect(blocked?.success).toBe(false)
+  expect(blocked?.error).toContain('outside the workspace')
+  expect(existsSync(outsideFile)).toBe(false)
+  await executor.ptyKillAll?.()
+}))
+
+it('denies web search when sandbox networking is disabled', async () => withWorkspace(async ({ workspace }) => {
+  const executor = new NodeToolExecutor(workspace, {
+    sandbox: { policy: 'workspace', enforcement: 'strict', network: 'deny', backend: 'guarded' },
+  })
+
+  const result = await executor.webSearch({ query: 'should not leave the process' })
+
+  expect(result.success).toBe(false)
+  expect(result.error).toContain('network policy denied')
 }))
 
 describe('NodeToolExecutor webSearch', () => {

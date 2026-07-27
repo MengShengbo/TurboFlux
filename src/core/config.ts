@@ -2,7 +2,15 @@ import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { getSupportedModelSpec, normalizeNativeReasoningConfig, SUPPORTED_MODEL_SPECS } from './modelRegistry'
-import { normalizeApprovalPolicy, type ApprovalPolicy, type NativeReasoningConfig } from '../shared/agentTypes'
+import {
+  normalizeApprovalPolicy,
+  type ApprovalPolicy,
+  type NativeReasoningConfig,
+  type SandboxBackend,
+  type SandboxEnforcement,
+  type SandboxNetworkPolicy,
+  type SandboxPolicy,
+} from '../shared/agentTypes'
 import { loadCredentialSnapshot, saveCredentialSnapshot } from './credentialStore'
 import { writeFileAtomicSync } from './fileIO'
 
@@ -17,6 +25,11 @@ export interface TurboFluxConfig {
   modelCapabilities?: ModelCapabilities
   modelMetadataSources?: ModelMetadataSource[]
   approvalPolicy: ApprovalPolicy
+  sandboxPolicy?: SandboxPolicy
+  sandboxEnforcement?: SandboxEnforcement
+  sandboxNetwork?: SandboxNetworkPolicy
+  sandboxBackend?: SandboxBackend
+  sandboxDockerImage?: string
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
@@ -230,6 +243,10 @@ const DEFAULT_CONFIG: TurboFluxConfig = {
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
   approvalPolicy: 'ask',
+  sandboxPolicy: 'workspace',
+  sandboxEnforcement: 'guarded',
+  sandboxNetwork: 'allow',
+  sandboxBackend: 'auto',
   reasoning: undefined,
   apiConfigs: [],
   activeApiConfigId: undefined,
@@ -276,6 +293,16 @@ function normalizeProvider(value: unknown, fallback: TurboFluxProvider): TurboFl
     : fallback
 }
 
+function normalizeEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback
+}
+
+function requireEnumValue<T extends string>(key: string, value: string, allowed: readonly T[]): T {
+  const normalized = value.trim().toLowerCase() as T
+  if (!allowed.includes(normalized)) throw new Error(`${key} must be one of: ${allowed.join(', ')}`)
+  return normalized
+}
+
 function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
   const provider = normalizeProvider(raw.provider, DEFAULT_CONFIG.provider)
   const model = typeof raw.model === 'string' ? raw.model.trim() : DEFAULT_CONFIG.model
@@ -284,6 +311,10 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
   const contextWindow = positiveInteger(raw.contextWindow, DEFAULT_CONFIG.contextWindow)
   const maxTokens = positiveInteger(raw.maxTokens, DEFAULT_CONFIG.maxTokens)
   const approvalPolicy = normalizeApprovalPolicy(raw.approvalPolicy, DEFAULT_CONFIG.approvalPolicy)
+  const sandboxPolicy = normalizeEnum(raw.sandboxPolicy, ['workspace', 'readonly', 'full'], DEFAULT_CONFIG.sandboxPolicy || 'workspace')
+  const sandboxEnforcement = normalizeEnum(raw.sandboxEnforcement, ['guarded', 'strict'], DEFAULT_CONFIG.sandboxEnforcement || 'guarded')
+  const sandboxNetwork = normalizeEnum(raw.sandboxNetwork, ['allow', 'deny'], DEFAULT_CONFIG.sandboxNetwork || 'allow')
+  const sandboxBackend = normalizeEnum(raw.sandboxBackend, ['auto', 'guarded', 'bubblewrap', 'sandbox-exec', 'docker'], DEFAULT_CONFIG.sandboxBackend || 'auto')
   const profiles = normalizeApiConfigProfiles((raw as any).apiConfigs)
   let activeApiConfigId = typeof raw.activeApiConfigId === 'string' ? raw.activeApiConfigId : undefined
   const activeProfile = profiles.find(profile => profile.id === activeApiConfigId)
@@ -323,6 +354,11 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
     modelCapabilities: selected?.modelCapabilities,
     modelMetadataSources: selected?.modelMetadataSources,
     approvalPolicy,
+    sandboxPolicy,
+    sandboxEnforcement,
+    sandboxNetwork,
+    sandboxBackend,
+    sandboxDockerImage: typeof raw.sandboxDockerImage === 'string' && raw.sandboxDockerImage.trim() ? raw.sandboxDockerImage.trim() : undefined,
     reasoning: selected?.reasoning ?? normalizeNativeReasoningConfig(model, raw.reasoning, provider, raw.modelCapabilities),
     apiConfigs: nextProfiles,
     activeApiConfigId,
@@ -509,6 +545,17 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
         throw new Error('approvalPolicy must be ask, agent, or full')
       }
       return { ...config, approvalPolicy: normalizeApprovalPolicy(value.toLowerCase(), config.approvalPolicy) }
+    case 'sandboxPolicy':
+      return { ...config, sandboxPolicy: requireEnumValue<SandboxPolicy>(key, value, ['workspace', 'readonly', 'full']) }
+    case 'sandboxEnforcement':
+      return { ...config, sandboxEnforcement: requireEnumValue<SandboxEnforcement>(key, value, ['guarded', 'strict']) }
+    case 'sandboxNetwork':
+      return { ...config, sandboxNetwork: requireEnumValue<SandboxNetworkPolicy>(key, value, ['allow', 'deny']) }
+    case 'sandboxBackend':
+      return { ...config, sandboxBackend: requireEnumValue<SandboxBackend>(key, value, ['auto', 'guarded', 'bubblewrap', 'sandbox-exec', 'docker']) }
+    case 'sandboxDockerImage':
+      if (!value.trim()) throw new Error('sandboxDockerImage cannot be empty')
+      return { ...config, sandboxDockerImage: value.trim() }
     case 'reasoningEnabled': {
       const normalized = value.toLowerCase()
       if (!['true', 'false', 'on', 'off', 'enabled', 'disabled'].includes(normalized)) {
@@ -553,7 +600,7 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
       return updateActive({ ...config, [key]: parsed } as TurboFluxConfig)
     }
     default:
-      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens, approvalPolicy, reasoningEnabled, reasoningEffort, reasoningBudgetTokens`)
+      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens, approvalPolicy, sandboxPolicy, sandboxEnforcement, sandboxNetwork, sandboxBackend, sandboxDockerImage, reasoningEnabled, reasoningEffort, reasoningBudgetTokens`)
   }
 }
 
@@ -691,6 +738,10 @@ export function configFromProviderPreset(preset: ProviderPreset, apiKey: string,
     } : undefined,
     modelMetadataSources: spec ? ['builtin'] : ['default'],
     approvalPolicy: 'ask',
+    sandboxPolicy: 'workspace',
+    sandboxEnforcement: 'guarded',
+    sandboxNetwork: 'allow',
+    sandboxBackend: 'auto',
     reasoning: normalizeNativeReasoningConfig(spec?.id ?? selectedModel, undefined, preset.provider),
     apiConfigs: [],
     activeApiConfigId: 'main',

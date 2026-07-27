@@ -1,6 +1,13 @@
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
 import type { FastContextModelConfig, ModelCapabilities, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
-import type { ApprovalPolicy, NativeReasoningConfig } from '../../shared/agentTypes'
+import type {
+  ApprovalPolicy,
+  NativeReasoningConfig,
+  SandboxBackend,
+  SandboxEnforcement,
+  SandboxNetworkPolicy,
+  SandboxPolicy,
+} from '../../shared/agentTypes'
 
 export interface AgentRuntimeConfig {
   provider: TurboFluxProvider
@@ -11,6 +18,11 @@ export interface AgentRuntimeConfig {
   maxTokens: number
   modelCapabilities?: ModelCapabilities
   approvalPolicy?: ApprovalPolicy
+  sandboxPolicy?: SandboxPolicy
+  sandboxEnforcement?: SandboxEnforcement
+  sandboxNetwork?: SandboxNetworkPolicy
+  sandboxBackend?: SandboxBackend
+  sandboxDockerImage?: string
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
