@@ -281,7 +281,7 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const cursorChar = value[cursorOffset] ?? ' '
   const beforeCursor = value.slice(0, cursorOffset)
   const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
-  const landingInnerWidth = Math.max(1, frameWidth)
+  const landingInnerWidth = Math.max(1, frameWidth - 2)
   const landingPanelFill = '█'.repeat(landingInnerWidth)
   const defaultInnerWidth = Math.max(1, frameWidth - 2)
   const defaultPanelFill = '█'.repeat(defaultInnerWidth)
@@ -320,6 +320,8 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
         <Box
           width={frameWidth}
           flexDirection="column"
+          borderStyle="single"
+          borderColor={promptChrome.borderColor}
           overflow="hidden"
         >
           <Text color="#000000">{landingPanelFill}</Text>
