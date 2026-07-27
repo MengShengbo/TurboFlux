@@ -4253,6 +4253,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
             hash: result.checkpointId,
             message: result.label || `Auto-checkpoint after file operations`,
           }
+          let gitCommitSucceeded = !this.gitEnabled
           if (this.gitEnabled) {
             const gitResult = await gitCommitPaths(
               this.config.workspacePath,
@@ -4260,6 +4261,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
               filePaths,
               this.toolExecutor,
             )
+            gitCommitSucceeded = gitResult.ok
             if (!gitResult.ok) {
               this.emit({ type: 'notification', level: 'warning', message: `Local checkpoint saved; Git auto-commit skipped: ${gitResult.error}` })
             } else if (!gitResult.nothingToCommit) {
@@ -4267,8 +4269,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
             }
             await this.refreshGitStatus()
           }
-          this.touchedFilePaths.clear()
-          this.filePreimages.clear()
+          if (gitCommitSucceeded) {
+            this.touchedFilePaths.clear()
+            this.filePreimages.clear()
+          }
         }
       } catch (err) {
         this.emit({ type: 'error', error: `Auto-checkpoint failed: ${err instanceof Error ? err.message : String(err)}` })
@@ -5618,15 +5622,19 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!cpResult.checkpointId) return `No changes to checkpoint`
         this.pendingCheckpoint = { hash: cpResult.checkpointId, message: cpResult.label || checkpointMessage }
         let gitMessage = ''
+        let gitCommitSucceeded = !this.gitEnabled
         if (this.gitEnabled) {
           const gitResult = await gitCommitPaths(basePath, checkpointMessage, filePaths, this.toolExecutor)
+          gitCommitSucceeded = gitResult.ok
           gitMessage = gitResult.ok
             ? gitResult.nothingToCommit ? ' Git had no additional changes.' : ` Git commit: ${gitResult.hash || 'created'}.`
             : ` Git commit skipped: ${gitResult.error}`
           await this.refreshGitStatus()
         }
-        this.touchedFilePaths.clear()
-        this.filePreimages.clear()
+        if (gitCommitSucceeded) {
+          this.touchedFilePaths.clear()
+          this.filePreimages.clear()
+        }
         return `Checkpoint created: ${cpResult.shortId} - ${checkpointMessage}.${gitMessage}`
       }
 
