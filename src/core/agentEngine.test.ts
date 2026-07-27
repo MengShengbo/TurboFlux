@@ -1492,4 +1492,82 @@ describe('context compaction boundaries', () => {
     expect(split.oldTurns.map(turn => turn.id)).toEqual(['u1'])
     expect(split.recentTurns.map(turn => turn.id)).toEqual(['a1', 'tr1', 'a2'])
   })
+
+  it('reuses a persisted summary and carries preserved files into the next run', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      workspacePath: workspace,
+    }, new NodeToolExecutor(workspace), stateProvider)
+    const oldTurns: AgentTurn[] = [
+      { id: 'u-old', role: 'user', content: 'inspect the implementation', timestamp: 1 },
+      {
+        id: 'a-read',
+        role: 'assistant',
+        content: '',
+        timestamp: 2,
+        toolCalls: [{ id: 'read-1', name: 'read_file', arguments: { path: 'src/important.ts' } }],
+      },
+      {
+        id: 'tr-read',
+        role: 'tool_result',
+        content: '',
+        timestamp: 3,
+        toolResults: [{ toolCallId: 'read-1', name: 'read_file', output: 'export const important = true', isError: false }],
+      },
+      { id: 'a-old', role: 'assistant', content: 'I found the owner.', timestamp: 4 },
+    ]
+    const recentTurns: AgentTurn[] = Array.from({ length: 10 }, (_, index) => ({
+      id: `recent-${index}`,
+      role: 'user' as const,
+      content: `follow up ${index}`,
+      timestamp: index + 5,
+    }))
+    engine.restoreFromTurns([...oldTurns, ...recentTurns])
+    stateProvider.setContextSegments([{
+      startMessageId: 'u-old',
+      endMessageId: 'a-old',
+      summary: '<continuation_summary>persisted state</continuation_summary>',
+      isModelGenerated: true,
+      kind: 'compact',
+      originalCharCount: 100,
+      isValid: true,
+      createdAt: 1,
+      coveredTurnIds: oldTurns.map(turn => turn.id),
+    }])
+    const generateSummary = vi.spyOn(engine as any, 'generateContinuationSummary')
+
+    try {
+      await engine.compactContext()
+
+      expect(generateSummary).not.toHaveBeenCalled()
+      expect(engine.getSession().turns.map(turn => turn.id)).toEqual(recentTurns.map(turn => turn.id))
+      expect(stateProvider.getContextReservoir()).toHaveLength(1)
+
+      let preservedAtModelCall: Array<{ path: string; content: string }> = []
+      vi.spyOn(engine as any, 'callModel').mockImplementation(async () => {
+        preservedAtModelCall = (engine as any).preservedFiles
+        return { id: 'final', role: 'assistant', content: 'done', timestamp: Date.now() } satisfies AgentTurn
+      })
+      await engine.run('continue from the compacted context')
+
+      expect(preservedAtModelCall).toEqual([{
+        path: 'src/important.ts',
+        content: 'export const important = true',
+      }])
+    } finally {
+      engine.destroy()
+    }
+  })
 })

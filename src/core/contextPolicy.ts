@@ -2,12 +2,8 @@ import type { ContextPolicyMode } from '../shared/agentTypes'
 
 export interface ContextPolicyProfile {
   mode: ContextPolicyMode
-  recapRatio: number
-  compactRatio: number
-  emergencyRatio: number
   targetRatio: number
   keepRecentTurns: number
-  recapKeepRecentTurns: number
   maxSegmentTokens: number
   minTailTurns: number
 }
@@ -15,23 +11,15 @@ export interface ContextPolicyProfile {
 export const CONTEXT_POLICY_PROFILES: Record<ContextPolicyMode, ContextPolicyProfile> = {
   normal: {
     mode: 'normal',
-    recapRatio: 0.55,
-    compactRatio: 0.75,
-    emergencyRatio: 0.88,
     targetRatio: 0.72,
     keepRecentTurns: 10,
-    recapKeepRecentTurns: 8,
     maxSegmentTokens: 16_000,
     minTailTurns: 6,
   },
   qualityFirst: {
     mode: 'qualityFirst',
-    recapRatio: 0.40,
-    compactRatio: 0.60,
-    emergencyRatio: 0.72,
     targetRatio: 0.56,
     keepRecentTurns: 14,
-    recapKeepRecentTurns: 10,
     maxSegmentTokens: 24_000,
     minTailTurns: 8,
   },
@@ -61,12 +49,6 @@ export function autoCompactThreshold(contextWindow: number, maxOutputTokens: num
     ? Math.max(QUALITY_AUTOCOMPACT_BUFFER_TOKENS, Math.floor(effectiveWindow * 0.18))
     : NORMAL_AUTOCOMPACT_BUFFER_TOKENS
   return Math.max(1_024, effectiveWindow - buffer)
-}
-
-export function recapThreshold(contextWindow: number, maxOutputTokens: number, mode?: ContextPolicyMode): number {
-  const effectiveWindow = effectiveInputWindow(contextWindow, maxOutputTokens)
-  const profile = resolveContextPolicyProfile(mode)
-  return Math.max(1_024, Math.floor(effectiveWindow * profile.recapRatio))
 }
 
 export function blockingContextLimit(contextWindow: number, maxOutputTokens: number): number {
