@@ -1437,6 +1437,28 @@ describe('AgentEngine model protocol compatibility', () => {
     }
   })
 
+  it('persists partial Responses output when the provider ends incomplete', async () => {
+    const harness = createProtocolHarness('custom', 'gpt-5.5', async (_url, _headers, _body, onLine) => {
+      onLine(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'Partial but useful.' })}`)
+      onLine(`data: ${JSON.stringify({
+        type: 'response.incomplete',
+        response: { incomplete_details: { reason: 'max_output_tokens' } },
+      })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      const turn = await harness.callModel()
+      expect(turn).toMatchObject({
+        content: 'Partial but useful.',
+        metadata: expect.objectContaining({ interrupted: true }),
+      })
+      expect(harness.events).toContainEqual({ type: 'stream:end', interrupted: true })
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
   it('reports every attempted protocol and URL when all candidates fail', async () => {
     const harness = createProtocolHarness('custom', 'gpt-compatible-model', async url => {
       if (url.endsWith('/chat/completions')) return { success: false, status: 404, error: 'HTTP 404: endpoint not found' }

@@ -1551,7 +1551,7 @@ export class NodeToolExecutor implements ToolExecutor {
           if (!response.ok) {
             const error = this.formatHttpError(url, response.status, text)
             if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
-              await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+              await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
               continue
             }
             return { success: false, error, status: response.status }
@@ -1559,10 +1559,15 @@ export class NodeToolExecutor implements ToolExecutor {
           return { success: true, data: text }
         } catch (error) {
           if (request.controller.signal.aborted || this.isAbortError(error)) {
-            return { success: false, error: 'Request aborted' }
+            return {
+              success: false,
+              error: request.timedOut() && !options.signal?.aborted
+                ? `Request timed out after ${request.timeoutMs}ms`
+                : 'Request aborted',
+            }
           }
           if (attempt < STREAM_RETRY_DELAYS_MS.length) {
-            await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+            await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
             continue
           }
           return { success: false, error: this.formatNetworkError(url, error) }
@@ -1603,7 +1608,7 @@ export class NodeToolExecutor implements ToolExecutor {
             const text = await response.text()
             const error = this.formatHttpError(url, response.status, text)
             if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
-              await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+              await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
               continue
             }
             return { success: false, error, status: response.status }
@@ -1636,7 +1641,12 @@ export class NodeToolExecutor implements ToolExecutor {
           return { success: true, data: fullResponse }
         } catch (error) {
           if (request.controller.signal.aborted || this.isAbortError(error)) {
-            return { success: false, error: 'Request aborted' }
+            return {
+              success: false,
+              error: request.timedOut() && !options.signal?.aborted
+                ? `Request timed out after ${request.timeoutMs}ms`
+                : 'Request aborted',
+            }
           }
           if (buffer.trim()) {
             emittedAnyLine = true
@@ -1645,7 +1655,7 @@ export class NodeToolExecutor implements ToolExecutor {
             buffer = ''
           }
           if (!emittedAnyLine && !receivedAnyBytes && attempt < STREAM_RETRY_DELAYS_MS.length) {
-            await this.delay(STREAM_RETRY_DELAYS_MS[attempt])
+            await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
             continue
           }
           return { success: false, error: this.formatNetworkError(url, error), data: fullResponse }
@@ -1664,14 +1674,26 @@ export class NodeToolExecutor implements ToolExecutor {
     this.activeStreams.get(streamId)?.abort()
   }
 
-  private createRequestController(options: RequestOptions): { controller: AbortController; cleanup: () => void } {
+  private createRequestController(options: RequestOptions): {
+    controller: AbortController
+    cleanup: () => void
+    timedOut: () => boolean
+    timeoutMs: number
+  } {
     const controller = new AbortController()
+    const timeoutMs = options.timeoutMs || MODEL_REQUEST_TIMEOUT_MS
+    let timedOut = false
     const abortFromParent = () => controller.abort()
     if (options.signal?.aborted) controller.abort()
     else options.signal?.addEventListener('abort', abortFromParent, { once: true })
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs || MODEL_REQUEST_TIMEOUT_MS)
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, timeoutMs)
     return {
       controller,
+      timeoutMs,
+      timedOut: () => timedOut,
       cleanup: () => {
         clearTimeout(timer)
         options.signal?.removeEventListener('abort', abortFromParent)
@@ -2177,8 +2199,17 @@ export class NodeToolExecutor implements ToolExecutor {
     return { ...environment, ...overrides }
   }
 
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms))
+  private delay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve()
+    return new Promise(resolve => {
+      const finish = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', finish)
+        resolve()
+      }
+      const timer = setTimeout(finish, ms)
+      signal?.addEventListener('abort', finish, { once: true })
+    })
   }
 
   private formatHttpError(url: string, status: number, text: string): string {

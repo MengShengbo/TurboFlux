@@ -3502,6 +3502,8 @@ Before retrying:
       }
     }
     if (streamFailure) {
+      const interruptedTurn = this.finishInterruptedStream(textContent, reasoningContent, model, startTime)
+      if (interruptedTurn) return interruptedTurn
       throw new ModelProtocolRequestError(streamFailure, {
         protocol,
         url,

@@ -39,8 +39,8 @@ const NEVER_CROSS_PROTOCOL_STATUSES = new Set([401, 403, 408, 409, 425, 429])
 const PROTOCOL_MISMATCH_DETAIL = new RegExp([
   '(?:unknown|unsupported|unrecognized|invalid|missing|required|expected|must provide|does not support|not found)',
   '.{0,100}',
-  '(?:endpoint|route|path|url|schema|payload|request format|model|messages|input|max_tokens|anthropic-version|x-api-key|authorization|content-type|tool_choice|tools|stream|thinking|output_config|cache_control)',
-  '|(?:endpoint|route|path|url|schema|payload|request format|model|messages|input|max_tokens|anthropic-version|x-api-key|authorization|content-type|thinking|output_config|cache_control)',
+  '(?:endpoint|route|path|url|schema|payload|request format|model|messages|instructions|input|max_tokens|anthropic-version|x-api-key|authorization|content-type|tool_choice|tools|stream|thinking|output_config|cache_control)',
+  '|(?:endpoint|route|path|url|schema|payload|request format|model|messages|instructions|input|max_tokens|anthropic-version|x-api-key|authorization|content-type|thinking|output_config|cache_control)',
   '.{0,100}',
   '(?:unknown|unsupported|unrecognized|invalid|missing|required|expected|not found)',
 ].join(''), 'i')
@@ -94,8 +94,8 @@ export function looksLikeResponsesPreferredModel(model: string): boolean {
 }
 
 export function shouldFallbackProtocol(error: ModelProtocolRequestError): boolean {
-  if (error.receivedStreamData) return false
   if (error.kind === 'response_shape') return true
+  if (error.receivedStreamData) return false
   if (error.status === undefined) return false
   if (NEVER_CROSS_PROTOCOL_STATUSES.has(error.status) || error.status >= 500) return false
   if (DIRECT_FALLBACK_STATUSES.has(error.status)) return true
