@@ -42,7 +42,7 @@ export function resolveSandboxStatus(
       resolvedBackend: 'guarded',
       available: true,
       osIsolation: false,
-      networkIsolated: true,
+      networkIsolated: config.network === 'deny',
       writableRoots: [],
       warning: 'Command execution is disabled by the read-only policy.',
     }

@@ -1049,7 +1049,7 @@ export class NodeToolExecutor implements ToolExecutor {
         proc.stderr.off('data', onStderr)
         proc.off('error', onError)
         proc.off('close', onClose)
-        this.cleanupSandboxProcess(spawnPlan, false)
+        this.processSandbox.cleanupProcess(spawnPlan, result.success !== true)
         const finalizedResult: Result<CommandOutput> = result.data
           ? { ...result, data: { ...result.data, logPath, outputBytes } }
           : result
@@ -1118,7 +1118,7 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private terminateProcessTree(proc: ChildProcessWithoutNullStreams, spawnPlan?: SandboxSpawnPlan): void {
-    this.cleanupSandboxProcess(spawnPlan, true)
+    this.processSandbox.cleanupProcess(spawnPlan, true)
     if (!proc.pid) return
     if (process.platform === 'win32') {
       const killer = spawn('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
@@ -1129,34 +1129,6 @@ export class NodeToolExecutor implements ToolExecutor {
       process.kill(usesProcessGroup() ? -proc.pid : proc.pid, getProcessGroupSignal())
     } catch {
       proc.kill('SIGTERM')
-    }
-  }
-
-  private cleanupSandboxProcess(spawnPlan: SandboxSpawnPlan | undefined, force: boolean): void {
-    const cleanup = spawnPlan?.cleanup
-    if (!cleanup || cleanup.kind !== 'docker') return
-    const attempt = () => {
-      if (!existsSync(cleanup.cidFile)) return false
-      try {
-        const containerId = readFileSync(cleanup.cidFile, 'utf-8').trim()
-        if (force && /^[a-f0-9]{12,64}$/i.test(containerId)) {
-          const cleaner = spawn('docker', ['rm', '-f', containerId], {
-            cwd: spawnPlan.cwd,
-            env: spawnPlan.env,
-            windowsHide: true,
-            stdio: 'ignore',
-          })
-          cleaner.on('error', () => {})
-          cleaner.unref()
-        }
-      } catch {}
-      rmSync(cleanup.cidFile, { force: true })
-      return true
-    }
-    const cleaned = attempt()
-    if (force && !cleaned) {
-      const retry = setTimeout(attempt, 250)
-      retry.unref?.()
     }
   }
 
@@ -1355,7 +1327,7 @@ export class NodeToolExecutor implements ToolExecutor {
         })
       })
       proc.on('close', (code, signal) => {
-        this.cleanupSandboxProcess(session.spawnPlan, false)
+        this.processSandbox.cleanupProcess(session.spawnPlan, code !== 0 || signal !== null)
         session.info.status = 'exited'
         session.info.exitCode = code
         session.info.exitSignal = signal ?? null
@@ -1514,7 +1486,7 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   private async killTerminalProcessTree(session: BackgroundTerminalSession): Promise<void> {
-    this.cleanupSandboxProcess(session.spawnPlan, true)
+    this.processSandbox.cleanupProcess(session.spawnPlan, true)
     const pid = session.info.pid
     if (!pid) {
       session.proc.kill()

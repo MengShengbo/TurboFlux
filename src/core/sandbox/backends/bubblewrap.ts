@@ -16,7 +16,10 @@ export const bubblewrapBackend: SandboxBackendAdapter = {
     const sandboxCwd = workspaceRelativeCwd
       ? `${SANDBOX_WORKSPACE}/${workspaceRelativeCwd.replace(/\\/g, '/')}`
       : SANDBOX_WORKSPACE
-    const mapWorkspaceValue = (value: string) => value.split(context.workspacePath).join(SANDBOX_WORKSPACE)
+    const mapWorkspaceValue = (value: string) => {
+      const mapped = value.split(context.workspacePath).join(SANDBOX_WORKSPACE)
+      return mapped === value ? value : mapped.replace(/\\/g, '/')
+    }
     const args = [
       '--die-with-parent',
       '--new-session',
@@ -35,20 +38,22 @@ export const bubblewrapBackend: SandboxBackendAdapter = {
         '/mnt',
         '/media',
         '/Volumes',
-        '/run/user',
+        '/run',
       ].filter(path => path !== '/' && existsSync(path)))
       if (isAbsolute(request.command) && [...hiddenRoots].some(root => isWithin(root, request.command))) {
         if (!isWithin(context.workspacePath, request.command)) {
           throw new Error('Strict Bubblewrap cannot execute a tool from a hidden user directory; use a system toolchain or Docker image.')
         }
       }
-      environment = {
-        ...context.targetEnvironment,
-        PATH: String(context.targetEnvironment.PATH || '')
-          .split(':')
-          .filter(path => !isAbsolute(path) || ![...hiddenRoots].some(root => isWithin(root, path)))
-          .join(':'),
-      }
+      environment = Object.fromEntries(Object.entries(context.targetEnvironment).map(([name, value]) => [
+        name,
+        value === undefined ? value : mapWorkspaceValue(value),
+      ]))
+      environment.PATH = String(context.targetEnvironment.PATH || '')
+        .split(':')
+        .filter(path => !isAbsolute(path) || isWithin(context.workspacePath, path) || ![...hiddenRoots].some(root => isWithin(root, path)))
+        .map(mapWorkspaceValue)
+        .join(':')
       args.push('--dir', SANDBOX_WORKSPACE, '--bind', context.workspacePath, SANDBOX_WORKSPACE)
       for (const path of hiddenRoots) args.push('--tmpfs', path)
     }
