@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
+import React, { useState, useMemo, useRef, useEffect, useCallback, type MutableRefObject } from 'react'
 import { Box, Text, useInput, usePaste, type Key } from 'ink'
 import stringWidth from 'string-width'
 import { useTheme } from '../../theme/index'
@@ -27,6 +27,7 @@ interface PromptInputProps {
   width?: number
   placeholder?: string
   appearance?: PromptAppearance
+  historyRef?: MutableRefObject<string[]>
 }
 
 export function resolvePromptChrome(theme: Theme, appearance: PromptAppearance): { borderColor: string; backgroundColor?: string } {
@@ -45,6 +46,91 @@ export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'met
 
 function clampCursor(offset: number, value: string): number {
   return Math.max(0, Math.min(offset, value.length))
+}
+
+export interface PromptHistoryNavigation {
+  value: string
+  index: number
+  draft: string
+}
+
+export function navigatePromptHistory(
+  history: string[],
+  index: number,
+  draft: string,
+  currentValue: string,
+  direction: 'older' | 'newer',
+): PromptHistoryNavigation {
+  if (history.length === 0) return { value: currentValue, index, draft }
+
+  if (direction === 'older') {
+    const nextIndex = Math.min(history.length - 1, index + 1)
+    return {
+      value: history[history.length - 1 - nextIndex] ?? currentValue,
+      index: nextIndex,
+      draft: index < 0 ? currentValue : draft,
+    }
+  }
+
+  if (index < 0) return { value: currentValue, index, draft }
+  if (index === 0) return { value: draft, index: -1, draft: '' }
+  const nextIndex = index - 1
+  return {
+    value: history[history.length - 1 - nextIndex] ?? draft,
+    index: nextIndex,
+    draft,
+  }
+}
+
+export interface PromptEditorViewport {
+  beforeCursor: string
+  cursorChar: string
+  afterCursor: string
+  width: number
+}
+
+export function getPromptEditorViewport(value: string, cursorOffset: number, maxWidth: number): PromptEditorViewport {
+  const offset = clampCursor(cursorOffset, value)
+  const availableWidth = Math.max(1, Math.floor(maxWidth))
+  const cursorChar = Array.from(value.slice(offset))[0] ?? ' '
+  const cursorEnd = offset < value.length ? offset + cursorChar.length : offset
+  const cursorWidth = Math.max(1, stringWidth(cursorChar))
+  let remainingWidth = Math.max(0, availableWidth - cursorWidth)
+  let beforeCursor = ''
+
+  for (const char of Array.from(value.slice(0, offset)).reverse()) {
+    const width = stringWidth(char)
+    if (width > remainingWidth) break
+    beforeCursor = char + beforeCursor
+    remainingWidth -= width
+  }
+
+  let afterCursor = ''
+  for (const char of Array.from(value.slice(cursorEnd))) {
+    const width = stringWidth(char)
+    if (width > remainingWidth) break
+    afterCursor += char
+    remainingWidth -= width
+  }
+
+  return {
+    beforeCursor,
+    cursorChar,
+    afterCursor,
+    width: stringWidth(beforeCursor) + cursorWidth + stringWidth(afterCursor),
+  }
+}
+
+function fitText(value: string, maxWidth: number): string {
+  let result = ''
+  let width = 0
+  for (const char of Array.from(value)) {
+    const nextWidth = width + stringWidth(char)
+    if (nextWidth > maxWidth) break
+    result += char
+    width = nextWidth
+  }
+  return result
 }
 
 export function getImageTokenBefore(value: string, offset: number): { start: number; end: number } | null {
@@ -88,7 +174,7 @@ export function getImageTokenRangeAfterDelete(value: string, offset: number): { 
   return { start: offset, end: fullEnd }
 }
 
-export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode, width, placeholder: requestedPlaceholder, appearance = 'default' }: PromptInputProps) {
+export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode, width, placeholder: requestedPlaceholder, appearance = 'default', historyRef: sharedHistoryRef }: PromptInputProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -96,8 +182,10 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const [cursorOffset, setCursorOffset] = useState(value.length)
   const lastEscRef = useRef<number>(0)
   const lastValueRef = useRef(value)
-  const historyRef = useRef<string[]>([])
+  const localHistoryRef = useRef<string[]>([])
+  const historyRef = sharedHistoryRef ?? localHistoryRef
   const historyIdxRef = useRef<number>(-1)
+  const historyDraftRef = useRef('')
 
   const completions = useMemo(() => {
     if (!value.startsWith('/') || value.includes(' ')) return []
@@ -115,11 +203,14 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     lastValueRef.current = value
   }, [value])
 
-  const replaceValue = useCallback((nextValue: string, nextCursor = nextValue.length) => {
+  const replaceValue = useCallback((nextValue: string, nextCursor = nextValue.length, resetHistory = true) => {
     onChange(nextValue)
     setCursorOffset(clampCursor(nextCursor, nextValue))
     setSelectedIdx(0)
-    historyIdxRef.current = -1
+    if (resetHistory) {
+      historyIdxRef.current = -1
+      historyDraftRef.current = ''
+    }
   }, [onChange])
 
   const insertText = useCallback((text: string) => {
@@ -143,6 +234,7 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     if (val.trim()) {
       historyRef.current.push(val)
       historyIdxRef.current = -1
+      historyDraftRef.current = ''
     }
     onSubmit(val)
   }, [onSubmit])
@@ -177,13 +269,10 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       if (showCompletions) {
         setSelectedIdx(i => Math.max(i - 1, 0))
       } else {
-        const history = historyRef.current
-        if (history.length === 0) return
-        const nextIdx = historyIdxRef.current < history.length - 1
-          ? historyIdxRef.current + 1
-          : historyIdxRef.current
-        historyIdxRef.current = nextIdx
-        replaceValue(history[history.length - 1 - nextIdx] ?? '')
+        const next = navigatePromptHistory(historyRef.current, historyIdxRef.current, historyDraftRef.current, value, 'older')
+        historyIdxRef.current = next.index
+        historyDraftRef.current = next.draft
+        replaceValue(next.value, next.value.length, false)
       }
       return
     }
@@ -192,14 +281,10 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       if (showCompletions) {
         setSelectedIdx(i => Math.min(i + 1, completions.length - 1))
       } else {
-        const history = historyRef.current
-        if (historyIdxRef.current <= 0) {
-          historyIdxRef.current = -1
-          replaceValue('')
-        } else {
-          historyIdxRef.current -= 1
-          replaceValue(history[history.length - 1 - historyIdxRef.current] ?? '')
-        }
+        const next = navigatePromptHistory(historyRef.current, historyIdxRef.current, historyDraftRef.current, value, 'newer')
+        historyIdxRef.current = next.index
+        historyDraftRef.current = next.draft
+        replaceValue(next.value, next.value.length, false)
       }
       return
     }
@@ -278,28 +363,28 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     : 'What are we building today?')
   const frameWidth = Math.max(20, Math.min(width ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
   const promptChrome = resolvePromptChrome(theme, appearance)
-  const cursorChar = value[cursorOffset] ?? ' '
-  const beforeCursor = value.slice(0, cursorOffset)
-  const afterCursor = cursorOffset < value.length ? value.slice(cursorOffset + 1) : ''
   const landingInnerWidth = Math.max(1, frameWidth - 2)
   const landingPanelFill = '█'.repeat(landingInnerWidth)
   const defaultInnerWidth = Math.max(1, frameWidth - 2)
   const defaultPanelFill = '█'.repeat(defaultInnerWidth)
+  const editorViewportWidth = Math.max(1, (appearance === 'landing' ? landingInnerWidth : defaultInnerWidth) - 3)
+  const editorViewport = getPromptEditorViewport(value, cursorOffset, editorViewportWidth)
+  const visiblePlaceholder = fitText(placeholder, editorViewportWidth)
   const editorWidth = value
-    ? stringWidth(value) + (cursorOffset >= value.length ? 1 : 0)
-    : Math.max(1, stringWidth(placeholder))
+    ? editorViewport.width
+    : Math.max(1, stringWidth(visiblePlaceholder))
   const landingMiddleFill = '█'.repeat(Math.max(0, landingInnerWidth - 3 - editorWidth))
   const defaultMiddleFill = '█'.repeat(Math.max(0, defaultInnerWidth - 3 - editorWidth))
   const editorText = value ? (
     <Text backgroundColor={promptChrome.backgroundColor}>
-      {beforeCursor}
-      <Text inverse>{cursorChar}</Text>
-      {afterCursor}
+      {editorViewport.beforeCursor}
+      <Text inverse>{editorViewport.cursorChar}</Text>
+      {editorViewport.afterCursor}
     </Text>
   ) : (
     <Text backgroundColor={promptChrome.backgroundColor}>
-      <Text inverse>{placeholder[0] ?? ' '}</Text>
-      <Text color={theme.inactive}>{placeholder.slice(1)}</Text>
+      <Text inverse>{Array.from(visiblePlaceholder)[0] ?? ' '}</Text>
+      <Text color={theme.inactive}>{Array.from(visiblePlaceholder).slice(1).join('')}</Text>
     </Text>
   )
 

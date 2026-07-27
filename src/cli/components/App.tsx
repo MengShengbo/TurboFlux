@@ -293,6 +293,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const streamThinkingBufferRef = useRef('')
   const streamThinkingStartedAtRef = useRef<number | undefined>(undefined)
   const streamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const streamTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastActivityPaintRef = useRef(0)
   const fcEventBufferRef = useRef<FastContextScanEvent[]>([])
   const fcFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -311,6 +312,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const runControlHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleInterruptRef = useRef<() => void>(() => {})
   const lastClipboardImageRef = useRef<{ fingerprint: string; at: number } | null>(null)
+  const promptHistoryRef = useRef<string[]>([])
   const genMsgId = useCallback(() => {
     messageIdRef.current += 1
     return `msg-${messageIdRef.current}`
@@ -393,6 +395,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (streamFlushTimerRef.current) {
       clearTimeout(streamFlushTimerRef.current)
       streamFlushTimerRef.current = null
+    }
+    if (streamTransitionTimerRef.current) {
+      clearTimeout(streamTransitionTimerRef.current)
+      streamTransitionTimerRef.current = null
     }
   }, [])
 
@@ -575,18 +581,19 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           streamThinkingStartedAtRef.current = streamStartedAt
           setStreamThinkingStartedAt(streamStartedAt)
           setStreamThinkingText('')
+          setStreamText('')
           clearStreamFlushTimer()
           break
         }
         case 'stream:delta':
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
           streamBufferRef.current += event.text
-          setCurrentTurnOutputTokens(previous => Math.max(previous, estimateOutputTokensForDisplay(streamBufferRef.current)))
           if (!streamFlushTimerRef.current) {
             streamFlushTimerRef.current = setTimeout(() => {
               streamFlushTimerRef.current = null
               setStreamText(streamBufferRef.current)
               setStreamThinkingText(streamThinkingBufferRef.current)
+              setCurrentTurnOutputTokens(previous => Math.max(previous, estimateOutputTokensForDisplay(streamBufferRef.current)))
             }, 80)
           }
           markActivity()
@@ -604,6 +611,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               streamFlushTimerRef.current = null
               setStreamText(streamBufferRef.current)
               setStreamThinkingText(streamThinkingBufferRef.current)
+              setCurrentTurnOutputTokens(previous => Math.max(previous, estimateOutputTokensForDisplay(streamBufferRef.current)))
             }, 80)
           }
           markActivity()
@@ -647,10 +655,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               thinking,
             }])
           }
-          setTimeout(() => {
+          if (noFlickerActive) {
             setStreamText('')
             setStreamThinkingText('')
-          }, 120)
+          } else {
+            streamTransitionTimerRef.current = setTimeout(() => {
+              streamTransitionTimerRef.current = null
+              setStreamText('')
+              setStreamThinkingText('')
+            }, 120)
+          }
           setCurrentTurnOutputTokens(0)
           setCurrentTools([])
           setChangeSummaries([])
@@ -847,7 +861,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       convManager.destroy()
       runtime.destroy().catch(() => {})
     }
-  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer, markActivity, showRunControlHint, genMsgId])
+  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer, markActivity, showRunControlHint, genMsgId, noFlickerActive])
 
   const getConversationEntries = useCallback((): ConversationEntry[] => {
     const convs = convManager.list()
@@ -1554,6 +1568,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         onPasteText={handlePasteText}
         mode={currentMode}
         width={conversationFrameWidth}
+        historyRef={promptHistoryRef}
       />
     </Box>
   ) : null
@@ -1625,6 +1640,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   width={landingFrameWidth}
                   placeholder=""
                   appearance="landing"
+                  historyRef={promptHistoryRef}
                 />
               )}
             />
