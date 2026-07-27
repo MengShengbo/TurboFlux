@@ -1,5 +1,6 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
 import type { ToolExecutor } from '../tools/executor'
 
 const DEFAULT_OUTPUT_LIMIT = 60_000
@@ -41,6 +42,25 @@ export interface GitSnapshot {
   untrackedCount: number
   conflictedCount: number
   recentCommits: GitCommitSummary[]
+}
+
+export type GitIntegrationPhase = 'detecting' | 'ready' | 'syncing' | 'error' | 'unavailable' | 'disabled'
+
+export interface GitOperationState {
+  name: string
+  status: 'running' | 'success' | 'error'
+  message?: string
+  hash?: string
+  updatedAt: number
+}
+
+export interface GitIntegrationState {
+  enabled: boolean
+  phase: GitIntegrationPhase
+  snapshot: GitSnapshot | null
+  error?: string
+  operation?: GitOperationState
+  updatedAt: number
 }
 
 export interface GitOperationResult {
@@ -429,9 +449,7 @@ export async function gitCommitPaths(
     const indexBefore = await runGit(workspacePath, ['ls-files', '-s', '-z', '--', ...paths], executor)
     if (!indexBefore.ok) return { ok: false, error: commandError(indexBefore, 'Unable to snapshot the real Git index') }
 
-    const isolatedIndexRoot = join(resolve(workspacePath), '.turboflux')
-    await mkdir(isolatedIndexRoot, { recursive: true, mode: 0o700 })
-    temporaryDirectory = await mkdtemp(join(isolatedIndexRoot, 'git-index-'))
+    temporaryDirectory = await mkdtemp(join(tmpdir(), 'turboflux-git-index-'))
     const indexPath = join(temporaryDirectory, 'index')
     const env = { GIT_INDEX_FILE: indexPath }
     const readTree = await runGit(workspacePath, head.ok ? ['read-tree', 'HEAD'] : ['read-tree', '--empty'], executor, { env })
@@ -483,6 +501,60 @@ export async function gitCommit(
     return filePaths && filePaths.length > 0
       ? gitCommitPaths(workspacePath, safeMessage, filePaths, executor)
       : commitCurrentIndex(workspacePath, safeMessage, executor)
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+export async function gitRestorePaths(
+  workspacePath: string,
+  filePaths: string[],
+  executor: ToolExecutor,
+  source = 'HEAD',
+): Promise<GitOperationResult> {
+  try {
+    const paths = normalizeWorkspacePaths(workspacePath, filePaths)
+    const revision = validateRevision(source)
+    const stagedCheck = await runGit(workspacePath, ['diff', '--cached', '--quiet', '--', ...paths], executor)
+    if (stagedCheck.exitCode === 1) {
+      return { ok: false, error: 'Refusing to restore: one or more selected paths contain staged changes.' }
+    }
+    if (!stagedCheck.ok) return { ok: false, error: commandError(stagedCheck, 'Unable to inspect staged paths') }
+
+    const result = await runGit(workspacePath, ['restore', `--source=${revision}`, '--worktree', '--', ...paths], executor)
+    return result.ok
+      ? { ok: true, output: `Restored ${paths.length} path(s) from ${revision}:\n${paths.join('\n')}` }
+      : { ok: false, error: commandError(result, 'Git restore failed') }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+export async function gitRevertCommit(
+  workspacePath: string,
+  revision: string,
+  executor: ToolExecutor,
+): Promise<GitOperationResult> {
+  try {
+    const safeRevision = validateRevision(revision)
+    const [working, staged] = await Promise.all([
+      runGit(workspacePath, ['diff', '--quiet'], executor),
+      runGit(workspacePath, ['diff', '--cached', '--quiet'], executor),
+    ])
+    if (working.exitCode === 1 || staged.exitCode === 1) {
+      return { ok: false, error: 'Refusing to revert: tracked working-tree or staged changes are present.' }
+    }
+    if (!working.ok) return { ok: false, error: commandError(working, 'Unable to inspect working tree') }
+    if (!staged.ok) return { ok: false, error: commandError(staged, 'Unable to inspect staged changes') }
+
+    const result = await runGit(workspacePath, ['revert', '--no-edit', safeRevision], executor, { timeout: 30_000 })
+    if (!result.ok) return { ok: false, error: commandError(result, 'Git revert failed') }
+    const hash = await runGit(workspacePath, ['rev-parse', 'HEAD'], executor, { timeout: 3_000 })
+    return {
+      ok: true,
+      hash: hash.ok ? hash.stdout.trim() : undefined,
+      output: truncateOutput(result.stdout.trimEnd() || `Reverted ${safeRevision}.`),
+    }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }

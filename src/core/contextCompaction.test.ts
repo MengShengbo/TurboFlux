@@ -51,7 +51,6 @@ describe('context compaction compiler', () => {
       'files_touched',
       'important_decisions',
       'open_questions',
-      'rollback_anchor',
       'next_step_hint',
     ].map(section => `<${section}>ok</${section}>`).join('')}</continuation_summary>`
 

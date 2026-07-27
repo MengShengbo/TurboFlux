@@ -4,7 +4,7 @@
 
 ## 模块职责
 
-TurboFlux 的具体工具实现层。包含工具执行器、代码索引、本地历史记录和记忆系统工具。
+TurboFlux 的具体工具实现层。包含工具执行器、代码索引和记忆系统工具。
 
 ## 入口与导出
 
@@ -12,7 +12,6 @@ TurboFlux 的具体工具实现层。包含工具执行器、代码索引、本�
 |------|------|
 | `src/tools/executor.ts` | 工具执行器 — 工具调用的具体执行逻辑 |
 | `src/tools/codeIndex.ts` | 代码索引工具 — 代码符号搜索与索引 |
-| `src/tools/localHistory.ts` | 本地历史工具 — 操作历史追踪 |
 | `src/tools/memory.ts` | 记忆工具 — 长期记忆的读写 |
 
 ## 对外接口
@@ -23,7 +22,6 @@ TurboFlux 的具体工具实现层。包含工具执行器、代码索引、本�
 |------|------|------|
 | `executeTool` | `executor.ts` | 工具执行主入口 |
 | `searchCode` / `indexCode` | `codeIndex.ts` | 代码搜索与索引 |
-| `getHistory` / `saveHistory` | `localHistory.ts` | 本地历史管理 |
 | `remember` / `recall` | `memory.ts` | 记忆系统读写 |
 
 ## 关键依赖与配置

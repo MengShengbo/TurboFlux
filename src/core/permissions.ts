@@ -96,6 +96,10 @@ export class PermissionPipeline {
       return decide({ verdict: 'ask', reason: 'Repository state change: committing the current index may include user-staged files' })
     }
 
+    if ((toolName === 'git_restore' || toolName === 'git_revert') && this.approvalPolicy !== 'full') {
+      return decide({ verdict: 'ask', reason: 'Repository recovery operation: confirm the selected Git revision and paths' })
+    }
+
     if (toolName === 'run_command' || toolName === 'write_terminal') {
       const askResult = this.checkAskCommandPatterns(args)
       if (askResult) return decide(askResult)
@@ -194,8 +198,8 @@ export class PermissionPipeline {
       'write_terminal',
       'kill_terminal',
       'cancel_agent',
-      'restore_checkpoint',
-      'prune_checkpoints',
+      'git_restore',
+      'git_revert',
       'git_stage',
       'git_commit',
       'git_create_branch',

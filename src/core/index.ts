@@ -10,7 +10,6 @@ export type { AgentRuntime, CreateAgentRuntimeOptions } from './runtime/agentRun
 export {
   applyPreset,
   ensureDirectories,
-  getCheckpointsDir,
   getConfigDir,
   getConversationsDir,
   getPresetByIdOrModel,

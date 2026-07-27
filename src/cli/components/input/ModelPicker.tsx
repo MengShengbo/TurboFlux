@@ -4,6 +4,7 @@ import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import type { ModelPreset } from '../../../core/config'
+import { useI18n } from '../../i18n/index'
 
 interface Props {
   currentModel?: string
@@ -51,6 +52,7 @@ export function ModelPicker({
   onCancel,
 }: Props) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [query, setQuery] = useState('')
@@ -111,14 +113,14 @@ export function ModelPicker({
   return (
     <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={theme.brand} paddingX={1}>
       <Box justifyContent="space-between">
-        <Text bold color={theme.brand}>Models</Text>
+        <Text bold color={theme.brand}>{t('ui.models.title')}</Text>
         <Text color={isRefreshing ? theme.brandShimmer : stale ? theme.warning : theme.inactive}>
           {isRefreshing ? 'refreshing' : stale ? 'cached' : `${models.length} available`}
         </Text>
       </Box>
       <Box marginTop={1}>
-        <Text color={theme.inactive}>Search  </Text>
-        <Text color={query ? theme.text : theme.inactive}>{query || 'type to filter'}</Text>
+        <Text color={theme.inactive}>{t('ui.models.search')}  </Text>
+        <Text color={query ? theme.text : theme.inactive}>{query || t('ui.models.filter')}</Text>
       </Box>
       <Box flexDirection="column" marginTop={1}>
         {visible.map((model, visibleIndex) => {
@@ -134,12 +136,12 @@ export function ModelPicker({
             </Box>
           )
         })}
-        {filtered.length === 0 ? <Text color={theme.inactive}>No matching chat models.</Text> : null}
+        {filtered.length === 0 ? <Text color={theme.inactive}>{t('ui.models.none')}</Text> : null}
       </Box>
       {error ? <Box marginTop={1}><Text color={theme.warning} wrap="truncate-end">{error}</Text></Box> : null}
       <Box marginTop={1} justifyContent="space-between">
-        <Text color={theme.inactive}>Up/Down select  Enter apply  Esc close</Text>
-        <Text color={theme.inactive}>Ctrl+R refresh</Text>
+        <Text color={theme.inactive}>{t('ui.models.keys')}</Text>
+        <Text color={theme.inactive}>{t('ui.models.refresh')}</Text>
       </Box>
     </Box>
   )

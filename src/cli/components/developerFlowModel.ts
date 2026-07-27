@@ -4,6 +4,8 @@ import type { FastContextUiSummary } from './layout/fastContextUi'
 import { deriveActivityModel } from './agentActivityModel'
 import type { StreamingToolDraft } from './tools/toolTypes'
 import type { ToolStatus } from './tools/toolTypes'
+import { getToolActivityKind } from './tools/toolPresentation'
+import { createTranslator, type Translator } from '../i18n/index'
 
 export type DeveloperFlowTone = 'idle' | 'active' | 'success' | 'warning' | 'error'
 export type SubAgentUiStatus = 'running' | 'completed' | 'failed'
@@ -41,105 +43,92 @@ export interface DeveloperFlowModel {
   background: string[]
 }
 
-const FILE_TOOLS = new Set(['write_file', 'replace_file', 'edit_file', 'multi_edit', 'delete_file'])
-const RUN_TOOLS = new Set(['run_command'])
-const EXPLORE_TOOLS = new Set([
-  'read_file',
-  'read_file_full',
-  'list_directory',
-  'search_files',
-  'search_content',
-  'search_symbols',
-  'search_symbol',
-  'search_semantic',
-  'get_codemap',
-  'explore_code',
-  'web_search',
-])
+const DEFAULT_TRANSLATOR = createTranslator('en')
 
-export function deriveDeveloperFlow(input: DeveloperFlowInput): DeveloperFlowModel {
+export function deriveDeveloperFlow(input: DeveloperFlowInput, t: Translator = DEFAULT_TRANSLATOR): DeveloperFlowModel {
   const activity = deriveActivityModel({
     runState: input.runState,
     tools: input.tools,
     draft: input.draft,
     streamText: input.streamText,
     thinkingText: input.thinkingText,
-  })
+  }, t)
   const activeTool = activity.activeTool
   const activeToolName = input.draft?.name || activeTool?.name || input.runState.activeTool || ''
   const objective = input.task?.title.trim() || input.objective?.trim() || ''
-  const background = buildBackgroundSummary(input)
+  const background = buildBackgroundSummary(input, t)
 
   if (input.runState.phase === 'awaiting_approval') {
-    return flow('REVIEW REQUIRED', input.runState.detail || 'Review the pending action', 'warning', background)
+    return flow(t('ui.runState.reviewRequired'), input.runState.detail || t('ui.flow.reviewPending'), 'warning', background)
   }
   if (input.runState.phase === 'awaiting_input') {
-    return flow('INPUT REQUIRED', input.runState.detail || 'The agent is waiting for your answer', 'warning', background)
+    return flow(t('ui.runState.inputRequired'), input.runState.detail || t('ui.flow.awaitingAnswer'), 'warning', background)
   }
   if (input.runState.phase === 'paused') {
-    return flow('PAUSED', input.runState.detail || 'Work is paused', 'warning', background)
+    return flow(t('ui.runState.paused'), input.runState.detail || t('ui.flow.workPaused'), 'warning', background)
   }
   if (input.runState.phase === 'aborting') {
-    return flow('STOPPING', input.runState.detail || 'Stopping active work', 'error', background)
+    return flow(t('ui.runState.stopping'), input.runState.detail || t('ui.flow.stoppingWork'), 'error', background)
   }
   if (input.runState.phase === 'recoverable_error') {
-    return flow('RECOVERING', input.runState.detail || 'The last step can be retried', 'error', background)
+    return flow(t('ui.runState.recovering'), input.runState.detail || t('ui.flow.retryStep'), 'error', background)
   }
   if (input.streamText?.trim()) {
-    return flow('RESPONDING', 'Writing the result', 'active', background)
+    return flow(t('ui.flow.responding'), t('ui.flow.writingResult'), 'active', background)
   }
   if (activeToolName) {
-    if (FILE_TOOLS.has(activeToolName)) return flow('EDITING', activity.detail, 'active', background)
-    if (RUN_TOOLS.has(activeToolName)) return flow('RUNNING', activity.detail, 'active', background)
-    if (EXPLORE_TOOLS.has(activeToolName)) return flow('EXPLORING', activity.detail, 'active', background)
-    if (activeToolName === 'spawn_agent') return flow('DELEGATING', activity.detail, 'active', background)
-    return flow('WORKING', activity.detail, 'active', background)
+    const kind = getToolActivityKind(activeToolName)
+    if (kind === 'edit') return flow(t('ui.flow.editing'), activity.detail, 'active', background)
+    if (kind === 'run') return flow(t('ui.flow.running'), activity.detail, 'active', background)
+    if (kind === 'read') return flow(t('ui.flow.exploring'), activity.detail, 'active', background)
+    if (activeToolName === 'spawn_agent') return flow(t('ui.flow.delegating'), activity.detail, 'active', background)
+    return flow(t('ui.flow.working'), activity.detail, 'active', background)
   }
   if (input.thinkingText?.trim() || input.runState.phase === 'thinking') {
-    return flow('PLANNING', objective || input.runState.detail || 'Planning the next step', 'active', background)
+    return flow(t('ui.runState.planning'), objective || input.runState.detail || t('ui.flow.planningNext'), 'active', background)
   }
   if (input.runState.phase === 'tool_running' || input.isRunning) {
-    return flow('EXECUTING', objective || input.runState.detail || 'Continuing the current task', 'active', background)
+    return flow(t('ui.runState.executing'), objective || input.runState.detail || t('ui.flow.continuingTask'), 'active', background)
   }
 
   const runningSubagent = input.subagents.find(agent => agent.status === 'running')
   if (runningSubagent) {
-    return flow('BACKGROUND', `${runningSubagent.label} is working`, 'active', background)
+    return flow(t('ui.flow.background'), t('ui.flow.agentWorking', { agent: runningSubagent.label }), 'active', background)
   }
   if (input.fastContextActive) {
-    return flow('EXPLORING', `FastContext is ${formatFastContextPhase(input.fastContextSummary.phase)}`, 'active', background)
+    return flow(t('ui.flow.exploring'), t('ui.flow.fastContextState', { state: formatFastContextPhase(input.fastContextSummary.phase, t) }), 'active', background)
   }
 
-  return flow('READY', 'Ready for the next task', 'success', background)
+  return flow(t('ui.runState.ready'), t('ui.flow.readyNext'), 'success', background)
 }
 
-function buildBackgroundSummary(input: DeveloperFlowInput): string[] {
+function buildBackgroundSummary(input: DeveloperFlowInput, t: Translator): string[] {
   const items: string[] = []
   if (input.fastContextActive) {
-    const evidence = input.fastContextSummary.absorbed > 0
-      ? ` · ${input.fastContextSummary.absorbed} evidence`
-      : ''
-    items.push(`FC ${formatFastContextPhase(input.fastContextSummary.phase)}${evidence}`)
+    const state = formatFastContextPhase(input.fastContextSummary.phase, t)
+    items.push(input.fastContextSummary.absorbed > 0
+      ? t('ui.flow.fcEvidence', { state, count: input.fastContextSummary.absorbed })
+      : t('ui.flow.fcState', { state }))
   } else if (
     input.isRunning
     && input.fastContextSummary.events > 0
     && input.fastContextSummary.phase === 'completed'
   ) {
-    items.push('FC evidence ready')
+    items.push(t('ui.flow.fcEvidenceReady'))
   } else if (input.fastContextSummary.events > 0 && input.fastContextSummary.phase === 'error') {
-    items.push('FC failed')
+    items.push(t('ui.flow.fcFailed'))
   } else if (input.isRunning && input.fastContextSummary.events > 0 && input.fastContextSummary.phase === 'cancelled') {
-    items.push('FC cancelled')
+    items.push(t('ui.flow.fcCancelled'))
   }
 
   for (const agent of input.subagents.slice(-2)) {
-    if (agent.status === 'completed') items.push(`${agent.label} result ready`)
-    else if (agent.status === 'failed') items.push(`${agent.label} failed`)
-    else items.push(`${agent.label} ${normalizeSubagentDetail(agent.detail)}`)
+    if (agent.status === 'completed') items.push(t('ui.flow.agentResultReady', { agent: agent.label }))
+    else if (agent.status === 'failed') items.push(t('ui.flow.agentFailed', { agent: agent.label }))
+    else items.push(`${agent.label} ${normalizeSubagentDetail(agent.detail, t)}`)
   }
 
-  if (input.terminals > 0) items.push(`${input.terminals} terminal${input.terminals === 1 ? '' : 's'} active`)
-  if (input.queuedCount > 0) items.push(`${input.queuedCount} queued`)
+  if (input.terminals > 0) items.push(t(input.terminals === 1 ? 'ui.flow.terminalsActive' : 'ui.flow.terminalsActivePlural', { count: input.terminals }))
+  if (input.queuedCount > 0) items.push(t('ui.flow.queued', { count: input.queuedCount }))
   return items
 }
 
@@ -152,20 +141,20 @@ function flow(
   return { label, detail: trimTrailingEllipsis(detail), tone, background }
 }
 
-function formatFastContextPhase(phase: FastContextUiSummary['phase']): string {
-  if (phase === 'synthesizing') return 'assembling'
-  if (phase === 'ranking') return 'ranking'
-  if (phase === 'mapping' || phase === 'scanning') return 'mapping'
-  if (phase === 'completed') return 'ready'
-  if (phase === 'cancelled') return 'cancelled'
-  return 'needs attention'
+function formatFastContextPhase(phase: FastContextUiSummary['phase'], t: Translator): string {
+  if (phase === 'synthesizing') return t('ui.flow.fcAssembling')
+  if (phase === 'ranking') return t('ui.flow.fcRanking')
+  if (phase === 'mapping' || phase === 'scanning') return t('ui.flow.fcMapping')
+  if (phase === 'completed') return t('ui.flow.fcReady')
+  if (phase === 'cancelled') return t('ui.flow.fcCancelledState')
+  return t('ui.flow.fcAttention')
 }
 
-function normalizeSubagentDetail(detail: string): string {
+function normalizeSubagentDetail(detail: string, t: Translator): string {
   const normalized = detail.trim().replace(/^turn\s+/i, 'turn ')
   const turn = normalized.match(/^turn\s+(\d+\/\d+)$/i)
   if (turn) return turn[1]
-  return trimTrailingEllipsis(normalized || 'working')
+  return trimTrailingEllipsis(normalized || t('common.working'))
 }
 
 function trimTrailingEllipsis(value: string): string {

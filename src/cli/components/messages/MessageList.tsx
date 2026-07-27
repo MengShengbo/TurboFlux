@@ -5,6 +5,7 @@ import { UserMessage, AssistantMessage, SystemMessage, type Message } from './Me
 import { ToolCallTree } from '../tools/ToolCallTree'
 import { DiffCard } from '../diff/DiffCard'
 import type { ChangeSummary } from '../../../shared/agentTypes'
+import { useI18n } from '../../i18n/index'
 
 interface Props {
   messages: Message[]
@@ -16,6 +17,7 @@ interface Props {
   selectedMessageRef?: Ref<DOMElement>
   showThinking?: boolean
   showToolDetails?: boolean
+  availableWidth?: number
 }
 
 /** Group consecutive system messages into a single rendered block. */
@@ -58,8 +60,10 @@ export function MessageList({
   selectedMessageRef,
   showThinking = verbose,
   showToolDetails = verbose,
+  availableWidth,
 }: Props) {
   const theme = useTheme()
+  const { t } = useI18n()
   const grouped = useGroupedMessages(messages)
   const selectedId = selectedMessageId ?? (selectedIndex === undefined ? undefined : messages[selectedIndex]?.id)
 
@@ -96,7 +100,7 @@ export function MessageList({
               paddingX={isSelected ? 1 : 0}
             >
               <Text dimColor color={theme.inactive}>
-                {'>'} {msgs.length} system messages
+                {t('ui.message.systemCount', { count: msgs.length })}
               </Text>
               {msgs.map(m => (
                 <Box key={m.id} paddingLeft={2}>
@@ -152,21 +156,39 @@ export function MessageList({
             borderColor={isSelected ? theme.brand : undefined}
             paddingX={isSelected ? 1 : 0}
           >
-            {msg.tools && msg.tools.length > 0 && <ToolCallTree tools={msg.tools} verbose={verbose} expanded={showToolDetails} />}
-            {msg.changes && msg.changes.length > 0 && msg.changes.map((change, ci) => (
-              <Box key={ci}>
-                <DiffCard
-                  filename={change.path}
-                  operation={change.operation}
-                  before={change.before}
-                  after={change.after}
-                  addedLines={change.addedLines}
-                  removedLines={change.removedLines}
-                  totalLines={change.totalLines}
-                  maxDiffRows={diffMaxRows}
-                />
+            {msg.tools && msg.tools.length > 0 && (
+              <ToolCallTree
+                tools={msg.tools}
+                verbose={verbose}
+                expanded={showToolDetails}
+                availableWidth={availableWidth}
+              />
+            )}
+            {msg.changes && msg.changes.length > 0 && (
+              <Box flexDirection="column" marginTop={msg.tools?.length ? 1 : 0}>
+                <Text color={theme.inactive}>{t('ui.message.changes')}</Text>
+                {msg.changes.map((change, ci) => (
+                  <DiffCard
+                    key={`${change.path}-${ci}`}
+                    filename={change.path}
+                    operation={change.operation}
+                    before={change.before}
+                    after={change.after}
+                    addedLines={change.addedLines}
+                    removedLines={change.removedLines}
+                    totalLines={change.totalLines}
+                    maxDiffRows={diffMaxRows}
+                    availableWidth={availableWidth}
+                    diffStatus={change.diffStatus}
+                    beforeBytes={change.beforeBytes}
+                    afterBytes={change.afterBytes}
+                  />
+                ))}
               </Box>
-            ))}
+            )}
+            {(msg.content || msg.thinking) && (msg.tools?.length || msg.changes?.length) ? (
+              <Text color={theme.inactive}>{t('ui.message.answer')}</Text>
+            ) : null}
             <AssistantMessage content={msg.content} interrupted={msg.interrupted} thinking={msg.thinking} showThinking={showThinking} />
           </Box>
         )

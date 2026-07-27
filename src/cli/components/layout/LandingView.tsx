@@ -2,6 +2,7 @@ import React from 'react'
 import { Box, Text } from 'ink'
 import { Header } from '../header/Header'
 import type { MascotMood } from '../header/Mascot'
+import { useI18n } from '../../i18n/index'
 
 interface LandingViewProps {
   frameWidth: number
@@ -26,6 +27,7 @@ export function LandingView({
   showPrompt,
   prompt,
 }: LandingViewProps) {
+  const { t } = useI18n()
   return (
     <Box
       flexDirection="column"
@@ -49,7 +51,7 @@ export function LandingView({
       <Box width={frameWidth} flexDirection="column" alignItems="center" marginTop={2} flexShrink={0}>
         {showPrompt ? (
           <>
-            <Text bold>我们该构建什么？</Text>
+            <Text bold>{t('ui.landing.prompt')}</Text>
             <Box marginTop={1} backgroundColor="#050505">{prompt}</Box>
           </>
         ) : null}

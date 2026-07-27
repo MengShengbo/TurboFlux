@@ -4,6 +4,9 @@ import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import type { AgentAttachment } from '../shared/agentTypes'
+import { createTranslator, type Translator } from './i18n/index'
+
+const DEFAULT_TRANSLATOR = createTranslator('en')
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
@@ -24,6 +27,7 @@ export interface ResolvedImagePrompt {
 
 export interface ResolveImagePromptOptions {
   existingAttachments?: AgentAttachment[]
+  t?: Translator
 }
 
 interface ImageRef {
@@ -39,6 +43,7 @@ export function resolveImagePrompt(input: string, workspacePath: string, options
   const refs = collectImageRefs(input)
   const placeholders = collectImagePlaceholders(input)
   const warnings: string[] = []
+  const t = options.t ?? DEFAULT_TRANSLATOR
   let prompt = input
   const existing = normalizeExistingAttachments(prompt, options.existingAttachments ?? [])
   prompt = existing.prompt
@@ -47,17 +52,17 @@ export function resolveImagePrompt(input: string, workspacePath: string, options
 
   for (const ref of refs) {
     const resolved = resolveInputPath(ref.path, workspacePath)
-    const attachment = attachImageFile(resolved, attachments.length + 1, warnings)
+    const attachment = attachImageFile(resolved, attachments.length + 1, warnings, t)
     if (!attachment) continue
     attachments.push(attachment)
     replacements.set(ref.raw, imagePlaceholderForIndex(attachments.length))
   }
 
   if (placeholders.length > 0 && attachments.length === 0) {
-    const attachment = captureClipboardImageAttachment(1, warnings, workspacePath)
+    const attachment = captureClipboardImageAttachment(1, warnings, workspacePath, t)
     if (attachment) attachments.push(attachment)
     if (attachment && placeholders.length > 1) {
-      warnings.push('Only one image can be read from the clipboard at submit time. Paste image files or use Ctrl+V for each image while composing.')
+      warnings.push(t('image.onlyOneClipboard'))
     }
   }
 
@@ -67,7 +72,7 @@ export function resolveImagePrompt(input: string, workspacePath: string, options
   prompt = normalizeImagePlaceholders(prompt)
   const missingPlaceholders = maxImagePlaceholderIndex(prompt) - attachments.length
   if (missingPlaceholders > 0) {
-    warnings.push(`${missingPlaceholders} image placeholder(s) do not have an attached image.`)
+    warnings.push(t('image.missingPlaceholders', { count: missingPlaceholders }))
   }
 
   return { prompt, attachments, warnings }
@@ -182,20 +187,20 @@ function maxImagePlaceholderIndex(input: string): number {
   return max
 }
 
-function attachImageFile(filePath: string, index: number, warnings: string[]): AgentAttachment | null {
+function attachImageFile(filePath: string, index: number, warnings: string[], t: Translator): AgentAttachment | null {
   const mime = mimeForPath(filePath)
   if (!mime) return null
   if (!existsSync(filePath)) {
-    warnings.push(`Image not found: ${filePath}`)
+    warnings.push(t('image.notFound', { path: filePath }))
     return null
   }
   const stat = statSync(filePath)
   if (!stat.isFile()) {
-    warnings.push(`Image path is not a file: ${filePath}`)
+    warnings.push(t('image.notFile', { path: filePath }))
     return null
   }
   if (stat.size > MAX_IMAGE_BYTES) {
-    warnings.push(`Image is larger than ${formatBytes(MAX_IMAGE_BYTES)} and was not attached: ${filePath}`)
+    warnings.push(t('image.tooLarge', { limit: formatBytes(MAX_IMAGE_BYTES), path: filePath }))
     return null
   }
 
@@ -216,23 +221,23 @@ function attachImageFile(filePath: string, index: number, warnings: string[]): A
   }
 }
 
-export function captureClipboardImageAttachment(index: number, warnings: string[] = [], workspacePath = process.cwd()): AgentAttachment | null {
+export function captureClipboardImageAttachment(index: number, warnings: string[] = [], workspacePath = process.cwd(), t: Translator = DEFAULT_TRANSLATOR): AgentAttachment | null {
   if (process.platform !== 'win32') {
-    warnings.push('Clipboard image paste is currently only available on Windows.')
+    warnings.push(t('image.clipboardUnsupported'))
     return null
   }
 
-  const fileAttachment = captureClipboardImageFileAttachment(index, warnings, workspacePath)
+  const fileAttachment = captureClipboardImageFileAttachment(index, warnings, workspacePath, t)
   if (fileAttachment) return fileAttachment
 
-  const bitmapAttachment = captureClipboardBitmapAttachment(index, warnings)
+  const bitmapAttachment = captureClipboardBitmapAttachment(index, warnings, t)
   if (bitmapAttachment) return bitmapAttachment
 
-  warnings.push('No image was found in the Windows clipboard. Paste an image path or copy an image first.')
+  warnings.push(t('image.clipboardMissing'))
   return null
 }
 
-function captureClipboardBitmapAttachment(index: number, warnings: string[]): AgentAttachment | null {
+function captureClipboardBitmapAttachment(index: number, warnings: string[], t: Translator): AgentAttachment | null {
   const targetDir = attachmentDir()
   mkdirSync(targetDir, { recursive: true })
   const target = join(targetDir, `clipboard-${Date.now()}-${index}.png`)
@@ -262,7 +267,7 @@ function captureClipboardBitmapAttachment(index: number, warnings: string[]): Ag
   }
   const stat = statSync(target)
   if (stat.size > MAX_IMAGE_BYTES) {
-    warnings.push(`Clipboard image is larger than ${formatBytes(MAX_IMAGE_BYTES)} and was not attached.`)
+    warnings.push(t('image.clipboardTooLarge', { limit: formatBytes(MAX_IMAGE_BYTES) }))
     return null
   }
   return {
@@ -275,10 +280,10 @@ function captureClipboardBitmapAttachment(index: number, warnings: string[]): Ag
   }
 }
 
-function captureClipboardImageFileAttachment(index: number, warnings: string[], workspacePath: string): AgentAttachment | null {
+function captureClipboardImageFileAttachment(index: number, warnings: string[], workspacePath: string, t: Translator): AgentAttachment | null {
   const refs = readClipboardImageRefs()
   for (const ref of refs) {
-    const attachment = attachImageFile(resolveInputPath(ref, workspacePath), index, warnings)
+    const attachment = attachImageFile(resolveInputPath(ref, workspacePath), index, warnings, t)
     if (attachment) return attachment
   }
   return null

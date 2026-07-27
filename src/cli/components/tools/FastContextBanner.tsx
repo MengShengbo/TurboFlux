@@ -4,6 +4,7 @@ import { useTheme } from '../../theme/index'
 import type { FastContextScanEvent, FastContextScanPhase } from '../../../core/fastContextTypes'
 import { SPINNER_CHARS, SPINNER_INTERVAL_MS } from '../spinner/constants'
 import type { FastContextUiSummary } from '../layout/fastContextUi'
+import { useI18n } from '../../i18n/index'
 
 const SPIN = SPINNER_CHARS
 const TICK_MS = SPINNER_INTERVAL_MS
@@ -36,6 +37,7 @@ interface FastContextBannerProps {
 
 export function FastContextBanner({ events, summary, isActive }: FastContextBannerProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const [tick, setTick] = useState(0)
   const state = useMemo(() => {
     const recent = events.reduce(processEvent, createScanState())
@@ -61,13 +63,13 @@ export function FastContextBanner({ events, summary, isActive }: FastContextBann
     : state.phase === 'error' ? theme.error
     : theme.brand
 
-  const phaseLabel = state.phase === 'mapping' ? 'MAPPING'
-    : state.phase === 'ranking' ? 'RANKING'
-    : state.phase === 'scanning' ? 'SCANNING'
-    : state.phase === 'synthesizing' ? 'SYNTHESIZING'
-    : state.phase === 'completed' ? 'DONE'
-    : state.phase === 'cancelled' ? 'CANCELLED'
-    : 'ERROR'
+  const phaseLabel = state.phase === 'mapping' ? t('ui.fastContext.phase.mapping')
+    : state.phase === 'ranking' ? t('ui.fastContext.phase.ranking')
+    : state.phase === 'scanning' ? t('ui.fastContext.phase.scanning')
+    : state.phase === 'synthesizing' ? t('ui.fastContext.phase.synthesizing')
+    : state.phase === 'completed' ? t('ui.runState.done')
+    : state.phase === 'cancelled' ? t('ui.fastContext.phase.cancelled')
+    : t('ui.fastContext.phase.error')
 
   const activeWorkers = [...state.workers.values()].filter(w => w.status === 'running')
   const showWorkers = isActive && activeWorkers.length > 0
@@ -77,10 +79,10 @@ export function FastContextBanner({ events, summary, isActive }: FastContextBann
     <Box flexDirection="column" marginBottom={0}>
       {/* Header row */}
       <Box>
-        <Text color={phaseColor} bold>Fast Context </Text>
+        <Text color={phaseColor} bold>FastContext </Text>
         <Text color={theme.inactive}>[{phaseLabel}]</Text>
-        <Text color={theme.inactive}> wave {state.wave}/{state.maxWaves}</Text>
-        <Text color={theme.inactive}> - {state.filesDiscovered} files - {state.hitCount} hits</Text>
+        <Text color={theme.inactive}> {t('ui.fastContext.wave', { wave: state.wave, maxWaves: state.maxWaves })}</Text>
+        <Text color={theme.inactive}> - {t('ui.fastContext.counts', { files: state.filesDiscovered, hits: state.hitCount })}</Text>
       </Box>
 
       {/* Parallel workers */}
@@ -108,7 +110,7 @@ export function FastContextBanner({ events, summary, isActive }: FastContextBann
       {showFallback && (
         <Box marginLeft={2}>
           <Text color={theme.brand}>{SPIN[tick % SPIN.length]} </Text>
-          <Text color={theme.inactive}>{state.insight || 'mapping code...'}</Text>
+          <Text color={theme.inactive}>{state.insight || t('ui.fastContext.mapping')}</Text>
         </Box>
       )}
 
@@ -128,7 +130,7 @@ export function FastContextBanner({ events, summary, isActive }: FastContextBann
       {/* Completion summary */}
       {state.phase === 'completed' && state.hitCount > 0 && (
         <Box marginLeft={2}>
-          <Text color={theme.success}>Captured {state.filesAbsorbed} evidence files across {state.hitCount} line ranges</Text>
+          <Text color={theme.success}>{t('ui.fastContext.captured', { files: state.filesAbsorbed, ranges: state.hitCount })}</Text>
         </Box>
       )}
     </Box>

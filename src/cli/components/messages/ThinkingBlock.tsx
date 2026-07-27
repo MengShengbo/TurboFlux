@@ -2,10 +2,10 @@ import React, { useEffect, useState } from 'react'
 import cliTruncate from 'cli-truncate'
 import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
-import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { formatMarkdown } from '../markdown/index'
 import { SpinnerGlyph } from '../spinner/SpinnerGlyph'
 import type { ThinkingTrace } from '../../../shared/agentTypes'
+import { useI18n } from '../../i18n/index'
 
 interface ThinkingBlockProps {
   trace: ThinkingTrace
@@ -16,7 +16,7 @@ interface ThinkingBlockProps {
 
 export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity }: ThinkingBlockProps) {
   const theme = useTheme()
-  const { columns } = useTerminalSize()
+  const { t } = useI18n()
   const [now, setNow] = useState(Date.now())
   const startedAt = trace.startedAt ?? 0
   const duration = trace.durationMs ?? (streaming && startedAt > 0 ? now - startedAt : undefined)
@@ -29,19 +29,17 @@ export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity
   }, [streaming])
 
   const summary = [
-    streaming ? 'Reasoning' : 'Thought',
+    streaming ? t('ui.thinking.reasoning') : t('ui.thinking.thought'),
     trace.effort,
     typeof duration === 'number' ? formatDuration(duration) : '',
-    tokenCount > 0 ? `${formatTokenCount(tokenCount)} tokens` : '',
-    trace.status === 'interrupted' ? 'interrupted' : '',
+    tokenCount > 0 ? t('common.tokens', { count: formatTokenCount(tokenCount) }) : '',
+    trace.status === 'interrupted' ? t('ui.thinking.interrupted') : '',
   ].filter(Boolean).join(' · ')
   const displayContent = cliTruncate(
     trace.content.trim(),
     streaming ? 1200 : 6000,
     { position: streaming ? 'start' : 'end' },
   )
-  const compactPreview = trace.content.trim().replace(/\s+/g, ' ')
-  const previewWidth = Math.max(12, columns - summary.length - 8)
 
   if (streaming && !displayContent) {
     return (
@@ -57,14 +55,7 @@ export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity
         {streaming ? (
           <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
         ) : (
-          <>
-            <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▸ ${summary}`}</Text>
-            {compactPreview && (
-              <Box flexShrink={1} minWidth={0} overflow="hidden">
-                <Text color={theme.inactive} wrap="truncate-end">{`  ${cliTruncate(compactPreview, previewWidth)}`}</Text>
-              </Box>
-            )}
-          </>
+          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▸ ${summary}`}</Text>
         )}
       </Box>
     )

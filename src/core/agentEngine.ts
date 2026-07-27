@@ -14,6 +14,7 @@
   AnthropicThinkingBlock,
   AgentRunState,
   AgentRunPhase,
+  ChangeSummary,
 } from '../shared/agentTypes'
 import { generateSessionId, generateTurnId } from '../shared/agentTypes'
 import type { MemoryKind, MemoryScope } from '../shared/memoryTypes'
@@ -43,6 +44,7 @@ import {
   shouldOmitSamplingTemperature,
 } from './requestCompatibility'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
+import { ToolExecutionLedger } from './toolExecutionLedger'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import { FAST_CONTEXT_ENGINE_ID, getFastContextProfile, normalizeFastContextStrategy, type FastContextScanEvent, type FastContextScanResult, type FastContextStrategy } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
@@ -88,18 +90,18 @@ import {
   gitCommitPaths,
   gitCreateBranch,
   gitPush,
+  gitRestorePaths,
+  gitRevertCommit,
   gitStagePaths,
   gitStash,
   gitSwitchBranch,
   type GitDiffScope,
-  type GitSnapshot,
+  type GitIntegrationState,
+  type GitOperationResult,
 } from './gitService'
 import { hashText } from './fileIO'
 import { RuntimeTaskManager } from './runtime/runtimeTaskManager'
 import { SubAgentTaskManager, type SubAgentTaskSnapshot } from './runtime/subAgentTaskManager'
-import type { SecurityResearchProfile } from '../shared/securityTypes'
-import { createOffSecurityProfile } from '../shared/securityTypes'
-import { assertSecurityActivationAllowed, buildSecurityResearchPrompt, isSecurityProfileExpired } from './security/researchMode'
 
 type TaskSystemCreationEvent = {
   status: 'planning' | 'creating' | 'completed' | 'error'
@@ -246,7 +248,6 @@ export type AgentEventType =
   | { type: 'tool:result'; toolResult: ToolResult }
   | { type: 'task:update'; taskId: string; status: string; progress: number }
   | { type: 'mode:change'; from: AgentMode; to: AgentMode }
-  | { type: 'security:change'; profile: SecurityResearchProfile }
   | { type: 'session:complete'; session: AgentSession }
   | { type: 'error'; error: string }
   | { type: 'notification'; message: string; level: 'info' | 'success' | 'warning' | 'error' }
@@ -268,8 +269,7 @@ export type AgentEventType =
     creation?: TaskSystemCreationEvent | null
   }
   | { type: 'context:segment_created'; segment: ContextSegment }
-  | { type: 'checkpoint:attached'; assistantMessageId: string; checkpointId: string; checkpointLabel: string }
-  | { type: 'git:status'; enabled: boolean; snapshot: GitSnapshot | null }
+  | { type: 'git:state'; state: GitIntegrationState }
   | { type: 'fast_context:event'; runId: string; event: FastContextScanEvent }
   | { type: 'fast_context:complete'; runId: string; result: FastContextScanResult }
   | { type: 'subagent:start'; agentId: string; agentType: string; label: string; objective: string; runKind: 'fast_context' | 'spawn_agent' }
@@ -401,7 +401,6 @@ export class AgentEngine {
   private listeners: Set<AgentEventListener> = new Set()
   private abortController: AbortController | null = null
   private currentStreamId: number | null = null
-  private pendingCheckpoint: { hash: string; message: string } | null = null
   private isPaused: boolean = false
   private pausePromise: Promise<void> | null = null
   private pauseResolve: (() => void) | null = null
@@ -411,7 +410,7 @@ export class AgentEngine {
   private queuedAskUserResponse: string | null = null
   private toolCallTaskMap: Map<string, string> = new Map()
   private touchedFilePaths: Set<string> = new Set()
-  private filePreimages: Map<string, string | null> = new Map()
+  private fileBeforeSnapshots: Map<string, string | null> = new Map()
   private fastContextRun: ActiveFastContextRun | null = null
   private fastContextGeneration = 0
   private agentRunGeneration = 0
@@ -439,10 +438,15 @@ export class AgentEngine {
    */
   private workspaceSkeleton: string | null = null
   private workspaceSkeletonPath: string | null = null
-  private gitEnabled: boolean = false
   private cachedGitStatus: string | null = null
-  private gitSnapshot: GitSnapshot | null = null
   private gitDetected: boolean = false
+  private gitGeneration = 0
+  private gitState: GitIntegrationState = {
+    enabled: false,
+    phase: 'detecting',
+    snapshot: null,
+    updatedAt: Date.now(),
+  }
   // Workspace long-term memory (M1: static loaders only).
   // Injection text is owned by the main process MemoryService — we just
   // cache the latest copy plus its fingerprint so we don't re-IPC every turn.
@@ -464,15 +468,10 @@ export class AgentEngine {
   private currentRunSearches: Set<string> = new Set()
   private currentRunSuccessfulSearches: Set<string> = new Set()
   private currentRunExplorePacks: Set<string> = new Set()
+  private toolExecutionLedger = new ToolExecutionLedger()
   private conclusionGuardAttempts: number = 0
   private disabledToolNames: Set<string> = new Set()
   private pendingAssistantMessageId: string | null = null
-  // Snapshot of the chat message id for the assistant turn that just finished
-  // streaming. Used to attach an auto/explicit checkpoint produced AFTER that
-  // turn back to the SAME message instead of leaking onto the next assistant
-  // turn (Bug #12). Set by createAssistantTurn, consumed and cleared by
-  // executeToolCalls.
-  private lastAssistantMessageId: string | null = null
   private currentRunPromise: Promise<AgentTurn[]> | null = null
   private pendingSteeringMessages: string[] = []
   private runState: AgentRunState = { phase: 'idle', updatedAt: Date.now() }
@@ -495,16 +494,6 @@ export class AgentEngine {
     subAgentTaskManager?: SubAgentTaskManager,
   ) {
     this.toolExecutor = toolExecutor
-    this.config.securityProfile = config.securityProfile
-      ? { ...config.securityProfile, targets: [...config.securityProfile.targets] }
-      : createOffSecurityProfile()
-    if (this.config.securityProfile.active && this.config.securityProfile.mode === 'red') {
-      assertSecurityActivationAllowed('red', {
-        sandboxStatus: this.toolExecutor.getSandboxStatus?.(),
-        approvalPolicy: config.approvalPolicy || 'agent',
-      })
-    }
-    this.toolExecutor.setSecurityProfile?.(this.config.securityProfile)
     this.stateProvider = stateProvider
     this.subAgentTaskManager = subAgentTaskManager || new SubAgentTaskManager({
       workspacePath: config.workspacePath || '',
@@ -514,6 +503,13 @@ export class AgentEngine {
     })
     this.permissions.setApprovalPolicy(config.approvalPolicy || 'agent')
     const now = Date.now()
+    const gitEnabled = config.gitEnabled !== false
+    this.gitState = {
+      enabled: gitEnabled,
+      phase: gitEnabled ? 'detecting' : 'disabled',
+      snapshot: null,
+      updatedAt: now,
+    }
     this.session = {
       id: generateSessionId(),
       mode: config.mode,
@@ -570,26 +566,25 @@ export class AgentEngine {
     this.emit({ type: 'mode:change', from: oldMode, to: mode })
   }
 
-  getSecurityProfile(): SecurityResearchProfile {
-    const profile = this.config.securityProfile || createOffSecurityProfile()
-    return { ...profile, targets: [...profile.targets] }
-  }
-
-  setSecurityProfile(profile: SecurityResearchProfile): void {
-    const next = { ...profile, targets: [...profile.targets] }
-    if (next.active && next.mode === 'red') {
-      assertSecurityActivationAllowed('red', {
-        sandboxStatus: this.toolExecutor.getSandboxStatus?.(),
-        approvalPolicy: this.getApprovalPolicy(),
-      })
-    }
-    this.config.securityProfile = next
-    this.toolExecutor.setSecurityProfile?.(next)
-    this.emit({ type: 'security:change', profile: this.getSecurityProfile() })
-  }
-
   setAppendSystemPrompt(appendSystemPrompt: string | undefined): void {
     this.config.appendSystemPrompt = appendSystemPrompt
+  }
+
+  updateRuntimeConfiguration(update: Partial<Pick<AgentConfig,
+    'approvalPolicy' | 'gitEnabled' | 'contextWindow' | 'maxTokens' | 'profileSystemPrompt'
+  >>): void {
+    if (update.approvalPolicy !== undefined && update.approvalPolicy !== this.config.approvalPolicy) {
+      this.setApprovalPolicy(update.approvalPolicy)
+    }
+    if (update.gitEnabled !== undefined && update.gitEnabled !== this.gitState.enabled) {
+      this.setGitEnabled(update.gitEnabled)
+    }
+    if (update.contextWindow !== undefined) this.config.contextWindow = update.contextWindow
+    if (update.maxTokens !== undefined) this.config.maxTokens = update.maxTokens
+    if (update.profileSystemPrompt !== undefined && update.profileSystemPrompt !== this.config.profileSystemPrompt) {
+      this.config.profileSystemPrompt = update.profileSystemPrompt
+      this.invalidateStaticPromptCache()
+    }
   }
 
   setEnabledSkills(skills: AgentConfig['enabledSkills']): void {
@@ -829,10 +824,6 @@ export class AgentEngine {
   }
 
   setApprovalPolicy(policy: NonNullable<AgentConfig['approvalPolicy']>): void {
-    const securityProfile = this.getSecurityProfile()
-    if (policy === 'full' && securityProfile.active && securityProfile.mode === 'red') {
-      throw new Error('Approval policy "full" is unavailable during an active red-team engagement. Disable /security first.')
-    }
     this.config.approvalPolicy = policy
     this.permissions.setApprovalPolicy(policy)
   }
@@ -841,48 +832,115 @@ export class AgentEngine {
     return this.permissions.getApprovalPolicy()
   }
 
-  isGitEnabled(): boolean {
-    return this.gitEnabled
-  }
-
-  getGitSnapshot(): GitSnapshot | null {
-    return this.gitSnapshot
+  getGitState(): GitIntegrationState {
+    return {
+      ...this.gitState,
+      snapshot: this.gitState.snapshot
+        ? { ...this.gitState.snapshot, files: [...this.gitState.snapshot.files], recentCommits: [...this.gitState.snapshot.recentCommits] }
+        : null,
+      operation: this.gitState.operation ? { ...this.gitState.operation } : undefined,
+    }
   }
 
   setGitEnabled(enabled: boolean): void {
-    this.gitEnabled = enabled
+    this.gitGeneration += 1
     this.config.gitEnabled = enabled
-    this.session.gitEnabled = enabled
     if (!enabled) {
       this.cachedGitStatus = null
-      this.gitSnapshot = null
-      this.emit({ type: 'git:status', enabled: false, snapshot: null })
+      this.updateGitState({ enabled: false, phase: 'disabled', snapshot: null, error: undefined, operation: undefined })
     } else {
-      void this.refreshGitStatus()
+      this.gitDetected = false
+      this.updateGitState({ enabled: true, phase: 'detecting', snapshot: null, error: undefined })
+      void this.initializeGit(true)
     }
     this.invalidateStaticPromptCache()
   }
 
-  async detectAndEnableGit(): Promise<boolean> {
-    if (!this.config.workspacePath || this.gitDetected) return this.gitEnabled
+  async initializeGit(force = false): Promise<boolean> {
+    if (!this.gitState.enabled) return false
+    const generation = this.gitGeneration
+    if (!this.config.workspacePath) {
+      this.updateGitState({ phase: 'unavailable', snapshot: null, error: 'No workspace selected' })
+      return false
+    }
+    if (this.gitDetected && !force) return this.gitState.phase === 'ready' || this.gitState.phase === 'syncing'
+    this.updateGitState({ phase: 'detecting', error: undefined })
     this.gitDetected = true
     const isRepo = await detectGitRepo(this.config.workspacePath, this.toolExecutor)
-    if (isRepo && this.config.gitEnabled === true) {
-      this.setGitEnabled(true)
+    if (generation !== this.gitGeneration || !this.gitState.enabled) return false
+    if (!isRepo) {
+      this.cachedGitStatus = null
+      this.updateGitState({ phase: 'unavailable', snapshot: null, error: 'Workspace is not a Git repository' })
+      return false
     }
-    return this.gitEnabled
+    await this.refreshGitStatus(generation)
+    return this.gitState.phase === 'ready'
   }
 
   private invalidateStaticPromptCache(): void {
     invalidateStaticPromptCache()
   }
 
-  private async refreshGitStatus(): Promise<void> {
-    if (!this.gitEnabled || !this.config.workspacePath) return
+  async refreshGitStatus(expectedGeneration = this.gitGeneration): Promise<void> {
+    if (!this.gitState.enabled || !this.config.workspacePath) return
     const snapshot = await fetchGitSnapshot(this.config.workspacePath, this.toolExecutor).catch(() => null)
-    this.gitSnapshot = snapshot
+    if (expectedGeneration !== this.gitGeneration || !this.gitState.enabled) return
     this.cachedGitStatus = snapshot ? formatGitSnapshotForPrompt(snapshot) : null
-    this.emit({ type: 'git:status', enabled: this.gitEnabled, snapshot })
+    this.updateGitState({
+      phase: snapshot ? 'ready' : 'error',
+      snapshot,
+      error: snapshot ? undefined : 'Unable to read Git repository state',
+    })
+    this.invalidateStaticPromptCache()
+  }
+
+  private updateGitState(patch: Partial<GitIntegrationState>): void {
+    this.gitState = { ...this.gitState, ...patch, updatedAt: Date.now() }
+    this.emit({ type: 'git:state', state: this.getGitState() })
+  }
+
+  private async runGitOperation(
+    name: string,
+    operation: () => Promise<GitOperationResult>,
+  ): Promise<GitOperationResult> {
+    if (!this.gitState.enabled || !this.config.workspacePath) {
+      return { ok: false, error: 'Git integration is not active for this workspace' }
+    }
+    if (this.gitState.phase === 'syncing') {
+      return { ok: false, error: 'Another Git operation is already running' }
+    }
+    if (this.gitState.phase !== 'ready' && !await this.initializeGit(true)) {
+      return { ok: false, error: this.gitState.error || 'Git repository is not ready' }
+    }
+    this.updateGitState({
+      phase: 'syncing',
+      error: undefined,
+      operation: { name, status: 'running', updatedAt: Date.now() },
+    })
+    let result: GitOperationResult
+    const generation = this.gitGeneration
+    try {
+      result = await operation()
+    } catch (error) {
+      result = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    const snapshot = await fetchGitSnapshot(this.config.workspacePath, this.toolExecutor).catch(() => null)
+    if (generation !== this.gitGeneration || !this.gitState.enabled) return result
+    this.cachedGitStatus = snapshot ? formatGitSnapshotForPrompt(snapshot) : null
+    this.updateGitState({
+      phase: result.ok ? 'ready' : 'error',
+      snapshot,
+      error: result.ok ? undefined : result.error || `${name} failed`,
+      operation: {
+        name,
+        status: result.ok ? 'success' : 'error',
+        message: result.ok ? result.output : result.error,
+        hash: result.hash,
+        updatedAt: Date.now(),
+      },
+    })
+    this.invalidateStaticPromptCache()
+    return result
   }
 
   async compactContext(): Promise<void> {
@@ -948,7 +1006,8 @@ export class AgentEngine {
     this.session.createdAt = now
     this.session.updatedAt = now
     this.session.totalTokens = { input: 0, output: 0 }
-    this.setSecurityProfile(createOffSecurityProfile())
+    this.touchedFilePaths.clear()
+    this.fileBeforeSnapshots.clear()
   }
 
   restoreFromTurns(turns: AgentTurn[]): void {
@@ -1000,6 +1059,10 @@ export class AgentEngine {
     this.config.disabledTools = toolNames
   }
 
+  private modelDisabledToolNames(): string[] {
+    return [...this.disabledToolNames]
+  }
+
   attachPendingAssistantMessageId(messageId: string): void {
     this.pendingAssistantMessageId = messageId
   }
@@ -1030,10 +1093,6 @@ export class AgentEngine {
       model?: string
       tokens?: number | TokenUsage
       duration?: number
-      checkpointHash?: string
-      checkpointMessage?: string
-      checkpointId?: string
-      checkpointLabel?: string
       reasoningEnabled?: boolean
       reasoningEffort?: NonNullable<AgentTurn['metadata']>['reasoningEffort']
       thinking?: NonNullable<AgentTurn['metadata']>['thinking']
@@ -1074,13 +1133,15 @@ export class AgentEngine {
     this.currentRunSearches.clear()
     this.currentRunSuccessfulSearches.clear()
     this.currentRunExplorePacks.clear()
+    this.toolExecutionLedger.beginRun()
     this.conclusionGuardAttempts = 0
     this.compressionPreparedTurnCount = 0
     this.workspaceMemoryText = null
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
     this.pendingAssistantMessageId = null
-    this.lastAssistantMessageId = null
+    this.touchedFilePaths.clear()
+    this.fileBeforeSnapshots.clear()
 
     let restoredTimestampFallback = Date.now()
     for (const msg of messages) {
@@ -1161,13 +1222,6 @@ export class AgentEngine {
               : {}),
           }
         }
-        const checkpointId = meta?.checkpointId || meta?.checkpointHash
-        const checkpointLabel = meta?.checkpointLabel || meta?.checkpointMessage
-        if (checkpointId) {
-          turnMetadata.checkpointId = checkpointId
-          turnMetadata.checkpointLabel = checkpointLabel
-        }
-
         const assistantTurn: AgentTurn = {
           id: msg.id || generateTurnId(),
           role: 'assistant',
@@ -1393,6 +1447,10 @@ export class AgentEngine {
   }
 
   publishRuntimeTaskFinished(task: RuntimeTask): void {
+    const sessionId = task.metadata?.sessionId
+    if (task.kind === 'terminal' && typeof sessionId === 'string') {
+      this.agentBackgroundSessions.delete(sessionId)
+    }
     this.emit({ type: 'runtime-task:finished', task })
   }
 
@@ -1554,7 +1612,7 @@ export class AgentEngine {
     if (this.fastContextRun) this.cancelFastContextRun('Discarding FastContext state from a completed agent run', false)
     const agentRunId = ++this.agentRunGeneration
     const runPromise = (async () => {
-    await this.detectAndEnableGit()
+    await this.initializeGit()
     this.abortController = new AbortController()
     this.permissions.clearRunGrants()
     this.pendingSteeringMessages = []
@@ -1565,6 +1623,7 @@ export class AgentEngine {
     this.currentRunSearches.clear()
     this.currentRunSuccessfulSearches.clear()
     this.currentRunExplorePacks.clear()
+    this.toolExecutionLedger.beginRun()
     this.conclusionGuardAttempts = 0
     this.contextLimitRetryInProgress = false
     this.workspaceMemoryText = null
@@ -1721,7 +1780,7 @@ export class AgentEngine {
    * context:segment_created event so the store can persist it.
    *
    * The user never sees a conversation break — they can still scroll back,
-   * edit old messages, and rollback to any checkpoint.
+   * edit old messages, and continue from compacted context.
    */
   private async ensureContextWindow(force = false): Promise<void> {
     const activeConfig = this.stateProvider.getActiveConfig()
@@ -1763,14 +1822,6 @@ export class AgentEngine {
     )
 
     if (!existingSegment) {
-      let checkpointId: string | undefined
-      for (let index = oldTurns.length - 1; index >= 0; index -= 1) {
-        if (oldTurns[index].metadata?.checkpointId) {
-          checkpointId = oldTurns[index].metadata!.checkpointId
-          break
-        }
-      }
-
       const summary = await this.generateContinuationSummary(oldTurns, recentTurns)
       const segment: ContextSegment = {
         startMessageId,
@@ -1778,7 +1829,6 @@ export class AgentEngine {
         summary,
         isModelGenerated: true,
         kind: 'compact',
-        checkpointId,
         originalCharCount,
         isValid: true,
         createdAt: Date.now(),
@@ -1811,7 +1861,7 @@ export class AgentEngine {
     await Promise.all([
       workspacePath ? this.maybeBuildWorkspaceSkeleton(workspacePath) : Promise.resolve(),
       this.maybeRefreshWorkspaceMemory(),
-      this.gitEnabled ? this.refreshGitStatus() : Promise.resolve(),
+      this.gitState.enabled ? this.refreshGitStatus() : Promise.resolve(),
     ])
 
     const evidence = buildContinuationEvidence(oldTurns, recentTurns, {
@@ -2053,7 +2103,6 @@ Use one of these safer paths:
 - For broad or fragile changes: use replace_file with the complete final file content.
 `
       : ''
-
     return `<tool_retry_hint>
 The last tool call(s) failed: ${toolNames}.
 Errors:
@@ -2082,20 +2131,34 @@ Before retrying:
       : result)
   }
 
-  private async capturePreimage(filePath: string): Promise<void> {
-    if (this.filePreimages.has(filePath)) return
+  private async captureBeforeSnapshot(filePath: string): Promise<void> {
+    if (this.fileBeforeSnapshots.has(filePath)) return
     try {
       const readResult = await this.toolExecutor.readFile(filePath)
-      this.filePreimages.set(filePath, readResult.success ? (readResult.data ?? null) : null)
+      this.fileBeforeSnapshots.set(filePath, readResult.success ? (readResult.data ?? null) : null)
     } catch {
-      this.filePreimages.set(filePath, null)
+      this.fileBeforeSnapshots.set(filePath, null)
     }
   }
 
-  private diffStats(before: string, after: string): { addedLines?: number; removedLines?: number } {
-    if (!canComputeDiff(before, after)) return {}
+  private buildDiffSnapshot(before: string, after: string): Partial<ChangeSummary> {
+    if (!canComputeDiff(before, after)) {
+      return {
+        diffStatus: 'snapshot-too-large',
+        beforeBytes: before.length,
+        afterBytes: after.length,
+      }
+    }
     const stats = summarizeHunks(computeHunks(before, after))
-    return { addedLines: stats.added, removedLines: stats.removed }
+    return {
+      diffStatus: 'complete',
+      beforeBytes: before.length,
+      afterBytes: after.length,
+      addedLines: stats.added,
+      removedLines: stats.removed,
+      before,
+      after,
+    }
   }
 
   private async runFastContextScan(objective: string, options: {
@@ -2267,19 +2330,16 @@ Before retrying:
     ].filter(Boolean).join('\n\n') || undefined
     this.captureRuntimeContext(currentUserTurn, runtimeContextCandidate || '')
 
-    const systemPrompt = [
-      buildSystemPrompt(this.config.mode, {
-        workspacePath: this.config.workspacePath,
-        workspaceName: this.config.workspaceName,
-        systemPromptOverride: this.config.systemPromptOverride,
-        profileSystemPrompt: this.config.profileSystemPrompt,
-        enabledSkills: this.config.enabledSkills,
-        provider: activeConfig.provider,
-        modelId: activeConfig.defaultModel,
-        shell: this.config.shell,
-      }),
-      buildSecurityResearchPrompt(this.getSecurityProfile()),
-    ].filter(Boolean).join('\n\n')
+    const systemPrompt = buildSystemPrompt(this.config.mode, {
+      workspacePath: this.config.workspacePath,
+      workspaceName: this.config.workspaceName,
+      systemPromptOverride: this.config.systemPromptOverride,
+      profileSystemPrompt: this.config.profileSystemPrompt,
+      enabledSkills: this.config.enabledSkills,
+      provider: activeConfig.provider,
+      modelId: activeConfig.defaultModel,
+      shell: this.config.shell,
+    })
 
     const startTime = Date.now()
     const protocolCandidates = planModelProtocols(activeConfig.provider, activeConfig.defaultModel)
@@ -2395,10 +2455,10 @@ Before retrying:
       ...config.customHeaders,
     })
 
-    // Tool visibility is mode/policy based. Turn strategy may influence
-    // context hints, but never hides tools from the model.
+    // Tool visibility is mode and user-policy based. Runtime failures stay
+    // recoverable and therefore never remove the terminal tool surface.
     const anthropicTools = toolsToAnthropicFormat(this.config.mode, {
-      disabledTools: [],
+      disabledTools: this.modelDisabledToolNames(),
     })
 
     // Inject MCP tools into Anthropic format
@@ -2785,7 +2845,7 @@ Before retrying:
 
   private buildOpenAITools(config: APIConfig): object[] {
     const openaiTools = toolsToOpenAIFormat(this.config.mode, {
-      disabledTools: [],
+      disabledTools: this.modelDisabledToolNames(),
       strict: config.provider === 'openai',
     })
 
@@ -3209,6 +3269,9 @@ Before retrying:
       stream: true,
       store: false,
     }
+    if (looksLikeResponsesPreferredModel(config.defaultModel)) {
+      body.text = { verbosity: 'low' }
+    }
     if (!shouldOmitSamplingTemperature(config)) {
       body.temperature = this.config.temperature ?? config.temperature ?? 0.7
     }
@@ -3241,6 +3304,7 @@ Before retrying:
         protocol,
         max_output_tokens: body.max_output_tokens ?? null,
         temperature: body.temperature ?? null,
+        text: body.text ?? null,
         reasoning: body.reasoning ?? null,
         tool_choice: body.tool_choice ?? null,
         parallel_tool_calls: body.parallel_tool_calls ?? null,
@@ -4275,82 +4339,41 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     }
     if (completedIds.size !== allResults.length) this.emitActiveTaskContext()
 
-    // Auto-create checkpoint if there are file modifications without explicit checkpoint
-    // This ensures code changes are always recoverable even if AI forgets to checkpoint
     const hasFileOperations = toolCalls.some(tc =>
       ['write_file', 'replace_file', 'edit_file', 'multi_edit', 'delete_file'].includes(tc.name)
     )
-    const hasExplicitCheckpoint = toolCalls.some(tc => tc.name === 'create_checkpoint')
-
-    if (hasFileOperations && !hasExplicitCheckpoint && !this.pendingCheckpoint && this.config.workspacePath) {
-      try {
-        const filePaths = Array.from(this.touchedFilePaths)
-        if (filePaths.length === 0) return allResults
-        const preimages = this.filePreimages.size > 0 ? Object.fromEntries(this.filePreimages) : undefined
-        const result = await this.toolExecutor.checkpointCreate?.(this.config.workspacePath, `Auto-checkpoint after file operations`, filePaths, 'auto', preimages) as { checkpointId?: string; label?: string } | undefined
-        if (result?.checkpointId) {
-          this.pendingCheckpoint = {
-            hash: result.checkpointId,
-            message: result.label || `Auto-checkpoint after file operations`,
-          }
-          let gitCommitSucceeded = !this.gitEnabled
-          if (this.gitEnabled) {
-            const gitResult = await gitCommitPaths(
-              this.config.workspacePath,
-              'chore(turboflux): checkpoint AI changes',
-              filePaths,
-              this.toolExecutor,
-            )
-            gitCommitSucceeded = gitResult.ok
-            if (!gitResult.ok) {
-              this.emit({ type: 'notification', level: 'warning', message: `Local checkpoint saved; Git auto-commit skipped: ${gitResult.error}` })
-            } else if (!gitResult.nothingToCommit) {
+    if (hasFileOperations && this.config.workspacePath) {
+      const filePaths = Array.from(this.touchedFilePaths)
+      if (filePaths.length > 0) {
+        const gitReady = this.gitState.enabled && await this.initializeGit(this.gitState.phase !== 'ready')
+        if (!gitReady) {
+          this.emit({
+            type: 'notification',
+            level: 'warning',
+            message: this.gitState.phase === 'disabled'
+              ? 'Git auto-commit is disabled; AI file changes were not versioned.'
+              : `Git auto-commit unavailable: ${this.gitState.error || 'repository is not ready'}`,
+          })
+          this.touchedFilePaths.clear()
+          this.fileBeforeSnapshots.clear()
+        } else {
+          const gitResult = await this.runGitOperation('auto-commit', () => gitCommitPaths(
+            this.config.workspacePath!,
+            'chore(turboflux): commit AI changes',
+            filePaths,
+            this.toolExecutor,
+          ))
+          if (!gitResult.ok) {
+            this.emit({ type: 'notification', level: 'warning', message: `Git auto-commit failed: ${gitResult.error}` })
+          } else {
+            if (!gitResult.nothingToCommit) {
               this.emit({ type: 'notification', level: 'success', message: `Git auto-commit ${gitResult.hash?.slice(0, 8) || 'created'}` })
             }
-            await this.refreshGitStatus()
-          }
-          if (gitCommitSucceeded) {
             this.touchedFilePaths.clear()
-            this.filePreimages.clear()
+            this.fileBeforeSnapshots.clear()
           }
         }
-      } catch (err) {
-        this.emit({ type: 'error', error: `Auto-checkpoint failed: ${err instanceof Error ? err.message : String(err)}` })
       }
-    }
-
-    // Bind any pending checkpoint (auto OR explicit create_checkpoint) to the
-    // assistant turn that produced these tool calls, not to the next one. The
-    // old behavior carried pendingCheckpoint into createAssistantTurn for the
-    // following model call, which (a) attached the rollback metadata to the
-    // wrong message and (b) silently orphaned the checkpoint when the run
-    // ended before another model call arrived (abort, max turns, error path).
-    if (this.pendingCheckpoint) {
-      let latestAssistantTurn: AgentTurn | undefined
-      for (let i = this.session.turns.length - 1; i >= 0; i--) {
-        const candidate = this.session.turns[i]
-        if (candidate.role === 'assistant') {
-          latestAssistantTurn = candidate
-          break
-        }
-      }
-      if (latestAssistantTurn) {
-        latestAssistantTurn.metadata = {
-          ...(latestAssistantTurn.metadata || {}),
-          checkpointId: this.pendingCheckpoint.hash,
-          checkpointLabel: this.pendingCheckpoint.message,
-        }
-      }
-      if (this.lastAssistantMessageId) {
-        this.emit({
-          type: 'checkpoint:attached',
-          assistantMessageId: this.lastAssistantMessageId,
-          checkpointId: this.pendingCheckpoint.hash,
-          checkpointLabel: this.pendingCheckpoint.message,
-        })
-      }
-      this.pendingCheckpoint = null
-      this.lastAssistantMessageId = null
     }
 
     return allResults
@@ -4499,8 +4522,18 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         name: toolCall.name,
         output: `Error: unknown tool "${toolCall.name}"`,
         isError: true,
+        errorKind: 'validation',
       }
     }
+
+    return this.toolExecutionLedger.execute(toolCall, async () => {
+      const result = await this.executeSingleToolUncached(toolCall, tool)
+      if (!result.isError && !tool.isReadOnly) this.toolExecutionLedger.invalidateReadResults()
+      return result
+    })
+  }
+
+  private async executeSingleToolUncached(toolCall: ToolCall, tool: AgentTool): Promise<ToolResult> {
 
     if (this.config.mode === 'plan' && !tool.isReadOnly) {
       return {
@@ -4540,6 +4573,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         name: toolCall.name,
         output: `Error: ${validation.error}`,
         isError: true,
+        errorKind: 'validation',
       }
     }
 
@@ -4576,6 +4610,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         name: toolCall.name,
         output: truncatedOutput,
         isError: isOutputFailure,
+        ...(isOutputFailure ? { errorKind: this.classifyToolErrorKind(truncatedOutput) } : {}),
       }
       if (!isOutputFailure) {
         this.recordSuccessfulToolUsage(toolCall.name, toolCall.arguments, truncatedOutput)
@@ -4592,30 +4627,28 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       if (toolCall.name === 'write_file' && !isOutputFailure) {
         const content = (toolCall.arguments.content as string) || ''
         const lines = content.split('\n')
-        const before = this.filePreimages.get(resolvedPath) ?? ''
+        const before = this.fileBeforeSnapshots.get(resolvedPath) ?? ''
         const after = content
         result.changeSummary = {
           path: (toolCall.arguments.path as string) || '',
           operation: 'write',
           totalLines: lines.length,
           preview: lines.slice(0, 20).join('\n'),
-          ...this.diffStats(before, after),
-          ...(canComputeDiff(before, after) ? { before, after } : {}),
+          ...this.buildDiffSnapshot(before, after),
         }
       }
 
       if (toolCall.name === 'replace_file' && !isOutputFailure) {
         const content = (toolCall.arguments.content as string) || ''
         const lines = content.split('\n')
-        const before = this.filePreimages.get(resolvedPath) ?? ''
+        const before = this.fileBeforeSnapshots.get(resolvedPath) ?? ''
         const after = content
         result.changeSummary = {
           path: (toolCall.arguments.path as string) || '',
           operation: 'edit',
           totalLines: lines.length,
           preview: lines.slice(0, 20).join('\n'),
-          ...this.diffStats(before, after),
-          ...(canComputeDiff(before, after) ? { before, after } : {}),
+          ...this.buildDiffSnapshot(before, after),
         }
       }
 
@@ -4640,7 +4673,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           }
         } catch {
         }
-        const before = this.filePreimages.get(resolvedPath) ?? ''
+        const before = this.fileBeforeSnapshots.get(resolvedPath) ?? ''
         const after = afterFileContent
         result.changeSummary = {
           path: (toolCall.arguments.path as string) || '',
@@ -4648,13 +4681,14 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           totalLines,
           oldPreview: oldContent.split('\n').slice(0, 5).join('\n'),
           preview: newContent.split('\n').slice(0, 5).join('\n'),
-          ...(hasAfterSnapshot ? this.diffStats(before, after) : {}),
-          ...(hasAfterSnapshot && canComputeDiff(before, after) ? { before, after } : {}),
+          ...(hasAfterSnapshot
+            ? this.buildDiffSnapshot(before, after)
+            : { diffStatus: 'postimage-unavailable' as const, beforeBytes: before.length }),
         }
       }
 
       if (toolCall.name === 'multi_edit' && !isOutputFailure) {
-        const before = this.filePreimages.get(resolvedPath) ?? ''
+        const before = this.fileBeforeSnapshots.get(resolvedPath) ?? ''
         let after = ''
         let hasAfterSnapshot = false
         try {
@@ -4670,18 +4704,18 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           path: (toolCall.arguments.path as string) || '',
           operation: 'edit',
           totalLines: afterLines,
-          ...(hasAfterSnapshot ? this.diffStats(before, after) : {}),
-          ...(hasAfterSnapshot && canComputeDiff(before, after) ? { before, after } : {}),
+          ...(hasAfterSnapshot
+            ? this.buildDiffSnapshot(before, after)
+            : { diffStatus: 'postimage-unavailable' as const, beforeBytes: before.length }),
         }
       }
 
       if (toolCall.name === 'delete_file' && !isOutputFailure) {
-        const before = this.filePreimages.get(resolvedPath) ?? ''
+        const before = this.fileBeforeSnapshots.get(resolvedPath) ?? ''
         result.changeSummary = {
           path: (toolCall.arguments.path as string) || '',
           operation: 'delete',
-          ...this.diffStats(before, ''),
-          ...(canComputeDiff(before, '') ? { before, after: '' } : {}),
+          ...this.buildDiffSnapshot(before, ''),
         }
       }
 
@@ -4692,33 +4726,19 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         name: toolCall.name,
         output: `Tool execution error: ${error instanceof Error ? error.message : String(error)}`,
         isError: true,
+        errorKind: 'execution',
       }
     }
   }
 
+  private classifyToolErrorKind(output: string): ToolResult['errorKind'] {
+    if (/timed out|timeout/i.test(output)) return 'timeout'
+    if (/permission|denied|blocked by .*policy|requires an explicit permission/i.test(output)) return 'permission'
+    if (/required|invalid|unknown tool|not available in .* mode/i.test(output)) return 'validation'
+    return 'execution'
+  }
+
   private async checkToolPermission(toolCall: ToolCall): Promise<ToolResult | null> {
-    const securityProfile = this.getSecurityProfile()
-    const activeSecurityTool = toolCall.name === 'run_command'
-      || toolCall.name === 'pty_write'
-      || isMcpTool(toolCall.name)
-    if (activeSecurityTool && isSecurityProfileExpired(securityProfile)) {
-      return {
-        toolCallId: toolCall.id,
-        name: toolCall.name,
-        output: 'Error: Security engagement expired. Renew the authorized scope with /security before active operations.',
-        isError: true,
-        errorKind: 'permission',
-      }
-    }
-    if (securityProfile.active && securityProfile.mode === 'red' && isMcpTool(toolCall.name)) {
-      return {
-        toolCallId: toolCall.id,
-        name: toolCall.name,
-        output: 'Error: MCP tools are disabled during red-team engagements because their outbound destinations cannot be enforced by the local scope guard.',
-        isError: true,
-        errorKind: 'permission',
-      }
-    }
     const permissionArgs = toolCall.name === 'run_command'
       ? { ...toolCall.arguments, approved: false }
       : toolCall.arguments
@@ -4891,7 +4911,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
       case 'write_file': {
         const filePath = this.resolvePath(basePath, args.path as string)
-        await this.capturePreimage(filePath)
+        await this.captureBeforeSnapshot(filePath)
         const result = await this.toolExecutor.writeFile(filePath, args.content as string, {
           source: 'ai',
           label: 'AI write_file',
@@ -4909,7 +4929,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!existing.success) {
           return `Error: replace_file requires an existing file - ${existing.error || 'file not found'}`
         }
-        await this.capturePreimage(filePath)
+        await this.captureBeforeSnapshot(filePath)
         const result = await this.toolExecutor.writeFile(filePath, args.content as string, {
           source: 'ai',
           label: 'AI replace_file',
@@ -4923,7 +4943,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
       case 'edit_file': {
         const filePath = this.resolvePath(basePath, args.path as string)
-        await this.capturePreimage(filePath)
+        await this.captureBeforeSnapshot(filePath)
         const readResult = await this.toolExecutor.readFile(filePath)
         if (!readResult.success) return `Error: unable to read file - ${readResult.error}`
 
@@ -4955,7 +4975,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!Array.isArray(rawEdits) || rawEdits.length === 0) {
           return `Error: edits must be a non-empty array`
         }
-        await this.capturePreimage(filePath)
+        await this.captureBeforeSnapshot(filePath)
         const readResult = await this.toolExecutor.readFile(filePath)
         if (!readResult.success) return `Error: unable to read file - ${readResult.error}`
 
@@ -5186,14 +5206,11 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
       case 'git_status': {
         if (!basePath) return 'Error: no workspace selected'
-        const snapshot = await fetchGitSnapshot(basePath, this.toolExecutor)
-        if (!snapshot) return 'Error: workspace is not a readable Git repository'
-        if (this.gitEnabled) {
-          this.gitSnapshot = snapshot
-          this.cachedGitStatus = formatGitSnapshotForPrompt(snapshot)
-          this.emit({ type: 'git:status', enabled: true, snapshot })
+        const ready = await this.initializeGit(true)
+        if (!ready || !this.gitState.snapshot) {
+          return `Error: ${this.gitState.error || 'workspace is not a readable Git repository'}`
         }
-        return formatGitSnapshotForTool(snapshot)
+        return formatGitSnapshotForTool(this.gitState.snapshot)
       }
 
       case 'git_diff': {
@@ -5222,15 +5239,13 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
       case 'git_stage': {
         if (!basePath) return 'Error: no workspace selected'
-        const result = await gitStagePaths(basePath, args.paths as string[], this.toolExecutor)
-        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        const result = await this.runGitOperation('stage', () => gitStagePaths(basePath, args.paths as string[], this.toolExecutor))
         return result.ok ? result.output || 'Paths staged.' : `Error: ${result.error}`
       }
 
       case 'git_commit': {
         if (!basePath) return 'Error: no workspace selected'
-        const result = await gitCommit(basePath, args.message as string, this.toolExecutor, args.paths as string[] | undefined)
-        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        const result = await this.runGitOperation('commit', () => gitCommit(basePath, args.message as string, this.toolExecutor, args.paths as string[] | undefined))
         if (!result.ok) return `Error: ${result.error}`
         if (result.nothingToCommit) return 'Nothing to commit.'
         return `${result.hash ? `Commit ${result.hash}` : 'Commit created'}${result.output ? `\n${result.output}` : ''}`
@@ -5238,43 +5253,54 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
       case 'git_create_branch': {
         if (!basePath) return 'Error: no workspace selected'
-        const result = await gitCreateBranch(basePath, args.name as string, this.toolExecutor, args.start_point as string | undefined)
-        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        const result = await this.runGitOperation('create-branch', () => gitCreateBranch(basePath, args.name as string, this.toolExecutor, args.start_point as string | undefined))
         return result.ok ? result.output || 'Branch created.' : `Error: ${result.error}`
       }
 
       case 'git_switch_branch': {
         if (!basePath) return 'Error: no workspace selected'
-        const result = await gitSwitchBranch(basePath, args.name as string, this.toolExecutor)
-        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        const result = await this.runGitOperation('switch-branch', () => gitSwitchBranch(basePath, args.name as string, this.toolExecutor))
         return result.ok ? result.output || 'Branch switched.' : `Error: ${result.error}`
       }
 
       case 'git_stash': {
         if (!basePath) return 'Error: no workspace selected'
-        const result = await gitStash(
-          basePath,
-          args.action as 'list' | 'push' | 'apply' | 'pop',
-          this.toolExecutor,
-          {
-            message: args.message as string | undefined,
-            includeUntracked: args.include_untracked === true,
-            stash: args.stash as string | undefined,
-          },
-        )
-        if (result.ok && this.gitEnabled && args.action !== 'list') await this.refreshGitStatus()
+        const action = args.action as 'list' | 'push' | 'apply' | 'pop'
+        const operation = () => gitStash(basePath, action, this.toolExecutor, {
+          message: args.message as string | undefined,
+          includeUntracked: args.include_untracked === true,
+          stash: args.stash as string | undefined,
+        })
+        const result = action === 'list' ? await operation() : await this.runGitOperation(`stash-${action}`, operation)
         return result.ok ? result.output || 'Stash operation completed.' : `Error: ${result.error}`
       }
 
       case 'git_push': {
         if (!basePath) return 'Error: no workspace selected'
-        const result = await gitPush(basePath, this.toolExecutor, {
+        const result = await this.runGitOperation('push', () => gitPush(basePath, this.toolExecutor, {
           remote: args.remote as string | undefined,
           branch: args.branch as string | undefined,
           setUpstream: args.set_upstream === true,
-        })
-        if (result.ok && this.gitEnabled) await this.refreshGitStatus()
+        }))
         return result.ok ? result.output || 'Push completed.' : `Error: ${result.error}`
+      }
+
+      case 'git_restore': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await this.runGitOperation('restore', () => gitRestorePaths(
+          basePath,
+          args.paths as string[],
+          this.toolExecutor,
+          args.source as string | undefined,
+        ))
+        return result.ok ? result.output || 'Paths restored.' : `Error: ${result.error}`
+      }
+
+      case 'git_revert': {
+        if (!basePath) return 'Error: no workspace selected'
+        const result = await this.runGitOperation('revert', () => gitRevertCommit(basePath, args.revision as string, this.toolExecutor))
+        if (!result.ok) return `Error: ${result.error}`
+        return `${result.hash ? `Revert commit ${result.hash}` : 'Revert commit created'}${result.output ? `\n${result.output}` : ''}`
       }
 
       case 'run_command': {
@@ -5288,20 +5314,25 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           const command = args.command as string
           const validation = await this.toolExecutor.validateCommand?.(command, cwd)
           if (validation && !validation.success) {
-            return `Error: ${validation.error || 'command failed sandbox validation'}`
+            return `Error: ${validation.error || 'command validation failed'}`
           }
 
-          const ptyResult = await this.toolExecutor.ptyCreate?.({ cwd, env })
+          const directResult = this.toolExecutor.startBackgroundCommand
+            ? await this.toolExecutor.startBackgroundCommand(command, cwd, env, approved)
+            : undefined
+          const ptyResult = directResult || await this.toolExecutor.ptyCreate?.({ cwd, env })
           const sessionId = ptyResult?.data?.sessionId
           if (!sessionId) {
             return `Error: failed to spawn agent terminal${ptyResult?.error ? ` — ${ptyResult.error}` : ''}`
           }
           const terminalLogPath = ptyResult.data?.session?.logPath
-          const writeResult = await this.toolExecutor.ptyWrite?.(sessionId, `${command}\n`)
-          if (!writeResult?.success) {
-            await this.toolExecutor.ptyKill?.(sessionId)
-            await this.emitTerminalSessions()
-            return `Error: failed to start background command — ${writeResult?.error || 'unknown error'}`
+          if (!directResult) {
+            const writeResult = await this.toolExecutor.ptyWrite?.(sessionId, `${command}\n`)
+            if (!writeResult?.success) {
+              await this.toolExecutor.ptyKill?.(sessionId)
+              await this.emitTerminalSessions()
+              return `Error: failed to start background command — ${writeResult?.error || 'unknown error'}`
+            }
           }
           this.agentBackgroundSessions.set(sessionId, { command, startedAt: Date.now() })
           await this.emitTerminalSessions()
@@ -5337,14 +5368,11 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!sessionId) return `Error: session_id is required`
         const tail = typeof args.tail_lines === 'number' ? args.tail_lines : 200
         const sinceSeq = typeof args.since_seq === 'number' ? args.since_seq : 0
-        const result = await this.toolExecutor.ptyGetBuffer?.(sessionId)
+        const result = await this.toolExecutor.ptyGetBuffer?.(sessionId, sinceSeq)
         if (!result?.success) return `Error: ${result?.error || 'failed to read terminal buffer'}`
         await this.emitTerminalSessions()
         const session = result.session as { status: string; exitCode?: number; cwd: string; logPath?: string } | undefined
-        const allChunks = (result.chunks || []) as Array<{ seq: number; data: string }>
-        // Filter by since_seq so polling loops only see new output. Each
-        // chunk carries a monotonic seq from terminalManager.
-        const chunks = sinceSeq > 0 ? allChunks.filter((c: { seq: number }) => c.seq > sinceSeq) : allChunks
+        const chunks = (result.chunks || []) as Array<{ seq: number; data: string }>
         const combined = chunks.map((c: { data: string }) => c.data).join('')
         // Strip ANSI escapes for model readability — terminal UI keeps them.
         // eslint-disable-next-line no-control-regex
@@ -5354,16 +5382,21 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const truncatedNotice = tail > 0 && lines.length > tail
           ? `[showing last ${tailed.length} of ${lines.length} lines]\n`
           : ''
-        const lastSeq = allChunks.length > 0 ? allChunks[allChunks.length - 1].seq : 0
+        const lastSeq = typeof result.lastSeq === 'number'
+          ? result.lastSeq
+          : chunks.length > 0 ? chunks[chunks.length - 1].seq : sinceSeq
         const sinceNotice = sinceSeq > 0
           ? ` • since_seq=${sinceSeq} • new_chunks=${chunks.length}`
           : ''
         const statusLine = session
           ? `[session ${sessionId} • status=${session.status}${typeof session.exitCode === 'number' ? ` • exit=${session.exitCode}` : ''} • cwd=${session.cwd}${session.logPath ? ` • log=${session.logPath}` : ''} • last_seq=${lastSeq}${sinceNotice}]`
           : `[session ${sessionId} • last_seq=${lastSeq}${sinceNotice}]`
+        const omittedNotice = (result.omittedBytes || 0) > 0
+          ? `[${result.omittedBytes} earlier output byte(s) omitted from memory; full output remains in the session log]\n`
+          : ''
         const body = chunks.length === 0 && sinceSeq > 0
           ? '[no new output since last read]'
-          : `${truncatedNotice}${tailed.join('\n')}`
+          : `${omittedNotice}${truncatedNotice}${tailed.join('\n')}`
         return `${statusLine}\n${body}`
       }
 
@@ -5413,13 +5446,14 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       case 'list_terminals': {
         const result = await this.toolExecutor.ptyList?.()
         if (!result?.success) return `Error: ${result?.error || 'failed to list terminals'}`
-        const rawSessions = (result.sessions || []) as Array<{ isAgentSession?: boolean; id: string; status: string; exitCode?: number; cwd: string; logPath?: string }>
+        const rawSessions = (result.sessions || []) as Array<{ isAgentSession?: boolean; id: string; status: string; exitCode?: number; cwd: string; logPath?: string; command?: string; title?: string }>
         const sessions = rawSessions.filter(s => s.isAgentSession || this.agentBackgroundSessions.has(s.id))
         await this.emitTerminalSessions()
         if (sessions.length === 0) return 'No agent terminal sessions active.'
-        const lines = sessions.map((s: { id: string; status: string; exitCode?: number; cwd: string; logPath?: string }) => {
+        const lines = sessions.map(s => {
           const meta = this.agentBackgroundSessions.get(s.id)
-          const cmd = meta ? ` • last: ${meta.command}` : ''
+          const command = meta?.command || s.command || s.title
+          const cmd = command ? ` • command: ${command}` : ''
           const exit = typeof s.exitCode === 'number' ? ` • exit=${s.exitCode}` : ''
           const log = s.logPath ? ` • log=${s.logPath}` : ''
           return `- ${s.id} • ${s.status}${exit} • cwd=${s.cwd}${log}${cmd}`
@@ -5431,7 +5465,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const filePath = this.resolvePath(basePath, args.path as string)
         const existing = await this.toolExecutor.readFile(filePath)
         if (!existing.success) return `Error: unable to read file before deletion - ${existing.error}`
-        await this.capturePreimage(filePath)
+        await this.captureBeforeSnapshot(filePath)
         const result = await this.toolExecutor.deleteFile(filePath, {
           source: 'ai',
           label: 'AI delete_file',
@@ -5663,68 +5697,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       case 'notify_user': {
         this.emit({ type: 'notification', message: args.message as string, level: (args.type as 'info' | 'success' | 'warning' | 'error') || 'info' })
         return `Notification sent`
-      }
-
-      case 'create_checkpoint': {
-        if (!basePath) {
-          return `Error: no workspace selected`
-        }
-        const checkpointMessage = args.message as string
-        const filePaths = Array.from(this.touchedFilePaths)
-        if (filePaths.length === 0) {
-          return `No AI-touched files to checkpoint`
-        }
-
-        const preimages = this.filePreimages.size > 0 ? Object.fromEntries(this.filePreimages) : undefined
-        const result = await this.toolExecutor.checkpointCreate?.(basePath, checkpointMessage, filePaths, 'explicit', preimages)
-        if (!result?.success) {
-          return `Error: failed to create checkpoint - ${result?.error}`
-        }
-        const cpResult = result as { checkpointId?: string; label?: string; shortId?: string }
-        if (!cpResult.checkpointId) return `No changes to checkpoint`
-        this.pendingCheckpoint = { hash: cpResult.checkpointId, message: cpResult.label || checkpointMessage }
-        let gitMessage = ''
-        let gitCommitSucceeded = !this.gitEnabled
-        if (this.gitEnabled) {
-          const gitResult = await gitCommitPaths(basePath, checkpointMessage, filePaths, this.toolExecutor)
-          gitCommitSucceeded = gitResult.ok
-          gitMessage = gitResult.ok
-            ? gitResult.nothingToCommit ? ' Git had no additional changes.' : ` Git commit: ${gitResult.hash || 'created'}.`
-            : ` Git commit skipped: ${gitResult.error}`
-          await this.refreshGitStatus()
-        }
-        if (gitCommitSucceeded) {
-          this.touchedFilePaths.clear()
-          this.filePreimages.clear()
-        }
-        return `Checkpoint created: ${cpResult.shortId} - ${checkpointMessage}.${gitMessage}`
-      }
-
-      case 'list_checkpoints': {
-        if (!basePath) return 'Error: no workspace selected'
-        const result = await this.toolExecutor.checkpointList?.(basePath, args.limit as number | undefined)
-        if (!result?.success) return `Error: ${result?.error || 'unable to list checkpoints'}`
-        const checkpoints = result.data || []
-        if (checkpoints.length === 0) return 'No local history checkpoints.'
-        return checkpoints.map((checkpoint: any) =>
-          `- ${checkpoint.id} • ${checkpoint.label} • ${checkpoint.fileCount} file(s) • ${new Date(checkpoint.timestamp).toISOString()}`
-        ).join('\n')
-      }
-
-      case 'restore_checkpoint': {
-        if (!basePath) return 'Error: no workspace selected'
-        const result = await this.toolExecutor.checkpointRestore?.(basePath, args.checkpoint_id as string)
-        if (!result?.success) return `Error: ${result?.error || 'checkpoint restore failed'}`
-        const restored = result.data?.restoredFiles || []
-        const safety = result.data?.safetyCheckpointId ? `\nSafety checkpoint: ${result.data.safetyCheckpointId}` : ''
-        return `Restored ${restored.length} file(s) from checkpoint.${safety}`
-      }
-
-      case 'prune_checkpoints': {
-        if (!basePath) return 'Error: no workspace selected'
-        const keepCount = typeof args.keep_count === 'number' ? args.keep_count : 50
-        const result = await this.toolExecutor.checkpointPrune?.(basePath, keepCount)
-        return result?.success ? `Kept the newest ${keepCount} checkpoint(s).` : `Error: ${result?.error || 'checkpoint prune failed'}`
       }
 
       case 'list_agents': {
@@ -5990,21 +5962,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     metadata?: AgentTurn['metadata']
   ): AgentTurn {
     let finalMetadata: AgentTurn['metadata'] = { ...metadata }
-    // Snapshot the chat message id of THIS finishing assistant turn into
-    // lastAssistantMessageId so executeToolCalls can attach any checkpoint
-    // produced by the tools to this same message (Bug #12). pendingCheckpoint
-    // is intentionally NOT consumed here — it has already been bound to the
-    // previous assistant turn by the previous executeToolCalls call.
-    // Bug 6 fix: only consume pendingAssistantMessageId when it was actually
-    // attached. On error/abort short-circuit paths callModel returns through
-    // createAssistantTurn without a stream:start having fired, so
-    // pendingAssistantMessageId is null. Overwriting unconditionally would
-    // clear the previous successful assistant message id and orphan any
-    // pending checkpoint about to be bound by executeToolCalls.
     let turnId = generateTurnId()
     if (this.pendingAssistantMessageId) {
       turnId = this.pendingAssistantMessageId
-      this.lastAssistantMessageId = this.pendingAssistantMessageId
       this.pendingAssistantMessageId = null
     }
 
@@ -6071,4 +6031,5 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       listener(event)
     }
   }
+
 }

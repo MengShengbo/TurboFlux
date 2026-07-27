@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
   RuntimeRestartPolicy,
@@ -28,6 +28,7 @@ export interface RuntimeTaskManagerOptions {
   now?: () => number
   journalPath?: string
   recover?: boolean
+  isProcessAlive?: (pid: number) => boolean
 }
 
 export interface CreateRuntimeTaskInput {
@@ -79,11 +80,13 @@ export class RuntimeTaskManager {
   private readonly now: () => number
   private readonly journalPath?: string
   private readonly runtimeInfo: RuntimeInfo
+  private readonly isProcessAlive: (pid: number) => boolean
 
   constructor(private options: RuntimeTaskManagerOptions = {}) {
     this.now = options.now || Date.now
     this.journalPath = options.journalPath
     this.runtimeInfo = getRuntimeInfo()
+    this.isProcessAlive = options.isProcessAlive || processIsAlive
     if (options.recover !== false) this.recoverFromJournal()
   }
 
@@ -128,10 +131,25 @@ export class RuntimeTaskManager {
       return { taskId, offset: Math.max(0, offset), nextOffset: Math.max(0, offset), content: '', eof: true }
     }
     const fileSize = statSync(task.logPath).size
-    const start = Math.max(0, Math.min(Math.floor(offset), fileSize))
+    const requestedStart = Math.max(0, Math.min(Math.floor(offset), fileSize))
     const limit = Math.max(1, Math.min(Math.floor(maxBytes), 2 * 1024 * 1024))
-    const content = readFileSync(task.logPath).subarray(start, start + limit).toString('utf8')
-    const nextOffset = start + Buffer.byteLength(content)
+    const readLength = Math.min(fileSize - requestedStart, limit + 8)
+    const buffer = Buffer.allocUnsafe(readLength)
+    const fd = openSync(task.logPath, 'r')
+    let bytesRead = 0
+    try {
+      bytesRead = readSync(fd, buffer, 0, readLength, requestedStart)
+    } finally {
+      closeSync(fd)
+    }
+    const value = buffer.subarray(0, bytesRead)
+    let localStart = 0
+    while (localStart < bytesRead && isUtf8ContinuationByte(value[localStart])) localStart += 1
+    let localEnd = Math.min(localStart + limit, bytesRead)
+    while (localEnd < bytesRead && !isValidUtf8(value.subarray(localStart, localEnd))) localEnd += 1
+    const start = requestedStart + localStart
+    const nextOffset = requestedStart + localEnd
+    const content = value.subarray(localStart, localEnd).toString('utf8')
     return { taskId, offset: start, nextOffset, content, eof: nextOffset >= fileSize }
   }
 
@@ -349,18 +367,27 @@ export class RuntimeTaskManager {
         closeSync(fd)
       }
     }
-    const recoveredOrphans: RuntimeTask[] = []
+    const recoveredTasks: RuntimeTask[] = []
     for (const task of this.tasks.values()) {
       if (!TERMINAL_STATUSES.has(task.status)) {
-        task.status = 'orphaned'
-        task.error = 'Recovered without an active process lease'
+        const processAlive = typeof task.pid === 'number' && task.pid > 0 && this.isProcessAlive(task.pid)
+        task.status = processAlive ? 'running' : 'orphaned'
+        task.error = processAlive ? undefined : 'Recovered process is no longer running'
         task.updatedAt = this.now()
-        task.endedAt = task.updatedAt
-        recoveredOrphans.push(cloneTask(task))
+        task.endedAt = processAlive ? undefined : task.updatedAt
+        task.metadata = {
+          ...task.metadata,
+          recovered: true,
+          controlAvailable: false,
+        }
+        recoveredTasks.push(cloneTask(task))
       }
     }
-    for (const task of recoveredOrphans) {
-      this.appendJournal({ type: 'runtime-task:finished', task })
+    for (const task of recoveredTasks) {
+      this.appendJournal({
+        type: task.status === 'orphaned' ? 'runtime-task:finished' : 'runtime-task:updated',
+        task,
+      })
     }
   }
 
@@ -370,5 +397,27 @@ export class RuntimeTaskManager {
       return
     }
     this.tasks.delete(event.taskId)
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+function isUtf8ContinuationByte(byte: number): boolean {
+  return (byte & 0b1100_0000) === 0b1000_0000
+}
+
+function isValidUtf8(value: Buffer): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(value)
+    return true
+  } catch {
+    return false
   }
 }

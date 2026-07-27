@@ -2,18 +2,17 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
 import { resolveBackground, useTheme } from '../../theme/index'
-import { TURBOFLUX_VERSION } from '../../brand'
 import type { FastContextUiSummary } from './fastContextUi'
+import { FastContextStage } from './FastContextStage'
+import type { FastContextScanEvent } from '../../../core/fastContextTypes'
 import type { ActiveTaskContext } from '../../../core/taskManager'
-import type { GitSnapshot } from '../../../core/gitService'
+import type { GitIntegrationState } from '../../../core/gitService'
 import type { AgentRunState, TokenUsage } from '../../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../../shared/terminalTypes'
 import type { ToolStatus } from '../tools/ToolCallTree'
-import { formatToolLabelForHistory } from '../tools/ToolCallTree'
 import type { StreamingToolDraft } from '../tools/ActiveWorkPanel'
-import type { SandboxStatus } from '../../../core/sandbox/types'
-import type { SecurityResearchProfile } from '../../../shared/securityTypes'
 import { deriveDeveloperFlow, type DeveloperSubAgentActivity, type DeveloperFlowTone } from '../developerFlowModel'
+import { useI18n } from '../../i18n/index'
 
 interface SessionSidebarProps {
   width: number
@@ -21,9 +20,6 @@ interface SessionSidebarProps {
   model: string
   mode: 'vibe' | 'plan'
   reasoning?: string
-  approvalPolicy: string
-  sandboxStatus?: SandboxStatus
-  securityProfile?: SecurityResearchProfile
   contextWindow: number
   tokenUsage: TokenUsage
   isRunning: boolean
@@ -32,6 +28,7 @@ interface SessionSidebarProps {
   draft: StreamingToolDraft | null
   streamText?: string
   thinkingText?: string
+  fastContextEvents: readonly FastContextScanEvent[]
   fastContextSummary: FastContextUiSummary
   fastContextActive: boolean
   subagents: readonly DeveloperSubAgentActivity[]
@@ -40,8 +37,7 @@ interface SessionSidebarProps {
   mcpCount: number
   task: ActiveTaskContext | null
   objective?: string | null
-  gitEnabled: boolean
-  gitSnapshot: GitSnapshot | null
+  gitState: GitIntegrationState
 }
 
 export function SessionSidebar({
@@ -50,9 +46,6 @@ export function SessionSidebar({
   model,
   mode,
   reasoning,
-  approvalPolicy,
-  sandboxStatus,
-  securityProfile,
   contextWindow,
   tokenUsage,
   isRunning,
@@ -61,6 +54,7 @@ export function SessionSidebar({
   draft,
   streamText,
   thinkingText,
+  fastContextEvents,
   fastContextSummary,
   fastContextActive,
   subagents,
@@ -69,12 +63,14 @@ export function SessionSidebar({
   mcpCount,
   task,
   objective,
-  gitEnabled,
-  gitSnapshot,
+  gitState,
 }: SessionSidebarProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const [, setTick] = useState(0)
-  const activeTerminals = terminals.filter(session => session.status === 'running' || session.status === 'starting').length
+  const runningTerminals = terminals.filter(session => session.status === 'running' || session.status === 'starting')
+  const activeTerminals = runningTerminals.length
+  const latestTerminal = runningTerminals.at(-1)
   const flow = deriveDeveloperFlow({
     runState,
     isRunning,
@@ -89,21 +85,22 @@ export function SessionSidebar({
     queuedCount,
     task,
     objective,
-  })
+  }, t)
   const contextTotal = tokenUsage.source === 'provider' && typeof tokenUsage.input === 'number'
     ? tokenUsage.input
     : 0
   const safeContextWindow = Math.max(1, contextWindow || 200_000)
   const contextRatio = Math.min(1, contextTotal / safeContextWindow)
-  const latestTool = [...tools].reverse().find(tool => tool.status === 'running') ?? tools.at(-1)
-  const workspaceName = workspacePath.split(/[\\/]/).filter(Boolean).at(-1) || workspacePath
   const elapsed = isRunning && runState.startedAt ? formatElapsed(Date.now() - runState.startedAt) : ''
+  const gitSnapshot = gitState.snapshot
+  const showRepo = Boolean(gitSnapshot || gitState.error || gitState.operation || ['detecting', 'syncing', 'error', 'unavailable'].includes(gitState.phase))
+  const showRuntime = mcpCount > 0 || activeTerminals > 0 || queuedCount > 0
 
   useEffect(() => {
-    if (!isRunning || !runState.startedAt) return
+    if ((!isRunning || !runState.startedAt) && activeTerminals === 0) return
     const timer = setInterval(() => setTick(value => value + 1), 1000)
     return () => clearInterval(timer)
-  }, [isRunning, runState.startedAt])
+  }, [activeTerminals, isRunning, runState.startedAt])
 
   return (
     <Box
@@ -119,74 +116,68 @@ export function SessionSidebar({
       paddingX={1}
       overflow="hidden"
     >
-      <Box justifyContent="space-between" flexShrink={0}>
-        <Text color={theme.brand} bold>TurboFlux</Text>
-        <Text color={theme.subtle}>{`v${TURBOFLUX_VERSION}`}</Text>
-      </Box>
+      <Text color={theme.brand} bold>TurboFlux</Text>
       <Text color={theme.inactive}>{cliTruncate(workspacePath, Math.max(12, width - 4), { position: 'middle' })}</Text>
 
-      <Section title="STATUS">
-        <Text color={flowColor(flow.tone, theme)} bold>{flow.label}</Text>
-        <Text color={theme.inactive}>{cliTruncate(flow.detail, Math.max(16, (width - 4) * 2), { position: 'end' })}</Text>
-        {elapsed && <SidebarRow label="Elapsed" value={elapsed} width={width} color={theme.info} />}
+      <Section title={t('ui.sidebar.status')}>
+        <Box justifyContent="space-between">
+          <Text color={flowColor(flow.tone, theme)} bold>{cliTruncate(flow.label, Math.max(10, width - 12))}</Text>
+          {elapsed && <Text color={theme.info}>{elapsed}</Text>}
+        </Box>
       </Section>
 
-      <Section title="SESSION">
-        <SidebarRow label="Model" value={model || 'not mounted'} width={width} color={theme.text} />
-        <SidebarRow label="Mode" value={mode.toUpperCase()} width={width} color={mode === 'vibe' ? theme.success : theme.info} />
-        <SidebarRow label="Reason" value={reasoning || 'provider'} width={width} color={theme.text} />
-        <SidebarRow label="Approval" value={approvalPolicy} width={width} color={theme.text} />
-        {securityProfile?.active && <SidebarRow
-          label="Security"
-          value={`${securityProfile.mode.toUpperCase()} · ${securityProfile.targets.length} target${securityProfile.targets.length === 1 ? '' : 's'}`}
-          width={width}
-          color={securityProfile.mode === 'red' ? theme.error : theme.info}
-        />}
-        {sandboxStatus && <SidebarRow
-          label="Sandbox"
-          value={`${sandboxStatus.policy}/${sandboxStatus.resolvedBackend}${sandboxStatus.available ? '' : ' unavailable'}`}
-          width={width}
-          color={!sandboxStatus.available ? theme.error : sandboxStatus.osIsolation ? theme.success : theme.warning}
-        />}
+      <Section title={t('ui.sidebar.session')}>
+        <SidebarRow label={t('ui.sidebar.model')} value={model || t('ui.sidebar.notMounted')} width={width} color={theme.text} />
+        <SidebarRow label={t('ui.sidebar.profile')} value={`${mode.toUpperCase()} / ${reasoning || t('ui.sidebar.provider')}`} width={width} color={mode === 'vibe' ? theme.success : theme.info} />
       </Section>
 
-      <Section title="CONTEXT">
+      <Section title={t('ui.sidebar.context')}>
         <Text color={contextColor(contextRatio, theme)}>{progressBar(contextRatio, Math.max(8, width - 5))}</Text>
         <SidebarRow
-          label="Used"
-          value={contextTotal > 0 ? `${formatTokens(contextTotal)} / ${formatTokens(safeContextWindow)}` : 'waiting'}
+          label={t('ui.sidebar.used')}
+          value={contextTotal > 0 ? `${formatTokens(contextTotal)} / ${formatTokens(safeContextWindow)}` : t('ui.sidebar.waiting')}
           width={width}
           color={contextTotal > 0 ? theme.text : theme.inactive}
         />
-        {(tokenUsage.cached ?? 0) > 0 && <SidebarRow label="Cached" value={formatTokens(tokenUsage.cached)} width={width} color={theme.success} />}
-        {(tokenUsage.output ?? 0) > 0 && <SidebarRow label="Output" value={formatTokens(tokenUsage.output)} width={width} color={theme.info} />}
+        {((tokenUsage.cached ?? 0) > 0 || (tokenUsage.output ?? 0) > 0) && (
+          <SidebarRow
+            label={t('ui.sidebar.io')}
+            value={t('ui.sidebar.cacheOut', { cache: formatTokens(tokenUsage.cached), output: formatTokens(tokenUsage.output) })}
+            width={width}
+            color={theme.info}
+          />
+        )}
       </Section>
 
-      {(objective || task || latestTool || fastContextActive || flow.background.length > 0) && (
-        <Section title="WORK">
-          {(objective || task?.title) && (
-            <Text color={theme.text}>{cliTruncate((objective || task?.title || '').replace(/\s+/g, ' '), Math.max(16, (width - 4) * 2), { position: 'end' })}</Text>
-          )}
-          {latestTool && (
-            <Text color={latestTool.status === 'error' ? theme.error : latestTool.status === 'running' ? theme.brandShimmer : theme.inactive}>
-              {cliTruncate(formatToolLabelForHistory(latestTool.name, latestTool.args), Math.max(12, width - 4), { position: 'middle' })}
-            </Text>
-          )}
-          {fastContextActive && <SidebarRow label="Context" value={fastContextSummary.phase} width={width} color={theme.brandShimmer} />}
-          {flow.background.slice(0, 2).map(item => <Text key={item} color={theme.inactive}>{cliTruncate(item, Math.max(12, width - 4))}</Text>)}
+      {showRepo && (
+        <Section title={t('ui.sidebar.repo')}>
+          {gitState.phase !== 'ready' && <SidebarRow label={t('ui.sidebar.state')} value={gitState.phase} width={width} color={gitState.phase === 'error' || gitState.phase === 'unavailable' ? theme.error : theme.warning} />}
+          {gitSnapshot && <SidebarRow label={t('ui.sidebar.branch')} value={`${gitSnapshot.branch}${gitSnapshot.head ? ` @ ${gitSnapshot.head.slice(0, 8)}` : ''}`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : theme.text} />}
+          {gitSnapshot && <SidebarRow label={t('ui.sidebar.changes')} value={`${gitSnapshot.stagedCount}S ${gitSnapshot.unstagedCount}M ${gitSnapshot.untrackedCount}U ${gitSnapshot.conflictedCount}C`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : gitSnapshot.clean ? theme.success : theme.warning} />}
+          {gitSnapshot && (gitSnapshot.ahead > 0 || gitSnapshot.behind > 0) && <SidebarRow label={t('ui.sidebar.tracking')} value={`+${gitSnapshot.ahead} / -${gitSnapshot.behind}`} width={width} color={theme.info} />}
+          {gitState.operation && <SidebarRow label={t('ui.sidebar.operation')} value={`${gitState.operation.name}: ${gitState.operation.status}`} width={width} color={gitState.operation.status === 'error' ? theme.error : gitState.operation.status === 'running' ? theme.warning : theme.success} />}
+          {gitState.error && <Text color={theme.error}>{cliTruncate(gitState.error, Math.max(12, width - 4), { position: 'end' })}</Text>}
         </Section>
       )}
 
-      <Section title="RUNTIME">
-        <SidebarRow label="Git" value={formatGit(gitEnabled, gitSnapshot)} width={width} color={gitSnapshot?.conflictedCount ? theme.error : gitEnabled ? theme.success : theme.inactive} />
-        <SidebarRow label="MCP" value={mcpCount > 0 ? `${mcpCount} online` : 'off'} width={width} color={mcpCount > 0 ? theme.success : theme.inactive} />
-        <SidebarRow label="Terminal" value={activeTerminals > 0 ? `${activeTerminals} active` : 'idle'} width={width} color={activeTerminals > 0 ? theme.info : theme.inactive} />
-        {queuedCount > 0 && <SidebarRow label="Queued" value={String(queuedCount)} width={width} color={theme.warning} />}
-      </Section>
+      {showRuntime && (
+        <Section title={t('ui.sidebar.runtime')}>
+          {mcpCount > 0 && <SidebarRow label="MCP" value={t('common.online', { count: mcpCount })} width={width} color={theme.success} />}
+          {activeTerminals > 0 && <SidebarRow label={t('ui.sidebar.terminal')} value={t('common.active', { count: activeTerminals })} width={width} color={theme.info} />}
+          {latestTerminal && <SidebarRow label={t('ui.sidebar.running')} value={formatElapsed(Date.now() - latestTerminal.createdAt)} width={width} color={theme.info} />}
+          {latestTerminal && <Text color={theme.text}>{cliTruncate(latestTerminal.command || latestTerminal.title, Math.max(12, width - 4), { position: 'middle' })}</Text>}
+          {latestTerminal && <Text color={theme.inactive}>{`${formatBytes(latestTerminal.outputBytes || 0)} · /ps · /stop`}</Text>}
+          {queuedCount > 0 && <SidebarRow label={t('ui.sidebar.queued')} value={String(queuedCount)} width={width} color={theme.warning} />}
+        </Section>
+      )}
 
-      <Box flexGrow={1} />
-      <Text color={theme.subtle}>{`/${cliTruncate(workspaceName, Math.max(8, width - 5), { position: 'middle' })}`}</Text>
-      <Text color={isRunning ? theme.brandShimmer : theme.success}>{`● ${isRunning ? 'working' : 'ready'} · TurboFlux ${TURBOFLUX_VERSION}`}</Text>
+      <FastContextStage
+        events={fastContextEvents}
+        summary={fastContextSummary}
+        isActive={fastContextActive}
+        width={width}
+      />
+      <Text color={isRunning ? theme.brandShimmer : theme.success}>{`● ${t(isRunning ? 'common.working' : 'common.ready')}`}</Text>
     </Box>
   )
 }
@@ -237,11 +228,10 @@ function formatTokens(value = 0): string {
   return String(value)
 }
 
-function formatGit(enabled: boolean, snapshot: GitSnapshot | null): string {
-  if (!enabled) return 'off'
-  if (!snapshot) return 'loading'
-  const changed = snapshot.files.length > 0 ? ` · ${snapshot.files.length}` : ''
-  return `${snapshot.branch}${changed}`
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 function formatElapsed(ms: number): string {

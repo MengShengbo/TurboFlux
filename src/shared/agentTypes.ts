@@ -4,22 +4,6 @@ export type ApprovalPolicy = 'ask' | 'agent' | 'full'
 
 export type LegacyApprovalPolicy = 'request' | 'auto'
 
-export type SandboxPolicy = 'workspace' | 'readonly' | 'full'
-
-export type SandboxEnforcement = 'guarded' | 'strict'
-
-export type SandboxNetworkPolicy = 'allow' | 'deny'
-
-export type SandboxBackend = 'auto' | 'guarded' | 'bubblewrap' | 'sandbox-exec' | 'docker'
-
-export interface SandboxConfig {
-  policy: SandboxPolicy
-  enforcement: SandboxEnforcement
-  network: SandboxNetworkPolicy
-  backend: SandboxBackend
-  dockerImage?: string
-}
-
 export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 export type ReasoningEffort = typeof REASONING_EFFORTS[number]
@@ -126,8 +110,6 @@ export interface AgentTurn {
     interrupted?: boolean
     internal?: boolean
     internalKind?: string
-    checkpointId?: string
-    checkpointLabel?: string
     attachments?: AgentAttachment[]
     runtimeContext?: string
   }
@@ -219,7 +201,7 @@ export interface ChangeSummary {
   preview?: string
   oldPreview?: string
   /**
-   * Full preimage and postimage snapshots for inline diff rendering.
+   * Full before and after snapshots for inline diff rendering.
    *
    * Populated by AgentEngine on successful write_file / edit_file /
    * multi_edit / delete_file when both sides are within MAX_DIFF_INPUT_BYTES
@@ -232,6 +214,9 @@ export interface ChangeSummary {
    */
   before?: string
   after?: string
+  diffStatus?: 'complete' | 'snapshot-too-large' | 'postimage-unavailable'
+  beforeBytes?: number
+  afterBytes?: number
 }
 
 export interface ToolResult {
@@ -239,7 +224,7 @@ export interface ToolResult {
   name: string
   output: string
   isError: boolean
-  errorKind?: 'validation' | 'permission' | 'execution' | 'timeout' | 'abort'
+  errorKind?: 'validation' | 'permission' | 'environment' | 'execution' | 'timeout' | 'abort'
   changeSummary?: ChangeSummary
 }
 
@@ -253,17 +238,11 @@ export interface AgentSession {
   workspacePath?: string
   workspaceName?: string
   totalTokens: { input: number; output: number }
-  gitEnabled?: boolean
 }
 
 export interface AgentConfig {
   mode: AgentMode
   approvalPolicy?: ApprovalPolicy
-  sandboxPolicy?: SandboxPolicy
-  sandboxEnforcement?: SandboxEnforcement
-  sandboxNetwork?: SandboxNetworkPolicy
-  sandboxBackend?: SandboxBackend
-  sandboxDockerImage?: string
   temperature: number
   maxTokens: number
   /** @deprecated Main-agent runs are user-controlled and do not enforce a turn budget. */
@@ -282,8 +261,6 @@ export interface AgentConfig {
   shell?: string
   /** Enables structured Git context, status UI, and isolated commits for AI-touched paths. */
   gitEnabled?: boolean
-  /** Session-only security research contract. It is never persisted to global config. */
-  securityProfile?: import('./securityTypes').SecurityResearchProfile
 }
 
 export const TASK_ID_PREFIXES: Record<TaskPriority, string> = {
@@ -311,7 +288,7 @@ export const APPROVAL_POLICY_LABELS: Record<ApprovalPolicy, string> = {
 export const APPROVAL_POLICY_DESCRIPTIONS: Record<ApprovalPolicy, string> = {
   ask: 'Ask before file changes, commands, MCP tools, and external actions.',
   agent: 'Continue with low-risk workspace actions and ask only when risk is detected.',
-  full: 'Skip approval prompts for allowed operations; deny rules and sandbox boundaries remain active.',
+  full: 'Skip approval prompts for allowed operations; explicit deny rules remain active.',
 }
 
 export function normalizeApprovalPolicy(value: unknown, fallback: ApprovalPolicy = 'ask'): ApprovalPolicy {

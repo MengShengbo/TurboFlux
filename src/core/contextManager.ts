@@ -19,8 +19,6 @@ export interface StructuredSummary {
   decisions: Array<{ question: string; answer: string }>
   /** Task state snapshots */
   taskSnapshots: Array<{ taskId: string; title: string; status: string }>
-  /** Checkpoints created */
-  checkpoints: Array<{ id: string; label: string }>
   /** Errors encountered */
   errors: Array<{ tool: string; summary: string }>
   /** Brief outline of old conversation flow */
@@ -32,7 +30,6 @@ export interface StructuredSummary {
 const MAX_SUMMARY_FILES = 20
 const MAX_SUMMARY_DECISIONS = 10
 const MAX_SUMMARY_TASKS = 20
-const MAX_SUMMARY_CHECKPOINTS = 10
 const MAX_SUMMARY_ERRORS = 10
 const MAX_SUMMARY_OUTLINE = 12
 
@@ -45,7 +42,6 @@ export function extractStructuredSummary(turns: AgentTurn[]): StructuredSummary 
     filesAccessed: [],
     decisions: [],
     taskSnapshots: [],
-    checkpoints: [],
     errors: [],
     conversationOutline: [],
     originalGoal: '',
@@ -100,13 +96,6 @@ export function extractStructuredSummary(turns: AgentTurn[]): StructuredSummary 
           }
         }
 
-        // Checkpoint operations
-        if (tc.name === 'create_checkpoint') {
-          summary.checkpoints.push({
-            id: (args.id || '') as string,
-            label: (args.message || '') as string,
-          })
-        }
       }
     }
 
@@ -152,16 +141,6 @@ export function extractStructuredSummary(turns: AgentTurn[]): StructuredSummary 
           }
         }
 
-        // Checkpoint results
-        if (tr.name === 'create_checkpoint') {
-          const parsed = tryParseJSON(tr.output)
-          if (parsed?.checkpointId) {
-            summary.checkpoints.push({
-              id: String(parsed.checkpointId),
-              label: String(parsed.message || parsed.label || ''),
-            })
-          }
-        }
       }
     }
 
@@ -186,7 +165,6 @@ export function extractStructuredSummary(turns: AgentTurn[]): StructuredSummary 
 
   summary.filesAccessed = summary.filesAccessed.slice(0, MAX_SUMMARY_FILES)
   summary.decisions = summary.decisions.slice(0, MAX_SUMMARY_DECISIONS)
-  summary.checkpoints = summary.checkpoints.slice(0, MAX_SUMMARY_CHECKPOINTS)
   summary.errors = summary.errors.slice(0, MAX_SUMMARY_ERRORS)
   summary.conversationOutline = summary.conversationOutline.slice(0, MAX_SUMMARY_OUTLINE)
 
@@ -334,14 +312,6 @@ export function formatSummaryAsContext(summary: StructuredSummary): string {
       parts.push(`- [${t.status}] ${t.taskId}: ${t.title}`)
     }
     parts.push('</task_state>')
-  }
-
-  if (summary.checkpoints.length > 0) {
-    parts.push('\n<checkpoints>')
-    for (const c of summary.checkpoints) {
-      parts.push(`- ${c.id}: ${c.label}`)
-    }
-    parts.push('</checkpoints>')
   }
 
   if (summary.errors.length > 0) {

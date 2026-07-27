@@ -179,7 +179,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'web_search',
-    description: 'Search the public web for current or external information. Returns compact results with title, URL, snippet, provider, and query. Use for up-to-date facts, documentation, products, news, APIs, errors, or anything not knowable from the local workspace.',
+    description: 'Search the public web for current or explicitly external information. Returns compact results with title, URL, snippet, provider, and query. Do not use it as a substitute for source code missing from the active workspace when the user asks about this repository or current project; report the workspace mismatch unless the user requested a remote copy.',
     category: 'read',
     parameters: [
       { name: 'query', type: 'string', description: 'Search query. Include specific product/library/version/error terms when possible.', required: true },
@@ -312,6 +312,31 @@ const tools: EnhancedToolDef[] = [
     requiredMode: ['vibe'],
   },
   {
+    name: 'git_restore',
+    description: 'Restore explicit workspace paths from a validated Git revision into the working tree. Refuses paths that already contain staged changes.',
+    category: 'write',
+    parameters: [
+      { name: 'paths', type: 'array', description: 'Workspace-relative paths to restore', required: true, schema: { type: 'array', minItems: 1, maxItems: 200, items: { type: 'string', minLength: 1, maxLength: 1024 } } },
+      { name: 'source', type: 'string', description: 'Validated source revision; defaults to HEAD', required: false, default: 'HEAD' },
+    ],
+    isReadOnly: false,
+    isDestructive: true,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
+    name: 'git_revert',
+    description: 'Revert one validated Git revision by creating a new commit. Requires a clean tracked working tree and index.',
+    category: 'manage',
+    parameters: [
+      { name: 'revision', type: 'string', description: 'Commit hash or revision to revert', required: true },
+    ],
+    isReadOnly: false,
+    isDestructive: true,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
+  },
+  {
     name: 'git_create_branch',
     description: 'Create and switch to a validated branch. Does not force through conflicting working-tree changes.',
     category: 'manage',
@@ -369,7 +394,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'run_command',
-    description: 'Run a shell command (foreground by default). Set run_in_background for dev servers/watch mode. High-risk commands trigger a user permission gate.',
+    description: 'Run a shell command. Background mode starts one dedicated process session with durable output, exact exit status, and immediate session_id return.',
     category: 'execute',
     parameters: [
       { name: 'command', type: 'string', description: 'Shell command to execute', required: true },
@@ -377,7 +402,7 @@ const tools: EnhancedToolDef[] = [
       { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (foreground only). Default 30000.', required: false, default: 30000 },
       { name: 'env', type: 'object', description: 'Additional environment variables', required: false, schema: { type: 'object', additionalProperties: { type: 'string' } } },
       { name: 'approved', type: 'boolean', description: 'Legacy field; permission gates are enforced by the runtime.', required: false, default: false },
-      { name: 'run_in_background', type: 'boolean', description: 'When true, spawn the command in a dedicated agent terminal session and return immediately with a session_id. Use for dev servers, watch processes, test-watch. Default false.', required: false, default: false },
+      { name: 'run_in_background', type: 'boolean', description: 'When true, spawn one dedicated command session and return immediately. Use for dev servers, watch mode, builds, and multi-hour jobs. Default false.', required: false, default: false },
     ],
     isReadOnly: false,
     isDestructive: true,
@@ -392,7 +417,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'read_terminal',
-    description: 'Read output from a background terminal session. Use since_seq to poll only new output.',
+    description: 'Read bounded output from a background command session. Use since_seq for incremental polling; omitted bytes remain available in the durable log.',
     category: 'read',
     parameters: [
       { name: 'session_id', type: 'string', description: 'Terminal session id (returned by run_command(run_in_background=true) or list_terminals).', required: true },
@@ -554,53 +579,6 @@ const tools: EnhancedToolDef[] = [
     isReadOnly: true,
     isDestructive: false,
     isConcurrencySafe: true,
-  },
-  {
-    name: 'list_checkpoints',
-    description: 'List local history checkpoints for the current workspace.',
-    category: 'read',
-    parameters: [
-      { name: 'limit', type: 'number', description: 'Maximum checkpoints to return (1-100)', required: false, default: 20 },
-    ],
-    isReadOnly: true,
-    isDestructive: false,
-    isConcurrencySafe: true,
-  },
-  {
-    name: 'restore_checkpoint',
-    description: 'Restore AI-touched files from a local history checkpoint. A safety checkpoint is created before files are overwritten.',
-    category: 'write',
-    parameters: [
-      { name: 'checkpoint_id', type: 'string', description: 'Checkpoint id returned by list_checkpoints', required: true },
-    ],
-    isReadOnly: false,
-    isDestructive: true,
-    isConcurrencySafe: false,
-    requiredMode: ['vibe'],
-  },
-  {
-    name: 'prune_checkpoints',
-    description: 'Prune old local history checkpoints while keeping the newest entries.',
-    category: 'manage',
-    parameters: [
-      { name: 'keep_count', type: 'number', description: 'Number of newest checkpoints to keep (1-200)', required: false, default: 50 },
-    ],
-    isReadOnly: false,
-    isDestructive: true,
-    isConcurrencySafe: false,
-    requiredMode: ['vibe'],
-  },
-  {
-    name: 'create_checkpoint',
-    description: 'Create a local history checkpoint.',
-    category: 'manage',
-    parameters: [
-      { name: 'message', type: 'string', description: 'Checkpoint description', required: true },
-    ],
-    isReadOnly: false,
-    isDestructive: false,
-    isConcurrencySafe: false,
-    requiredMode: ['vibe'],
   },
   {
     name: 'spawn_agent',

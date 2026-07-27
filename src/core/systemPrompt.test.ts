@@ -35,6 +35,8 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('This path is the authoritative current workspace')
     expect(prompt).toContain('Historical mentions of other projects do not change it')
     expect(prompt).toContain('without supporting tool output')
+    expect(prompt).toContain('report the workspace mismatch')
+    expect(prompt).toContain('instead of silently substituting a GitHub repository')
   })
 
   it('does not project TurboFlux product positioning onto open-ended ideas', () => {
@@ -53,5 +55,16 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('Never reread the same region merely to obtain raw text for an edit')
     expect(prompt).toContain('Do not rerun a successful check unless a later edit can affect it')
     expect(prompt).toContain('chain them in one run_command')
+  })
+
+  it('enforces Codex-style low response density by default', () => {
+    const prompt = buildSystemPrompt('vibe')
+
+    expect(prompt).toContain('<response_density>')
+    expect(prompt).toContain('Brevity is a hard output constraint')
+    expect(prompt).toContain('stay within 10 rendered lines')
+    expect(prompt).toContain('Never turn progress updates into a running investigation diary')
+    expect(prompt).toContain('Do not restate the request, enumerate every file or search performed')
+    expect(prompt).toContain('only when the user explicitly asks for a detailed explanation')
   })
 })

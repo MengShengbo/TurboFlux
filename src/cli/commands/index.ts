@@ -5,13 +5,14 @@ import { existsSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
 import { APPROVAL_POLICY_LABELS, normalizeApprovalPolicy, type ReasoningEffort } from '../../shared/agentTypes'
-import { createOffSecurityProfile } from '../../shared/securityTypes'
-import { createSecurityResearchProfile, parseSecurityCommand } from '../../core/security/researchMode'
+import { createTranslator, type Translator } from '../i18n/index'
+
+const DEFAULT_TRANSLATOR = createTranslator('en')
 
 // /exit
 commandRegistry.register({
   name: 'exit',
-  description: 'Exit TurboFlux',
+  descriptionKey: 'command.exit.description',
   aliases: ['quit', 'q'],
   type: 'local',
   execute: (_args, ctx) => { ctx.exit() },
@@ -20,43 +21,44 @@ commandRegistry.register({
 // /clear
 commandRegistry.register({
   name: 'clear',
-  description: 'Clear conversation history',
+  descriptionKey: 'command.clear.description',
   type: 'local',
   execute: (_args, ctx) => {
     ctx.conversationManager?.startNew()
     ctx.engine.resetSession()
     ctx.setMessages([])
-    return 'Conversation cleared.'
+    return ctx.t('command.clear.done')
   },
 })
 
 // /help
 commandRegistry.register({
   name: 'help',
-  description: 'Show available commands',
+  descriptionKey: 'command.help.description',
   aliases: ['?'],
   type: 'local',
-  execute: () => {
+  execute: (_args, ctx) => {
     const commands = commandRegistry.listAll()
     const lines = commands.map(c => {
       const hint = c.argumentHint ? ` ${c.argumentHint}` : ''
       const aliases = c.aliases?.length ? ` (${c.aliases.map(a => '/' + a).join(', ')})` : ''
-      return `  /${c.name}${hint}${aliases} - ${c.description}`
+      const description = c.descriptionKey ? ctx.t(c.descriptionKey) : c.description ?? ''
+      return `  /${c.name}${hint}${aliases} - ${description}`
     })
-    return 'Available commands:\n' + lines.join('\n')
+    return `${ctx.t('command.available')}\n${lines.join('\n')}`
   },
 })
 
 // /config
 commandRegistry.register({
   name: 'config',
-  description: 'View or set configuration',
+  descriptionKey: 'command.config.description',
   argumentHint: '[key] [value]',
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
       const safe = redactConfig(ctx.config)
-      return 'Current config:\n' + Object.entries(safe).map(([k, v]) => `  ${k}: ${v}`).join('\n')
+      return `${ctx.t('command.config.current')}\n${Object.entries(safe).map(([k, v]) => `  ${k}: ${v}`).join('\n')}`
     }
     const parts = args.split(/\s+/)
     if (parts.length < 2) {
@@ -69,9 +71,9 @@ commandRegistry.register({
     try {
       const updated = setConfigValue(ctx.config, key, val)
       ctx.setConfig(updated)
-      return `Set ${key} = ${key === 'apiKey' ? '***' : String((updated as any)[key])}`
+      return ctx.t('command.config.set', { key, value: key === 'apiKey' ? '***' : String((updated as any)[key]) })
     } catch (error) {
-      return `Config error: ${error instanceof Error ? error.message : String(error)}`
+      return ctx.t('command.config.error', { message: error instanceof Error ? error.message : String(error) })
     }
   },
 })
@@ -79,32 +81,15 @@ commandRegistry.register({
 // /setup
 commandRegistry.register({
   name: 'setup',
-  description: 'Show setup command for provider, language, and persona configuration',
+  descriptionKey: 'command.setup.description',
   type: 'local',
-  execute: () => {
-    return [
-      'Run this outside the TurboFlux session:',
-      '',
-      '  turboflux setup',
-      '  turboflux setup init',
-      '  turboflux setup api',
-      '  turboflux setup language',
-      '  turboflux setup persona',
-      '  turboflux setup show',
-      '',
-      'Examples:',
-      '  turboflux setup init --provider openai --api-key <key> --yes',
-      '  turboflux setup api --provider deepseek --api-key <key>',
-      '  turboflux setup language --all-lang zh-CN --yes',
-      '  turboflux setup persona --output-style all --default-output-style engineer-professional --yes',
-    ].join('\n')
-  },
+  execute: (_args, ctx) => ctx.t('command.setup.instructions'),
 })
 
 // /model
 commandRegistry.register({
   name: 'model',
-  description: 'Discover and switch models available to the active API',
+  descriptionKey: 'command.model.description',
   argumentHint: '[add <model-id>|<model-id>]',
   type: 'local',
   execute: (args, ctx) => {
@@ -113,111 +98,173 @@ commandRegistry.register({
         const active = ctx.config.model === p.model ? ' *' : ''
         return `  ${p.id.padEnd(8)} ${p.name.padEnd(20)} ${p.description}${active}`
       })
-      return `Current: ${ctx.config.model || '(none)'}\n\nAvailable models:\n${presetLines.join('\n')}\n\nUsage: /model add <model-id>`
+      return `${ctx.t('command.model.current', { model: ctx.config.model || ctx.t('command.model.none') })}\n\n${ctx.t('command.model.available')}\n${presetLines.join('\n')}\n\n${ctx.t('command.model.usage')}`
     }
     const input = args.trim()
     const addMatch = input.match(/^add(?:\s+(.+))?$/i)
     if (addMatch) {
       const modelId = addMatch[1]?.trim()
-      if (!modelId) return 'Usage: /model add <model-id>'
+      if (!modelId) return ctx.t('command.model.usage')
       const preset = getPresetByIdOrModelFrom(ctx.modelPresets, modelId)
       const updated = preset
         ? applyPreset(ctx.config, preset)
         : setConfigValue(ctx.config, 'model', modelId)
       ctx.setConfig(updated)
-      return `Mounted model: ${updated.model}`
+      return ctx.t('command.model.mounted', { model: updated.model })
     }
     const preset = getPresetByIdOrModelFrom(ctx.modelPresets, input)
     if (preset) {
       const updated = applyPreset(ctx.config, preset)
       ctx.setConfig(updated)
-      return `Switched to ${preset.name} (${preset.model})`
+      return ctx.t('command.model.switchedPreset', { name: preset.name, model: preset.model })
     }
     const updated = setConfigValue(ctx.config, 'model', input)
     ctx.setConfig(updated)
-    return `Model switched to: ${input}`
+    return ctx.t('command.model.switched', { model: input })
   },
 })
 
 // /plan
 commandRegistry.register({
   name: 'plan',
-  description: 'Switch to plan mode (read-only -> plan -> approve -> execute)',
+  descriptionKey: 'command.plan.description',
   type: 'local',
   execute: (_args, ctx) => {
     ctx.engine.setMode('plan')
-    return 'Switched to plan mode.'
+    return ctx.t('command.plan.done')
   },
 })
 
 // /vibe
 commandRegistry.register({
   name: 'vibe',
-  description: 'Switch to vibe mode (full autonomous execution)',
+  descriptionKey: 'command.vibe.description',
   aliases: ['code'],
   type: 'local',
   execute: (_args, ctx) => {
     ctx.engine.setMode('vibe')
-    return 'Switched to vibe mode.'
+    return ctx.t('command.vibe.done')
   },
 })
 
 // /git
 commandRegistry.register({
   name: 'git',
-  description: 'Toggle structured Git integration, repository context, status UI, and isolated AI auto-commits.',
+  descriptionKey: 'command.git.description',
+  argumentHint: '[on|off|refresh]',
   type: 'local',
   execute: (args, ctx) => {
     const sub = args.trim().toLowerCase()
     if (sub === 'off' || sub === 'disable') {
-      ctx.engine.setGitEnabled(false)
-      return 'Git integration disabled. Local History remains active.'
+      const nextConfig = setConfigValue(ctx.config, 'gitEnabled', 'off')
+      ctx.setConfig(nextConfig)
+      return ctx.t('command.git.disabled')
     }
     if (sub === 'on' || sub === 'enable') {
-      ctx.engine.setGitEnabled(true)
-      return 'Git integration enabled. Repository context and isolated AI auto-commits are active.'
+      const nextConfig = setConfigValue(ctx.config, 'gitEnabled', 'on')
+      ctx.setConfig(nextConfig)
+      return ctx.t('command.git.enabled')
     }
-    const current = ctx.engine.isGitEnabled()
-    const next = !current
-    ctx.engine.setGitEnabled(next)
-    return `Git integration ${next ? 'enabled' : 'disabled'}.`
+    if (sub === 'refresh') {
+      void ctx.engine.initializeGit(true)
+      return ctx.t('command.git.refreshing')
+    }
+    if (sub) return ctx.t('command.git.usage')
+
+    const state = ctx.engine.getGitState()
+    const snapshot = state.snapshot
+    const lines = [
+      ctx.t('command.git.phase', { phase: state.phase }),
+      snapshot ? ctx.t('command.git.branch', { branch: `${snapshot.branch}${snapshot.head ? ` @ ${snapshot.head.slice(0, 8)}` : ''}` }) : '',
+      snapshot ? ctx.t('command.git.changes', { staged: snapshot.stagedCount, unstaged: snapshot.unstagedCount, untracked: snapshot.untrackedCount, conflicted: snapshot.conflictedCount }) : '',
+      snapshot && (snapshot.ahead > 0 || snapshot.behind > 0) ? ctx.t('command.git.tracking', { ahead: snapshot.ahead, behind: snapshot.behind }) : '',
+      state.operation ? ctx.t('command.git.operation', { name: state.operation.name, status: state.operation.status, hash: state.operation.hash ? ` ${state.operation.hash.slice(0, 8)}` : '' }) : '',
+      state.error ? ctx.t('common.error', { message: state.error }) : '',
+    ].filter(Boolean)
+    return lines.join('\n')
+  },
+})
+
+commandRegistry.register({
+  name: 'ps',
+  descriptionKey: 'command.ps.description',
+  type: 'local',
+  execute: (_args, ctx) => {
+    const tasks = ctx.runtimeTaskManager?.listTasks({ kind: 'terminal' }) || []
+    if (tasks.length === 0) return ctx.t('command.ps.none')
+    const now = Date.now()
+    const lines = tasks.map(task => {
+      const sessionId = typeof task.metadata?.sessionId === 'string' ? task.metadata.sessionId : task.id
+      const elapsed = formatRuntimeDuration((task.endedAt || now) - task.startedAt)
+      const exit = typeof task.exitCode === 'number' ? ctx.t('command.ps.exit', { code: task.exitCode }) : ''
+      const pid = task.pid ? ctx.t('command.ps.pid', { pid: task.pid }) : ''
+      const output = typeof task.outputBytes === 'number' ? ` · ${formatRuntimeBytes(task.outputBytes)}` : ''
+      const recovered = task.metadata?.recovered === true ? ctx.t('command.ps.recovered') : ''
+      return `- ${sessionId} · ${task.status}${exit}${pid} · ${elapsed}${output}${recovered}\n  ${task.command || ctx.t('ui.app.shellSession')}`
+    })
+    return `${ctx.t('command.ps.title', { count: tasks.length })}\n${lines.join('\n')}`
+  },
+})
+
+commandRegistry.register({
+  name: 'stop',
+  descriptionKey: 'command.stop.description',
+  argumentHint: '[session-id|all]',
+  type: 'local',
+  execute: (args, ctx) => {
+    const manager = ctx.runtimeTaskManager
+    if (!manager) return ctx.t('command.stop.unavailable')
+    const requested = args.trim()
+    const active = manager.listTasks({ kind: 'terminal' }).filter(task =>
+      task.status === 'starting' || task.status === 'running' || task.status === 'stopping'
+    )
+    const targets = !requested || requested === 'all'
+      ? active
+      : active.filter(task => task.id === requested || task.metadata?.sessionId === requested)
+    if (targets.length === 0) return requested ? ctx.t('command.stop.noMatch', { session: requested }) : ctx.t('command.stop.none')
+    const readOnly = targets.filter(task => task.metadata?.recovered === true && task.metadata?.controlAvailable === false)
+    if (readOnly.length > 0) {
+      return ctx.t('command.stop.readOnly', { count: readOnly.length })
+    }
+    void Promise.all(targets.map(task => manager.stopTask(task.id, ctx.t('command.stop.reason')).catch(() => undefined)))
+    return ctx.t(targets.length === 1 ? 'command.stop.stoppingOne' : 'command.stop.stopping', { count: targets.length })
   },
 })
 
 // /compact
 commandRegistry.register({
   name: 'compact',
-  description: 'Compress conversation context to free up token budget',
+  descriptionKey: 'command.compact.description',
   type: 'local',
   execute: (_args, ctx) => {
     ctx.engine.compactContext().catch(() => {})
-    return 'Context compaction triggered.'
+    return ctx.t('command.compact.triggered')
   },
 })
 
 // /context
 commandRegistry.register({
   name: 'context',
-  description: 'Show context window usage',
+  descriptionKey: 'command.context.description',
   type: 'local',
   execute: (_args, ctx) => {
     const tokens = ctx.engine.getContextUsage()
     const window = ctx.config.contextWindow
     if (tokens.source !== 'provider' || typeof tokens.input !== 'number') {
       return [
-        `Context usage: unknown / ${window.toLocaleString()} tokens`,
-        '  Waiting for provider-reported usage from the next model response.',
-        '  Local character/token estimates are intentionally not used for this number.',
+        ctx.t('command.context.unknown', { window: window.toLocaleString() }),
+        ctx.t('command.context.waiting'),
+        ctx.t('command.context.noEstimate'),
       ].join('\n')
     }
     const used = tokens.input
     const pct = Math.round((used / window) * 100)
     const bar = renderBar(pct, 30)
     return [
-      `Context usage: ${used.toLocaleString()} / ${window.toLocaleString()} tokens (${pct}%)`,
+      ctx.t('command.context.usage', { used: used.toLocaleString(), window: window.toLocaleString(), percent: pct }),
       bar,
-      `  Last provider prompt_tokens: ${tokens.input.toLocaleString()}`,
-      `  Last provider completion_tokens: ${(tokens.output ?? 0).toLocaleString()}`,
+      ctx.t('command.context.input', { tokens: tokens.input.toLocaleString() }),
+      ctx.t('command.context.output', { tokens: (tokens.output ?? 0).toLocaleString() }),
     ].join('\n')
   },
 })
@@ -225,26 +272,26 @@ commandRegistry.register({
 // /theme
 commandRegistry.register({
   name: 'theme',
-  description: 'Switch color theme',
+  descriptionKey: 'command.theme.description',
   argumentHint: '[dark|light]',
   type: 'local',
-  execute: (args) => {
+  execute: (args, ctx) => {
     if (!args || !['dark', 'light'].includes(args.trim())) {
-      return 'Usage: /theme <dark|light>'
+      return ctx.t('command.theme.usage')
     }
-    return `Theme switched to: ${args.trim()} (will apply on next render)`
+    return ctx.t('command.theme.switched', { theme: args.trim() })
   },
 })
 
 // /effort
 commandRegistry.register({
   name: 'effort',
-  description: 'Adjust the active model native reasoning effort',
+  descriptionKey: 'command.effort.description',
   argumentHint: '[level]',
   type: 'local',
   execute: (args, ctx) => {
     const capability = getModelReasoningCapabilities(ctx.config.model, ctx.config.provider, ctx.config.modelCapabilities)
-    if (!capability) return `${ctx.config.model || 'This model'} does not expose adjustable reasoning.`
+    if (!capability) return ctx.t('command.effort.unsupported', { model: ctx.config.model || ctx.t('command.effort.thisModel') })
 
     const input = args.trim().toLowerCase()
     const current = formatNativeReasoningSetting(ctx.config.model, ctx.config.reasoning, ctx.config.provider, ctx.config.modelCapabilities)
@@ -252,14 +299,14 @@ commandRegistry.register({
       const available = [
         capability.efforts.length > 0 ? capability.efforts.join('/') : null,
         capability.supportsToggle ? 'on/off' : null,
-        capability.control === 'budget' ? '<token budget>' : null,
+        capability.control === 'budget' ? ctx.t('command.effort.budget') : null,
       ].filter(Boolean).join(', ')
-      return `Effort: ${current || 'provider default'}\nAvailable: ${available || 'fixed by model'}`
+      return ctx.t('command.effort.summary', { current: current || ctx.t('common.providerDefault'), available: available || ctx.t('command.effort.fixed') })
     }
 
     let next: TurboFluxConfig
     if (input === 'on' || input === 'off') {
-      if (!capability.supportsToggle) return 'This model keeps reasoning enabled and does not expose a toggle.'
+      if (!capability.supportsToggle) return ctx.t('command.effort.noToggle')
       next = setConfigValue(ctx.config, 'reasoningEnabled', input)
     } else if (capability.efforts.includes(input as ReasoningEffort)) {
       next = setConfigValue(ctx.config, 'reasoningEffort', input)
@@ -267,116 +314,41 @@ commandRegistry.register({
       next = setConfigValue(ctx.config, 'reasoningBudgetTokens', input)
     } else {
       const available = capability.control === 'budget'
-        ? 'on, off, or a token budget such as 8192'
-        : [...capability.efforts, ...(capability.supportsToggle ? ['on', 'off'] : [])].join(', ') || 'fixed by model'
-      return `Available: ${available}`
+        ? ctx.t('command.effort.budgetOptions')
+        : [...capability.efforts, ...(capability.supportsToggle ? ['on', 'off'] : [])].join(', ') || ctx.t('command.effort.fixed')
+      return ctx.t('command.effort.available', { available })
     }
     ctx.setConfig(next)
-    return `Effort set to ${formatNativeReasoningSetting(next.model, next.reasoning, next.provider, next.modelCapabilities)}.`
+    return ctx.t('command.effort.set', { effort: formatNativeReasoningSetting(next.model, next.reasoning, next.provider, next.modelCapabilities) })
   },
 })
 
 // /approval
 commandRegistry.register({
   name: 'approval',
-  description: 'Set approval policy',
+  descriptionKey: 'command.approval.description',
   argumentHint: '[ask|agent|full]',
   type: 'local',
   execute: (args, ctx) => {
     const input = args.trim().toLowerCase()
     if (!input) {
-      return `Approval policy: ${APPROVAL_POLICY_LABELS[ctx.config.approvalPolicy]} (${ctx.config.approvalPolicy})`
+      return ctx.t('command.approval.current', { label: approvalLabel(ctx.config.approvalPolicy, ctx), policy: ctx.config.approvalPolicy })
     }
     if (!['ask', 'agent', 'full', 'request', 'auto'].includes(input)) {
-      return 'Usage: /approval <ask|agent|full>'
+      return ctx.t('command.approval.usage')
     }
     const policy = normalizeApprovalPolicy(input, ctx.config.approvalPolicy)
-    const securityProfile = ctx.engine.getSecurityProfile()
-    if (policy === 'full' && securityProfile.active && securityProfile.mode === 'red') {
-      return 'Approval policy "full" is unavailable during an active red-team engagement. Run /security off first.'
-    }
     const next = setConfigValue(ctx.config, 'approvalPolicy', policy)
     ctx.setConfig(next)
-    ctx.engine.setApprovalPolicy(policy)
-    return `${APPROVAL_POLICY_LABELS[policy]}. Sandbox policy is unchanged.`
+    return `${approvalLabel(policy, ctx)}.`
   },
 })
 
-commandRegistry.register({
-  name: 'sandbox',
-  description: 'Show active filesystem and process isolation',
-  type: 'local',
-  execute: (_args, ctx) => {
-    const status = ctx.sandboxStatus
-    if (!status) return 'Sandbox status is unavailable in this runtime.'
-    const lines = [
-      `Policy: ${status.policy}`,
-      `Enforcement: ${status.enforcement}`,
-      `Backend: ${status.resolvedBackend}${status.osIsolation ? ' (OS isolated)' : ' (policy guard only)'}`,
-      `Network: ${status.network}${status.networkIsolated ? ' (isolated)' : ''}`,
-      `Writable roots: ${status.writableRoots.length > 0 ? status.writableRoots.join(', ') : 'none'}`,
-      `Available: ${status.available ? 'yes' : 'no'}`,
-      `Audit: ${status.auditPath || 'unavailable'}`,
-    ]
-    if (status.reason) lines.push(`Reason: ${status.reason}`)
-    if (status.warning) lines.push(`Warning: ${status.warning}`)
-    lines.push('Change persistent settings with /config sandboxPolicy|sandboxEnforcement|sandboxNetwork|sandboxBackend <value>, then restart.')
-    return lines.join('\n')
-  },
-})
-
-commandRegistry.register({
-  name: 'security',
-  description: 'Start or stop a supervised security research engagement',
-  argumentHint: '<red|blue|off> <target[,target]> | <objective>',
-  type: 'local',
-  execute: (args, ctx) => {
-    const input = args.trim()
-    const current = ctx.engine.getSecurityProfile()
-    if (!input) {
-      if (!current.active || current.mode === 'off') {
-        return [
-          'Security research: off',
-          'Usage:',
-          '  /security red <IP|domain|CIDR>[,...] | <authorized objective>',
-          '  /security blue <asset>[,...] | <defensive objective>',
-          '  /security off',
-        ].join('\n')
-      }
-      return [
-        `Security research: ${current.mode}`,
-        `Engagement: ${current.engagementId}`,
-        `Targets: ${current.targets.join(', ')}`,
-        `Objective: ${current.objective}`,
-        `Expires: ${current.expiresAt ? new Date(current.expiresAt).toISOString() : 'session end'}`,
-      ].join('\n')
-    }
-    if (input.toLowerCase() === 'off') {
-      ctx.engine.setSecurityProfile(createOffSecurityProfile())
-      return 'Security research mode disabled. The next engagement must declare a new scope.'
-    }
-    try {
-      const parsed = parseSecurityCommand(input)
-      const profile = createSecurityResearchProfile(parsed, {
-        sandboxStatus: ctx.sandboxStatus,
-        approvalPolicy: ctx.engine.getApprovalPolicy(),
-      })
-      ctx.engine.setSecurityProfile(profile)
-      return [
-        `${profile.mode === 'red' ? 'Red-team' : 'Blue-team'} research mode active.`,
-        `Engagement: ${profile.engagementId}`,
-        `Scope: ${profile.targets.join(', ')}`,
-        `Objective: ${profile.objective}`,
-        `Expires: ${new Date(profile.expiresAt!).toISOString()}`,
-        profile.mode === 'red'
-          ? 'Strict sandbox, approval policy, target scope guard, and audit logging remain enforced.'
-          : 'Evidence preservation and approval policy remain enforced.',
-      ].join('\n')
-    } catch (error) {
-      return `Security mode error: ${error instanceof Error ? error.message : String(error)}`
-    }
-  },
-})
+function approvalLabel(policy: keyof typeof APPROVAL_POLICY_LABELS, ctx: CommandContext): string {
+  if (policy === 'ask') return ctx.t('command.approval.ask')
+  if (policy === 'agent') return ctx.t('command.approval.agent')
+  return ctx.t('command.approval.full')
+}
 
 function renderBar(pct: number, width: number): string {
   const filled = Math.round((pct / 100) * width)
@@ -385,89 +357,104 @@ function renderBar(pct: number, width: number): string {
   return `  [${bar}]`
 }
 
+function formatRuntimeDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
+function formatRuntimeBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
+
 // /mcp
 commandRegistry.register({
   name: 'mcp',
-  description: 'Show MCP server status and tools',
+  descriptionKey: 'command.mcp.description',
   argumentHint: '[status|tools]',
   type: 'local',
   execute: (args, ctx) => {
-    if (!ctx.mcpClient) return 'MCP not initialized. Configure servers in .turboflux/settings.json'
+    if (!ctx.mcpClient) return ctx.t('command.mcp.uninitialized')
     const connections = ctx.mcpClient.getAllConnections()
-    if (connections.length === 0) return 'No MCP servers configured.'
+    if (connections.length === 0) return ctx.t('command.mcp.none')
 
     if (args === 'tools') {
       const tools = ctx.mcpClient.getAllTools()
-      if (tools.length === 0) return 'No MCP tools available.'
+      if (tools.length === 0) return ctx.t('command.mcp.noTools')
       const lines = tools.map(t => `  ${t.name} - ${t.description.slice(0, 60)}`)
-      return `MCP tools (${tools.length}):\n${lines.join('\n')}`
+      return `${ctx.t('command.mcp.tools', { count: tools.length })}\n${lines.join('\n')}`
     }
 
     const lines = connections.map(c => {
       const status = c.status === 'connected' ? 'ok' : c.status === 'error' ? 'error' : 'pending'
       const toolCount = c.tools.length
       const err = c.error ? ` (${c.error})` : ''
-      return `  ${status} ${c.name} - ${c.status}, ${toolCount} tools${err}`
+      return `  ${status} ${c.name} - ${c.status}, ${ctx.t('command.mcp.toolCount', { count: toolCount })}${err}`
     })
-    return `MCP servers (${connections.length}):\n${lines.join('\n')}\n\nUse /mcp tools to list all available tools.`
+    return `${ctx.t('command.mcp.servers', { count: connections.length })}\n${lines.join('\n')}\n\n${ctx.t('command.mcp.hint')}`
   },
 })
 
 // /skills
 commandRegistry.register({
   name: 'skills',
-  description: 'List available skills',
+  descriptionKey: 'command.skills.description',
   type: 'local',
   execute: (_args, ctx) => {
-    if (!ctx.skillRuntime) return 'Skill runtime not available.'
+    if (!ctx.skillRuntime) return ctx.t('command.skills.unavailable')
     const skills = ctx.skillRuntime.getAll()
-    if (skills.length === 0) return 'No skills found.\nPlace SKILL.md files in .turboflux/skills/<name>/ or ~/.turboflux/skills/<name>/'
+    if (skills.length === 0) return ctx.t('command.skills.none')
     const active = ctx.skillRuntime.getActiveSkillId()
     const lines = skills.map(s => {
-      const marker = s.id === active ? ' * active' : ''
+      const marker = s.id === active ? ctx.t('command.skills.active') : ''
       return `  ${s.command} - ${s.description}${marker}`
     })
-    return `Available skills (${skills.length}):\n${lines.join('\n')}`
+    return `${ctx.t('command.skills.available', { count: skills.length })}\n${lines.join('\n')}`
   },
 })
 
 // /new
 commandRegistry.register({
   name: 'new',
-  description: 'Start a new conversation',
+  descriptionKey: 'command.new.description',
   type: 'local',
   execute: (_args, ctx) => {
-    if (!ctx.conversationManager) return 'Conversation manager not available.'
+    if (!ctx.conversationManager) return ctx.t('command.conversation.unavailable')
     ctx.conversationManager.startNew()
     ctx.engine.resetSession()
     ctx.setMessages([])
-    return 'Started new conversation.'
+    return ctx.t('command.conversation.started')
   },
 })
 
 // /list
 commandRegistry.register({
   name: 'list',
-  description: 'List saved conversations',
+  descriptionKey: 'command.list.description',
   aliases: ['conversations'],
   type: 'local',
   execute: (_args, ctx) => {
-    if (!ctx.conversationManager) return 'Conversation manager not available.'
+    if (!ctx.conversationManager) return ctx.t('command.conversation.unavailable')
     const convs = ctx.conversationManager.list()
-    if (convs.length === 0) return 'No saved conversations.'
+    if (convs.length === 0) return ctx.t('command.conversation.none')
     const lines = convs.slice(0, 20).map((c, i) => {
       const date = new Date(c.updatedAt).toLocaleString()
       const current = c.id === ctx.conversationManager!.getCurrentId() ? ' *' : ''
-      return `  ${i + 1}. ${c.title} (${c.turnCount} turns, ${date})${current}\n     ID: ${c.id}`
+      return `  ${i + 1}. ${c.title} (${ctx.t('command.conversation.turns', { count: c.turnCount })}, ${date})${current}\n     ${ctx.t('command.conversation.id', { id: c.id })}`
     })
-    return `Conversations (${convs.length} total):\n${lines.join('\n')}`
+    return `${ctx.t('command.conversation.total', { count: convs.length })}\n${lines.join('\n')}`
   },
 })
 
 // /resume
 commandRegistry.register({
   name: 'resume',
-  description: 'Open saved conversations and resume one',
+  descriptionKey: 'command.resume.description',
   type: 'local',
   execute: () => {
     return ''
@@ -477,7 +464,7 @@ commandRegistry.register({
 // /init
 commandRegistry.register({
   name: 'init',
-  description: 'Show TURBOFLUX.md project instruction status',
+  descriptionKey: 'command.init.description',
   isHidden: true,
   type: 'local',
   execute: (_args, ctx) => {
@@ -485,53 +472,27 @@ commandRegistry.register({
     const targetPath = join(wsPath, 'TURBOFLUX.md')
 
     if (existsSync(targetPath)) {
-      return `TURBOFLUX.md is already active at ${targetPath}. TurboFlux loads it automatically.`
+      return ctx.t('command.init.active', { path: targetPath })
     }
 
-    ensureProjectInstructions(wsPath)
-    return `Created TURBOFLUX.md at ${targetPath}. TurboFlux will load it automatically.`
+    ensureProjectInstructions(wsPath, ctx.t)
+    return ctx.t('command.init.created', { path: targetPath })
   },
 })
 
-export function ensureProjectInstructions(wsPath: string): string | null {
+export function ensureProjectInstructions(wsPath: string, t: Translator = DEFAULT_TRANSLATOR): string | null {
   const targetPath = join(wsPath, 'TURBOFLUX.md')
   if (existsSync(targetPath)) return null
 
   const projectName = wsPath.split(/[\\/]/).pop() || 'my-project'
-  const techStack = detectTechStack(wsPath)
-  const structure = scanTopLevel(wsPath)
-
-  const template = `# ${projectName}
-
-## Project Overview
-
-<!-- Describe what this project does -->
-
-## Tech Stack
-
-${techStack}
-
-## Directory Structure
-
-${structure}
-
-## Coding Rules
-
-- <!-- Add coding conventions here -->
-
-## Architecture Decisions
-
-- <!-- Document key design decisions -->
-
-## Known Pitfalls
-
-- <!-- Things to watch out for -->
-`
+  const techStack = detectTechStack(wsPath, t)
+  const structure = scanTopLevel(wsPath, t)
+  const template = t('command.init.template', { projectName, techStack, structure })
   writeFileSync(targetPath, template, 'utf-8')
   return targetPath
 }
 
-function detectTechStack(wsPath: string): string {
+function detectTechStack(wsPath: string, t: Translator): string {
   const indicators: string[] = []
   const has = (f: string) => existsSync(join(wsPath, f))
 
@@ -553,11 +514,11 @@ function detectTechStack(wsPath: string): string {
   if (has('requirements.txt') || has('pyproject.toml')) indicators.push('Python')
   if (has('tsconfig.json')) indicators.push('TypeScript')
 
-  if (indicators.length === 0) return '- <!-- Detected: unknown -->'
+  if (indicators.length === 0) return t('command.init.unknownStack')
   return indicators.map(t => `- ${t}`).join('\n')
 }
 
-function scanTopLevel(wsPath: string): string {
+function scanTopLevel(wsPath: string, t: Translator): string {
   try {
     const entries = readdirSync(wsPath, { withFileTypes: true })
       .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'dist')
@@ -566,9 +527,9 @@ function scanTopLevel(wsPath: string): string {
       const suffix = e.isDirectory() ? '/' : ''
       return `- ${e.name}${suffix}`
     })
-    return lines.join('\n') || '- <!-- empty -->'
+    return lines.join('\n') || t('command.init.empty')
   } catch {
-    return '- <!-- could not scan -->'
+    return t('command.init.scanFailed')
   }
 }
 

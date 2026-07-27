@@ -110,13 +110,37 @@ describe('RuntimeTaskManager', () => {
       expect(recovered.getTask(completed.id)).toMatchObject({ status: 'completed', exitCode: 0 })
       expect(recovered.listTasks({ kind: 'agent' })[0]).toMatchObject({
         status: 'orphaned',
-        error: 'Recovered without an active process lease',
+        error: 'Recovered process is no longer running',
       })
       const records = readFileSync(journalPath, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line))
       expect(records.at(-1)?.event).toMatchObject({
         type: 'runtime-task:finished',
         task: { status: 'orphaned', endedAt: 200 },
       })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers a live process as observable and read-only', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-live-recovery-'))
+    const journalPath = join(root, 'journal.jsonl')
+    try {
+      const first = new RuntimeTaskManager({ journalPath, now: () => 100 })
+      const task = first.createTask({ kind: 'terminal', status: 'running', pid: 42 })
+      const recovered = new RuntimeTaskManager({
+        journalPath,
+        now: () => 200,
+        isProcessAlive: pid => pid === 42,
+      })
+
+      expect(recovered.getTask(task.id)).toMatchObject({
+        status: 'running',
+        pid: 42,
+        endedAt: undefined,
+        metadata: { recovered: true, controlAvailable: false },
+      })
+      await expect(recovered.stopTask(task.id)).rejects.toThrow('cannot be stopped')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -147,6 +171,26 @@ describe('RuntimeTaskManager', () => {
       expect(first).toMatchObject({ offset: 2, nextOffset: 6, content: '2345', eof: false })
       const second = manager.readTaskOutput(task.id, first.nextOffset, 100)
       expect(second).toMatchObject({ offset: 6, nextOffset: 10, content: '6789', eof: true })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps byte cursors on UTF-8 character boundaries', () => {
+    const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-utf8-'))
+    const logPath = join(root, 'task.log')
+    try {
+      writeFileSync(logPath, 'A你B', 'utf8')
+      const manager = new RuntimeTaskManager({ now: () => 100 })
+      const task = manager.createTask({ kind: 'shell', logPath })
+
+      const first = manager.readTaskOutput(task.id, 0, 2)
+      expect(first).toMatchObject({ offset: 0, nextOffset: 4, content: 'A你', eof: false })
+      const second = manager.readTaskOutput(task.id, first.nextOffset, 2)
+      expect(second).toMatchObject({ offset: 4, nextOffset: 5, content: 'B', eof: true })
+      const misaligned = manager.readTaskOutput(task.id, 2, 2)
+      expect(misaligned).toMatchObject({ offset: 4, content: 'B' })
+      expect(first.content).not.toContain('�')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

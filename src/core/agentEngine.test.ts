@@ -6,30 +6,6 @@ import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasonin
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
-describe('AgentEngine security research lifecycle', () => {
-  it('keeps the research contract session-scoped and publishes state changes', () => {
-    const workspace = process.cwd()
-    const stateProvider = new DefaultAgentStateProvider({
-      provider: 'custom', apiKey: 'test', baseUrl: 'http://example.test', model: 'test-model', contextWindow: 100_000, maxTokens: 4096,
-    }, workspace)
-    const executor = new NodeToolExecutor(workspace)
-    const engine = new AgentEngine({
-      mode: 'vibe', approvalPolicy: 'ask', temperature: 0, maxTokens: 4096, workspacePath: workspace,
-    }, executor, stateProvider)
-    const events: AgentEventType[] = []
-    engine.subscribe(event => events.push(event))
-
-    engine.setSecurityProfile({ mode: 'blue', active: true, engagementId: 'sec-test', targets: ['prod-web-01'], objective: 'triage alerts' })
-    expect(engine.getSecurityProfile()).toMatchObject({ mode: 'blue', active: true })
-    expect(executor.getSecurityProfile()).toMatchObject({ mode: 'blue', active: true })
-    expect(events.some(event => event.type === 'security:change')).toBe(true)
-
-    engine.resetSession()
-    expect(engine.getSecurityProfile()).toEqual({ mode: 'off', active: false, targets: [] })
-    engine.destroy()
-  })
-})
-
 describe('appendRuntimeContextToLatestUserMessage', () => {
   it('does not create a synthetic user turn after tool results', () => {
     const messages: Array<Record<string, unknown>> = [
@@ -593,6 +569,30 @@ describe('AgentEngine filesystem tool output', () => {
       engine.destroy()
     }
   })
+
+  it('does not execute an identical read twice in one agent run', async () => {
+    const readFile = vi.fn(async () => ({ success: true, data: 'const value = 1' }))
+    const { engine, executeSingleTool } = createFilesystemHarness({ readFile } as unknown as ToolExecutor)
+
+    try {
+      const first = await executeSingleTool({
+        id: 'read-once-1',
+        name: 'read_file',
+        arguments: { path: 'src/value.ts' },
+      })
+      const second = await executeSingleTool({
+        id: 'read-once-2',
+        name: 'read_file',
+        arguments: { path: 'src/value.ts' },
+      })
+
+      expect(first.output).toContain('const value = 1')
+      expect(second.output).toContain('reused')
+      expect(readFile).toHaveBeenCalledTimes(1)
+    } finally {
+      engine.destroy()
+    }
+  })
 })
 
 describe('AgentEngine FastContext scheduling', () => {
@@ -692,6 +692,64 @@ describe('AgentEngine FastContext scheduling', () => {
         isError: true,
         output: expect.stringContaining('Continue with targeted search'),
       })
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
+describe('AgentEngine Git integration state', () => {
+  function createEngine(runProcess: ToolExecutor['runProcess']) {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    return new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      workspacePath: workspace,
+      gitEnabled: true,
+    }, { runProcess } as unknown as ToolExecutor, stateProvider)
+  }
+
+  it('emits one structured state through detection, readiness, and disablement', async () => {
+    const runProcess = vi.fn(async (_command: string, args: string[]) => {
+      if (args[0] === 'rev-parse') return { success: true, data: { stdout: 'true\n', stderr: '', exitCode: 0 } }
+      if (args[0] === 'status') return { success: true, data: { stdout: '# branch.oid abc123\0# branch.head main\0', stderr: '', exitCode: 0 } }
+      return { success: true, data: { stdout: '', stderr: '', exitCode: 0 } }
+    })
+    const engine = createEngine(runProcess)
+    const states: string[] = []
+    engine.subscribe(event => {
+      if (event.type === 'git:state') states.push(event.state.phase)
+    })
+
+    try {
+      await expect(engine.initializeGit(true)).resolves.toBe(true)
+      expect(engine.getGitState()).toMatchObject({ enabled: true, phase: 'ready', snapshot: { branch: 'main', head: 'abc123' } })
+
+      engine.setGitEnabled(false)
+
+      expect(engine.getGitState()).toMatchObject({ enabled: false, phase: 'disabled', snapshot: null })
+      expect(states).toEqual(expect.arrayContaining(['detecting', 'ready', 'disabled']))
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('keeps configured integration enabled while marking non-repositories unavailable', async () => {
+    const engine = createEngine(async () => ({ success: false, error: 'not a repository', data: { stdout: '', stderr: 'not a repository', exitCode: 128 } }))
+
+    try {
+      await expect(engine.initializeGit(true)).resolves.toBe(false)
+      expect(engine.getGitState()).toMatchObject({ enabled: true, phase: 'unavailable', snapshot: null })
     } finally {
       engine.destroy()
     }
@@ -1391,6 +1449,7 @@ describe('AgentEngine model protocol compatibility', () => {
 
       expect(harness.executor.streamMessage).toHaveBeenCalledOnce()
       expect(requestBody?.prompt_cache_key).toMatch(/^tf:gpt-5\.6-sol:/)
+      expect(requestBody?.text).toEqual({ verbosity: 'low' })
       expect(requestBody?.reasoning).toMatchObject({ summary: 'detailed' })
       expect(turn.content).toBe('Visible answer.')
       expect(turn.metadata?.thinking?.tokenCount).toBe(384)

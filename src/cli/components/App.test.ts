@@ -136,10 +136,10 @@ describe('reasoning visibility shortcut', () => {
 })
 
 describe('stream display classification', () => {
-  it('promotes reasoning-only completed output to the visible answer', () => {
-    expect(resolveAssistantStreamDisplay('', 'Visible provider answer', false, false)).toEqual({
-      visibleText: 'Visible provider answer',
-      thinkingText: '',
+  it('never promotes provider reasoning into the visible answer', () => {
+    expect(resolveAssistantStreamDisplay('', 'Internal provider reasoning', false, false)).toEqual({
+      visibleText: '',
+      thinkingText: 'Internal provider reasoning',
     })
   })
 

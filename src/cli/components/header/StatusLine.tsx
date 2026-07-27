@@ -6,23 +6,19 @@ import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { getSafeFrameWidth } from '../../terminalLayout'
 import type { TurboFluxConfig } from '../../../core/config'
 import { formatNativeReasoningSetting } from '../../../core/modelRegistry'
-import type { GitSnapshot } from '../../../core/gitService'
+import type { GitIntegrationState } from '../../../core/gitService'
 import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
-import type { SandboxStatus } from '../../../core/sandbox/types'
-import type { SecurityResearchProfile } from '../../../shared/securityTypes'
+import { useI18n } from '../../i18n/index'
 
 interface StatusLineProps {
   config: TurboFluxConfig
   tokenUsage: TokenUsage
   mode?: AgentMode
   viewingHistory?: boolean
-  gitEnabled?: boolean
-  gitSnapshot?: GitSnapshot | null
+  gitState?: GitIntegrationState
   mcpCount?: number
   terminalCount?: number
   width?: number
-  sandboxStatus?: SandboxStatus
-  securityProfile?: SecurityResearchProfile
 }
 
 const MODE_LABELS: Record<AgentMode, string> = {
@@ -35,15 +31,13 @@ export function StatusLine({
   tokenUsage,
   mode = 'vibe',
   viewingHistory = false,
-  gitEnabled = false,
-  gitSnapshot = null,
+  gitState,
   mcpCount = 0,
   terminalCount = 0,
   width: requestedWidth,
-  sandboxStatus,
-  securityProfile,
 }: StatusLineProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { columns } = useTerminalSize()
   const hasProviderUsage = tokenUsage.source === 'provider' && typeof tokenUsage.input === 'number'
   const total = hasProviderUsage ? tokenUsage.input! : 0
@@ -58,31 +52,36 @@ export function StatusLine({
   const barColor = ratio < 0.5 ? theme.success : ratio < 0.8 ? theme.warning : theme.error
 
   const frameWidth = Math.max(20, Math.min(requestedWidth ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
-  const modelPart = config.model || 'no model connection'
+  const modelPart = config.model || t('ui.status.noModel')
   const reasoningSetting = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
+  const gitSnapshot = gitState?.snapshot ?? null
   const gitChangedCount = gitSnapshot?.files.length || 0
   const gitTracking = gitSnapshot
     ? [gitSnapshot.ahead > 0 ? `+${gitSnapshot.ahead}` : '', gitSnapshot.behind > 0 ? `-${gitSnapshot.behind}` : ''].filter(Boolean).join('/')
     : ''
-  const gitPart = !gitEnabled
-    ? 'git:off'
-    : !gitSnapshot
-      ? 'git:loading'
-      : `git:${gitSnapshot.branch}${gitTracking ? ` ${gitTracking}` : ''}${gitSnapshot.conflictedCount > 0 ? ` !${gitSnapshot.conflictedCount}` : gitChangedCount > 0 ? ` · ${gitChangedCount} changed` : ' clean'}`
+  const gitPart = !gitState || gitState.phase === 'disabled'
+    ? t('ui.status.gitOff')
+    : gitState.phase === 'detecting'
+      ? t('ui.status.gitDetecting')
+      : gitState.phase === 'unavailable'
+        ? t('ui.status.gitUnavailable')
+        : gitState.phase === 'error'
+          ? t('ui.status.gitError')
+          : !gitSnapshot
+            ? `git:${gitState.phase}`
+      : `git:${gitSnapshot.branch}${gitTracking ? ` ${gitTracking}` : ''}${gitSnapshot.conflictedCount > 0 ? ` !${gitSnapshot.conflictedCount}` : gitChangedCount > 0 ? ` · ${t('ui.status.gitChanged', { count: gitChangedCount })}` : ` ${t('ui.status.gitClean')}`}`
   const primaryParts = [
     modelPart,
     reasoningSetting ? `reason:${reasoningSetting}` : '',
     `approval:${config.approvalPolicy}`,
-    securityProfile?.active ? `security:${securityProfile.mode}` : '',
   ].filter(Boolean)
   const secondaryParts = [
     gitPart,
     `mcp:${mcpCount > 0 ? mcpCount : 'off'}`,
     terminalCount > 0 ? `term:${terminalCount}` : '',
-    viewingHistory ? 'history' : '',
-    sandboxStatus ? `sandbox:${sandboxStatus.policy}/${sandboxStatus.resolvedBackend}${sandboxStatus.available ? '' : '!'}` : '',
+    viewingHistory ? t('ui.status.history') : '',
   ].filter(Boolean)
-  const contextLabel = `ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : 'unknown'}`
+  const contextLabel = `ctx ${hasProviderUsage ? `${formatTokens(total)}/${formatTokens(contextWindow)}` : t('ui.status.unknown')}`
   const cacheLabel = hasProviderUsage && (tokenUsage.cached ?? 0) > 0
     ? `cache ${formatTokens(tokenUsage.cached)}`
     : ''

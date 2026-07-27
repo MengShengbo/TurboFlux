@@ -3,6 +3,7 @@ import { Box, Text, useInput } from 'ink'
 import { useTheme } from '../../theme/index'
 import { canComputeDiff, computeHunks, summarizeHunks } from '../../../core/diffCompute'
 import { DiffHunks } from './DiffHunks'
+import { useI18n } from '../../i18n/index'
 
 interface InteractiveDiffProps {
   oldContent: string
@@ -14,6 +15,7 @@ interface InteractiveDiffProps {
 
 export function InteractiveDiff({ oldContent, newContent, filename, onAccept, onReject }: InteractiveDiffProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [decided, setDecided] = useState<'accepted' | 'rejected' | null>(null)
   const canRenderDiff = canComputeDiff(oldContent, newContent)
@@ -48,19 +50,19 @@ export function InteractiveDiff({ oldContent, newContent, filename, onAccept, on
       <Box flexDirection="column" marginTop={1}>
         {canRenderDiff
           ? <DiffHunks hunks={hunks} maxLines={20} />
-          : <Text dimColor>diff omitted: file snapshot is too large</Text>}
+          : <Text dimColor>{t('ui.diff.tooLarge')}</Text>}
       </Box>
 
       {!decided && (
         <Box marginTop={1}>
-          <Text bold color={theme.brand}>Apply this change? </Text>
-          <Text color={theme.success}>[y]es</Text>
+          <Text bold color={theme.brand}>{t('ui.diff.apply')} </Text>
+          <Text color={theme.success}>{t('ui.diff.yes')}</Text>
           <Text> / </Text>
-          <Text color={theme.error}>[n]o</Text>
+          <Text color={theme.error}>{t('ui.diff.no')}</Text>
         </Box>
       )}
-      {decided === 'accepted' && <Text color={theme.success} bold>Change accepted.</Text>}
-      {decided === 'rejected' && <Text color={theme.error} bold>Change rejected.</Text>}
+      {decided === 'accepted' && <Text color={theme.success} bold>{t('ui.diff.accepted')}</Text>}
+      {decided === 'rejected' && <Text color={theme.error} bold>{t('ui.diff.rejected')}</Text>}
     </Box>
   )
 }

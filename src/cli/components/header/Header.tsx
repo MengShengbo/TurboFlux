@@ -6,6 +6,7 @@ import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { centerText, centerTextBlock, revealTextBlock, shouldUseCompactWordmark, TURBOFLUX_COMPACT_MARK, TURBOFLUX_VERSION, TURBOFLUX_WORDMARK_LINES } from '../../brand'
 import { getSafeFrameWidth } from '../../terminalLayout'
 import type { MascotMood } from './Mascot'
+import { useI18n } from '../../i18n/index'
 
 interface HeaderProps {
   workspacePath: string
@@ -29,10 +30,11 @@ export function Header({
   showWorkspace = true,
 }: HeaderProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { columns, rows } = useTerminalSize()
   const compact = shouldUseCompactWordmark(columns, rows)
   const width = Math.max(24, Math.min(requestedWidth ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
-  const workspaceLabel = `workspace ${workspacePath}`
+  const workspaceLabel = t('ui.header.workspace', { path: workspacePath })
   const path = cliTruncate(workspaceLabel, Math.max(20, width), { position: 'middle' })
   const wordmarkSource = compact ? [TURBOFLUX_COMPACT_MARK] : TURBOFLUX_WORDMARK_LINES
   const revealedWordmark = revealTextBlock(wordmarkSource, logoReveal)
@@ -49,7 +51,7 @@ export function Header({
       <Text color={theme.brandShimmer} bold>{centerText(showVersion ? `v${TURBOFLUX_VERSION}` : ' ', width)}</Text>
       {showConnector && <Text color={theme.info}>{centerText(showVersion ? '├────────────┤' : ' ', width)}</Text>}
       <Text color={theme.inactive}>{centerText(showWorkspace ? path : ' ', width)}</Text>
-      {!hasApiKey && <Text color={theme.warning}>{centerText(showWorkspace ? 'setup required' : ' ', width)}</Text>}
+      {!hasApiKey && <Text color={theme.warning}>{centerText(showWorkspace ? t('ui.header.setupRequired') : ' ', width)}</Text>}
     </Box>
   )
 }

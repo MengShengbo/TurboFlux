@@ -3,10 +3,6 @@ import type { FastContextModelConfig, ModelCapabilities, TurboFluxApiConfigProfi
 import type {
   ApprovalPolicy,
   NativeReasoningConfig,
-  SandboxBackend,
-  SandboxEnforcement,
-  SandboxNetworkPolicy,
-  SandboxPolicy,
 } from '../../shared/agentTypes'
 
 export interface AgentRuntimeConfig {
@@ -18,11 +14,7 @@ export interface AgentRuntimeConfig {
   maxTokens: number
   modelCapabilities?: ModelCapabilities
   approvalPolicy?: ApprovalPolicy
-  sandboxPolicy?: SandboxPolicy
-  sandboxEnforcement?: SandboxEnforcement
-  sandboxNetwork?: SandboxNetworkPolicy
-  sandboxBackend?: SandboxBackend
-  sandboxDockerImage?: string
+  gitEnabled?: boolean
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string

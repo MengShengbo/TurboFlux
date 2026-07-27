@@ -9,7 +9,7 @@
 | 文件 | 规模 | 主要职责 | 风险 |
 | --- | ---: | --- | --- |
 | `src/core/agentEngine.ts` | 约 6000 行 | 会话循环、协议请求、工具调度、权限、上下文、子代理 | 任何改动都可能跨越多个生命周期 |
-| `src/core/runtime/nodeToolExecutor.ts` | 约 2000 行 | 文件、搜索、命令、终端、HTTP、检查点、记忆 | 安全边界与基础设施逻辑混合 |
+| `src/core/runtime/nodeToolExecutor.ts` | 约 2000 行 | 文件、搜索、命令、终端、HTTP、检查点、记忆 | 职责过多且与基础设施逻辑混合 |
 | `src/cli/components/App.tsx` | 约 1580 行 | TUI 状态、事件桥接、输入、历史、滚动、覆盖层 | React 状态与 Agent 事件高度耦合 |
 | `src/core/subAgent.ts` | 约 1150 行 | 子代理协议、重试、工具循环、结果压缩 | 与主 Agent 存在协议兼容重复逻辑 |
 | `src/cli/setup.ts` | 约 1060 行 | 配置迁移、交互步骤、供应商和人设设置 | 配置规则与交互流程混合 |
@@ -18,7 +18,7 @@
 
 - `src/cli/components/appHelpers.ts`：承接消息转换、回滚定位、环境开关和 UI 纯函数。
 - `src/core/requestCompatibility.ts`：统一主 Agent 与子代理的可选参数移除、原生推理档位降级和错误识别。
-- 修复 `runProcess()` 在 `readonly` sandbox 中仍可启动进程的问题。
+- 统一 `runProcess()` 与前台命令的进程生命周期和取消行为。
 - 子代理不再因为一个 reasoning 字段不兼容而删除整组原生推理参数。
 
 ## 仍需处理的问题
@@ -34,7 +34,7 @@ Anthropic Messages、OpenAI Chat Completions 和 OpenAI Responses 的请求构�
 1. Web Search 客户端与 HTML 解析。
 2. Code Search / CodeMap 本地索引适配。
 3. 前台进程与后台终端管理。
-4. 文件系统与 workspace sandbox 保留为执行器核心。
+4. 文件系统与本机进程调用保留为执行器核心。
 
 ### P1：App 事件桥接过大
 

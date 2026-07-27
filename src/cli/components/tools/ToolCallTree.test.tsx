@@ -19,20 +19,22 @@ function tool(name: string, status: ToolStatus['status'], args?: Record<string, 
 }
 
 describe('ToolCallTree history policy', () => {
-  it('renders compact settled history until explicitly expanded', () => {
+  it('keeps each settled tool visible in compact history', () => {
     const tools = [tool('read_file', 'done', { path: 'src/App.tsx' }), tool('run_command', 'done', { command: 'npm test' })]
     const compact = renderToString(<ThemeProvider><ToolCallTree tools={tools} verbose={false} expanded={false} /></ThemeProvider>, { columns: 88 })
     const expanded = renderToString(<ThemeProvider><ToolCallTree tools={tools} verbose={false} expanded /></ThemeProvider>, { columns: 88 })
 
-    expect(compact).toContain('tool complete')
+    expect(compact).toContain('Activity 2 complete')
+    expect(compact).toContain('Read src/App.tsx')
+    expect(compact).toContain('Run npm test')
     expect(expanded).toContain('Read src/App.tsx')
     expect(expanded).toContain('Run npm test')
   })
 
-  it('keeps successful exploration tools as compact committed history', () => {
-    expect(shouldPersistToolForHistory(tool('read_file', 'done'))).toBe(false)
-    expect(shouldPersistToolForHistory(tool('search_content', 'done'))).toBe(false)
-    expect(shouldPersistToolForHistory(tool('get_codemap', 'done'))).toBe(false)
+  it('persists successful exploration tools for auditability', () => {
+    expect(shouldPersistToolForHistory(tool('read_file', 'done'))).toBe(true)
+    expect(shouldPersistToolForHistory(tool('search_content', 'done'))).toBe(true)
+    expect(shouldPersistToolForHistory(tool('get_codemap', 'done'))).toBe(true)
     expect(shouldPersistToolForHistory(tool('explore_code', 'done'))).toBe(true)
     expect(shouldPersistToolForHistory(tool('web_search', 'done'))).toBe(true)
     expect(shouldPersistToolForHistory(tool('read_agent', 'done'))).toBe(false)
@@ -42,7 +44,7 @@ describe('ToolCallTree history policy', () => {
     expect(shouldPersistToolForHistory(tool('read_file', 'error'))).toBe(true)
   })
 
-  it('hides failed tool details in compact user-facing history', () => {
+  it('keeps failed tool details visible in compact history', () => {
     const output = renderToString(
       <ThemeProvider>
         <ToolCallTree
@@ -54,8 +56,8 @@ describe('ToolCallTree history policy', () => {
       { columns: 88 },
     )
 
-    expect(output).not.toContain('error')
-    expect(output).not.toContain('missing.ts')
+    expect(output).toContain('1 failed')
+    expect(output).toContain('missing.ts')
   })
 
   it('keeps user-visible write and shell tools visible', () => {

@@ -28,17 +28,20 @@ describe('tool mode boundaries', () => {
     const webSearch = tools.find(tool => tool.name === 'web_search')
 
     expect(webSearch.input_schema.properties.domains.items).toEqual({ type: 'string' })
+    expect(webSearch.description).toContain('Do not use it as a substitute for source code missing from the active workspace')
     expect(validateToolArgs('read_file', { path: 'a.ts', surprise: true })).toEqual({ valid: false, error: 'Unexpected parameter: surprise' })
   })
 
   it('enforces nested array schemas before a tool reaches its executor', () => {
-    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: [] })).toMatchObject({ valid: false })
-    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: [42] })).toMatchObject({
+    expect(validateToolArgs('git_commit', { message: 'commit changes', paths: [] })).toMatchObject({ valid: false })
+    expect(validateToolArgs('git_commit', { message: 'commit changes', paths: [42] })).toMatchObject({
       valid: false,
       error: 'Invalid type for paths[0]: expected string',
     })
-    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: ['x'.repeat(1_025)] })).toMatchObject({ valid: false })
-    expect(validateToolArgs('git_commit', { message: 'checkpoint', paths: ['src/app.ts'] })).toEqual({ valid: true })
+    expect(validateToolArgs('git_commit', { message: 'commit changes', paths: ['x'.repeat(1_025)] })).toMatchObject({ valid: false })
+    expect(validateToolArgs('git_commit', { message: 'commit changes', paths: ['src/app.ts'] })).toEqual({ valid: true })
+    expect(validateToolArgs('git_restore', { paths: ['src/app.ts'], source: 'HEAD~1' })).toEqual({ valid: true })
+    expect(validateToolArgs('git_revert', { revision: 'abc1234' })).toEqual({ valid: true })
   })
 
   it('exposes validated terminal stdin writes only in vibe mode', () => {

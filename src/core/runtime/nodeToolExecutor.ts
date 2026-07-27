@@ -1501,6 +1501,7 @@ export class NodeToolExecutor implements ToolExecutor {
           })
           return { success: false, error: `Terminal ${sessionId} did not exit within ${TERMINAL_KILL_TIMEOUT_MS}ms` }
         }
+        await session.writer.close()
       }
       session.info.status = 'exited'
       session.info.canWrite = false

@@ -19,7 +19,6 @@ function segment(params: Partial<ContextSegment> & { summary: string }): Context
     originalCharCount: params.originalCharCount ?? params.summary.length,
     isValid: params.isValid ?? true,
     createdAt: params.createdAt,
-    checkpointId: params.checkpointId,
   }
 }
 

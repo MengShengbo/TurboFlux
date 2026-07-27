@@ -4,6 +4,7 @@ import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import figures from 'figures'
 import type { Message } from '../messages/Messages'
+import { useI18n } from '../../i18n/index'
 
 interface Props {
   messages: Message[]
@@ -13,6 +14,7 @@ interface Props {
 
 export function RewindSelector({ messages, onRewind, onCancel }: Props) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { rows } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const userIndices = messages
@@ -45,12 +47,12 @@ export function RewindSelector({ messages, onRewind, onCancel }: Props) {
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      <Text bold color={theme.brand}>Rewind conversation</Text>
-      <Text dimColor>Restore to before a message:</Text>
+      <Text bold color={theme.brand}>{t('ui.rewind.title')}</Text>
+      <Text dimColor>{t('ui.rewind.subtitle')}</Text>
 
       {viewStart > 0 && (
         <Box marginTop={1} paddingLeft={2}>
-          <Text dimColor>↑ {viewStart} more above</Text>
+          <Text dimColor>{t('common.moreAbove', { count: viewStart })}</Text>
         </Box>
       )}
 
@@ -69,7 +71,7 @@ export function RewindSelector({ messages, onRewind, onCancel }: Props) {
                 )}
               </Box>
               <Text color={isSelected ? theme.text : theme.inactive} dimColor={!isSelected}>
-                {preview || '(empty)'}
+                {preview || `(${t('common.empty')})`}
               </Text>
             </Box>
           )
@@ -78,12 +80,12 @@ export function RewindSelector({ messages, onRewind, onCancel }: Props) {
 
       {viewEnd < userIndices.length && (
         <Box paddingLeft={2}>
-          <Text dimColor>↓ {userIndices.length - viewEnd} more below</Text>
+          <Text dimColor>{t('common.moreBelow', { count: userIndices.length - viewEnd })}</Text>
         </Box>
       )}
 
       <Box marginTop={1}>
-        <Text dimColor>Up/Down navigate - Enter rewind - Esc cancel</Text>
+        <Text dimColor>{t('ui.rewind.keys')}</Text>
       </Box>
     </Box>
   )

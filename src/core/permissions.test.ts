@@ -261,7 +261,13 @@ describe('PermissionPipeline', () => {
 
       expect(pipeline.check('create_task', { title: 'Implement UI' }).verdict).toBe('allow')
       expect(pipeline.check('update_task', { task_id: 'task-1', status: 'completed' }).verdict).toBe('allow')
-      expect(pipeline.check('create_checkpoint', { label: 'safe point' }).verdict).toBe('allow')
+    })
+
+    it('asks before Git-native restore operations', () => {
+      const pipeline = new PermissionPipeline('agent')
+
+      expect(pipeline.check('git_restore', { paths: ['src/app.ts'], source: 'HEAD' }).verdict).toBe('ask')
+      expect(pipeline.check('git_revert', { revision: 'abc1234' }).verdict).toBe('ask')
     })
 
     it('full policy allows ask-level high-risk commands', () => {
