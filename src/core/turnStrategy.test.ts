@@ -26,6 +26,20 @@ function openAiToolNames(mode: AgentMode): string[] {
   }).filter(Boolean)
 }
 
+interface OpenAIToolShape {
+  function?: {
+    name?: string
+    description?: string
+    parameters?: { properties?: Record<string, unknown> }
+  }
+}
+
+function openAiTool(mode: AgentMode, name: string): OpenAIToolShape | undefined {
+  return toolsToOpenAIFormat(mode).find(tool => (
+    (tool as { function?: { name?: string } }).function?.name === name
+  )) as OpenAIToolShape | undefined
+}
+
 describe('TurnStrategyPlanner', () => {
   it('does not classify natural-language intent', () => {
     const planner = new TurnStrategyPlanner()
@@ -44,7 +58,6 @@ describe('TurnStrategyPlanner', () => {
 
     expect(strategy?.requiresEvidence).toBe(false)
     expect(strategy?.needsWorkspaceContext).toBe(true)
-    expect(strategy?.needsCodeMap).toBe(true)
     expect(strategy?.allowWrites).toBe(true)
   })
 
@@ -63,7 +76,7 @@ describe('TurnStrategyPlanner', () => {
     expect(strategy?.requiresEvidence).toBe(false)
   })
 
-  it('promotes codemap availability after recent tool errors', () => {
+  it('keeps tool-error recovery model-directed', () => {
     const planner = new TurnStrategyPlanner()
     const errorResult: ToolResult = {
       toolCallId: 'tc-1',
@@ -76,7 +89,8 @@ describe('TurnStrategyPlanner', () => {
     ]), 'vibe')
 
     expect(strategy?.needsWorkspaceContext).toBe(true)
-    expect(strategy?.needsCodeMap).toBe(true)
+    expect(strategy?.reasons).toContain('recent tool errors=1')
+    expect(strategy?.verificationPlan).toContain('If a tool failed, recover from the failure with a different read/search path before concluding.')
   })
 
   it('does not let strategy hide read tools', () => {
@@ -88,6 +102,18 @@ describe('TurnStrategyPlanner', () => {
     expect(names).toContain('search_content')
     expect(names).toContain('get_codemap')
     expect(names).toContain('explore_code')
+  })
+
+  it('keeps read output canonical for direct editing', () => {
+    const readTool = openAiTool('vibe', 'read_file')
+    const properties = readTool?.function?.parameters?.properties || {}
+
+    expect(properties).not.toHaveProperty('with_line_numbers')
+    expect(readTool?.function?.description).toContain('pasted directly')
+  })
+
+  it('does not expose a redundant change-summary tool', () => {
+    expect(openAiToolNames('vibe')).not.toContain('generate_change_summary')
   })
 
   it('keeps plan mode read-only while vibe mode can write', () => {

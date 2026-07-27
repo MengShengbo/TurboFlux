@@ -45,4 +45,13 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('Do not infer that the user wants a CLI, coding agent, AI assistant, workbench, or local-first application')
     expect(prompt).toContain("reason from the user's stated goals, audience, constraints, and existing work")
   })
+
+  it('keeps task, edit, and verification work in execution-sized rounds', () => {
+    const prompt = buildSystemPrompt('vibe')
+
+    expect(prompt).toContain('Never spend a model round only creating or updating task state')
+    expect(prompt).toContain('Never reread the same region merely to obtain raw text for an edit')
+    expect(prompt).toContain('Do not rerun a successful check unless a later edit can affect it')
+    expect(prompt).toContain('chain them in one run_command')
+  })
 })

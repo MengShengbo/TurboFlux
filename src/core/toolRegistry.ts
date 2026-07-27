@@ -4,13 +4,12 @@ import type { EnhancedToolDef } from '../shared/toolTypes'
 const tools: EnhancedToolDef[] = [
   {
     name: 'read_file',
-    description: 'Read a file with line numbers. When offset/limit are omitted, returns up to 2,000 lines so normal source files are available in one call. Use offset/limit only for very large files or a precise range found by search. Independent files or ranges can be read in parallel.',
+    description: 'Read a file with line numbers. When offset/limit are omitted, returns up to 2,000 lines so normal source files are available in one call. Use offset/limit only for very large files or a precise range found by search. Independent files or ranges can be read in parallel. Numbered snippets can be pasted directly into edit_file or multi_edit; the editor strips line-number prefixes.',
     category: 'read',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
-      { name: 'offset', type: 'number', description: 'Starting line number (1-based). Omit unless the file is too large or a search identified a precise range.', required: false },
-      { name: 'limit', type: 'number', description: 'Number of lines to read. Omit for normal source files.', required: false },
-      { name: 'with_line_numbers', type: 'boolean', description: 'When true (default), prefix each line with its 1-based line number followed by "\u2192". Set false for raw content.', required: false, default: true },
+      { name: 'offset', type: 'number', description: 'Starting line number (1-based). Only provide if the file is too large to read at once or a search identified a precise range.', required: false },
+      { name: 'limit', type: 'number', description: 'Number of lines to read. Only provide if the file is too large to read at once or a search identified a precise range.', required: false },
     ],
     isReadOnly: true,
     isDestructive: false,
@@ -23,7 +22,6 @@ const tools: EnhancedToolDef[] = [
     category: 'read',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
-      { name: 'with_line_numbers', type: 'boolean', description: 'When true, prefix each line with its 1-based line number followed by "\u2192". Default false for raw complete content.', required: false, default: false },
     ],
     isReadOnly: true,
     isDestructive: false,
@@ -58,11 +56,11 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'edit_file',
-    description: 'Replace a unique snippet in a file. old_content must match exactly (incl. whitespace). Use replace_all for renames. Prefer multi_edit for multiple changes to the same file.',
+    description: 'Replace a unique snippet in a file. old_content must match exactly after optional read_file line-number prefixes are stripped. Copy numbered read_file snippets directly; do not reread raw content. Use replace_all for renames and multi_edit for multiple changes to one file.',
     category: 'write',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
-      { name: 'old_content', type: 'string', description: 'Exact content to replace. Must match the file byte-for-byte (incl. indentation).', required: true },
+      { name: 'old_content', type: 'string', description: 'Exact content to replace, optionally copied with read_file line-number prefixes. Whitespace and indentation must otherwise match.', required: true },
       { name: 'new_content', type: 'string', description: 'Replacement content. Must differ from old_content.', required: true },
       { name: 'replace_all', type: 'boolean', description: 'When true, replace every occurrence of old_content. Default false (requires unique match). Use for variable/identifier renames.', required: false, default: false },
     ],
@@ -73,7 +71,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'multi_edit',
-    description: 'Apply multiple exact-snippet edits to one file atomically. All succeed or none are written. If matching is fragile or an old_string fails, switch to replace_file with complete final content instead of retrying similar snippets.',
+    description: 'Apply multiple exact-snippet edits to one file atomically. Numbered read_file snippets are accepted directly, so do not reread the file without line numbers. All edits succeed or none are written. If matching is fragile or an old_string fails, switch to replace_file instead of retrying similar snippets.',
     category: 'write',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
@@ -665,21 +663,6 @@ Launch multiple agents concurrently for independent topics and provide a highly 
     isDestructive: false,
     isConcurrencySafe: false,
     requiredMode: ['vibe'],
-  },
-  {
-    name: 'generate_change_summary',
-    description: 'Generate a summary card for completed work: changes, findings, key files, and unresolved gaps.',
-    category: 'communicate',
-    parameters: [
-      { name: 'files_changed', type: 'array', description: 'List of changed files', required: true, schema: { type: 'array', items: { type: 'string' } } },
-      { name: 'summary', type: 'string', description: 'Change summary', required: true },
-      { name: 'reason', type: 'string', description: 'Reason for the change', required: false },
-      { name: 'risks', type: 'string', description: 'Potential risks', required: false },
-    ],
-    isReadOnly: true,
-    isDestructive: false,
-    isConcurrencySafe: true,
-    requiredMode: ['vibe', 'plan'],
   },
 ]
 

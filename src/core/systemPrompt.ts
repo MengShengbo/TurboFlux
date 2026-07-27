@@ -27,7 +27,6 @@ interface SystemPromptOptions {
   workspaceName?: string
   systemPromptOverride?: string
   profileSystemPrompt?: string
-  codemapSummary?: string
   workspaceMemory?: string
   gitStatus?: string
   enabledSkills?: Array<{
@@ -86,6 +85,7 @@ No write operations before approval.
 - Follow existing code style and conventions
 - Prefer editing existing files over creating new ones
 - Only modify what is necessary
+- When the requested change is implemented and relevant checks pass, stop. Do not invent adjacent improvements or continue polishing beyond the user's scope.
 - No code comments unless user explicitly requests them
 </code_quality>
 
@@ -117,8 +117,10 @@ No write operations before approval.
 
 <task_management>
 - Use tasks only when work has multiple meaningful phases or needs durable progress tracking. Do not create task trees for small, linear changes.
-- When tasks help, create the full sibling group in one create_tasks call and combine bookkeeping with useful execution tools whenever dependencies allow.
+- When tasks help, create the full sibling group in one create_tasks call. Emit task creation alongside independent discovery or reads instead of dedicating a model round to bookkeeping.
 - Keep one task in_progress at a time and mark it complete when its work is actually finished.
+- Never spend a model round only creating or updating task state while useful work remains. Pair task transitions with the next independent reads, edits, or checks in the same response.
+- On final completion, answer directly; the runtime finalizes any completed active task metadata. Do not call a separate summary-card tool.
 </task_management>
 
 ${modeRules[mode]}
@@ -147,8 +149,9 @@ function buildToolUsageSection(_mode: AgentMode): string {
 - For location requests, choose search_content/search_files/search_symbols/get_codemap or explore_code from the meaning of the request before ask_user. Do not rely on fixed trigger words.
 - For current or external facts, call web_search with a specific query; do not answer from memory when recency or source accuracy matters.
 - When using explore_code, pass the user's real objective and any clues; after it returns, read_file the highest-signal candidate ranges before making detailed claims or editing.
-- read_file without offset/limit returns up to 2,000 lines and should cover normal source files in one call. Use ranges only for very large files or precise search hits.
+- read_file without offset/limit returns up to 2,000 numbered lines and should cover normal source files in one call. Use ranges only for very large files or precise search hits.
 - Do not reread a successful file range unless an edit changed it, the prior result was truncated/evicted, or a new question needs different lines.
+- Numbered read_file snippets can be passed directly to edit_file and multi_edit; the runtime strips line-number prefixes. Never reread the same region merely to obtain raw text for an edit.
 - Once enough evidence exists to edit safely, edit. Do not emit a promise to edit and then repeat the same reads.
 - read_file_full bypasses the 2,000-line window; reserve it for exact whole-file needs.
 - edit_file: old_content must match exactly and uniquely. Add context lines if ambiguous.
@@ -158,6 +161,8 @@ function buildToolUsageSection(_mode: AgentMode): string {
 - Prefer structured Git tools over shell commands for status, diff, history, staging, commits, branches, stashes, and pushes. They validate arguments, bound output, refresh UI state, and preserve approval policy.
 - Never use git_stage without explicit paths. Use git_commit(paths) to isolate AI-authored files from unrelated staged work. Never force push or discard working-tree content through a structured tool.
 - File modifications are checkpointed automatically by the runtime. Use create_checkpoint only for a deliberate named milestone; summarize completed work directly in the final response.
+- Run the narrowest relevant verification after edits. Do not rerun a successful check unless a later edit can affect it.
+- Put independent shell checks in parallel tool calls. When shell steps depend on each other and can share one failure boundary, chain them in one run_command instead of spending one model round per step.
 </tool_rules>
 </tool_usage>`
 }
@@ -201,10 +206,6 @@ function buildSkillsSection(
 
 function buildGitStatusSection(gitStatus: string): string {
   return `<git_status>\n${gitStatus.trim()}\n</git_status>`
-}
-
-function buildCodemapSection(codemapSummary: string): string {
-  return `<codebase_map>\n${codemapSummary.trim()}\n</codebase_map>`
 }
 
 function buildWorkspaceMemorySection(memory: string): string {
@@ -261,10 +262,6 @@ export function buildSystemPrompt(mode: AgentMode, options: SystemPromptOptions 
 
   if (options.workspaceMemory) {
     dynamicSections.push(buildWorkspaceMemorySection(options.workspaceMemory))
-  }
-
-  if (options.codemapSummary) {
-    dynamicSections.push(buildCodemapSection(options.codemapSummary))
   }
 
   const voiceAdapter = buildVoiceAdapterSection(options.provider, options.modelId)
