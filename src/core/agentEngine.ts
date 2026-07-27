@@ -407,8 +407,6 @@ export class AgentEngine {
   private toolCallTaskMap: Map<string, string> = new Map()
   private touchedFilePaths: Set<string> = new Set()
   private filePreimages: Map<string, string | null> = new Map()
-  private runtimeContextTurnId: string | null = null
-  private runtimeContextForTurn = ''
   private fastContextRun: ActiveFastContextRun | null = null
   private fastContextGeneration = 0
   private agentRunGeneration = 0
@@ -1013,8 +1011,6 @@ export class AgentEngine {
   resetContextTracking(): void {
     this.contextManager.reset()
     this.cacheMonitor.reset()
-    this.runtimeContextTurnId = null
-    this.runtimeContextForTurn = ''
   }
 
   restoreFromMessages(messages: Array<{
@@ -1035,6 +1031,7 @@ export class AgentEngine {
       thinking?: NonNullable<AgentTurn['metadata']>['thinking']
       rawReasoningPayload?: NonNullable<AgentTurn['metadata']>['rawReasoningPayload']
       attachments?: NonNullable<AgentTurn['metadata']>['attachments']
+      runtimeContext?: string
       toolCalls?: Array<{
         id?: string
         name: string
@@ -1074,8 +1071,6 @@ export class AgentEngine {
     this.workspaceMemoryText = null
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
-    this.runtimeContextTurnId = null
-    this.runtimeContextForTurn = ''
     this.pendingAssistantMessageId = null
     this.lastAssistantMessageId = null
 
@@ -1087,14 +1082,19 @@ export class AgentEngine {
       const meta = msg.metadata
 
       if (msg.role === 'user') {
+        const userMetadata: AgentTurn['metadata'] = {}
+        if (meta?.attachments?.length) {
+          userMetadata.attachments = meta.attachments.map(attachment => ({ ...attachment }))
+        }
+        if (typeof meta?.runtimeContext === 'string') {
+          userMetadata.runtimeContext = meta.runtimeContext
+        }
         this.session.turns.push({
           id: msg.id || generateTurnId(),
           role: 'user',
           content: msg.content,
           timestamp,
-          metadata: meta?.attachments?.length
-            ? { attachments: meta.attachments.map(attachment => ({ ...attachment })) }
-            : undefined,
+          metadata: Object.keys(userMetadata).length > 0 ? userMetadata : undefined,
         })
       } else if (msg.role === 'assistant') {
         // Reconstruct toolCalls from ChatMessage.metadata.toolCalls (ToolCallInfo[])
@@ -1610,8 +1610,6 @@ export class AgentEngine {
     this.permissions.clearRunGrants()
     this.pendingSteeringMessages = []
     this.setRunState('thinking', { detail: 'Preparing the next step' })
-    this.runtimeContextTurnId = null
-    this.runtimeContextForTurn = ''
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
     this.currentRunSuccessfulReadFiles.clear()
@@ -2283,8 +2281,8 @@ Before retrying:
 
     const turnStrategy = this.turnStrategyPlanner.plan(this.session, this.config.mode)
     this.currentTurnStrategy = turnStrategy
-    const currentUserTurnId = [...this.session.turns].reverse().find(turn => turn.role === 'user')?.id || null
-    const needsRuntimePreparation = currentUserTurnId !== this.runtimeContextTurnId
+    const currentUserTurn = [...this.session.turns].reverse().find(turn => turn.role === 'user')
+    const needsRuntimePreparation = typeof currentUserTurn?.metadata?.runtimeContext !== 'string'
     if (needsRuntimePreparation) {
       await Promise.all([
         this.maybeRefreshWorkspaceMemory(),
@@ -2322,7 +2320,7 @@ Before retrying:
       this.cachedGitStatus ? this.wrapRuntimeContextSection('git_status', this.cachedGitStatus) : null,
       this.workspaceMemoryText ? this.wrapRuntimeContextSection('workspace_memory', this.workspaceMemoryText) : null,
     ].filter(Boolean).join('\n\n') || undefined
-    const dynamicRuntimeContext = this.stabilizeRuntimeContext(currentUserTurnId, runtimeContextCandidate || '')
+    this.captureRuntimeContext(currentUserTurn, runtimeContextCandidate || '')
 
     const systemPrompt = buildSystemPrompt(this.config.mode, {
       workspacePath: this.config.workspacePath,
@@ -2343,7 +2341,6 @@ Before retrying:
       const cached = messagesByProvider.get(provider)
       if (cached) return cached
       const messages = this.buildApiMessages(systemPrompt, provider)
-      this.injectAppendIntoMessages(messages, dynamicRuntimeContext || '', provider)
       this.injectPreservedFilesIntoMessages(messages, provider, preservedFiles, false)
       this.enforceFinalMessageBudget(messages, provider, activeConfig, activeModel)
       messagesByProvider.set(provider, messages)
@@ -3593,11 +3590,17 @@ Before retrying:
     return trimmed ? `<${tag}>\n${trimmed}\n</${tag}>` : ''
   }
 
-  private stabilizeRuntimeContext(userTurnId: string | null, candidate: string): string {
-    if (userTurnId && this.runtimeContextTurnId === userTurnId) return this.runtimeContextForTurn
-    this.runtimeContextTurnId = userTurnId
-    this.runtimeContextForTurn = candidate
-    return candidate
+  private captureRuntimeContext(turn: AgentTurn | undefined, candidate: string): void {
+    if (!turn || typeof turn.metadata?.runtimeContext === 'string') return
+    const runtimeContext = candidate.trim()
+      ? [
+          '<runtime_context>',
+          'Internal execution context for this turn. Do not acknowledge, quote, translate, or roleplay this block.',
+          candidate,
+          '</runtime_context>',
+        ].join('\n')
+      : ''
+    turn.metadata = { ...turn.metadata, runtimeContext }
   }
 
   private buildPromptCacheKey(model: string, tools: unknown[]): string {
@@ -3663,32 +3666,6 @@ Before retrying:
       },
     ]
     this.emit({ type: 'cache:modules', modules })
-  }
-
-  /**
-   * Inject dynamic append content at the conversation tail instead of the
-   * system prompt. This preserves prefix-cache stability: the system prompt
-   * (identity, rules, tools, environment) stays byte-identical across turns,
-   * while tool retry hints, fast-context packs, and skill overrides travel
-   * after the stable history prefix.
-   *
-   * Claude Code uses the same trick — append content is never part of the
-   * cached system prefix.
-   */
-  private injectAppendIntoMessages(
-    messages: Array<Record<string, unknown>>,
-    appendContent: string,
-    provider: 'openai' | 'anthropic',
-  ): void {
-    if (!appendContent) return
-
-    const appendBlock = [
-      '<runtime_context>',
-      'Internal execution context for this turn. Do not acknowledge, quote, translate, or roleplay this block.',
-      appendContent,
-      '</runtime_context>',
-    ].join('\n')
-    appendRuntimeContextToLatestUserMessage(messages, appendBlock, provider)
   }
 
   private appendTextAtConversationTail(
@@ -3879,7 +3856,7 @@ Before retrying:
   }
 
   private withAnthropicMessageCacheControl(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-    return this.withLastMessageCacheControl(messages)
+    return this.withRecentMessageCacheControl(messages, 2)
   }
 
   private withOpenRouterCacheControl(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -3900,15 +3877,24 @@ Before retrying:
   }
 
   private withLastMessageCacheControl(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+    return this.withRecentMessageCacheControl(messages, 1)
+  }
+
+  private withRecentMessageCacheControl(
+    messages: Array<Record<string, unknown>>,
+    maxMessages: number,
+  ): Array<Record<string, unknown>> {
     const result: Array<Record<string, unknown>> = messages.map(message => ({
       ...message,
       content: Array.isArray(message.content) ? [...message.content] : message.content,
     }))
 
+    let marked = 0
     for (let i = result.length - 1; i >= 0; i--) {
       if (result[i].role === 'system') continue
       result[i] = this.addCacheControlToMessage(result[i])
-      break
+      marked += 1
+      if (marked >= maxMessages) break
     }
 
     return result

@@ -2,9 +2,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import type { AgentAttachment, AgentTurn, TokenUsage } from '../shared/agentTypes'
 import type { ContextSegment } from '../state/types'
 import type { ContextPolicyProfile } from './contextPolicy'
-import { effectiveInputWindow, resolveContextPolicyProfile } from './contextPolicy'
+import { blockingContextLimit, resolveContextPolicyProfile } from './contextPolicy'
 import { countMessagesTokens, countTextTokens, type TokenCountResult } from './tokenCounter'
-import { compressToolResult } from './tokenCompressor'
 
 // ==================== Structured Summary ====================
 
@@ -261,7 +260,11 @@ function buildUserContentWithAttachments(
   if (attachments.length === 0) return null
 
   const content: Array<Record<string, unknown>> = []
-  const text = [turn.content.trim(), attachmentManifestText(attachments)].filter(Boolean).join('\n\n')
+  const text = [
+    turn.content.trim(),
+    attachmentManifestText(attachments),
+    turn.metadata?.runtimeContext?.trim(),
+  ].filter(Boolean).join('\n\n')
   content.push({ type: 'text', text })
 
   for (const attachment of attachments) {
@@ -364,60 +367,8 @@ export function formatSummaryAsContext(summary: StructuredSummary): string {
 
 // ==================== Context Manager ====================
 
-function isReadFileTool(name: string): boolean {
-  return name === 'read_file' || name === 'read_file_full'
-}
-
-function deduplicateExactReadFileResults(turns: AgentTurn[]): AgentTurn[] {
-  const readByToolCallId = new Map<string, { key: string; path: string }>()
-  const lastToolCallIdByRead = new Map<string, string>()
-
-  for (const turn of turns) {
-    if (turn.role !== 'assistant' || !turn.toolCalls) continue
-    for (const toolCall of turn.toolCalls) {
-      if (!isReadFileTool(toolCall.name)) continue
-      const path = (toolCall.arguments.path as string) || ''
-      if (!path) continue
-      const key = JSON.stringify({
-        name: toolCall.name,
-        path,
-        offset: toolCall.arguments.offset ?? null,
-        limit: toolCall.arguments.limit ?? null,
-        withLineNumbers: toolCall.arguments.with_line_numbers ?? null,
-      })
-      readByToolCallId.set(toolCall.id, { key, path })
-    }
-  }
-
-  for (const turn of turns) {
-    if (turn.role !== 'tool_result' || !turn.toolResults) continue
-    for (const result of turn.toolResults) {
-      if (result.isError || !isReadFileTool(result.name)) continue
-      const read = readByToolCallId.get(result.toolCallId)
-      if (read) lastToolCallIdByRead.set(read.key, result.toolCallId)
-    }
-  }
-
-  return turns.map(turn => {
-    if (turn.role !== 'tool_result' || !turn.toolResults) return turn
-    let modified = false
-    const toolResults = turn.toolResults.map(result => {
-      if (result.isError || !isReadFileTool(result.name)) return result
-      const read = readByToolCallId.get(result.toolCallId)
-      if (!read || lastToolCallIdByRead.get(read.key) === result.toolCallId) return result
-      modified = true
-      return {
-        ...result,
-        output: `[evicted duplicate read: ${read.path}; the identical later read remains in context]`,
-      }
-    })
-    return modified ? { ...turn, toolResults } : turn
-  })
-}
-
-function getInputBudget(contextWindow: number, maxOutputTokens: number, policyProfile: ContextPolicyProfile): number {
-  const usableWindow = effectiveInputWindow(contextWindow, maxOutputTokens)
-  return Math.max(1_024, Math.floor(usableWindow * policyProfile.targetRatio))
+function getInputBudget(contextWindow: number, maxOutputTokens: number): number {
+  return blockingContextLimit(contextWindow, maxOutputTokens)
 }
 
 function tokenCountValue(result: TokenCountResult): number {
@@ -492,63 +443,26 @@ export class ContextManager {
     const injectableSegments = (contextSegments ?? []).filter(segment =>
       !(liveTurnIds.has(segment.startMessageId) && liveTurnIds.has(segment.endMessageId))
     )
-    const inputBudget = getInputBudget(contextWindow, maxOutputTokens, policyProfile)
+    const inputBudget = getInputBudget(contextWindow, maxOutputTokens)
     const segmentContext = this.buildSegmentContext(injectableSegments, policyProfile.maxSegmentTokens, counterOptions)
 
-    // Remove only identical reads. Distinct ranges from one file are separate
-    // evidence and must remain available together for cross-region edits.
-    const deduplicatedTurns = deduplicateExactReadFileResults(turns)
-
-    // Alias for the rest of the function — all logic below uses deduplicatedTurns
-    const turns_ = deduplicatedTurns
-
-    // If no compression needed, return all turns as-is — but still apply
-    // the rolling-window observation masking to prevent raw tool outputs
-    // from accumulating unboundedly.
-    //
-    // Research basis (JetBrains / NeurIPS 2025, arxiv:2508.21433):
-    //   Keeping the last N=10 tool_result turns intact and replacing older
-    //   ones with placeholders halves context cost while matching or slightly
-    //   exceeding LLM-summarisation solve rates on SWE-bench Verified.
-    //   N=10 was the empirically optimal window size across all tested models.
-    //
-    // The placeholder text mirrors SWE-agent's convention so the model
-    // understands it can re-fetch the content if needed.
-    const ROLLING_WINDOW_N = policyProfile.recentToolResultTurns
+    // Cacheable history stays append-only until an explicit compaction.
     const messages: Array<Record<string, unknown>> = [
       { role: 'system', content: systemPrompt },
     ]
     if (segmentContext) {
       messages.push(this.contextMessage(segmentContext, provider))
     }
-    const nonSystemTurns = turns_.filter(t => t.role !== 'system')
-    const toolResultTurns = nonSystemTurns.filter(t => t.role === 'tool_result')
-    // Keep the most recent ROLLING_WINDOW_N tool_result turns intact;
-    // compress everything older.
-    const toolResultCutoff = Math.max(0, toolResultTurns.length - ROLLING_WINDOW_N)
-    let toolResultIdx = 0
+    const nonSystemTurns = turns.filter(t => t.role !== 'system')
     for (const turn of nonSystemTurns) {
-      if (turn.role === 'tool_result' && Array.isArray(turn.toolResults) && turn.toolResults.length > 0) {
-        if (toolResultIdx < toolResultCutoff) {
-          const compressedResults = turn.toolResults.map(tr => {
-            const report = compressToolResult(tr.name, tr.output)
-            return report.method === 'skipped' ? tr : { ...tr, output: report.compressed }
-          })
-          messages.push(...this.turnToMessages({ ...turn, toolResults: compressedResults }, provider))
-        } else {
-          messages.push(...this.turnToMessages(turn, provider))
-        }
-        toolResultIdx++
-      } else {
-        messages.push(...this.turnToMessages(turn, provider))
-      }
+      messages.push(...this.turnToMessages(turn, provider))
     }
     if (tokenCountValue(countMessagesTokens(messages, counterOptions)) <= inputBudget) {
       return messages
     }
 
     return this.buildBudgetedMessages({
-      turns: turns_,
+      turns,
       systemPrompt,
       provider,
       contextSegments: injectableSegments,
@@ -576,7 +490,7 @@ export class ContextManager {
     let remaining = Math.max(hardFloor, inputBudget - baseTokens)
 
     const nonSystemTurns = turns.filter(turn => turn.role !== 'system')
-    const groups = this.groupTurnsForBudget(nonSystemTurns, provider, policyProfile.recentToolResultTurns, model)
+    const groups = this.groupTurnsForBudget(nonSystemTurns, provider, model)
     const selectedGroups: Array<{ firstIndex: number; turns: AgentTurn[]; messages: Array<Record<string, unknown>>; tokens: number }> = []
     const desiredTailGroups = Math.min(groups.length, Math.max(1, Math.ceil(policyProfile.minTailTurns / 2)))
     const protectedTailGroups = Math.min(groups.length, 2)
@@ -650,18 +564,16 @@ export class ContextManager {
   private groupTurnsForBudget(
     turns: AgentTurn[],
     provider: 'openai' | 'anthropic',
-    recentToolResultTurns: number,
     model?: string,
   ): Array<{ firstIndex: number; turns: AgentTurn[]; messages: Array<Record<string, unknown>>; tokens: number }> {
     const counterOptions = tokenCountOptions(provider, model)
-    const compressedTurns = this.compressOlderToolResults(turns, recentToolResultTurns)
     const groups: Array<{ firstIndex: number; turns: AgentTurn[]; messages: Array<Record<string, unknown>>; tokens: number }> = []
 
-    for (let index = 0; index < compressedTurns.length; index += 1) {
-      const turn = compressedTurns[index]
+    for (let index = 0; index < turns.length; index += 1) {
+      const turn = turns[index]
       const groupTurns = [turn]
-      if (turn.role === 'assistant' && turn.toolCalls && compressedTurns[index + 1]?.role === 'tool_result') {
-        groupTurns.push(compressedTurns[index + 1])
+      if (turn.role === 'assistant' && turn.toolCalls && turns[index + 1]?.role === 'tool_result') {
+        groupTurns.push(turns[index + 1])
         index += 1
       }
       const groupMessages = groupTurns.flatMap(groupTurn => this.turnToMessages(groupTurn, provider))
@@ -674,27 +586,6 @@ export class ContextManager {
     }
 
     return groups
-  }
-
-  private compressOlderToolResults(turns: AgentTurn[], recentToolResultTurns: number): AgentTurn[] {
-    const toolResultTurns = turns.filter(turn => turn.role === 'tool_result')
-    const toolResultCutoff = Math.max(0, toolResultTurns.length - recentToolResultTurns)
-    let toolResultIdx = 0
-    return turns.map(turn => {
-      if (turn.role !== 'tool_result' || !Array.isArray(turn.toolResults) || turn.toolResults.length === 0) {
-        return turn
-      }
-      if (toolResultIdx >= toolResultCutoff) {
-        toolResultIdx += 1
-        return turn
-      }
-      toolResultIdx += 1
-      const compressedResults = turn.toolResults.map(tr => {
-        const report = compressToolResult(tr.name, tr.output)
-        return report.method === 'skipped' ? tr : { ...tr, output: report.compressed }
-      })
-      return { ...turn, toolResults: compressedResults }
-    })
   }
 
   private shrinkOversizedToolMessages(
@@ -800,6 +691,11 @@ export class ContextManager {
         })
         return messages
       }
+      messages.push({
+        role: 'user',
+        content: [turn.content, turn.metadata?.runtimeContext].filter(Boolean).join('\n\n'),
+      })
+      return messages
     }
 
     if (turn.role === 'assistant' && turn.toolCalls && turn.toolCalls.length > 0) {

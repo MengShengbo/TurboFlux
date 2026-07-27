@@ -8,7 +8,6 @@ export interface ContextPolicyProfile {
   targetRatio: number
   keepRecentTurns: number
   recapKeepRecentTurns: number
-  recentToolResultTurns: number
   maxSegmentTokens: number
   minTailTurns: number
 }
@@ -22,7 +21,6 @@ export const CONTEXT_POLICY_PROFILES: Record<ContextPolicyMode, ContextPolicyPro
     targetRatio: 0.72,
     keepRecentTurns: 10,
     recapKeepRecentTurns: 8,
-    recentToolResultTurns: 10,
     maxSegmentTokens: 16_000,
     minTailTurns: 6,
   },
@@ -34,7 +32,6 @@ export const CONTEXT_POLICY_PROFILES: Record<ContextPolicyMode, ContextPolicyPro
     targetRatio: 0.56,
     keepRecentTurns: 14,
     recapKeepRecentTurns: 10,
-    recentToolResultTurns: 8,
     maxSegmentTokens: 24_000,
     minTailTurns: 8,
   },
