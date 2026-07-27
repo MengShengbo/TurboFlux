@@ -37,6 +37,7 @@ describe('ContextManager', () => {
           content: '[Image #1] describe this image',
           timestamp: 1,
           metadata: {
+            runtimeContext: '<runtime_context>stable attachment turn</runtime_context>',
             attachments: [{
               id: 'image1',
               type: 'image',
@@ -53,6 +54,7 @@ describe('ContextManager', () => {
       expect(Array.isArray(content)).toBe(true)
       expect(content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('[Image #1]') })
       expect(content[0]?.text).toContain('<attachments>')
+      expect(content[0]?.text).toContain('stable attachment turn')
       expect(content[0]?.text).not.toContain(imagePath)
       expect(content[0]?.text).toContain('local_path_redacted="true"')
       expect(content[1]).toMatchObject({ type: 'image_url' })
@@ -233,7 +235,7 @@ describe('ContextManager', () => {
     expect(toolMessages[1]?.content).toBe('latest range content')
   })
 
-  it('deduplicates only identical reads while keeping the latest result', () => {
+  it('keeps earlier duplicate reads immutable for prefix caching', () => {
     const manager = new ContextManager()
     const turns: AgentTurn[] = [
       userTurn('u1', 'inspect file'),
@@ -270,8 +272,67 @@ describe('ContextManager', () => {
     const messages = manager.buildMessages(turns, 'system prompt', 1_000_000, 'openai', 4096, undefined, undefined, 'gpt-5.5')
     const toolMessages = messages.filter(message => message.role === 'tool')
 
-    expect(toolMessages[0]?.content).toContain('[evicted duplicate read: src/a.ts')
+    expect(toolMessages[0]?.content).toBe('old range content')
     expect(toolMessages[1]?.content).toBe('new range content')
+  })
+
+  it('keeps the rendered message prefix stable as tool results are appended', () => {
+    const manager = new ContextManager()
+    const turns: AgentTurn[] = [userTurn('u1', 'inspect the repository')]
+
+    for (let index = 0; index < 10; index += 1) {
+      turns.push({
+        id: `a${index}`,
+        role: 'assistant',
+        content: '',
+        timestamp: index * 2 + 2,
+        toolCalls: [{ id: `tc${index}`, name: 'read_file', arguments: { path: `src/${index}.ts` } }],
+      })
+      turns.push({
+        id: `tr${index}`,
+        role: 'tool_result',
+        content: '',
+        timestamp: index * 2 + 3,
+        toolResults: [{
+          toolCallId: `tc${index}`,
+          name: 'read_file',
+          output: `stable result ${index} ${'content '.repeat(100)}`,
+          isError: false,
+        }],
+      })
+    }
+
+    const first = manager.buildMessages(turns, 'system prompt', 1_000_000, 'openai', 4096)
+    turns.push({
+      id: 'a10',
+      role: 'assistant',
+      content: '',
+      timestamp: 22,
+      toolCalls: [{ id: 'tc10', name: 'read_file', arguments: { path: 'src/10.ts' } }],
+    }, {
+      id: 'tr10',
+      role: 'tool_result',
+      content: '',
+      timestamp: 23,
+      toolResults: [{ toolCallId: 'tc10', name: 'read_file', output: 'new tail result', isError: false }],
+    })
+    const second = manager.buildMessages(turns, 'system prompt', 1_000_000, 'openai', 4096)
+
+    expect(second.slice(0, first.length)).toEqual(first)
+  })
+
+  it('renders persisted runtime context with normal user turns', () => {
+    const manager = new ContextManager()
+    const runtimeContext = '<runtime_context>\nstable workspace state\n</runtime_context>'
+    const messages = manager.buildMessages([{
+      id: 'u1',
+      role: 'user',
+      content: 'continue',
+      timestamp: 1,
+      metadata: { runtimeContext },
+    }], 'system prompt', 1_000_000, 'openai', 4096)
+
+    expect(messages[1]?.content).toBe(`continue\n\n${runtimeContext}`)
   })
 
   it('budgets messages for smaller model windows by summarizing older live turns', () => {

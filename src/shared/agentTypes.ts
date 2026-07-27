@@ -115,6 +115,7 @@ export interface AgentTurn {
     checkpointId?: string
     checkpointLabel?: string
     attachments?: AgentAttachment[]
+    runtimeContext?: string
   }
 }
 

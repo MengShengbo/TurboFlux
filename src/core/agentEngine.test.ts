@@ -1083,6 +1083,32 @@ describe('AgentEngine model protocol compatibility', () => {
     }
   })
 
+  it('places Anthropic cache breakpoints on the two most recent messages', async () => {
+    let requestBody: Record<string, any> | undefined
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async (_url, _headers, body, onLine) => {
+      requestBody = JSON.parse(body)
+      onLine(`data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'cached' } })}`)
+      onLine(`data: ${JSON.stringify({ type: 'message_stop' })}`)
+      return { success: true, data: '' }
+    })
+    harness.engine.restoreFromTurns([
+      { id: 'u1', role: 'user', content: 'first', timestamp: 1 },
+      { id: 'a1', role: 'assistant', content: 'middle', timestamp: 2 },
+      { id: 'u2', role: 'user', content: 'latest', timestamp: 3 },
+    ])
+
+    try {
+      await harness.callModel()
+      const cacheMarkedMessages = requestBody?.messages.filter((message: Record<string, any>) =>
+        JSON.stringify(message.content).includes('cache_control'))
+      expect(cacheMarkedMessages).toHaveLength(2)
+      expect(JSON.stringify(cacheMarkedMessages[0])).toContain('middle')
+      expect(JSON.stringify(cacheMarkedMessages[1])).toContain('latest')
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
   it('repairs incomplete historical tool use in the final Anthropic request', async () => {
     let requestBody: Record<string, any> | undefined
     const harness = createProtocolHarness('anthropic', 'claude-fable-5', async (_url, _headers, body, onLine) => {
@@ -1345,6 +1371,42 @@ describe('AgentEngine model protocol compatibility', () => {
       await harness.callModel()
 
       expect(JSON.stringify(requestBodies[2]?.input)).toContain('changed-runtime-context')
+      expect(requestBodies[2]?.input.slice(0, requestBodies[0]?.input.length)).toEqual(requestBodies[0]?.input)
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
+  it('restores the exact persisted runtime context for resumed conversations', async () => {
+    let requestBody: Record<string, any> | undefined
+    const harness = createProtocolHarness('custom', 'gpt-5.5', async (_url, _headers, body, onLine) => {
+      requestBody = JSON.parse(body)
+      onLine(`data: ${JSON.stringify({
+        type: 'response.completed',
+        response: {
+          usage: { input_tokens: 100, output_tokens: 10, input_tokens_details: { cached_tokens: 90 } },
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }],
+        },
+      })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      const runtimeContext = '<runtime_context>\npersisted workspace state\n</runtime_context>'
+      harness.engine.restoreFromMessages([{
+        id: 'restored-user',
+        role: 'user',
+        content: 'continue',
+        timestamp: 1,
+        metadata: { runtimeContext },
+      }])
+      harness.engine.setAppendSystemPrompt('must-not-replace-the-persisted-context')
+
+      await harness.callModel()
+
+      expect(harness.engine.getSession().turns[0]?.metadata?.runtimeContext).toBe(runtimeContext)
+      expect(JSON.stringify(requestBody?.input)).toContain('persisted workspace state')
+      expect(JSON.stringify(requestBody?.input)).not.toContain('must-not-replace-the-persisted-context')
     } finally {
       harness.engine.destroy()
     }
