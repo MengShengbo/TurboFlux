@@ -50,13 +50,16 @@ describe('image token navigation', () => {
 })
 
 describe('prompt appearance', () => {
-  it('keeps the landing prompt opaque under a transparent terminal theme', () => {
+  it('keeps every prompt opaque under a transparent terminal theme', () => {
     const transparentTheme = { ...darkTheme, transparentBackground: true }
 
-    expect(resolvePromptChrome(transparentTheme, 'default').backgroundColor).toBeUndefined()
+    expect(resolvePromptChrome(transparentTheme, 'default')).toEqual({
+      borderColor: darkTheme.promptBorder,
+      backgroundColor: '#000000',
+    })
     expect(resolvePromptChrome(transparentTheme, 'landing')).toEqual({
-      borderColor: darkTheme.brandShimmer,
-      backgroundColor: '#0b0b0b',
+      borderColor: darkTheme.promptBorder,
+      backgroundColor: '#000000',
     })
   })
 
@@ -81,6 +84,30 @@ describe('prompt appearance', () => {
     expect(lines).toHaveLength(3)
     expect(lines.every(line => line.length === 30)).toBe(true)
     expect(lines[1]).toContain('█')
+  })
+
+  it('paints every bordered prompt cell instead of relying on box background', () => {
+    const output = renderToString(
+      React.createElement(
+        ThemeProvider,
+        { transparentBackground: true },
+        React.createElement(PromptInput, {
+          value: '',
+          onChange: () => {},
+          onSubmit: () => {},
+          width: 30,
+          placeholder: '',
+          appearance: 'default',
+        }),
+      ),
+      { columns: 40 },
+    )
+    const lines = stripAnsi(output).split('\n')
+
+    expect(lines).toHaveLength(5)
+    expect(lines.every(line => line.length === 30)).toBe(true)
+    expect(lines[1]).toContain('█')
+    expect(lines[2]).toContain('> ')
   })
 
   it('keeps typed landing input visible on the editor row', () => {
