@@ -114,6 +114,7 @@ export class SubAgentTaskManager {
   private readonly outputBytes = new Map<string, number>()
   private readonly unsubscribeRuntimeTasks: () => void
   private sequence = 0
+  private destroyed = false
 
   constructor(private readonly options: SubAgentTaskManagerOptions) {
     this.runtimeTaskManager = options.runtimeTaskManager
@@ -139,6 +140,7 @@ export class SubAgentTaskManager {
   }
 
   startTask<TResult>(input: StartSubAgentTaskInput<TResult>): StartedSubAgentTask<TResult> {
+    if (this.destroyed) throw new Error('Subagent task manager is destroyed')
     const startedAt = this.now()
     const id = this.generateId(input.kind, startedAt)
     const transcriptPath = this.storageDir ? path.join(this.storageDir, `${id}.jsonl`) : ''
@@ -218,12 +220,12 @@ export class SubAgentTaskManager {
         version: 1,
         type: 'result',
         timestamp: this.now(),
-        status: succeeded ? 'completed' : stopped ? 'stopped' : 'failed',
+        status: stopped ? 'stopped' : succeeded ? 'completed' : 'failed',
         result,
         error,
       })
-      if (succeeded) this.runtimeTaskManager.completeTask(id)
-      else if (stopped) this.runtimeTaskManager.markStopped(id, error)
+      if (stopped) this.runtimeTaskManager.markStopped(id, error)
+      else if (succeeded) this.runtimeTaskManager.completeTask(id)
       else this.runtimeTaskManager.failTask(id, error || 'Subagent failed')
       return result
     }, error => {
@@ -288,6 +290,13 @@ export class SubAgentTaskManager {
   }
 
   destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
+    for (const descriptor of this.descriptors.values()) {
+      const task = this.runtimeTaskManager.getTask(descriptor.id)
+      if (!task || TERMINAL_STATUSES.has(task.status)) continue
+      void this.runtimeTaskManager.stopTask(descriptor.id, 'Subagent task manager destroyed').catch(() => {})
+    }
     this.unsubscribeRuntimeTasks()
   }
 
