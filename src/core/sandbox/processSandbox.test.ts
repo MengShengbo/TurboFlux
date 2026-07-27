@@ -191,11 +191,16 @@ describe('ProcessSandbox', () => {
   it('writes audit records with a digest instead of raw command text', () => {
     const root = workspace()
     const sandbox = new ProcessSandbox(root)
+    sandbox.setSecurityAuditContext({ mode: 'red', engagementId: 'sec-test', targets: ['example.com'] })
     sandbox.prepare({ command: 'node', args: ['--version'], cwd: root })
 
     const workspaceId = createHash('sha256').update(root).digest('hex').slice(0, 24)
     const audit = readFileSync(join(root, '.turboflux', 'sandbox', `${workspaceId}.jsonl`), 'utf-8')
     expect(audit).toContain('commandDigest')
+    expect(audit).toContain('"securityMode":"red"')
+    expect(audit).toContain('"targetCount":1')
+    expect(audit).toContain('targetDigest')
+    expect(audit).not.toContain('example.com')
     expect(audit).not.toContain('node --version')
   })
 })

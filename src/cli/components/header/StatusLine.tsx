@@ -9,6 +9,7 @@ import { formatNativeReasoningSetting } from '../../../core/modelRegistry'
 import type { GitSnapshot } from '../../../core/gitService'
 import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
 import type { SandboxStatus } from '../../../core/sandbox/types'
+import type { SecurityResearchProfile } from '../../../shared/securityTypes'
 
 interface StatusLineProps {
   config: TurboFluxConfig
@@ -21,6 +22,7 @@ interface StatusLineProps {
   terminalCount?: number
   width?: number
   sandboxStatus?: SandboxStatus
+  securityProfile?: SecurityResearchProfile
 }
 
 const MODE_LABELS: Record<AgentMode, string> = {
@@ -39,6 +41,7 @@ export function StatusLine({
   terminalCount = 0,
   width: requestedWidth,
   sandboxStatus,
+  securityProfile,
 }: StatusLineProps) {
   const theme = useTheme()
   const { columns } = useTerminalSize()
@@ -70,6 +73,7 @@ export function StatusLine({
     modelPart,
     reasoningSetting ? `reason:${reasoningSetting}` : '',
     `approval:${config.approvalPolicy}`,
+    securityProfile?.active ? `security:${securityProfile.mode}` : '',
   ].filter(Boolean)
   const secondaryParts = [
     gitPart,

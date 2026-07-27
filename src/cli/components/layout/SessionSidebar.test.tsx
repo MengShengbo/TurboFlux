@@ -16,6 +16,7 @@ describe('SessionSidebar', () => {
           mode="vibe"
           reasoning="high"
           approvalPolicy="agent"
+          securityProfile={{ mode: 'blue', active: true, engagementId: 'sec-test', targets: ['prod-web-01'] }}
           contextWindow={200_000}
           tokenUsage={{ source: 'provider', input: 40_000, output: 512, cached: 30_000 }}
           isRunning
@@ -46,6 +47,7 @@ describe('SessionSidebar', () => {
     expect(output).toContain('gpt-5.5')
     expect(output).toContain('40.0k / 200.0k')
     expect(output).toContain('Read src/App.tsx')
+    expect(output).toContain('BLUE')
   })
 
   it('keeps every rendered row inside the requested width', () => {

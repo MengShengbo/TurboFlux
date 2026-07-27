@@ -30,6 +30,20 @@ afterEach(() => {
 })
 
 describe('NodeToolExecutor sandbox policies', () => {
+  it('applies red-team target scope checks to the shared command validation path', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    executor.setSecurityProfile({
+      mode: 'red', active: true, engagementId: 'sec-test', targets: ['example.com'], objective: 'bounded validation',
+      startedAt: Date.now(), expiresAt: Date.now() + 60_000,
+    })
+
+    await expect(executor.validateCommand('curl https://example.com/health', workspace)).resolves.toMatchObject({ success: true })
+    await expect(executor.validateCommand('curl https://outside.test', workspace)).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('authorized scope'),
+    })
+  }))
+
   it('keeps workspace policy reads and writes inside the workspace', async () => withWorkspace(async ({ workspace, outside }) => {
     const outsideFile = join(outside, 'secret.txt')
     writeFileSync(join(workspace, 'inside.txt'), 'inside', 'utf-8')

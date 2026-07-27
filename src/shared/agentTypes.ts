@@ -282,6 +282,8 @@ export interface AgentConfig {
   shell?: string
   /** Enables structured Git context, status UI, and isolated commits for AI-touched paths. */
   gitEnabled?: boolean
+  /** Session-only security research contract. It is never persisted to global config. */
+  securityProfile?: import('./securityTypes').SecurityResearchProfile
 }
 
 export const TASK_ID_PREFIXES: Record<TaskPriority, string> = {

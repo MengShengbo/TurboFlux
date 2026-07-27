@@ -23,7 +23,8 @@
     "runtime:info": "tsx scripts/runtime-info.ts",
     "runtime:info:bun": "bun scripts/runtime-info.ts",
     "runtime:smoke": "tsx scripts/runtime-smoke.ts",
-    "runtime:smoke:bun": "bun scripts/runtime-smoke.ts"
+    "runtime:smoke:bun": "bun scripts/runtime-smoke.ts",
+    "security:model-check": "tsx scripts/security-model-acceptance.ts"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

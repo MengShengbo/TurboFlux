@@ -35,6 +35,7 @@ import type { CommandContext } from '../commands/types'
 import { ConversationManager } from '../conversations/manager'
 import type { MascotMood } from './header/Mascot'
 import { stripTextToolCallMarkup } from '../../shared/toolCallMarkup'
+import { createOffSecurityProfile } from '../../shared/securityTypes'
 import { useTerminalSize } from '../hooks/useTerminalSize'
 import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
 import { getSafeViewportWidth } from '../terminalLayout'
@@ -352,6 +353,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
   const sandboxStatus = runtime.toolExecutor.getSandboxStatus()
+  const [securityProfile, setSecurityProfile] = useState(() => engine.getSecurityProfile())
   const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath, error => {
     setPersistenceWarning(error ? `Conversation history unavailable: ${error.message}` : null)
   }))
@@ -854,6 +856,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           setCurrentMode(event.to)
           setGitEnabled(engine.isGitEnabled())
           setGitSnapshot(engine.getGitSnapshot())
+          break
+        case 'security:change':
+          setSecurityProfile(event.profile)
           break
       }
     })
@@ -1457,6 +1462,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         pop()
         const conv = convManager.switchTo(id)
         if (conv) {
+          engine.setSecurityProfile(createOffSecurityProfile())
           restoreCliStateFromTurns(
             conv.activeTurns ?? conv.turns,
             '',
@@ -1676,6 +1682,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                       terminalCount={activeTerminalCount}
                       width={conversationFrameWidth}
                       sandboxStatus={sandboxStatus}
+                      securityProfile={securityProfile}
                     />
                   )}
                 </Box>
@@ -1689,6 +1696,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   reasoning={reasoningLabel || undefined}
                   approvalPolicy={config.approvalPolicy}
                   sandboxStatus={sandboxStatus}
+                  securityProfile={securityProfile}
                   contextWindow={config.contextWindow}
                   tokenUsage={tokenUsage}
                   isRunning={isRunning}
@@ -1766,7 +1774,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
         {/* Status line at bottom */}
-        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} gitSnapshot={gitSnapshot} sandboxStatus={sandboxStatus} />
+        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} gitSnapshot={gitSnapshot} sandboxStatus={sandboxStatus} securityProfile={securityProfile} />
         <AgentActivityLine active={isRunning} />
       </Box>
     </ThemeProvider>

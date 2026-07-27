@@ -97,6 +97,9 @@ import {
 import { hashText } from './fileIO'
 import { RuntimeTaskManager } from './runtime/runtimeTaskManager'
 import { SubAgentTaskManager, type SubAgentTaskSnapshot } from './runtime/subAgentTaskManager'
+import type { SecurityResearchProfile } from '../shared/securityTypes'
+import { createOffSecurityProfile } from '../shared/securityTypes'
+import { assertSecurityActivationAllowed, buildSecurityResearchPrompt, isSecurityProfileExpired } from './security/researchMode'
 
 type TaskSystemCreationEvent = {
   status: 'planning' | 'creating' | 'completed' | 'error'
@@ -243,6 +246,7 @@ export type AgentEventType =
   | { type: 'tool:result'; toolResult: ToolResult }
   | { type: 'task:update'; taskId: string; status: string; progress: number }
   | { type: 'mode:change'; from: AgentMode; to: AgentMode }
+  | { type: 'security:change'; profile: SecurityResearchProfile }
   | { type: 'session:complete'; session: AgentSession }
   | { type: 'error'; error: string }
   | { type: 'notification'; message: string; level: 'info' | 'success' | 'warning' | 'error' }
@@ -491,6 +495,16 @@ export class AgentEngine {
     subAgentTaskManager?: SubAgentTaskManager,
   ) {
     this.toolExecutor = toolExecutor
+    this.config.securityProfile = config.securityProfile
+      ? { ...config.securityProfile, targets: [...config.securityProfile.targets] }
+      : createOffSecurityProfile()
+    if (this.config.securityProfile.active && this.config.securityProfile.mode === 'red') {
+      assertSecurityActivationAllowed('red', {
+        sandboxStatus: this.toolExecutor.getSandboxStatus?.(),
+        approvalPolicy: config.approvalPolicy || 'agent',
+      })
+    }
+    this.toolExecutor.setSecurityProfile?.(this.config.securityProfile)
     this.stateProvider = stateProvider
     this.subAgentTaskManager = subAgentTaskManager || new SubAgentTaskManager({
       workspacePath: config.workspacePath || '',
@@ -554,6 +568,24 @@ export class AgentEngine {
     this.config.mode = mode
     invalidateStaticPromptCache()
     this.emit({ type: 'mode:change', from: oldMode, to: mode })
+  }
+
+  getSecurityProfile(): SecurityResearchProfile {
+    const profile = this.config.securityProfile || createOffSecurityProfile()
+    return { ...profile, targets: [...profile.targets] }
+  }
+
+  setSecurityProfile(profile: SecurityResearchProfile): void {
+    const next = { ...profile, targets: [...profile.targets] }
+    if (next.active && next.mode === 'red') {
+      assertSecurityActivationAllowed('red', {
+        sandboxStatus: this.toolExecutor.getSandboxStatus?.(),
+        approvalPolicy: this.getApprovalPolicy(),
+      })
+    }
+    this.config.securityProfile = next
+    this.toolExecutor.setSecurityProfile?.(next)
+    this.emit({ type: 'security:change', profile: this.getSecurityProfile() })
   }
 
   setAppendSystemPrompt(appendSystemPrompt: string | undefined): void {
@@ -797,6 +829,10 @@ export class AgentEngine {
   }
 
   setApprovalPolicy(policy: NonNullable<AgentConfig['approvalPolicy']>): void {
+    const securityProfile = this.getSecurityProfile()
+    if (policy === 'full' && securityProfile.active && securityProfile.mode === 'red') {
+      throw new Error('Approval policy "full" is unavailable during an active red-team engagement. Disable /security first.')
+    }
     this.config.approvalPolicy = policy
     this.permissions.setApprovalPolicy(policy)
   }
@@ -912,6 +948,7 @@ export class AgentEngine {
     this.session.createdAt = now
     this.session.updatedAt = now
     this.session.totalTokens = { input: 0, output: 0 }
+    this.setSecurityProfile(createOffSecurityProfile())
   }
 
   restoreFromTurns(turns: AgentTurn[]): void {
@@ -2230,16 +2267,19 @@ Before retrying:
     ].filter(Boolean).join('\n\n') || undefined
     this.captureRuntimeContext(currentUserTurn, runtimeContextCandidate || '')
 
-    const systemPrompt = buildSystemPrompt(this.config.mode, {
-      workspacePath: this.config.workspacePath,
-      workspaceName: this.config.workspaceName,
-      systemPromptOverride: this.config.systemPromptOverride,
-      profileSystemPrompt: this.config.profileSystemPrompt,
-      enabledSkills: this.config.enabledSkills,
-      provider: activeConfig.provider,
-      modelId: activeConfig.defaultModel,
-      shell: this.config.shell,
-    })
+    const systemPrompt = [
+      buildSystemPrompt(this.config.mode, {
+        workspacePath: this.config.workspacePath,
+        workspaceName: this.config.workspaceName,
+        systemPromptOverride: this.config.systemPromptOverride,
+        profileSystemPrompt: this.config.profileSystemPrompt,
+        enabledSkills: this.config.enabledSkills,
+        provider: activeConfig.provider,
+        modelId: activeConfig.defaultModel,
+        shell: this.config.shell,
+      }),
+      buildSecurityResearchPrompt(this.getSecurityProfile()),
+    ].filter(Boolean).join('\n\n')
 
     const startTime = Date.now()
     const protocolCandidates = planModelProtocols(activeConfig.provider, activeConfig.defaultModel)
@@ -4657,6 +4697,28 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private async checkToolPermission(toolCall: ToolCall): Promise<ToolResult | null> {
+    const securityProfile = this.getSecurityProfile()
+    const activeSecurityTool = toolCall.name === 'run_command'
+      || toolCall.name === 'pty_write'
+      || isMcpTool(toolCall.name)
+    if (activeSecurityTool && isSecurityProfileExpired(securityProfile)) {
+      return {
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        output: 'Error: Security engagement expired. Renew the authorized scope with /security before active operations.',
+        isError: true,
+        errorKind: 'permission',
+      }
+    }
+    if (securityProfile.active && securityProfile.mode === 'red' && isMcpTool(toolCall.name)) {
+      return {
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        output: 'Error: MCP tools are disabled during red-team engagements because their outbound destinations cannot be enforced by the local scope guard.',
+        isError: true,
+        errorKind: 'permission',
+      }
+    }
     const permissionArgs = toolCall.name === 'run_command'
       ? { ...toolCall.arguments, approved: false }
       : toolCall.arguments

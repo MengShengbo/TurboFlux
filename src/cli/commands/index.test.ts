@@ -9,6 +9,7 @@ function contextWithUsage(usage: { input?: number; output?: number; source?: 'pr
       isRunning: () => false,
       isFastContextRunning: () => false,
       runStandaloneFastContextObjective: () => Promise.resolve(null),
+      getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
     } as CommandContext['engine'],
     config: {
       provider: 'custom',
@@ -36,6 +37,7 @@ function fullContext(overrides: Partial<CommandContext> = {}): CommandContext {
       isFastContextRunning: () => false,
       runStandaloneFastContextObjective: () => Promise.resolve(null),
       resetSession: () => {},
+      getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
     } as CommandContext['engine'],
     ...overrides,
   }
@@ -57,6 +59,57 @@ describe('/context', () => {
     expect(result.text).toContain('Context usage: 42,000 / 1,000,000 tokens')
     expect(result.text).toContain('Last provider prompt_tokens: 42,000')
     expect(result.text).toContain('Last provider completion_tokens: 500')
+  })
+})
+
+describe('/security', () => {
+  it('activates a bounded red-team engagement when runtime controls are present', () => {
+    let profile: ReturnType<CommandContext['engine']['getSecurityProfile']> | undefined
+    const ctx = fullContext({
+      engine: {
+        getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
+        getApprovalPolicy: () => 'ask',
+        setSecurityProfile: next => { profile = next },
+      } as CommandContext['engine'],
+      sandboxStatus: {
+        policy: 'workspace', enforcement: 'strict', network: 'allow', backend: 'docker', resolvedBackend: 'docker',
+        dockerImage: 'sandbox', available: true, osIsolation: true, networkIsolated: false, writableRoots: [process.cwd()],
+      },
+    })
+    const result = commandRegistry.execute('/security red example.com | verify the public test API', ctx)
+    expect(result.type).toBe('text')
+    expect(result.text).toContain('Red-team research mode active')
+    expect(profile).toMatchObject({ mode: 'red', active: true, targets: ['example.com'] })
+  })
+
+  it('refuses red-team mode without strict OS isolation', () => {
+    const ctx = fullContext({
+      engine: {
+        getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
+        getApprovalPolicy: () => 'ask',
+        setSecurityProfile: () => {},
+      } as CommandContext['engine'],
+      sandboxStatus: {
+        policy: 'workspace', enforcement: 'guarded', network: 'allow', backend: 'guarded', resolvedBackend: 'guarded',
+        available: true, osIsolation: false, networkIsolated: false, writableRoots: [process.cwd()],
+      },
+    })
+    const result = commandRegistry.execute('/security red example.com | test', ctx)
+    expect(result.text).toContain('requires an available strict OS-isolated sandbox')
+  })
+
+  it('prevents approval bypass while a red-team engagement is active', () => {
+    let changed = false
+    const ctx = fullContext({
+      engine: {
+        getSecurityProfile: () => ({ mode: 'red', active: true, engagementId: 'sec-test', targets: ['example.com'] }),
+        setApprovalPolicy: () => { changed = true },
+      } as CommandContext['engine'],
+      setConfig: () => { changed = true },
+    })
+    const result = commandRegistry.execute('/approval full', ctx)
+    expect(result.text).toContain('unavailable during an active red-team engagement')
+    expect(changed).toBe(false)
   })
 })
 

@@ -5,6 +5,8 @@ import { existsSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
 import { APPROVAL_POLICY_LABELS, normalizeApprovalPolicy, type ReasoningEffort } from '../../shared/agentTypes'
+import { createOffSecurityProfile } from '../../shared/securityTypes'
+import { createSecurityResearchProfile, parseSecurityCommand } from '../../core/security/researchMode'
 
 // /exit
 commandRegistry.register({
@@ -289,6 +291,10 @@ commandRegistry.register({
       return 'Usage: /approval <ask|agent|full>'
     }
     const policy = normalizeApprovalPolicy(input, ctx.config.approvalPolicy)
+    const securityProfile = ctx.engine.getSecurityProfile()
+    if (policy === 'full' && securityProfile.active && securityProfile.mode === 'red') {
+      return 'Approval policy "full" is unavailable during an active red-team engagement. Run /security off first.'
+    }
     const next = setConfigValue(ctx.config, 'approvalPolicy', policy)
     ctx.setConfig(next)
     ctx.engine.setApprovalPolicy(policy)
@@ -316,6 +322,59 @@ commandRegistry.register({
     if (status.warning) lines.push(`Warning: ${status.warning}`)
     lines.push('Change persistent settings with /config sandboxPolicy|sandboxEnforcement|sandboxNetwork|sandboxBackend <value>, then restart.')
     return lines.join('\n')
+  },
+})
+
+commandRegistry.register({
+  name: 'security',
+  description: 'Start or stop a supervised security research engagement',
+  argumentHint: '<red|blue|off> <target[,target]> | <objective>',
+  type: 'local',
+  execute: (args, ctx) => {
+    const input = args.trim()
+    const current = ctx.engine.getSecurityProfile()
+    if (!input) {
+      if (!current.active || current.mode === 'off') {
+        return [
+          'Security research: off',
+          'Usage:',
+          '  /security red <IP|domain|CIDR>[,...] | <authorized objective>',
+          '  /security blue <asset>[,...] | <defensive objective>',
+          '  /security off',
+        ].join('\n')
+      }
+      return [
+        `Security research: ${current.mode}`,
+        `Engagement: ${current.engagementId}`,
+        `Targets: ${current.targets.join(', ')}`,
+        `Objective: ${current.objective}`,
+        `Expires: ${current.expiresAt ? new Date(current.expiresAt).toISOString() : 'session end'}`,
+      ].join('\n')
+    }
+    if (input.toLowerCase() === 'off') {
+      ctx.engine.setSecurityProfile(createOffSecurityProfile())
+      return 'Security research mode disabled. The next engagement must declare a new scope.'
+    }
+    try {
+      const parsed = parseSecurityCommand(input)
+      const profile = createSecurityResearchProfile(parsed, {
+        sandboxStatus: ctx.sandboxStatus,
+        approvalPolicy: ctx.engine.getApprovalPolicy(),
+      })
+      ctx.engine.setSecurityProfile(profile)
+      return [
+        `${profile.mode === 'red' ? 'Red-team' : 'Blue-team'} research mode active.`,
+        `Engagement: ${profile.engagementId}`,
+        `Scope: ${profile.targets.join(', ')}`,
+        `Objective: ${profile.objective}`,
+        `Expires: ${new Date(profile.expiresAt!).toISOString()}`,
+        profile.mode === 'red'
+          ? 'Strict sandbox, approval policy, target scope guard, and audit logging remain enforced.'
+          : 'Evidence preservation and approval policy remain enforced.',
+      ].join('\n')
+    } catch (error) {
+      return `Security mode error: ${error instanceof Error ? error.message : String(error)}`
+    }
   },
 })
 

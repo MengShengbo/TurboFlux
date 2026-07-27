@@ -6,6 +6,30 @@ import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasonin
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
+describe('AgentEngine security research lifecycle', () => {
+  it('keeps the research contract session-scoped and publishes state changes', () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom', apiKey: 'test', baseUrl: 'http://example.test', model: 'test-model', contextWindow: 100_000, maxTokens: 4096,
+    }, workspace)
+    const executor = new NodeToolExecutor(workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe', approvalPolicy: 'ask', temperature: 0, maxTokens: 4096, workspacePath: workspace,
+    }, executor, stateProvider)
+    const events: AgentEventType[] = []
+    engine.subscribe(event => events.push(event))
+
+    engine.setSecurityProfile({ mode: 'blue', active: true, engagementId: 'sec-test', targets: ['prod-web-01'], objective: 'triage alerts' })
+    expect(engine.getSecurityProfile()).toMatchObject({ mode: 'blue', active: true })
+    expect(executor.getSecurityProfile()).toMatchObject({ mode: 'blue', active: true })
+    expect(events.some(event => event.type === 'security:change')).toBe(true)
+
+    engine.resetSession()
+    expect(engine.getSecurityProfile()).toEqual({ mode: 'off', active: false, targets: [] })
+    engine.destroy()
+  })
+})
+
 describe('appendRuntimeContextToLatestUserMessage', () => {
   it('does not create a synthetic user turn after tool results', () => {
     const messages: Array<Record<string, unknown>> = [
