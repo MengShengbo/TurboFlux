@@ -5,6 +5,8 @@ import { formatMarkdown } from '../markdown/index'
 import { ThinkingBlock } from './ThinkingBlock'
 import type { ToolStatus } from '../tools/ToolCallTree'
 import type { ChangeSummary, ThinkingTrace } from '../../../shared/agentTypes'
+import { useI18n } from '../../i18n/index'
+import { RECOVERED_ASSISTANT_MESSAGE } from '../../conversations/recoveryMessages'
 
 export interface Message {
   id: string
@@ -28,20 +30,26 @@ export function UserMessage({ content }: { content: string; key?: any }) {
 
 export function AssistantMessage({ content, interrupted = false, thinking, showThinking = false }: { content: string; interrupted?: boolean; thinking?: ThinkingTrace; showThinking?: boolean; key?: any }) {
   const theme = useTheme()
+  const { t } = useI18n()
   if (!content && !thinking) return null
+  const displayContent = content === RECOVERED_ASSISTANT_MESSAGE
+    ? t('ui.recovery.assistant')
+    : content
   return (
     <Box flexDirection="column">
       {thinking && <ThinkingBlock trace={thinking} expanded={showThinking} streaming={thinking.isStreaming} />}
-      <Text>{formatMarkdown(content)}</Text>
-      {interrupted && <Text dimColor color={theme.inactive}>Interrupted</Text>}
+      <Text>{formatMarkdown(displayContent)}</Text>
+      {interrupted && <Text dimColor color={theme.inactive}>{t('common.interrupted')}</Text>}
     </Box>
   )
 }
 
 export function SystemMessage({ content }: { content: string; key?: any }) {
   const theme = useTheme()
+  const { t } = useI18n()
   const trimmed = content.trim()
-  const color = /^error:/i.test(trimmed) ? theme.error
+  const errorPrefix = t('common.error', { message: '' }).trim()
+  const color = (/^error:/i.test(trimmed) || trimmed.startsWith(errorPrefix)) ? theme.error
     : /^(created|saved|switched|resumed|started|conversation cleared|context compaction)/i.test(trimmed) ? theme.brandShimmer
     : theme.brand
   return (

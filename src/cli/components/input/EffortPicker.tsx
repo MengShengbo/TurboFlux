@@ -5,6 +5,7 @@ import type { ModelReasoningCapabilities } from '../../../core/modelRegistry'
 import type { NativeReasoningConfig, ReasoningEffort } from '../../../shared/agentTypes'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
+import { createTranslator, useI18n, type Translator } from '../../i18n/index'
 
 export type EffortSelection =
   | { type: 'effort'; effort: ReasoningEffort }
@@ -33,14 +34,14 @@ function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
-function effortDescription(effort: ReasoningEffort): string {
-  if (effort === 'none') return 'Disable reasoning for the fastest response.'
-  if (effort === 'minimal') return 'Use only lightweight reasoning.'
-  if (effort === 'low') return 'Prioritize latency and cost.'
-  if (effort === 'medium') return 'Balanced reasoning for everyday work.'
-  if (effort === 'high') return 'Spend more reasoning on difficult tasks.'
-  if (effort === 'xhigh') return 'Extended reasoning for complex engineering work.'
-  return 'Use the model maximum reasoning effort.'
+function effortDescription(effort: ReasoningEffort, t: Translator): string {
+  if (effort === 'none') return t('ui.effort.none')
+  if (effort === 'minimal') return t('ui.effort.minimal')
+  if (effort === 'low') return t('ui.effort.low')
+  if (effort === 'medium') return t('ui.effort.medium')
+  if (effort === 'high') return t('ui.effort.high')
+  if (effort === 'xhigh') return t('ui.effort.xhigh')
+  return t('ui.effort.max')
 }
 
 function budgetLabel(value: number): string {
@@ -50,6 +51,7 @@ function budgetLabel(value: number): string {
 export function buildEffortOptions(
   capability: ModelReasoningCapabilities,
   current?: NativeReasoningConfig,
+  t: Translator = createTranslator('en'),
 ): EffortOption[] {
   if (capability.control === 'fixed') return []
   const enabled = current?.enabled ?? capability.defaultEnabled
@@ -63,15 +65,15 @@ export function buildEffortOptions(
     const options: EffortOption[] = budgets.map(budgetTokens => ({
       id: `budget:${budgetTokens}`,
       label: budgetLabel(budgetTokens),
-      description: `Allow up to ${budgetTokens.toLocaleString()} thinking tokens.`,
+      description: t('ui.effort.budget', { tokens: budgetTokens.toLocaleString() }),
       selection: { type: 'budget' as const, budgetTokens },
       current: enabled && activeBudget === budgetTokens,
     }))
     if (capability.supportsToggle) {
       options.unshift({
         id: 'toggle:off',
-        label: 'Off',
-        description: 'Disable extended thinking.',
+        label: t('ui.effort.off'),
+        description: t('ui.effort.disableThinking'),
         selection: { type: 'toggle' as const, enabled: false },
         current: !enabled,
       })
@@ -83,15 +85,15 @@ export function buildEffortOptions(
     const options: EffortOption[] = capability.efforts.map(effort => ({
       id: `effort:${effort}`,
       label: titleCase(effort),
-      description: effortDescription(effort),
+      description: effortDescription(effort, t),
       selection: { type: 'effort', effort },
       current: enabled && activeEffort === effort,
     }))
     if (capability.supportsToggle && !capability.efforts.includes('none')) {
       options.unshift({
         id: 'toggle:off',
-        label: 'Off',
-        description: 'Disable model reasoning.',
+        label: t('ui.effort.off'),
+        description: t('ui.effort.disableReasoning'),
         selection: { type: 'toggle', enabled: false },
         current: !enabled,
       })
@@ -103,15 +105,15 @@ export function buildEffortOptions(
     ? [
         {
           id: 'toggle:off',
-          label: 'Off',
-          description: 'Disable model reasoning.',
+          label: t('ui.effort.off'),
+          description: t('ui.effort.disableReasoning'),
           selection: { type: 'toggle', enabled: false },
           current: !enabled,
         },
         {
           id: 'toggle:on',
-          label: 'On',
-          description: 'Enable model reasoning.',
+          label: t('ui.effort.on'),
+          description: t('ui.effort.enableReasoning'),
           selection: { type: 'toggle', enabled: true },
           current: enabled,
         },
@@ -121,8 +123,9 @@ export function buildEffortOptions(
 
 export function EffortPicker({ model, capability, current, onSelect, onCancel }: Props) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { columns } = useTerminalSize()
-  const options = useMemo(() => buildEffortOptions(capability, current), [capability, current])
+  const options = useMemo(() => buildEffortOptions(capability, current, t), [capability, current, t])
   const initialIndex = Math.max(0, options.findIndex(option => option.current))
   const [selected, setSelected] = useState(initialIndex)
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -143,7 +146,7 @@ export function EffortPicker({ model, capability, current, onSelect, onCancel }:
 
   return (
     <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={theme.brand} paddingX={1}>
-      <Text bold color={theme.brand}>Reasoning effort</Text>
+      <Text bold color={theme.brand}>{t('ui.effort.title')}</Text>
       <Text color={theme.inactive} wrap="truncate-end">{model}</Text>
       <Box flexDirection="column" marginTop={1}>
         {options.map((option, index) => {
@@ -162,7 +165,7 @@ export function EffortPicker({ model, capability, current, onSelect, onCancel }:
         })}
       </Box>
       <Box marginTop={1}>
-        <Text color={theme.inactive}>Up/Down select  Enter apply  Esc close</Text>
+        <Text color={theme.inactive}>{t('ui.effort.keys')}</Text>
       </Box>
     </Box>
   )

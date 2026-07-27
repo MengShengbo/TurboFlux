@@ -23,7 +23,7 @@ export function extractUnsupportedRequestParam(error?: string): string | null {
   const knownOptionalParams = [
     'cache_control', 'anthropic-beta', 'output_config', 'thinking', 'reasoning_effort',
     'reasoning', 'summary', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
-    'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store',
+    'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store', 'text.verbosity', 'verbosity', 'text',
   ]
   return knownOptionalParams.find(param => error.toLowerCase().includes(param.toLowerCase())) || null
 }
@@ -44,6 +44,10 @@ export function removeOpenAICompatibleRequestParam(body: Record<string, unknown>
     const nestedKey = pathParts[pathParts.length - 1]
     if (target && Object.prototype.hasOwnProperty.call(target, nestedKey)) {
       delete target[nestedKey]
+      const rootValue = body[rootParam]
+      if (rootValue && typeof rootValue === 'object' && !Array.isArray(rootValue) && Object.keys(rootValue).length === 0) {
+        delete body[rootParam]
+      }
       return true
     }
   }
@@ -54,11 +58,19 @@ export function removeOpenAICompatibleRequestParam(body: Record<string, unknown>
       return true
     }
   }
+  if (rootParam === 'verbosity') {
+    const text = body.text
+    if (text && typeof text === 'object' && !Array.isArray(text) && Object.prototype.hasOwnProperty.call(text, 'verbosity')) {
+      delete (text as Record<string, unknown>).verbosity
+      if (Object.keys(text as Record<string, unknown>).length === 0) delete body.text
+      return true
+    }
+  }
   const removable = new Set([
     'temperature', 'max_output_tokens', 'max_completion_tokens', 'max_tokens',
     'stream_options', 'tools', 'tool_choice', 'parallel_tool_calls',
     'thinking', 'reasoning', 'reasoning_effort', 'output_config',
-    'prompt_cache_key', 'prompt_cache_retention', 'store',
+    'prompt_cache_key', 'prompt_cache_retention', 'store', 'text',
   ])
   if (!removable.has(rootParam)) return false
   const aliases = new Set<string>([rootParam])

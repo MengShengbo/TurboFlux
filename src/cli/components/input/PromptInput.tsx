@@ -8,6 +8,7 @@ import { commandRegistry } from '../../commands/registry'
 import { getSafeFrameWidth } from '../../terminalLayout'
 import { isTerminalMouseInput } from '../../terminalMouse'
 import type { Theme } from '../../theme/types'
+import { useI18n } from '../../i18n/index'
 
 type PromptAppearance = 'default' | 'landing'
 
@@ -177,14 +178,15 @@ export function getImageTokenRangeAfterDelete(value: string, offset: number): { 
 
 export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode, width, placeholder: requestedPlaceholder, appearance = 'default', historyRef: sharedHistoryRef }: PromptInputProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [cursorOffset, setCursorOffset] = useState(value.length)
   const lastEscRef = useRef<number>(0)
   const lastValueRef = useRef(value)
-  const localHistoryRef = useRef<string[]>([])
-  const historyRef = sharedHistoryRef ?? localHistoryRef
+  const internalHistoryRef = useRef<string[]>([])
+  const historyRef = sharedHistoryRef ?? internalHistoryRef
   const historyIdxRef = useRef<number>(-1)
   const historyDraftRef = useRef('')
 
@@ -360,8 +362,8 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     insertText(ch)
   }, { isActive: isInteractive })
 
-  const placeholder = requestedPlaceholder ?? (mode === 'plan' ? 'Describe what to plan...'
-    : 'What are we building today?')
+  const placeholder = requestedPlaceholder ?? (mode === 'plan' ? t('ui.prompt.plan')
+    : t('ui.prompt.default'))
   const frameWidth = Math.max(20, Math.min(width ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
   const promptChrome = resolvePromptChrome(theme, appearance)
   const landingInnerWidth = Math.max(1, frameWidth - 2)
@@ -402,7 +404,8 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
           {visibleCompletions.map((cmd, visibleIndex) => {
             const index = completionStart + visibleIndex
             const selected = index === selectedIdx
-            const line = `${selected ? '> ' : '  '}/${cmd.name} - ${cmd.description}`
+            const description = cmd.descriptionKey ? t(cmd.descriptionKey) : cmd.description ?? ''
+            const line = `${selected ? '> ' : '  '}/${cmd.name} - ${description}`
             return (
             <Box key={cmd.name}>
               <Text color={selected ? theme.brandShimmer : theme.inactive}>

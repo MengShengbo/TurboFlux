@@ -23,24 +23,26 @@ import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
 import { formatMarkdown } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
-import type { GitSnapshot } from '../../core/gitService'
+import type { GitIntegrationState } from '../../core/gitService'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
-import type { SandboxOptions } from '../../core/sandbox/types'
 import type { ActiveTaskContext } from '../../core/taskManager'
 import { applyPreset, saveConfig, setConfigValue, type ModelPreset, type TurboFluxConfig } from '../../core/config'
+import { loadProfile } from '../../core/profile'
 import { discoverModelPresets, readCachedModelDiscovery } from '../../core/modelDiscovery'
 import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
 import { commandRegistry } from '../commands/index'
 import type { CommandContext } from '../commands/types'
 import { ConversationManager } from '../conversations/manager'
+import { globalConfigurationFingerprint, watchGlobalConfiguration, type GlobalConfigurationSnapshot } from '../globalConfiguration'
+import { createTranslator, I18nProvider, useI18n, type Translator } from '../i18n/index'
 import type { MascotMood } from './header/Mascot'
 import { stripTextToolCallMarkup } from '../../shared/toolCallMarkup'
-import { createOffSecurityProfile } from '../../shared/securityTypes'
 import { useTerminalSize } from '../hooks/useTerminalSize'
-import { MAX_INLINE_DIFF_RENDER_ROWS } from './diff/DiffCard'
 import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
+import { QueuedPromptList } from './tools/QueuedPromptList'
+import { beginToolCall, settleToolCall } from './tools/toolLifecycleModel'
 import { resolveCockpitLayout } from './layout/CockpitRails'
 import { SessionSidebar } from './layout/SessionSidebar'
 import { LandingView } from './layout/LandingView'
@@ -99,7 +101,6 @@ interface AppProps {
   verbose: boolean
   noFlicker: boolean
   approvalPolicy?: ApprovalPolicy
-  sandbox?: SandboxOptions
   mcpServers?: string[]
   startupAnimation?: boolean
   transparentBackground?: boolean
@@ -110,24 +111,26 @@ type StaticTranscriptItem =
   | { kind: 'message'; id: string; message: Message }
 
 type QueuedPrompt = {
+  id: string
   prompt: string
   attachments?: AgentAttachment[]
 }
 
-function describeSubAgentEvent(event: SubAgentEvent): string {
-  if (event.type === 'turn_start') return `turn ${event.turn}/${event.maxTurns}`
-  if (event.type === 'model_wait') return `waiting for model · ${Math.floor(event.elapsedMs / 1000)}s`
-  if (event.type === 'model_retry') return `retry ${event.attempt} · ${event.reason.slice(0, 72)}`
+function describeSubAgentEvent(event: SubAgentEvent, t: Translator): string {
+  if (event.type === 'turn_start') return t('ui.subagent.turn', { turn: event.turn, maxTurns: event.maxTurns })
+  if (event.type === 'model_wait') return t('ui.subagent.waitingModel', { seconds: Math.floor(event.elapsedMs / 1000) })
+  if (event.type === 'model_retry') return t('ui.subagent.retry', { attempt: event.attempt, reason: event.reason.slice(0, 72) })
   if (event.type === 'tool_call') return event.tool
   if (event.type === 'tool_result') return event.summary.slice(0, 90)
   if (event.type === 'evidence') return event.evidence.path
-  if (event.type === 'final') return 'finalizing result'
+  if (event.type === 'final') return t('ui.subagent.finalizing')
   if (event.type === 'error') return event.message.slice(0, 90)
-  return `turn ${event.turn} complete`
+  return t('ui.subagent.turnComplete', { turn: event.turn })
 }
 
 function SubAgentProgressLine({ activities }: { activities: DeveloperSubAgentActivity[] }) {
   const theme = useTheme()
+  const { t } = useI18n()
   if (activities.length === 0) return null
   return (
     <Box flexDirection="column">
@@ -139,7 +142,7 @@ function SubAgentProgressLine({ activities }: { activities: DeveloperSubAgentAct
           <Text>{activity.label}</Text>
           <Text dimColor>{activity.status === 'running'
             ? ` · ${activity.detail || activity.objective} · ${formatElapsed(Date.now() - activity.startedAt)}`
-            : activity.status === 'completed' ? ' · result ready' : ' · failed'}</Text>
+            : activity.status === 'completed' ? ` · ${t('ui.subagent.resultReady')}` : ` · ${t('common.failed')}`}</Text>
         </Box>
       ))}
     </Box>
@@ -147,6 +150,7 @@ function SubAgentProgressLine({ activities }: { activities: DeveloperSubAgentAct
 }
 
 function TaskProgressLine({ task }: { task: ActiveTaskContext }) {
+  const { t } = useI18n()
   const completed = task.toolCalls.filter(call =>
     call.status === 'completed' || call.status === 'error' || call.status === 'cancelled'
   ).length
@@ -154,15 +158,15 @@ function TaskProgressLine({ task }: { task: ActiveTaskContext }) {
   const errored = task.toolCalls.filter(call => call.status === 'error').length
   const running = task.toolCalls.filter(call => call.status === 'running').length
   const latest = [...task.toolCalls].reverse().find(call => call.status === 'running') ?? task.toolCalls[task.toolCalls.length - 1]
-  const toolSummary = formatTaskToolSummary(completed, total, running, errored)
+  const toolSummary = formatTaskToolSummary(completed, total, running, errored, t)
   const elapsed = formatElapsed(Date.now() - task.startedAt)
-  const progress = formatTaskProgressLabel(task.progress)
+  const progress = formatTaskProgressLabel(task.progress, t)
   return (
     <Box>
-      <Text dimColor>Task </Text>
+      <Text dimColor>{t('ui.task.label')} </Text>
       <Text>{task.title}</Text>
       <Text dimColor>{` - ${toolSummary}`}</Text>
-      {latest && <Text dimColor>{` - ${formatTaskToolName(latest.toolName)}`}</Text>}
+      {latest && <Text dimColor>{` - ${formatTaskToolName(latest.toolName, t)}`}</Text>}
       <Text dimColor>{` - ${elapsed}`}</Text>
       {progress && <Text dimColor>{` - ${progress}`}</Text>}
     </Box>
@@ -217,7 +221,7 @@ function SessionPane({ running, visible, children }: { running: boolean; visible
   )
 }
 
-function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, sandbox, mcpServers, startupAnimation = true, transparentBackground = false }: AppProps) {
+function App({ workspacePath, workspaceName, config: initialConfig, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation = true, transparentBackground = false }: AppProps) {
   const { exit } = useApp()
   const layoutBackground = transparentBackground ? undefined : '#000000'
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -228,6 +232,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [startupElapsed, setStartupElapsed] = useState(startupAnimationEnabled ? 0 : STARTUP_ANIMATION_MS)
   const startupFrame = getStartupAnimationFrame(startupElapsed)
   const [config, setConfig] = useState(initialConfig)
+  const [profile, setProfile] = useState(loadProfile)
+  const t = useMemo(() => createTranslator(profile.interfaceLanguage), [profile.interfaceLanguage])
   const [messages, setMessages] = useState<Message[]>([])
   const [staticTranscriptRevision, setStaticTranscriptRevision] = useState(0)
   const [input, setInput] = useState('')
@@ -244,8 +250,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [mood, setMood] = useState<MascotMood>('idle')
   const [tokenUsage, setTokenUsage] = useState<TokenUsage>({ source: 'unknown' })
   const [currentMode, setCurrentMode] = useState<'vibe' | 'plan'>('vibe')
-  const [gitEnabled, setGitEnabled] = useState(false)
-  const [gitSnapshot, setGitSnapshot] = useState<GitSnapshot | null>(null)
+  const [gitState, setGitState] = useState<GitIntegrationState>(() => ({
+    enabled: initialConfig.gitEnabled !== false,
+    phase: initialConfig.gitEnabled === false ? 'disabled' : 'detecting',
+    snapshot: null,
+    updatedAt: Date.now(),
+  }))
   const [modelPresets, setModelPresets] = useState<ModelPreset[]>([])
   const [modelDiscoveryStatus, setModelDiscoveryStatus] = useState({
     isRefreshing: false,
@@ -263,7 +273,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [activeTask, setActiveTask] = useState<ActiveTaskContext | null>(null)
   const [activeObjective, setActiveObjective] = useState<{ prompt: string; startedAt: number } | null>(null)
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
-  const [changeSummaries, setChangeSummaries] = useState<ChangeSummary[]>([])
+  const [, setChangeSummaries] = useState<ChangeSummary[]>([])
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([])
   const [interruptHint, setInterruptHint] = useState<string | null>(null)
   const [exitHint, setExitHint] = useState<string | null>(null)
@@ -309,12 +319,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const activePromptRef = useRef<{ prompt: string; messageId: string; responseStarted: boolean; attachments?: AgentAttachment[]; priorTurns: AgentTurn[] } | null>(null)
   const abortingRef = useRef(false)
   const abortRestoredPromptRef = useRef(false)
-  const runPromptRef = useRef<((prompt: string, attachments?: AgentAttachment[]) => Promise<void>) | null>(null)
+  const runPromptRef = useRef<((prompt: string, attachments?: AgentAttachment[], messageId?: string) => Promise<void>) | null>(null)
   const exitPressRef = useRef(0)
   const lastCtrlCEventAtRef = useRef(0)
   const runControlHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const handleInterruptRef = useRef<() => void>(() => {})
   const lastClipboardImageRef = useRef<{ fingerprint: string; at: number } | null>(null)
+  const globalConfigurationFingerprintRef = useRef(globalConfigurationFingerprint({ config: initialConfig, profile }))
+  const pendingGlobalConfigurationRef = useRef<GlobalConfigurationSnapshot | null>(null)
   const promptHistoryRef = useRef<string[]>([])
   const genMsgId = useCallback(() => {
     messageIdRef.current += 1
@@ -324,8 +336,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   // Refs to avoid stale closures in the engine event subscription (effect runs once)
   const currentToolsRef = useRef<ToolStatus[]>([])
   const changeSummariesRef = useRef<ChangeSummary[]>([])
-  useEffect(() => { currentToolsRef.current = currentTools }, [currentTools])
-  useEffect(() => { changeSummariesRef.current = changeSummaries }, [changeSummaries])
+  const updateCurrentTools = useCallback((update: (current: ToolStatus[]) => ToolStatus[]) => {
+    const next = update(currentToolsRef.current)
+    currentToolsRef.current = next
+    setCurrentTools(next)
+  }, [])
+  const updateChangeSummaries = useCallback((update: (current: ChangeSummary[]) => ChangeSummary[]) => {
+    const next = update(changeSummariesRef.current)
+    changeSummariesRef.current = next
+    setChangeSummaries(next)
+  }, [])
   useEffect(() => { draftAttachmentsRef.current = draftAttachments }, [draftAttachments])
   useEffect(() => {
     const completed = subAgentActivities.filter(activity => activity.status !== 'running' && activity.completedAt)
@@ -344,16 +364,31 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     workspacePath,
     workspaceName,
     config: initialConfig,
+    profile,
     conversationPrefix: 'cli',
     approvalPolicy,
-    sandbox,
     connectMcp: Boolean(mcpServers?.length),
     mcpServers,
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
   }))
   const { engine, stateProvider, skillRuntime, mcpClient } = runtime
-  const sandboxStatus = runtime.toolExecutor.getSandboxStatus()
-  const [securityProfile, setSecurityProfile] = useState(() => engine.getSecurityProfile())
+  const terminalPollingActive = terminalSessions.some(session => session.status === 'running' || session.status === 'starting')
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const result = await runtime.toolExecutor.ptyList?.()
+      if (!cancelled && result?.success) {
+        setTerminalSessions((result.sessions || result.data || []) as TerminalSessionInfo[])
+      }
+    }
+    void refresh()
+    if (!terminalPollingActive) return () => { cancelled = true }
+    const timer = setInterval(() => { void refresh() }, 1000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [runtime.toolExecutor, terminalPollingActive])
   const [convManager] = useState(() => new ConversationManager(engine, config, workspacePath, error => {
     setPersistenceWarning(error ? `Conversation history unavailable: ${error.message}` : null)
   }))
@@ -391,11 +426,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   useEffect(() => { queuedPromptsRef.current = queuedPrompts }, [queuedPrompts])
 
   const persistConfig = useCallback((nextConfig: TurboFluxConfig) => {
-    stateProvider.updateConfig(nextConfig)
-    convManager.updateConfig(nextConfig)
-    setConfig(nextConfig)
-    saveConfig(nextConfig)
-  }, [stateProvider, convManager])
+    const savedConfig = saveConfig(nextConfig)
+    runtime.applyConfiguration(savedConfig, { profile, approvalPolicy })
+    convManager.updateConfig(savedConfig)
+    setConfig(savedConfig)
+    globalConfigurationFingerprintRef.current = globalConfigurationFingerprint({ config: savedConfig, profile })
+  }, [runtime, profile, approvalPolicy, convManager])
 
   const clearStreamFlushTimer = useCallback(() => {
     if (streamFlushTimerRef.current) {
@@ -489,11 +525,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setDraftAttachments([])
     setScrollRowsFromBottom(0)
     setTokenUsage(engine.getContextUsage())
-    setGitEnabled(engine.isGitEnabled())
-    setGitSnapshot(engine.getGitSnapshot())
-    setCurrentTools([])
+    setGitState(engine.getGitState())
+    updateCurrentTools(() => [])
     setStreamingToolDraft(null)
-    setChangeSummaries([])
+    updateChangeSummaries(() => [])
     setCurrentTurnOutputTokens(0)
     streamBufferRef.current = ''
     streamThinkingBufferRef.current = ''
@@ -540,9 +575,55 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, [])
 
   useEffect(() => {
-    stateProvider.updateConfig(config)
+    runtime.applyConfiguration(config, { profile, approvalPolicy })
     convManager.updateConfig(config)
-  }, [stateProvider, convManager, config])
+  }, [runtime, convManager, config, profile, approvalPolicy])
+
+  const applyGlobalConfiguration = useCallback((snapshot: GlobalConfigurationSnapshot) => {
+    const fingerprint = globalConfigurationFingerprint(snapshot)
+    if (fingerprint === globalConfigurationFingerprintRef.current) return
+    globalConfigurationFingerprintRef.current = fingerprint
+    pendingGlobalConfigurationRef.current = null
+    runtime.applyConfiguration(snapshot.config, { profile: snapshot.profile, approvalPolicy })
+    convManager.updateConfig(snapshot.config)
+    setConfig(snapshot.config)
+    setProfile(snapshot.profile)
+    setGitState(engine.getGitState())
+    const nextT = createTranslator(snapshot.profile.interfaceLanguage)
+    appendMessages([{
+      id: genMsgId(),
+      role: 'system',
+      content: nextT('ui.app.globalReloaded', {
+        provider: snapshot.config.provider,
+        model: snapshot.config.model || nextT('common.notSet'),
+        persona: snapshot.profile.defaultPersonaId,
+      }),
+    }], { forceLatest: true })
+  }, [runtime, approvalPolicy, convManager, engine, appendMessages, genMsgId])
+
+  useEffect(() => {
+    const accept = (snapshot: GlobalConfigurationSnapshot) => {
+      const fingerprint = globalConfigurationFingerprint(snapshot)
+      if (fingerprint === globalConfigurationFingerprintRef.current) return
+      if (engine.isRunning()) {
+        pendingGlobalConfigurationRef.current = snapshot
+        showRunControlHint(t('ui.app.globalPending'))
+        return
+      }
+      applyGlobalConfiguration(snapshot)
+    }
+    const stopWatching = watchGlobalConfiguration(accept, {
+      onError: error => showRunControlHint(t('ui.app.globalReloadFailed', { message: error.message })),
+    })
+    const pendingTimer = setInterval(() => {
+      const pending = pendingGlobalConfigurationRef.current
+      if (pending && !engine.isRunning()) applyGlobalConfiguration(pending)
+    }, 250)
+    return () => {
+      stopWatching()
+      clearInterval(pendingTimer)
+    }
+  }, [engine, applyGlobalConfiguration, showRunControlHint, t])
 
   const loadModelPresets = useCallback(async (targetConfig: TurboFluxConfig, force = false) => {
     const requestId = ++modelDiscoveryRequestRef.current
@@ -659,7 +740,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               changes: [...changesSnapshot],
               interrupted: event.interrupted === true,
               thinking,
-            }])
+            }], { forceLatest: true })
           }
           if (noFlickerActive) {
             setStreamText('')
@@ -672,8 +753,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             }, 120)
           }
           setCurrentTurnOutputTokens(0)
-          setCurrentTools([])
-          setChangeSummaries([])
+          updateCurrentTools(() => [])
+          updateChangeSummaries(() => [])
           setStreamingToolDraft(null)
           setIsRunning(engine.isRunning())
           setMood(event.interrupted ? 'idle' : 'happy')
@@ -687,13 +768,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
           setIsRunning(true)
           setStreamingToolDraft(prev => prev?.id === event.toolCall.id ? null : prev)
-          setCurrentTools(prev => [...prev, {
+          updateCurrentTools(previous => beginToolCall(previous, {
             id: event.toolCall.id,
             name: event.toolCall.name,
-            status: 'running',
             args: serializeToolArgsForUi(event.toolCall.arguments),
-            startTime: Date.now(),
-          }])
+            startedAt: Date.now(),
+          }))
           markActivity()
           break
         case 'stream:tool_call_delta':
@@ -714,14 +794,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             if (!prev) return null
             return prev.id === event.toolResult.toolCallId ? null : prev
           })
-          setCurrentTools(prev =>
-            prev.map(t => t.id === event.toolResult.toolCallId
-              ? { ...t, status: event.toolResult.isError ? 'error' : 'done', output: event.toolResult.output?.slice(0, 200), endTime: Date.now() }
-              : t
-            )
-          )
+          updateCurrentTools(previous => settleToolCall(previous, {
+            id: event.toolResult.toolCallId,
+            name: event.toolResult.name,
+            status: event.toolResult.isError ? 'error' : 'done',
+            output: event.toolResult.output?.slice(0, 200),
+            settledAt: Date.now(),
+          }))
           if (event.toolResult.changeSummary) {
-            setChangeSummaries(prev => [...prev, event.toolResult.changeSummary!])
+            updateChangeSummaries(previous => [...previous, event.toolResult.changeSummary!])
           }
           markActivity()
           break
@@ -752,7 +833,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 id: event.agentId,
                 label: event.label,
                 objective: event.objective,
-                detail: 'starting',
+                detail: t('ui.subagent.starting'),
                 startedAt: Date.now(),
                 status: 'running',
               },
@@ -761,7 +842,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'subagent:progress':
           setSubAgentActivities(current => current.map(activity => activity.id === event.agentId
-            ? { ...activity, detail: describeSubAgentEvent(event.event), status: 'running' }
+            ? { ...activity, detail: describeSubAgentEvent(event.event, t), status: 'running' }
             : activity))
           break
         case 'subagent:end':
@@ -771,7 +852,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   ...activity,
                   status: event.ok ? 'completed' : 'failed',
                   completedAt: Date.now(),
-                  detail: event.ok ? 'result ready' : 'failed',
+                  detail: event.ok ? t('ui.subagent.resultReady') : t('common.failed'),
                 }
               : activity))
           }
@@ -782,9 +863,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'terminal:sessions':
           setTerminalSessions(event.sessions)
           break
-        case 'git:status':
-          setGitEnabled(event.enabled)
-          setGitSnapshot(event.snapshot)
+        case 'git:state':
+          setGitState(event.state)
           break
         case 'runtime-task:finished': {
           const sessionId = event.task.metadata?.sessionId
@@ -798,6 +878,22 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   updatedAt: event.task.updatedAt,
                 }
               : session))
+            const durationMs = (event.task.endedAt || event.task.updatedAt) - event.task.startedAt
+            const duration = formatElapsed(durationMs)
+            const exit = typeof event.task.exitCode === 'number' ? t('ui.app.exitCode', { code: event.task.exitCode }) : ''
+            const log = event.task.logPath ? t('ui.app.logPath', { path: event.task.logPath }) : ''
+            appendMessages([{
+              id: genMsgId(),
+              role: 'system',
+              content: t('ui.app.backgroundFinished', {
+                session: sessionId,
+                status: event.task.status,
+                duration,
+                exit,
+                command: event.task.command || t('ui.app.shellSession'),
+                log,
+              }),
+            }], { forceLatest: true })
           }
           if (event.task.kind === 'agent') {
             setSubAgentActivities(current => current.filter(activity => activity.id !== event.task.id))
@@ -834,7 +930,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             appendMessages([{
               id: genMsgId(),
               role: 'system',
-              content: `Protocol fallback: ${event.message || 'request format mismatch'} → ${event.url}`,
+              content: t('ui.app.protocolFallback', {
+                message: event.message || t('ui.app.protocolMismatch'),
+                url: event.url,
+              }),
             }], { forceLatest: true })
           }
           break
@@ -846,7 +945,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           clearStreamFlushTimer()
       setStreamText('')
       setStreamThinkingText('')
-      appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${event.error}` }])
+      appendMessages([{ id: genMsgId(), role: 'system', content: t('common.error', { message: event.error }) }])
       setStreamingToolDraft(null)
       setIsRunning(false)
           setMood('error')
@@ -854,11 +953,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'mode:change':
           setCurrentMode(event.to)
-          setGitEnabled(engine.isGitEnabled())
-          setGitSnapshot(engine.getGitSnapshot())
-          break
-        case 'security:change':
-          setSecurityProfile(event.profile)
+          setGitState(engine.getGitState())
           break
       }
     })
@@ -870,7 +965,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       convManager.destroy()
       runtime.destroy().catch(() => {})
     }
-  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer, markActivity, showRunControlHint, genMsgId, noFlickerActive])
+  }, [engine, runtime, clearStreamFlushTimer, appendMessages, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer, markActivity, showRunControlHint, genMsgId, noFlickerActive, t])
 
   const getConversationEntries = useCallback((): ConversationEntry[] => {
     const convs = convManager.list()
@@ -947,28 +1042,28 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     const rest = queuedPromptsRef.current.slice(1)
     queuedPromptsRef.current = rest
     setQueuedPrompts(rest)
-    void runPromptRef.current(next.prompt, next.attachments)
+    void runPromptRef.current(next.prompt, next.attachments, next.id)
   }, [])
 
-  const runPrompt = useCallback(async (prompt: string, attachments?: AgentAttachment[]) => {
+  const runPrompt = useCallback(async (prompt: string, attachments?: AgentAttachment[], queuedMessageId?: string) => {
     if (isRunningRef.current) {
-      const nextQueue = [...queuedPromptsRef.current, { prompt, attachments }]
+      const nextQueue = [...queuedPromptsRef.current, { id: queuedMessageId ?? genMsgId(), prompt, attachments }]
       queuedPromptsRef.current = nextQueue
       setQueuedPrompts(nextQueue)
       showRunControlHint(`Queued #${nextQueue.length} for the next turn`)
       return
     }
 
-    const userMessageId = genMsgId()
+    const userMessageId = queuedMessageId ?? genMsgId()
     setActiveObjective({ prompt, startedAt: Date.now() })
     activePromptRef.current = { prompt, attachments, messageId: userMessageId, responseStarted: false, priorTurns: [...engine.getSession().turns] }
     abortingRef.current = false
     abortRestoredPromptRef.current = false
-    appendMessages([{ id: userMessageId, role: 'user', content: prompt }])
+    appendMessages([{ id: userMessageId, role: 'user', content: prompt }], { forceLatest: true })
     if (!config.apiKey) {
       activePromptRef.current = null
       setActiveObjective(null)
-      appendMessages([{ id: genMsgId(), role: 'system', content: 'No model provider is configured yet. Exit and run `turboflux setup`, or set `/config apiKey <key>` manually.' }])
+      appendMessages([{ id: genMsgId(), role: 'system', content: t('ui.app.noProvider') }])
       if (singleShot) exit()
       return
     }
@@ -979,8 +1074,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         id: genMsgId(),
         role: 'system',
         content: modelDiscoveryStatus.isRefreshing
-          ? 'Model discovery is still running. Try again shortly, or use `/model add <model-id>`.'
-          : 'No model is mounted. Use `/model` or `/model add <model-id>`.',
+          ? t('ui.app.modelDiscoveryRunning')
+          : t('ui.app.noModelMounted'),
       }])
       return
     }
@@ -994,12 +1089,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     clearStreamFlushTimer()
     setStreamText('')
     setStreamThinkingText('')
-    setCurrentTools([])
+    updateCurrentTools(() => [])
     setStreamingToolDraft(null)
     resetFastContextUi()
     setFcActive(false)
     setActiveTask(null)
-    setChangeSummaries([])
+    updateChangeSummaries(() => [])
     setPendingAsk(null)
     setAskInput('')
     setInterruptHint(null)
@@ -1045,12 +1140,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           thinking: createThinkingTrace(bufferedThinkingText, thinkingStartedAt, true),
         }])
       } else if (interrupted) {
-        appendMessages([{ id: genMsgId(), role: 'system', content: 'Interrupted.' }])
+        appendMessages([{ id: genMsgId(), role: 'system', content: t('common.interrupted') }])
       } else {
-        appendMessages([{ id: genMsgId(), role: 'system', content: `Error: ${e.message}` }])
+        appendMessages([{ id: genMsgId(), role: 'system', content: t('common.error', { message: e.message }) }])
       }
-      setCurrentTools([])
-      setChangeSummaries([])
+      updateCurrentTools(() => [])
+      updateChangeSummaries(() => [])
       setIsRunning(false)
       setMood(abortingRef.current ? 'idle' : 'error')
       if (!abortingRef.current) setTimeout(() => setMood('idle'), 4000)
@@ -1064,7 +1159,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       setTimeout(runNextQueuedPrompt, 0)
     }
     if (singleShot) exit()
-  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, resetFastContextUi, showRunControlHint, modelDiscoveryStatus.isRefreshing])
+  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, resetFastContextUi, showRunControlHint, modelDiscoveryStatus.isRefreshing, t])
 
   useEffect(() => {
     runPromptRef.current = runPrompt
@@ -1096,10 +1191,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const attachClipboardImage = useCallback((options?: { silentNoImage?: boolean }) => {
     const nextIndex = draftAttachmentsRef.current.length + 1
     const warnings: string[] = []
-    const attachment = captureClipboardImageAttachment(nextIndex, warnings, workspacePath)
+    const attachment = captureClipboardImageAttachment(nextIndex, warnings, workspacePath, t)
     if (!attachment) {
       if (!options?.silentNoImage) {
-        const visibleWarnings = warnings.length > 0 ? warnings : ['No image was found in the clipboard. Copy an image or paste an image file path.']
+        const visibleWarnings = warnings.length > 0 ? warnings : [t('ui.app.clipboardImageMissing')]
         for (const warning of visibleWarnings) {
           appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
         }
@@ -1121,7 +1216,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       return `${current}${spacer}${placeholder} `
     })
     return true
-  }, [appendMessages, genMsgId, setComposedInput, workspacePath])
+  }, [appendMessages, genMsgId, setComposedInput, t, workspacePath])
 
   const handlePasteImage = useCallback(() => {
     return attachClipboardImage()
@@ -1129,7 +1224,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const handlePasteText = useCallback((pastedText: string, nextValue: string) => {
     if (!hasImageReference(pastedText)) return null
-    const resolved = resolveImagePrompt(nextValue, workspacePath, { existingAttachments: draftAttachmentsRef.current })
+    const resolved = resolveImagePrompt(nextValue, workspacePath, { existingAttachments: draftAttachmentsRef.current, t })
     if (resolved.attachments.length === draftAttachmentsRef.current.length) return null
 
     for (const warning of resolved.warnings) {
@@ -1138,7 +1233,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     draftAttachmentsRef.current = resolved.attachments
     setDraftAttachments(resolved.attachments)
     return { value: resolved.prompt, cursorOffset: resolved.prompt.length }
-  }, [appendMessages, genMsgId, workspacePath])
+  }, [appendMessages, genMsgId, t, workspacePath])
 
   const handleInterrupt = useCallback(() => {
     const pressedAt = Date.now()
@@ -1153,7 +1248,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       setAskInput('')
       queuedPromptsRef.current = []
       setQueuedPrompts([])
-      setInterruptHint('Interrupted current agent run.')
+      setInterruptHint(t('ui.app.runInterrupted'))
       setTimeout(() => setInterruptHint(null), 2500)
 
       if (activePrompt && !activePrompt.responseStarted) {
@@ -1173,7 +1268,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       return
     }
     exitPressRef.current = pressedAt
-    setExitHint('Press Ctrl+C again to exit.')
+    setExitHint(t('ui.app.exitHint'))
     setTimeout(() => {
       if (Date.now() - exitPressRef.current >= 1800) setExitHint(null)
     }, 1800)
@@ -1250,12 +1345,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         conversationManager: convManager,
         skillRuntime,
         mcpClient,
-        sandboxStatus,
+        runtimeTaskManager: runtime.runtimeTaskManager,
+        t,
       }
       const result = commandRegistry.execute(trimmed, ctx)
       setTokenUsage(engine.getContextUsage())
-      setGitEnabled(engine.isGitEnabled())
-      setGitSnapshot(engine.getGitSnapshot())
+      setGitState(engine.getGitState())
       switch (result.type) {
         case 'text':
           appendMessages([{ id: genMsgId(), role: 'system', content: result.text! }])
@@ -1268,12 +1363,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       }
       return
     }
-    const resolved = resolveImagePrompt(trimmed, workspacePath, { existingAttachments: pendingDraftAttachments })
+    const resolved = resolveImagePrompt(trimmed, workspacePath, { existingAttachments: pendingDraftAttachments, t })
     for (const warning of resolved.warnings) {
       appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
     }
     runPrompt(resolved.prompt, resolved.attachments)
-  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, skillRuntime, workspacePath, genMsgId])
+  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, runtime.runtimeTaskManager, skillRuntime, t, workspacePath, genMsgId])
 
   const handleAlternateSubmit = useCallback((value: string) => {
     if (!isRunningRef.current) {
@@ -1385,14 +1480,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const reasoningActive = Boolean(reasoningLabel && reasoningLabel !== 'off' && isRunning && runState.phase === 'thinking')
   const conversationFrameWidth = Math.max(24, cockpit.contentWidth - 2)
 
-  const runningNode = (isRunning || fcActive || subAgentActivities.length > 0) ? (
+  const runningNode = (isRunning || fcActive || subAgentActivities.length > 0 || queuedPrompts.length > 0) ? (
     <Box flexDirection="column" marginBottom={1}>
-      {!noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} summary={fcSummary} isActive={fcActive} />}
+      {!cockpit.showSidebar && !noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} summary={fcSummary} isActive={fcActive} />}
       {!noFlickerActive && <SubAgentProgressLine activities={subAgentActivities} />}
       {!noFlickerActive && activeTask && <TaskProgressLine task={activeTask} />}
       <ActiveWorkPanel
-        tools={noFlickerActive ? [] : currentTools}
-        draft={noFlickerActive ? null : streamingToolDraft}
+        tools={currentTools}
+        draft={streamingToolDraft}
         streamText={streamTextForDisplay}
         outputTokens={currentTurnOutputTokens}
         lastActivity={lastActivity}
@@ -1402,11 +1497,20 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         thinkingStartedAt={streamThinkingStartedAt}
         reasoningEffort={config.reasoning?.effort}
         reasoningActive={reasoningActive}
+        showThinking={showThinking}
         verbose={verbose}
-        idleLabel={isRunning && !noFlickerActive && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
+        idleLabel={isRunning && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? 'Thinking...' : null}
         availableWidth={noFlickerActive
           ? cockpit.contentWidth - 4
           : terminal.columns - 4}
+      />
+      <QueuedPromptList
+        width={noFlickerActive ? cockpit.contentWidth - 4 : terminal.columns - 4}
+        prompts={queuedPrompts.map(queued => ({
+          id: queued.id,
+          prompt: queued.prompt,
+          attachmentCount: queued.attachments?.length,
+        }))}
       />
     </Box>
   ) : null
@@ -1424,7 +1528,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         />
       ) : (
         <Box flexDirection="column" borderStyle="round" paddingX={1} marginY={1}>
-          <Text bold>Confirmation needed</Text>
+          <Text bold>{t('ui.app.confirmationNeeded')}</Text>
           <Text>{pendingAsk.question}</Text>
           {pendingAsk.reason && <Text dimColor>{pendingAsk.reason}</Text>}
           {pendingAsk.command && <Text>{pendingAsk.command}</Text>}
@@ -1462,7 +1566,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         pop()
         const conv = convManager.switchTo(id)
         if (conv) {
-          engine.setSecurityProfile(createOffSecurityProfile())
           restoreCliStateFromTurns(
             conv.activeTurns ?? conv.turns,
             '',
@@ -1500,7 +1603,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         pop()
         const newConfig = applyPreset(config, preset)
         persistConfig(newConfig)
-        appendMessages([{ id: genMsgId(), role: 'system', content: `Model switched to ${preset.model}` }])
+        appendMessages([{ id: genMsgId(), role: 'system', content: t('ui.app.modelSwitched', { model: preset.model }) }])
       }}
       onCancel={() => pop()}
     />
@@ -1531,7 +1634,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           newConfig.provider,
           newConfig.modelCapabilities,
         )
-        appendMessages([{ id: genMsgId(), role: 'system', content: `Reasoning effort set to ${value || 'provider default'}` }])
+        appendMessages([{ id: genMsgId(), role: 'system', content: t('ui.app.reasoningSet', { value: value || t('common.providerDefault') }) }])
       }}
       onCancel={() => pop()}
     />
@@ -1542,7 +1645,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
     <Box marginTop={1}>
-      <Text dimColor>Message cursor: Up/Down navigate - Enter/Esc exit</Text>
+      <Text dimColor>{t('ui.app.cursorHint')}</Text>
     </Box>
   ) : null
   const cursorPreviewNode = cursorPreviewMessage ? (
@@ -1551,7 +1654,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       <MessageList
         messages={[cursorPreviewMessage]}
         verbose={verbose}
-        diffMaxRows={0}
+        availableWidth={conversationFrameWidth}
         selectedIndex={0}
       />
     </Box>
@@ -1601,7 +1704,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           messages={messages}
           verbose={verbose}
           showToolDetails={showToolDetails}
-          diffMaxRows={0}
+          availableWidth={conversationFrameWidth}
           selectedMessageId={selectedMessageId}
           selectedMessageRef={cursorMode ? selectedMessageRef : undefined}
           showThinking={showThinking}
@@ -1627,7 +1730,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   })
   if (noFlickerActive) {
     return (
-      <ThemeProvider transparentBackground={transparentBackground}>
+      <I18nProvider locale={profile.interfaceLanguage}>
+        <ThemeProvider transparentBackground={transparentBackground}>
         <CockpitRoot width={getSafeViewportWidth(terminal.columns)} height={terminal.rows}>
           {showLandingView ? (
             <LandingView
@@ -1676,13 +1780,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                       tokenUsage={tokenUsage}
                       mode={currentMode}
                       viewingHistory={isViewingHistory}
-                      gitEnabled={gitEnabled}
-                      gitSnapshot={gitSnapshot}
+                      gitState={gitState}
                       mcpCount={mcpCount}
                       terminalCount={activeTerminalCount}
                       width={conversationFrameWidth}
-                      sandboxStatus={sandboxStatus}
-                      securityProfile={securityProfile}
                     />
                   )}
                 </Box>
@@ -1694,9 +1795,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   model={config.model}
                   mode={currentMode}
                   reasoning={reasoningLabel || undefined}
-                  approvalPolicy={config.approvalPolicy}
-                  sandboxStatus={sandboxStatus}
-                  securityProfile={securityProfile}
                   contextWindow={config.contextWindow}
                   tokenUsage={tokenUsage}
                   isRunning={isRunning}
@@ -1705,6 +1803,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   draft={streamingToolDraft}
                   streamText={streamTextForDisplay}
                   thinkingText={streamThinkingText}
+                  fastContextEvents={fcEvents}
                   fastContextSummary={fcSummary}
                   fastContextActive={fcActive}
                   subagents={subAgentActivities}
@@ -1713,19 +1812,20 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   mcpCount={mcpCount}
                   task={activeTask}
                   objective={activeObjective?.prompt}
-                  gitEnabled={gitEnabled}
-                  gitSnapshot={gitSnapshot}
+                  gitState={gitState}
                 />
               )}
             </Box>
           )}
         </CockpitRoot>
-      </ThemeProvider>
+        </ThemeProvider>
+      </I18nProvider>
     )
   }
 
   return (
-    <ThemeProvider transparentBackground={transparentBackground}>
+    <I18nProvider locale={profile.interfaceLanguage}>
+      <ThemeProvider transparentBackground={transparentBackground}>
       <Static key={staticTranscriptRevision} items={staticTranscriptItems}>
         {item => (
           item.kind === 'header'
@@ -1743,7 +1843,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 <MessageList
                   messages={[item.message]}
                   verbose={verbose}
-                  diffMaxRows={MAX_INLINE_DIFF_RENDER_ROWS}
+                  availableWidth={Math.max(24, terminal.columns - 4)}
                 />
               </Box>
             )
@@ -1774,10 +1874,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
         {/* Status line at bottom */}
-        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitEnabled={gitEnabled} gitSnapshot={gitSnapshot} sandboxStatus={sandboxStatus} securityProfile={securityProfile} />
+        <StatusLine config={config} tokenUsage={tokenUsage} mode={currentMode} viewingHistory={isViewingHistory} gitState={gitState} />
         <AgentActivityLine active={isRunning} />
       </Box>
-    </ThemeProvider>
+      </ThemeProvider>
+    </I18nProvider>
   )
 }
 
@@ -1788,7 +1889,6 @@ export function startInkApp(options: {
   verbose: boolean
   noFlicker?: boolean
   approvalPolicy?: ApprovalPolicy
-  sandbox?: SandboxOptions
   mcpServers?: string[]
   startupAnimation?: boolean
   transparentBackground?: boolean
@@ -1805,7 +1905,6 @@ export function startInkApp(options: {
       verbose={options.verbose}
       noFlicker={noFlicker}
       approvalPolicy={options.approvalPolicy}
-      sandbox={options.sandbox}
       mcpServers={options.mcpServers}
       startupAnimation={options.startupAnimation}
       transparentBackground={options.transparentBackground}

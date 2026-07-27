@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import type { AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
 import type { ConversationJournalEntry, ConversationMeta, PersistedConversation } from './types'
 import { writeFileAtomicSync } from '../../core/fileIO'
+import { RECOVERED_ASSISTANT_MESSAGE, RECOVERED_TOOL_RESULT_MESSAGE } from './recoveryMessages'
 
 const DEFAULT_CONVERSATIONS_DIR = join(homedir(), '.turboflux', 'conversations')
 const CONVERSATION_ID_PATTERN = /^[a-zA-Z0-9._-]+$/
@@ -255,7 +256,7 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
     const recoveredResults = group.calls.map(call => journalToolResults.get(call.id) || {
       toolCallId: call.id,
       name: call.name,
-      output: 'Interrupted: tool result was not recorded before restart.',
+      output: RECOVERED_TOOL_RESULT_MESSAGE,
       isError: true,
       errorKind: 'abort' as const,
     })
@@ -272,7 +273,7 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
   if (lastTurn?.role === 'user') {
     const recovered = createRecoveredAssistantTurn(
       Math.max(latestTimestamp, lastTurn.timestamp + 1),
-      'Interrupted: assistant response was not recorded before restart.',
+      RECOVERED_ASSISTANT_MESSAGE,
     )
     upsertTurn(conversation.turns, recovered)
     upsertTurn(conversation.activeTurns, recovered)

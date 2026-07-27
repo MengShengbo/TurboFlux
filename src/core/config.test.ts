@@ -85,16 +85,6 @@ describe('setConfigValue', () => {
     expect(reasoning.reasoning?.effort).toBe('xhigh')
   })
 
-  it('validates persistent sandbox controls independently from approval', () => {
-    const strict = setConfigValue(baseConfig, 'sandboxEnforcement', 'strict')
-    const backend = setConfigValue(strict, 'sandboxBackend', 'docker')
-    const approval = setConfigValue(backend, 'approvalPolicy', 'full')
-
-    expect(approval.sandboxEnforcement).toBe('strict')
-    expect(approval.sandboxBackend).toBe('docker')
-    expect(approval.sandboxPolicy).toBeUndefined()
-    expect(() => setConfigValue(baseConfig, 'sandboxNetwork', 'sometimes')).toThrow(/sandboxNetwork/)
-  })
 })
 
 describe('provider presets', () => {

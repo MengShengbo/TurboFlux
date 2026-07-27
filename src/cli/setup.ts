@@ -25,16 +25,15 @@ import {
   normalizeNativeReasoningConfig,
 } from '../core/modelRegistry'
 import {
-  APPROVAL_POLICY_LABELS,
   normalizeApprovalPolicy,
   type ApprovalPolicy,
 } from '../shared/agentTypes'
 import { TURBOFLUX_WORDMARK_LINES } from './brand'
+import { createTranslator, type MessageKey, type TranslationValues, type Translator } from './i18n/index'
 import { TURBOFLUX_ACCENTS } from './theme/palette'
 import {
   DEFAULT_PROFILE,
   PERSONA_DEFINITIONS,
-  getOutputLanguageLabel,
   getPersonaDefinition,
   getProfileFile,
   loadProfile,
@@ -89,8 +88,8 @@ const MAIN_ACTIONS = new Set<SetupAction>([
   'exit',
 ])
 
-function zh(profile: TurboFluxProfile, zhText: string, enText: string): string {
-  return profile.interfaceLanguage === 'en' ? enText : zhText
+function setupText(key: MessageKey, values?: TranslationValues, profile = loadProfile()): string {
+  return createTranslator(profile.interfaceLanguage)(key, values)
 }
 
 const PROMPT_PREFIX = chalk.gray('›')
@@ -134,7 +133,7 @@ async function settlePromptInput(): Promise<void> {
 }
 
 function maskKey(key: string): string {
-  if (!key) return '(未设置)'
+  if (!key) return `(${setupText('common.notSet')})`
   if (key.length <= 8) return '***'
   return `${key.slice(0, 4)}...${key.slice(-4)}`
 }
@@ -171,12 +170,8 @@ function renderSetupLogoLine(line: string): string {
 }
 
 function printBanner(profile = loadProfile()): void {
-  const subtitle = zh(
-    profile,
-    '模型档案 · FastContext 子代理 · 语言 · 人设 · 全局行为',
-    'Model profiles · FastContext subagent · Language · Persona · Behavior',
-  )
-  const title = zh(profile, '终端工作台初始化', 'Terminal workbench setup')
+  const subtitle = setupText('setup.banner.subtitle', undefined, profile)
+  const title = setupText('setup.banner.title', undefined, profile)
   console.log('')
   console.log(`  ${chalk.dim('─'.repeat(72))}`)
   console.log('')
@@ -196,15 +191,15 @@ function printSeparator(): void {
 
 function profileLine(item: TurboFluxApiConfigProfile, currentId?: string): string {
   const marker = item.id === currentId ? chalk.green('*') : ' '
-  const model = item.model || '(未设置模型)'
-  const key = item.apiKey ? maskKey(item.apiKey) : '(未设置 Key)'
+  const model = item.model || `(${setupText('common.notSet')})`
+  const key = item.apiKey ? maskKey(item.apiKey) : `(${setupText('common.notSet')})`
   return `${marker} ${item.name}  [${item.id}]  ${item.provider} / ${model} / ${key}`
 }
 
 function printApiProfiles(config: TurboFluxConfig): void {
   const profiles = getApiConfigProfiles(config)
   if (profiles.length === 0) {
-    console.log(chalk.yellow('  当前没有 API 配置档案。'))
+    console.log(chalk.yellow(`  ${setupText('setup.current.noApiProfiles')}`))
     return
   }
   for (const item of profiles) {
@@ -213,35 +208,48 @@ function printApiProfiles(config: TurboFluxConfig): void {
 }
 
 function printSummary(config: TurboFluxConfig, profile: TurboFluxProfile): void {
+  const t = createTranslator(profile.interfaceLanguage)
   const knownModel = getSupportedModelSpec(config.model)
   const persona = getPersonaDefinition(profile.defaultPersonaId)
   const personaName = profile.defaultPersonaId === 'custom'
-    ? (profile.customPersonaName || 'Custom Persona')
+    ? (profile.customPersonaName || t('setup.persona.customFallback'))
     : (profile.interfaceLanguage === 'en' ? persona?.nameEn : persona?.nameZh) || profile.defaultPersonaId
-  const outputLanguage = getOutputLanguageLabel(profile.aiOutputLanguage, profile.customAiOutputLanguage, profile.interfaceLanguage)
+  const outputLanguage = getOutputLanguageLabel(profile, t)
   const profiles = getApiConfigProfiles(config)
   const activeProfile = getActiveApiConfigProfile(config)
 
-  console.log(chalk.bold(zh(profile, '当前配置', 'Current configuration')))
-  console.log(`  activeApiConfig:   ${activeProfile ? `${activeProfile.name} (${activeProfile.id})` : '(未设置)'}`)
-  console.log(`  apiConfigCount:    ${profiles.length}`)
-  console.log(`  provider:          ${config.provider}`)
-  console.log(`  baseUrl:           ${config.baseUrl || '(未设置)'}`)
-  console.log(`  model:             ${config.model || '(未设置)'}${knownModel ? ` (${knownModel.name})` : ''}`)
-  console.log(`  apiKey:            ${maskKey(config.apiKey)}`)
-  console.log(`  contextWindow:     ${config.contextWindow.toLocaleString()}`)
-  console.log(`  maxTokens:         ${config.maxTokens.toLocaleString()}`)
-  console.log(`  reasoning:         ${formatNativeReasoningSetting(config.model, config.reasoning, config.provider) || '(provider default)'}`)
-  console.log(`  approvalPolicy:    ${APPROVAL_POLICY_LABELS[config.approvalPolicy]} (${config.approvalPolicy})`)
-  console.log(`  sandbox:           ${config.sandboxPolicy || 'workspace'}/${config.sandboxEnforcement || 'guarded'}`)
-  console.log(`  sandboxBackend:    ${config.sandboxBackend || 'auto'}`)
-  console.log(`  sandboxNetwork:    ${config.sandboxNetwork || 'allow'}`)
-  console.log('  fastContextModel:  跟随主模型')
-  console.log(`  interfaceLanguage: ${profile.interfaceLanguage}`)
-  console.log(`  aiOutputLanguage:  ${outputLanguage}`)
-  console.log(`  persona:           ${personaName} (${profile.defaultPersonaId})`)
-  console.log(`  customInstructions:${profile.customInstructions ? ' set' : ' (未设置)'}`)
-  console.log(`  profileFile:       ${getProfileFile()}`)
+  console.log(chalk.bold(t('setup.current.title')))
+  console.log(`  ${t('setup.current.activeApiConfig')}: ${activeProfile ? `${activeProfile.name} (${activeProfile.id})` : `(${t('common.notSet')})`}`)
+  console.log(`  ${t('setup.current.apiConfigCount')}: ${profiles.length}`)
+  console.log(`  ${t('setup.current.provider')}: ${config.provider}`)
+  console.log(`  ${t('setup.current.baseUrl')}: ${config.baseUrl || `(${t('common.notSet')})`}`)
+  console.log(`  ${t('setup.current.model')}: ${config.model || `(${t('common.notSet')})`}${knownModel ? ` (${knownModel.name})` : ''}`)
+  console.log(`  ${t('setup.current.apiKey')}: ${maskKey(config.apiKey)}`)
+  console.log(`  ${t('setup.current.contextWindow')}: ${config.contextWindow.toLocaleString()}`)
+  console.log(`  ${t('setup.current.maxTokens')}: ${config.maxTokens.toLocaleString()}`)
+  console.log(`  ${t('setup.current.reasoning')}: ${formatNativeReasoningSetting(config.model, config.reasoning, config.provider) || `(${t('common.providerDefault')})`}`)
+  console.log(`  ${t('setup.current.approvalPolicy')}: ${approvalPolicyLabel(config.approvalPolicy, t)} (${config.approvalPolicy})`)
+  console.log(`  ${t('setup.current.fastContextModel')}: ${t('setup.current.fastContextFollowMain')}`)
+  console.log(`  ${t('setup.current.interfaceLanguage')}: ${profile.interfaceLanguage}`)
+  console.log(`  ${t('setup.current.aiOutputLanguage')}: ${outputLanguage}`)
+  console.log(`  ${t('setup.current.persona')}: ${personaName} (${profile.defaultPersonaId})`)
+  console.log(`  ${t('setup.current.customInstructions')}:${profile.customInstructions ? ` ${t('setup.current.customInstructionsSet')}` : ` (${t('common.notSet')})`}`)
+  console.log(`  ${t('setup.current.profileFile')}: ${getProfileFile()}`)
+}
+
+function getOutputLanguageLabel(profile: TurboFluxProfile, t: Translator): string {
+  if (profile.aiOutputLanguage === 'follow-user') return t('setup.language.followUser')
+  if (profile.aiOutputLanguage === 'zh-CN') return t('setup.language.simplifiedChinese')
+  if (profile.aiOutputLanguage === 'en') return t('setup.language.english')
+  if (profile.aiOutputLanguage === 'ja') return t('setup.language.japanese')
+  if (profile.aiOutputLanguage === 'ko') return t('setup.language.korean')
+  return profile.customAiOutputLanguage || t('setup.language.customLabel')
+}
+
+function approvalPolicyLabel(policy: ApprovalPolicy, t: Translator): string {
+  if (policy === 'ask') return t('command.approval.ask')
+  if (policy === 'agent') return t('command.approval.agent')
+  return t('command.approval.full')
 }
 
 async function promptInput(message: string, options: { default?: string; required?: boolean; validate?: (value: string) => true | string } = {}): Promise<string> {
@@ -252,7 +260,7 @@ async function promptInput(message: string, options: { default?: string; require
     default: options.default,
     validate: (value: string) => {
       const trimmed = value.trim()
-      if (options.required && !trimmed) return '不能为空'
+      if (options.required && !trimmed) return setupText('setup.prompt.required')
       return options.validate?.(trimmed) ?? true
     },
   }))
@@ -299,7 +307,7 @@ async function promptChoice(message: string, valid: string[], fallback = ''): Pr
     default: fallback,
     validate: value => {
       const normalized = value.trim().toLowerCase()
-      return lowerValid.has(normalized) || `请输入：${valid.join(', ')}`
+      return lowerValid.has(normalized) || setupText('setup.prompt.chooseFrom', { values: valid.join(', ') })
     },
   })
   return answer.toLowerCase()
@@ -331,7 +339,7 @@ async function promptCheckbox<T extends string>(message: string, choices: Prompt
 }
 
 async function promptContinue(profile: TurboFluxProfile): Promise<boolean> {
-  return promptConfirm(zh(profile, '返回主菜单？', 'Return to main menu?'), true)
+  return promptConfirm(setupText('setup.returnToMenu', undefined, profile), true)
 }
 
 function resolveProvider(value: string): ProviderPreset | undefined {
@@ -399,22 +407,23 @@ function normalizeOutputLanguage(value?: string): { language?: TurboFluxAiOutput
   return { language: 'custom', custom: trimmed }
 }
 
-function parseStyleList(value?: string): string[] | undefined {
+function parseStyleList(value?: string): string[] | 'skip' | undefined {
   if (!value) return undefined
   const trimmed = value.trim()
   if (!trimmed) return undefined
-  if (trimmed === 'skip' || trimmed === 'none') return []
-  if (trimmed === 'all') return PERSONA_DEFINITIONS.filter(p => !p.isCustom).map(p => p.id)
-  return trimmed.split(',').map(item => item.trim()).filter(Boolean)
+  const normalized = trimmed.toLowerCase()
+  if (normalized === 'skip' || normalized === 'none') return 'skip'
+  if (normalized === 'all') return PERSONA_DEFINITIONS.filter(p => !p.isCustom).map(p => p.id)
+  return trimmed.split(',').map(item => item.trim().toLowerCase()).filter(Boolean)
 }
 
 function validateUrl(value: string): true | string {
-  if (!value.trim()) return 'URL 不能为空'
+  if (!value.trim()) return setupText('setup.url.required')
   try {
     new URL(value)
     return true
   } catch {
-    return '请输入完整 URL，例如 https://api.example.com/v1'
+    return setupText('setup.url.invalid')
   }
 }
 
@@ -435,10 +444,10 @@ function findProfileByInput(config: TurboFluxConfig, value: string): TurboFluxAp
   return profiles.find(item => item.id.toLowerCase() === lower || item.name.toLowerCase() === lower)
 }
 
-async function promptProfile(config: TurboFluxConfig, message = '输入配置编号 / id / 名称'): Promise<TurboFluxApiConfigProfile | undefined> {
+async function promptProfile(config: TurboFluxConfig, message = setupText('setup.api.chooseAction')): Promise<TurboFluxApiConfigProfile | undefined> {
   const profiles = getApiConfigProfiles(config)
   if (profiles.length === 0) {
-    console.log(chalk.yellow('还没有可选的 API 配置。'))
+    console.log(chalk.yellow(setupText('setup.api.noSelectableProfiles')))
     return undefined
   }
   const selectedId = await promptSelect(message, profiles.map(item => ({
@@ -459,7 +468,7 @@ function modelLimits(model: string): { contextWindow: number; maxTokens: number 
 
 async function promptProvider(current?: TurboFluxApiConfigProfile | TurboFluxConfig): Promise<ProviderPreset> {
   const defaultPreset = current ? getProviderPreset(current.provider) : undefined
-  const providerId = await promptSelect('选择 Provider', PROVIDER_PRESETS.map(item => ({
+  const providerId = await promptSelect(setupText('setup.api.selectProvider'), PROVIDER_PRESETS.map(item => ({
     name: `${providerLabel(item)} ${chalk.gray(`- ${item.description}`)}`,
     value: item.id,
     short: item.name,
@@ -477,13 +486,17 @@ async function promptProfileFields(options: {
   const { currentConfig, existing, copyFrom, cliOptions = {}, directMode = false } = options
   const source = existing || copyFrom || currentConfig
   let preset = directMode ? defaultProviderForOptions(cliOptions, currentConfig) : undefined
-  if (!preset) preset = await promptProvider(source)
-  if (!preset) throw new Error(`Unknown provider "${cliOptions.provider || ''}".`)
-  if (directMode && preset.id === 'custom' && !cliOptions.baseUrl) {
-    throw new Error('Custom provider requires --base-url when using --yes.')
+  if (directMode && cliOptions.provider && !preset) {
+    throw new Error(setupText('setup.api.unknownProvider', { provider: cliOptions.provider }))
   }
+  if (!preset) preset = await promptProvider(source)
+  if (!preset) throw new Error(setupText('setup.api.unknownProvider', { provider: cliOptions.provider || '' }))
 
-  const defaultBaseUrl = cliOptions.baseUrl || source.baseUrl || preset.baseUrl
+  const providerWasExplicit = Boolean(cliOptions.provider?.trim())
+  const providerChanged = source.provider !== preset.provider
+  const defaultBaseUrl = cliOptions.baseUrl
+    || (providerChanged || providerWasExplicit ? preset.baseUrl : source.baseUrl)
+    || preset.baseUrl
   const baseUrl = directMode
     ? defaultBaseUrl
     : await promptInput('Base URL', {
@@ -491,31 +504,38 @@ async function promptProfileFields(options: {
       required: true,
       validate: validateUrl,
     })
-  const model = cliOptions.model?.trim() || existing?.model || copyFrom?.model || ''
+  const sameConnection = source.provider === preset.provider
+    && source.baseUrl.replace(/\/+$/, '') === baseUrl.replace(/\/+$/, '')
+  const model = cliOptions.model?.trim()
+    || (sameConnection ? source.model : preset.defaultModel)
 
   let apiKey = cliOptions.apiKey
   if (apiKey === undefined) {
     if (directMode) {
-      apiKey = shouldKeepCurrentApiKey(currentConfig, preset, baseUrl) ? currentConfig.apiKey : (source.apiKey || '')
+      apiKey = shouldKeepCurrentApiKey(currentConfig, preset, baseUrl) ? currentConfig.apiKey : ''
     } else {
-      const keepCurrent = Boolean(existing?.apiKey || copyFrom?.apiKey || shouldKeepCurrentApiKey(currentConfig, preset, baseUrl))
-      const entered = await promptPassword(keepCurrent ? 'API Key（留空保留当前值）' : 'API Key（可留空，之后再补）')
+      const keepCurrent = sameConnection && Boolean(source.apiKey)
+      const entered = await promptPassword(setupText(keepCurrent ? 'setup.api.keepKey' : 'setup.api.newKey'))
       apiKey = entered || (keepCurrent ? source.apiKey : '')
     }
   }
 
-  if (!baseUrl) throw new Error('Base URL is required.')
+  if (!baseUrl) throw new Error(setupText('setup.api.baseUrlRequired'))
+  const urlValidation = validateUrl(baseUrl)
+  if (urlValidation !== true) throw new Error(urlValidation)
 
+  const modelUnchanged = sameConnection && model === source.model
   const limits = modelLimits(model)
+  const modelSpec = getSupportedModelSpec(model)
   const reasoning = model
-    ? normalizeNativeReasoningConfig(model, source.reasoning, preset.provider)
+    ? normalizeNativeReasoningConfig(model, modelUnchanged ? source.reasoning : undefined, preset.provider)
     : undefined
   const profiles = getApiConfigProfiles(currentConfig).filter(item => item.id !== existing?.id)
   const defaultName = existing?.name
-    || uniqueProfileName(preset.id === 'custom' ? 'Custom API' : preset.name, profiles)
+    || uniqueProfileName(preset.id === 'custom' ? setupText('setup.api.customName') : preset.name, profiles)
   const name = directMode
     ? defaultName
-    : await promptInput('配置名称', {
+    : await promptInput(setupText('setup.api.profileName'), {
       default: defaultName,
       required: true,
     })
@@ -527,8 +547,14 @@ async function promptProfileFields(options: {
     apiKey,
     baseUrl,
     model,
-    contextWindow: existing?.contextWindow || limits.contextWindow,
-    maxTokens: existing?.maxTokens || limits.maxTokens,
+    contextWindow: modelUnchanged ? source.contextWindow : limits.contextWindow,
+    maxTokens: modelUnchanged ? source.maxTokens : limits.maxTokens,
+    maxOutputTokens: modelUnchanged ? source.maxOutputTokens : modelSpec?.maxOutputTokens,
+    modelCapabilities: modelUnchanged ? source.modelCapabilities : modelSpec ? {
+      vision: modelSpec.supportsVision,
+      reasoning: Boolean(reasoning),
+    } : undefined,
+    modelMetadataSources: modelUnchanged ? source.modelMetadataSources : modelSpec ? ['builtin'] : ['default'],
     reasoning,
     createdAt: existing?.createdAt,
   })
@@ -546,47 +572,47 @@ async function configureApiDirect(options: SetupOptions = {}): Promise<TurboFlux
     directMode: true,
   })
   const next = saveApiConfigProfile(current, profile, true)
-  saveConfig(next)
-  console.log(chalk.green('已保存 API 配置。'))
+  const saved = saveConfig(next)
+  console.log(chalk.green(setupText('setup.api.saved')))
   console.log(`  name:     ${profile.name}`)
-  console.log(`  provider: ${next.provider}`)
-  console.log(`  baseUrl:  ${next.baseUrl}`)
-  console.log(`  model:    ${next.model || '(启动后自动发现，或使用 /model add <模型ID>)'}`)
-  console.log(`  apiKey:   ${maskKey(next.apiKey)}`)
-  return next
+  console.log(`  provider: ${saved.provider}`)
+  console.log(`  baseUrl:  ${saved.baseUrl}`)
+  console.log(`  model:    ${saved.model || `(${setupText('setup.api.modelLater')})`}`)
+  console.log(`  apiKey:   ${maskKey(saved.apiKey)}`)
+  return saved
 }
 
 async function addApiProfile(config: TurboFluxConfig): Promise<TurboFluxConfig> {
   const profile = await promptProfileFields({ currentConfig: config })
-  const makeActive = await promptConfirm('设为当前 API 配置？', getApiConfigProfiles(config).length === 0)
+  const makeActive = await promptConfirm(setupText('setup.api.makeActive'), getApiConfigProfiles(config).length === 0)
   const next = saveApiConfigProfile(config, profile, makeActive)
-  saveConfig(next)
-  console.log(chalk.green(`已添加配置：${profile.name}`))
-  return next
+  const saved = saveConfig(next)
+  console.log(chalk.green(setupText('setup.api.added', { name: profile.name })))
+  return saved
 }
 
 async function switchApiProfile(config: TurboFluxConfig): Promise<TurboFluxConfig> {
-  const selected = await promptProfile(config, '切换到哪个配置？')
+  const selected = await promptProfile(config, setupText('setup.api.selectSwitch'))
   if (!selected) return config
   const next = switchActiveApiConfig(config, selected.id)
-  saveConfig(next)
-  console.log(chalk.green(`已切换到：${selected.name}`))
-  return next
+  const saved = saveConfig(next)
+  console.log(chalk.green(setupText('setup.api.switched', { name: selected.name })))
+  return saved
 }
 
 async function editApiProfile(config: TurboFluxConfig): Promise<TurboFluxConfig> {
-  const selected = await promptProfile(config, '编辑哪个配置？')
+  const selected = await promptProfile(config, setupText('setup.api.selectEdit'))
   if (!selected) return config
   const profile = await promptProfileFields({ currentConfig: config, existing: selected })
   const makeActive = selected.id === config.activeApiConfigId
   const next = saveApiConfigProfile(config, profile, makeActive)
-  saveConfig(next)
-  console.log(chalk.green(`已更新配置：${profile.name}`))
-  return next
+  const saved = saveConfig(next)
+  console.log(chalk.green(setupText('setup.api.updated', { name: profile.name })))
+  return saved
 }
 
 async function copyApiProfile(config: TurboFluxConfig): Promise<TurboFluxConfig> {
-  const selected = await promptProfile(config, '复制哪个配置？')
+  const selected = await promptProfile(config, setupText('setup.api.selectCopy'))
   if (!selected) return config
   const profiles = getApiConfigProfiles(config)
   const copied = createApiConfigProfile({
@@ -597,39 +623,39 @@ async function copyApiProfile(config: TurboFluxConfig): Promise<TurboFluxConfig>
     updatedAt: undefined,
   })
   const next = saveApiConfigProfile(config, copied, false)
-  saveConfig(next)
-  console.log(chalk.green(`已复制配置：${copied.name}`))
-  return next
+  const saved = saveConfig(next)
+  console.log(chalk.green(setupText('setup.api.copied', { name: copied.name })))
+  return saved
 }
 
 async function deleteApiProfile(config: TurboFluxConfig): Promise<TurboFluxConfig> {
-  const selected = await promptProfile(config, '删除哪个配置？')
+  const selected = await promptProfile(config, setupText('setup.api.selectDelete'))
   if (!selected) return config
-  const ok = await promptConfirm(`确认删除「${selected.name}」？`, false)
+  const ok = await promptConfirm(setupText('setup.api.confirmDelete', { name: selected.name }), false)
   if (!ok) {
-    console.log(chalk.yellow('已取消。'))
+    console.log(chalk.yellow(setupText('common.cancelled')))
     return config
   }
   const next = deleteApiConfigProfile(config, selected.id)
-  saveConfig(next)
-  console.log(chalk.green(`已删除配置：${selected.name}`))
-  return next
+  const saved = saveConfig(next)
+  console.log(chalk.green(setupText('setup.api.deleted', { name: selected.name })))
+  return saved
 }
 
 async function configureApiProfiles(): Promise<TurboFluxConfig> {
   let config = await loadConfig()
   let done = false
   while (!done) {
-    console.log(chalk.cyan('API 配置档案'))
+    console.log(chalk.cyan(setupText('setup.api.profilesTitle')))
     printApiProfiles(config)
     console.log('')
-    const choice = await promptSelect('选择 API 配置操作', [
-      { name: '新建配置 - 添加一个 API 档案', value: '1' },
-      { name: '切换当前配置 - 设置主 Agent 使用的档案', value: '2', disabled: getApiConfigProfiles(config).length === 0 && '还没有可切换的配置' },
-      { name: '编辑配置 - 修改 Provider、Base URL 和 Key', value: '3', disabled: getApiConfigProfiles(config).length === 0 && '还没有可编辑的配置' },
-      { name: '复制配置 - 基于已有档案创建副本', value: '4', disabled: getApiConfigProfiles(config).length === 0 && '还没有可复制的配置' },
-      { name: '删除配置 - 移除一个 API 档案', value: '5', disabled: getApiConfigProfiles(config).length === 0 && '还没有可删除的配置' },
-      { name: '返回主菜单', value: 'q' },
+    const choice = await promptSelect(setupText('setup.api.chooseAction'), [
+      { name: setupText('setup.api.actionAdd'), value: '1' },
+      { name: setupText('setup.api.actionSwitch'), value: '2', disabled: getApiConfigProfiles(config).length === 0 && setupText('setup.api.noSwitch') },
+      { name: setupText('setup.api.actionEdit'), value: '3', disabled: getApiConfigProfiles(config).length === 0 && setupText('setup.api.noEdit') },
+      { name: setupText('setup.api.actionCopy'), value: '4', disabled: getApiConfigProfiles(config).length === 0 && setupText('setup.api.noCopy') },
+      { name: setupText('setup.api.actionDelete'), value: '5', disabled: getApiConfigProfiles(config).length === 0 && setupText('setup.api.noDelete') },
+      { name: setupText('setup.api.back'), value: 'q' },
     ])
     console.log('')
     switch (choice) {
@@ -664,14 +690,26 @@ async function configureApi(options: SetupOptions = {}): Promise<TurboFluxConfig
 async function configureFastContextModel(): Promise<TurboFluxConfig> {
   const config = setFastContextModelConfig(await loadConfig(), { mode: 'follow-main' })
   saveConfig(config)
-  console.log(chalk.green('FastContext 始终跟随当前主模型。'))
+  console.log(chalk.green(setupText('setup.fastContext.followMain')))
   return config
 }
 
 async function configureLanguage(options: SetupOptions = {}): Promise<TurboFluxProfile> {
   let profile = loadProfile()
-  const interfaceFromCli = normalizeInterfaceLanguage(options.allLang || options.configLang || options.lang)
-  const outputFromCli = normalizeOutputLanguage(options.allLang || options.aiOutputLang || options.lang)
+  const interfaceInput = options.allLang || options.configLang || options.lang
+  const outputInput = options.allLang || options.aiOutputLang || options.lang
+  const interfaceFromCli = normalizeInterfaceLanguage(interfaceInput)
+  const outputFromCli = normalizeOutputLanguage(outputInput)
+
+  if (options.configLang && !normalizeInterfaceLanguage(options.configLang)) {
+    throw new Error(setupText('setup.language.invalidInterface', { language: options.configLang }, profile))
+  }
+  if (options.allLang && !normalizeInterfaceLanguage(options.allLang)) {
+    throw new Error(setupText('setup.language.invalidShared', { language: options.allLang }, profile))
+  }
+  if (outputFromCli.language === 'custom' && !outputFromCli.custom && !profile.customAiOutputLanguage) {
+    throw new Error(setupText('setup.language.customRequired', undefined, profile))
+  }
 
   if (options.yes || interfaceFromCli || outputFromCli.language) {
     profile = saveProfile({
@@ -679,58 +717,72 @@ async function configureLanguage(options: SetupOptions = {}): Promise<TurboFluxP
       aiOutputLanguage: outputFromCli.language || profile.aiOutputLanguage,
       customAiOutputLanguage: outputFromCli.custom || profile.customAiOutputLanguage,
     })
-    console.log(chalk.green('已保存语言配置。'))
+    console.log(chalk.green(setupText('setup.language.saved', undefined, profile)))
     return profile
   }
 
-  console.log(chalk.cyan('语言配置'))
-  const interfaceLanguage = await promptSelect<TurboFluxInterfaceLanguage>('Setup 界面语言', [
-    { name: '简体中文', value: 'zh-CN' },
+  console.log(chalk.cyan(setupText('setup.language.title', undefined, profile)))
+  const interfaceLanguage = await promptSelect<TurboFluxInterfaceLanguage>(setupText('setup.language.interface', undefined, profile), [
+    { name: setupText('setup.language.simplifiedChinese', undefined, profile), value: 'zh-CN' },
     { name: 'English', value: 'en' },
   ], profile.interfaceLanguage)
   profile = saveProfile({ interfaceLanguage })
 
   console.log('')
-  const aiOutputLanguage = await promptSelect<TurboFluxAiOutputLanguage>('AI 默认输出语言', [
-    { name: '跟随用户语言', value: 'follow-user' },
-    { name: '简体中文', value: 'zh-CN' },
+  const aiOutputLanguage = await promptSelect<TurboFluxAiOutputLanguage>(setupText('setup.language.aiOutput', undefined, profile), [
+    { name: setupText('setup.language.followUser', undefined, profile), value: 'follow-user' },
+    { name: setupText('setup.language.simplifiedChinese', undefined, profile), value: 'zh-CN' },
     { name: 'English', value: 'en' },
     { name: 'Japanese', value: 'ja' },
     { name: 'Korean', value: 'ko' },
-    { name: '自定义语言/语气', value: 'custom' },
+    { name: setupText('setup.language.custom', undefined, profile), value: 'custom' },
   ], profile.aiOutputLanguage)
   let customAiOutputLanguage = profile.customAiOutputLanguage
   if (aiOutputLanguage === 'custom') {
-    customAiOutputLanguage = await promptInput('输入自定义输出语言/语气', {
+    customAiOutputLanguage = await promptInput(setupText('setup.language.customPrompt', undefined, profile), {
       default: customAiOutputLanguage,
       required: true,
     })
   }
   profile = saveProfile({ aiOutputLanguage, customAiOutputLanguage })
-  console.log(chalk.green('已保存语言配置。'))
+  console.log(chalk.green(setupText('setup.language.saved', undefined, profile)))
   return profile
 }
 
 async function configurePersona(options: SetupOptions = {}): Promise<TurboFluxProfile> {
   let profile = loadProfile()
   const fromCli = parseStyleList(options.outputStyle)
-  const defaultFromCli = options.defaultOutputStyle
+  const defaultFromCli = options.defaultOutputStyle?.trim().toLowerCase()
 
   if (options.yes || fromCli || defaultFromCli) {
-    const enabledPersonaIds = fromCli?.filter(id => PERSONA_DEFINITIONS.some(p => p.id === id && !p.isCustom))
-      || profile.enabledPersonaIds
+    if (fromCli === 'skip' && !defaultFromCli) {
+      console.log(chalk.gray(setupText('setup.persona.skipped', undefined, profile)))
+      return profile
+    }
+    if (Array.isArray(fromCli)) {
+      const unknown = fromCli.filter(id => !PERSONA_DEFINITIONS.some(p => p.id === id && !p.isCustom))
+      if (unknown.length > 0) throw new Error(setupText('setup.persona.unknown', { personas: unknown.join(', ') }, profile))
+      if (fromCli.length === 0) throw new Error(setupText('setup.persona.oneRequired', undefined, profile))
+    }
+    let enabledPersonaIds = Array.isArray(fromCli) ? fromCli : [...profile.enabledPersonaIds]
     const defaultPersonaId = defaultFromCli || profile.defaultPersonaId
     if (defaultPersonaId !== 'custom' && !PERSONA_DEFINITIONS.some(p => p.id === defaultPersonaId)) {
-      throw new Error(`Unknown persona "${defaultPersonaId}".`)
+      throw new Error(setupText('setup.persona.unknownDefault', { persona: defaultPersonaId }, profile))
+    }
+    if (defaultPersonaId === 'custom' && !profile.customPersonaPrompt) {
+      throw new Error(setupText('setup.persona.customPromptRequired', undefined, profile))
+    }
+    if (defaultPersonaId !== 'custom' && !enabledPersonaIds.includes(defaultPersonaId)) {
+      enabledPersonaIds = [...enabledPersonaIds, defaultPersonaId]
     }
     profile = saveProfile({ enabledPersonaIds, defaultPersonaId })
-    console.log(chalk.green('已保存人设配置。'))
+    console.log(chalk.green(setupText('setup.persona.saved', undefined, profile)))
     return profile
   }
 
   const available = PERSONA_DEFINITIONS.filter(persona => !persona.isCustom)
-  console.log(chalk.cyan('可用人设 / 输出风格'))
-  const enabledPersonaIds = await promptCheckbox('选择要启用的人设（空格勾选，回车确认）', available.map(persona => {
+  console.log(chalk.cyan(setupText('setup.persona.title', undefined, profile)))
+  const enabledPersonaIds = await promptCheckbox(setupText('setup.persona.selectEnabled', undefined, profile), available.map(persona => {
     const name = profile.interfaceLanguage === 'en' ? persona.nameEn : persona.nameZh
     const desc = profile.interfaceLanguage === 'en' ? persona.descriptionEn : persona.descriptionZh
     return {
@@ -740,7 +792,7 @@ async function configurePersona(options: SetupOptions = {}): Promise<TurboFluxPr
     }
   }))
 
-  if (enabledPersonaIds.length === 0) throw new Error('至少启用一个人设。')
+  if (enabledPersonaIds.length === 0) throw new Error(setupText('setup.persona.oneRequired', undefined, profile))
 
   const defaultChoices = enabledPersonaIds.map(id => {
     const persona = getPersonaDefinition(id)!
@@ -750,28 +802,25 @@ async function configurePersona(options: SetupOptions = {}): Promise<TurboFluxPr
       value: id,
     }
   })
-  const defaultPersonaId = await promptSelect('默认人设', [
+  const defaultPersonaId = await promptSelect(setupText('setup.persona.default', undefined, profile), [
     ...defaultChoices,
-    { name: '自定义人设', value: 'custom' },
+    { name: setupText('setup.persona.custom', undefined, profile), value: 'custom' },
   ], enabledPersonaIds.includes(profile.defaultPersonaId) || profile.defaultPersonaId === 'custom'
     ? profile.defaultPersonaId
     : enabledPersonaIds[0])
   let customPersonaName = profile.customPersonaName
   let customPersonaPrompt = profile.customPersonaPrompt
   if (defaultPersonaId === 'custom') {
-    customPersonaName = await promptInput('自定义人设名称', {
-      default: customPersonaName || 'My TurboFlux',
+    customPersonaName = await promptInput(setupText('setup.persona.customName', undefined, profile), {
+      default: customPersonaName || setupText('setup.persona.defaultCustomName', undefined, profile),
       required: true,
     })
-    customPersonaPrompt = await promptEditor('编辑自定义人设提示词', customPersonaPrompt || [
-      'Use a precise, product-grade engineering style.',
-      'Balance execution speed with careful verification.',
-    ].join('\n'))
-    if (!customPersonaPrompt) throw new Error('自定义人设提示词不能为空。')
+    customPersonaPrompt = await promptEditor(setupText('setup.persona.customPrompt', undefined, profile), customPersonaPrompt || setupText('setup.persona.defaultPrompt', undefined, profile))
+    if (!customPersonaPrompt) throw new Error(setupText('setup.persona.customPromptEmpty', undefined, profile))
   }
 
   profile = saveProfile({ enabledPersonaIds, defaultPersonaId, customPersonaName, customPersonaPrompt })
-  console.log(chalk.green('已保存人设配置。'))
+  console.log(chalk.green(setupText('setup.persona.saved', undefined, profile)))
   return profile
 }
 
@@ -779,13 +828,13 @@ async function configureCustomInstructions(options: SetupOptions = {}): Promise<
   const profile = loadProfile()
   if (options.yes || options.customInstructions !== undefined) {
     const next = saveProfile({ customInstructions: options.customInstructions ?? profile.customInstructions })
-    console.log(chalk.green('已保存自定义指令。'))
+    console.log(chalk.green(setupText('setup.instructions.saved', undefined, next)))
     return next
   }
 
-  const customInstructions = await promptEditor('编辑全局自定义指令（可留空）', profile.customInstructions)
+  const customInstructions = await promptEditor(setupText('setup.instructions.edit', undefined, profile), profile.customInstructions)
   const next = saveProfile({ customInstructions })
-  console.log(chalk.green('已保存自定义指令。'))
+  console.log(chalk.green(setupText('setup.instructions.saved', undefined, next)))
   return next
 }
 
@@ -796,26 +845,26 @@ async function configureApprovalPolicy(options: SetupOptions = {}): Promise<Turb
   if (options.approvalPolicy) {
     const normalized = options.approvalPolicy.trim().toLowerCase()
     if (!['ask', 'agent', 'full', 'request', 'auto'].includes(normalized)) {
-      throw new Error('Approval policy must be ask, agent, or full.')
+      throw new Error(setupText('setup.approval.invalid', undefined, profile))
     }
     approvalPolicy = normalizeApprovalPolicy(normalized)
   } else if (options.yes) {
     approvalPolicy = config.approvalPolicy
   } else {
-    const labels: Record<ApprovalPolicy, { zh: string; en: string }> = {
-      ask: { zh: '请求批准 - 修改文件、执行命令和外部操作前询问', en: 'Request approval - ask before changes, commands, and external actions' },
-      agent: { zh: '替我审批 - 低风险工作区操作自动继续，检测到风险时询问', en: 'Approve low risk - continue routine workspace actions and ask on risk' },
-      full: { zh: '跳过审批提示 - 拒绝规则与沙箱边界仍然生效', en: 'Skip approval prompts - deny rules and sandbox boundaries remain active' },
+    const labelKeys: Record<ApprovalPolicy, MessageKey> = {
+      ask: 'setup.approval.ask',
+      agent: 'setup.approval.agent',
+      full: 'setup.approval.full',
     }
-    approvalPolicy = await promptSelect('审批策略', (['ask', 'agent', 'full'] as ApprovalPolicy[]).map(policy => ({
-      name: zh(profile, labels[policy].zh, labels[policy].en),
+    approvalPolicy = await promptSelect(setupText('setup.approval.title', undefined, profile), (['ask', 'agent', 'full'] as ApprovalPolicy[]).map(policy => ({
+      name: setupText(labelKeys[policy], undefined, profile),
       value: policy,
     })), config.approvalPolicy)
   }
 
   const next = { ...config, approvalPolicy }
   saveConfig(next)
-  console.log(chalk.green(`审批策略：${APPROVAL_POLICY_LABELS[approvalPolicy]}`))
+  console.log(chalk.green(setupText('setup.approval.saved', { policy: approvalPolicyLabel(approvalPolicy, createTranslator(profile.interfaceLanguage)) }, profile)))
   return next
 }
 
@@ -825,7 +874,7 @@ async function runFullInitialization(options: SetupOptions = {}): Promise<void> 
   await configureApprovalPolicy(options)
   profile = await configurePersona(options)
   if (!options.yes) {
-    const editCustom = await promptConfirm('现在编辑全局自定义指令？', false)
+    const editCustom = await promptConfirm(setupText('setup.init.editInstructions', undefined, profile), false)
     if (editCustom) profile = await configureCustomInstructions(options)
   } else if (options.customInstructions !== undefined) {
     profile = await configureCustomInstructions(options)
@@ -835,7 +884,7 @@ async function runFullInitialization(options: SetupOptions = {}): Promise<void> 
   console.log('')
   printSummary(config, profile)
   console.log('')
-  console.log(chalk.cyan('完成。现在可以运行：turboflux <workspace>'))
+  console.log(chalk.cyan(setupText('setup.init.done', undefined, profile)))
 }
 
 async function showCurrentConfiguration(): Promise<void> {
@@ -847,29 +896,29 @@ async function resetAllConfiguration(options: SetupOptions = {}): Promise<void> 
   let profile = loadProfile()
   const ok = options.yes
     ? true
-    : await promptConfirm('确认重置本机 TurboFlux 配置？API Key、模型配置、人设和语言都会恢复默认。', false)
+    : await promptConfirm(setupText('setup.reset.confirm', undefined, profile), false)
   if (!ok) {
-    console.log(chalk.yellow('已取消。'))
+    console.log(chalk.yellow(setupText('common.cancelled', undefined, profile)))
     return
   }
 
   saveConfig(createEmptyConfig())
   profile = resetProfile()
-  console.log(chalk.green(zh(profile, '已重置配置。', 'Configuration reset.')))
+  console.log(chalk.green(setupText('setup.reset.done', undefined, profile)))
 }
 
 async function promptMainAction(profile: TurboFluxProfile): Promise<SetupAction> {
-  console.log(chalk.cyan(zh(profile, '选择功能', 'Select action')))
-  console.log('  1. 完整初始化 - 语言 + API + FastContext + 人设 + 自定义指令')
-  console.log('  2. API 配置档案')
-  console.log('  3. 语言配置')
-  console.log('  4. 人设 / 输出风格')
-  console.log('  5. 全局自定义指令')
-  console.log('  6. 审批策略')
-  console.log('  7. 查看当前配置')
-  console.log('  8. 重置本机配置')
-  console.log('  Q. 退出')
-  const choice = await promptChoice('输入选项', ['1', '2', '3', '4', '5', '6', '7', '8', 'q'])
+  console.log(chalk.cyan(setupText('setup.menu.title', undefined, profile)))
+  console.log(`  ${setupText('setup.menu.init', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.api', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.language', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.persona', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.instructions', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.approval', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.show', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.reset', undefined, profile)}`)
+  console.log(`  ${setupText('setup.menu.exit', undefined, profile)}`)
+  const choice = await promptChoice(setupText('setup.menu.input', undefined, profile), ['1', '2', '3', '4', '5', '6', '7', '8', 'q'])
   switch (choice) {
     case '1': return 'init'
     case '2': return 'api'

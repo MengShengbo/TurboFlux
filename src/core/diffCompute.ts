@@ -29,7 +29,7 @@ export type DiffLineKind = 'context' | 'add' | 'remove'
 export interface DiffLine {
   kind: DiffLineKind
   text: string
-  /** 1-based line number in the original (preimage) file. Set for context+remove. */
+  /** 1-based line number in the original file. Set for context+remove. */
   oldLine?: number
   /** 1-based line number in the new (postimage) file. Set for context+add. */
   newLine?: number

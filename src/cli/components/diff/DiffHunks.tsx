@@ -1,9 +1,9 @@
 import React from 'react'
 import { Box, Text } from 'ink'
-import cliTruncate from 'cli-truncate'
 import type { DiffHunk, DiffLine } from '../../../core/diffCompute'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
+import { useI18n } from '../../i18n/index'
 
 interface DiffHunksProps {
   hunks: DiffHunk[]
@@ -11,23 +11,28 @@ interface DiffHunksProps {
   addedColor?: string
   removedColor?: string
   contextColor?: string
+  availableWidth?: number
 }
 
 export function DiffHunks({
   hunks,
-  maxLines = 30,
+  maxLines,
   addedColor = 'green',
   removedColor = 'red',
   contextColor,
+  availableWidth,
 }: DiffHunksProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { columns } = useTerminalSize()
   const nodes: React.ReactNode[] = []
   let totalRows = 0
   let renderedRows = 0
   const lineNumberWidth = getLineNumberWidth(hunks)
   const gutterWidth = lineNumberWidth * 2 + 5
-  const textWidth = Math.max(24, columns - gutterWidth - 10)
+  const panelWidth = Math.max(24, availableWidth ?? columns)
+  const textWidth = Math.max(8, panelWidth - gutterWidth)
+  const rowLimit = maxLines === undefined ? Number.POSITIVE_INFINITY : Math.max(0, maxLines)
   const resolvedAddedColor = addedColor === 'green' ? theme.diffAddedWord : addedColor
   const resolvedRemovedColor = removedColor === 'red' ? theme.diffRemovedWord : removedColor
   const resolvedContextColor = contextColor ?? theme.inactive
@@ -35,7 +40,7 @@ export function DiffHunks({
   for (let i = 0; i < hunks.length; i += 1) {
     const hunk = hunks[i]!
     totalRows += 1 + hunk.lines.length
-    const remainingRows = maxLines - renderedRows
+    const remainingRows = rowLimit - renderedRows
     if (remainingRows <= 0) continue
 
     const visibleLines = hunk.lines.slice(0, Math.max(0, remainingRows - 1))
@@ -71,7 +76,7 @@ export function DiffHunks({
       {nodes}
       {totalRows > renderedRows && (
         <Text color={theme.inactive}>
-          {`  ... ${totalRows - renderedRows} more diff lines hidden`}
+          {t('ui.diff.moreHidden', { count: totalRows - renderedRows })}
         </Text>
       )}
     </>
@@ -101,14 +106,14 @@ function DiffLineRow({
 }) {
   const oldNumber = formatLineNumber(line.oldLine, lineNumberWidth)
   const newNumber = formatLineNumber(line.newLine, lineNumberWidth)
-  const visibleText = cliTruncate(line.text, textWidth, { position: 'end' })
-
   if (line.kind === 'add') {
     return (
       <Box backgroundColor={addedBackground}>
         <Text color={gutterColor}>{oldNumber} {newNumber} </Text>
         <Text color={addedColor} bold>+ </Text>
-        <Text color={addedColor}>{visibleText}</Text>
+        <Box width={textWidth}>
+          <Text color={addedColor} wrap="wrap">{line.text || ' '}</Text>
+        </Box>
       </Box>
     )
   }
@@ -118,7 +123,9 @@ function DiffLineRow({
       <Box backgroundColor={removedBackground}>
         <Text color={gutterColor}>{oldNumber} {newNumber} </Text>
         <Text color={removedColor} bold>- </Text>
-        <Text color={removedColor}>{visibleText}</Text>
+        <Box width={textWidth}>
+          <Text color={removedColor} wrap="wrap">{line.text || ' '}</Text>
+        </Box>
       </Box>
     )
   }
@@ -127,7 +134,9 @@ function DiffLineRow({
     <Box>
       <Text color={gutterColor}>{oldNumber} {newNumber} </Text>
       <Text color={contextColor}>  </Text>
-      <Text color={contextColor}>{visibleText}</Text>
+      <Box width={textWidth}>
+        <Text color={contextColor} wrap="wrap">{line.text || ' '}</Text>
+      </Box>
     </Box>
   )
 }

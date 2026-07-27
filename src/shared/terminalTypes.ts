@@ -27,8 +27,15 @@ export interface TerminalSessionInfo {
   updatedAt: number
   isAgentSession: boolean
   title: string
+  command?: string
   runtimeTaskId?: string
   logPath?: string
+  outputBytes?: number
+  omittedBytes?: number
+  firstSeq?: number
+  lastSeq?: number
+  recovered?: boolean
+  canWrite?: boolean
   exitCode?: number | null
   exitSignal?: string | null
   error?: string
@@ -63,7 +70,15 @@ export interface TerminalBufferResult {
   success: boolean
   chunks?: TerminalOutputChunk[]
   session?: TerminalSessionInfo
+  firstSeq?: number
+  lastSeq?: number
+  omittedBytes?: number
   error?: string
+}
+
+export interface TerminalStartCommandResult {
+  sessionId: string
+  session: TerminalSessionInfo
 }
 
 export interface TerminalShellsResult {

@@ -12,11 +12,11 @@ describe('ThinkingBlock', () => {
     effort: 'high' as const,
   }
 
-  it('keeps completed reasoning compact with a visible preview', () => {
+  it('keeps completed reasoning private while collapsed', () => {
     const output = renderToString(<ThinkingBlock trace={trace} expanded={false} />, { columns: 88 })
 
     expect(output).toContain('Thought · high · 4.2s · 128 tokens')
-    expect(output).toContain('Inspect architecture')
+    expect(output).not.toContain('Inspect architecture')
   })
 
   it('shows complete reasoning content when expanded', () => {

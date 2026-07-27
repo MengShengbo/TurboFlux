@@ -6,7 +6,10 @@ import type { AgentTurn, ApprovalPolicy, ToolCall } from '../shared/agentTypes'
 import { stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import { commandRegistry } from './commands/index'
 import { ConversationManager } from './conversations/manager'
-import type { SandboxOptions } from '../core/sandbox/types'
+import { loadProfile } from '../core/profile'
+import { createTranslator, type Translator } from './i18n/index'
+
+const DEFAULT_TRANSLATOR = createTranslator('en')
 
 export interface SingleShotOptions {
   workspacePath: string
@@ -14,7 +17,6 @@ export interface SingleShotOptions {
   prompt: string
   verbose: boolean
   approvalPolicy?: ApprovalPolicy
-  sandbox?: SandboxOptions
   mcpServers?: string[]
   stdout?: Pick<NodeJS.WriteStream, 'write'>
   stderr?: Pick<NodeJS.WriteStream, 'write'>
@@ -31,6 +33,7 @@ export class SingleShotProgressReporter {
     private readonly write: OutputWriter,
     private readonly verbose = false,
     private readonly now: () => number = Date.now,
+    private readonly t: Translator = DEFAULT_TRANSLATOR,
   ) {}
 
   start(model: string, workspacePath: string): void {
@@ -42,14 +45,14 @@ export class SingleShotProgressReporter {
       case 'run:state':
         if (event.state.phase !== this.lastPhase && event.state.phase !== 'idle') {
           this.lastPhase = event.state.phase
-          this.write(`[${event.state.phase}]\n`)
+          this.write(`[${formatRunPhase(event.state.phase, this.t)}]\n`)
         }
         break
       case 'stream:thinking_delta': {
         const timestamp = this.now()
         if (timestamp - this.lastThinkingUpdate >= 5_000) {
           this.lastThinkingUpdate = timestamp
-          this.write('[thinking]\n')
+          this.write(`[${this.t('single.thinking')}]\n`)
         }
         break
       }
@@ -66,25 +69,27 @@ export class SingleShotProgressReporter {
         break
       }
       case 'model:protocol':
-        if (event.phase === 'fallback') this.write(`[protocol fallback] ${event.message || event.url}\n`)
+        if (event.phase === 'fallback') this.write(`[${this.t('single.protocolFallback')}] ${event.message || event.url}\n`)
         break
       case 'fast_context:event':
         if (event.event.type === 'phase') this.write(`[FastContext] ${event.event.phase}\n`)
         break
       case 'subagent:start':
-        if (event.runKind === 'spawn_agent') this.write(`[agent] ${event.label} started\n`)
+        if (event.runKind === 'spawn_agent') this.write(`[${this.t('single.agent')}] ${this.t('single.agentStarted', { agent: event.label })}\n`)
         break
       case 'subagent:end':
-        if (event.runKind === 'spawn_agent') this.write(`[agent] ${event.agentType} ${event.ok ? 'completed' : 'failed'} · ${formatElapsed(event.elapsedMs)}\n`)
+        if (event.runKind === 'spawn_agent') this.write(`[${this.t('single.agent')}] ${this.t('single.agentFinished', { agent: event.agentType, status: this.t(event.ok ? 'single.completed' : 'single.failed'), elapsed: formatElapsed(event.elapsedMs) })}\n`)
         break
       case 'notification':
-        if (event.level === 'warning' || event.level === 'error') this.write(`[${event.level}] ${singleLine(event.message, 240)}\n`)
+        if (event.level === 'warning' || event.level === 'error') {
+          this.write(`[${this.t(event.level === 'warning' ? 'single.warning' : 'single.error')}] ${singleLine(event.message, 240)}\n`)
+        }
         break
       case 'ask:user':
-        this.write(`[input required] ${singleLine(event.question, 240)}\n`)
+        this.write(`[${this.t('single.inputRequired')}] ${singleLine(event.question, 240)}\n`)
         break
       case 'error':
-        this.write(`[error] ${singleLine(event.error, 240)}\n`)
+        this.write(`[${this.t('single.error')}] ${singleLine(event.error, 240)}\n`)
         break
     }
   }
@@ -94,9 +99,10 @@ export async function runSingleShot(options: SingleShotOptions): Promise<void> {
   const stdout = options.stdout || process.stdout
   const stderr = options.stderr || process.stderr
   const writeProgress = (text: string) => { stderr.write(text) }
+  const t = createTranslator(loadProfile().interfaceLanguage)
 
-  if (!options.config.apiKey) throw new Error('No API key configured. Run "turboflux setup" first.')
-  if (!options.config.model) throw new Error('No model is mounted. Configure a model or run TurboFlux interactively and use /model.')
+  if (!options.config.apiKey) throw new Error(t('single.noApiKey'))
+  if (!options.config.model) throw new Error(t('single.noModel'))
 
   const workspaceName = basename(options.workspacePath) || 'workspace'
   const runtime = createAgentRuntime({
@@ -105,17 +111,13 @@ export async function runSingleShot(options: SingleShotOptions): Promise<void> {
     config: options.config,
     conversationPrefix: 'cli-command',
     approvalPolicy: options.approvalPolicy,
-    sandbox: options.sandbox,
     connectMcp: Boolean(options.mcpServers?.length),
     mcpServers: options.mcpServers,
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
   })
-  const reporter = new SingleShotProgressReporter(writeProgress, options.verbose)
-  const sandboxStatus = runtime.toolExecutor.getSandboxStatus()
-  if (sandboxStatus.warning) writeProgress(`[sandbox] ${sandboxStatus.warning}\n`)
-  if (!sandboxStatus.available) writeProgress(`[sandbox unavailable] ${sandboxStatus.reason}\n`)
+  const reporter = new SingleShotProgressReporter(writeProgress, options.verbose, Date.now, t)
   const conversations = new ConversationManager(runtime.engine, options.config, options.workspacePath, error => {
-    if (error) writeProgress(`[warning] Conversation history unavailable: ${singleLine(error.message, 240)}\n`)
+    if (error) writeProgress(`[${t('single.warning')}] ${t('single.historyUnavailable', { message: singleLine(error.message, 240) })}\n`)
   })
   const unsubscribe = runtime.engine.subscribe(event => {
     conversations.recordEvent(event)
@@ -139,6 +141,19 @@ function finalAssistantText(turns: AgentTurn[]): string {
   return finalTurn
     ? stripTextToolCallMarkup(finalTurn.content, { stripIncomplete: true }).trim()
     : ''
+}
+
+function formatRunPhase(phase: string, t: Translator): string {
+  if (phase === 'idle') return t('single.phase.idle')
+  if (phase === 'thinking') return t('single.phase.thinking')
+  if (phase === 'tool_running') return t('single.phase.toolRunning')
+  if (phase === 'awaiting_approval') return t('single.phase.awaitingApproval')
+  if (phase === 'awaiting_input') return t('single.phase.awaitingInput')
+  if (phase === 'paused') return t('single.phase.paused')
+  if (phase === 'aborting') return t('single.phase.aborting')
+  if (phase === 'recoverable_error') return t('single.phase.recoverableError')
+  if (phase === 'completed') return t('single.phase.completed')
+  return phase
 }
 
 function summarizeToolCall(toolCall: ToolCall, verbose: boolean): string {

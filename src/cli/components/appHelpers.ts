@@ -3,16 +3,19 @@ import type { ModelPreset } from '../../core/config'
 import type { ModelDiscoveryResult } from '../../core/modelDiscovery'
 import type { Message } from './messages/Messages'
 import type { ToolStatus } from './tools/ToolCallTree'
+import { createTranslator, type Translator } from '../i18n/index'
+
+const DEFAULT_TRANSLATOR = createTranslator('en')
 
 function isMessageRole(role: string): role is Message['role'] {
   return role === 'user' || role === 'assistant' || role === 'system'
 }
 
-export function formatTaskToolSummary(completed: number, total: number, running: number, errored: number): string {
-  if (total === 0) return 'planning'
-  const parts = [`tools ${completed}/${total}`]
-  if (running > 0) parts.push(`${running} running`)
-  if (errored > 0) parts.push(`${errored} failed`)
+export function formatTaskToolSummary(completed: number, total: number, running: number, errored: number, t: Translator = DEFAULT_TRANSLATOR): string {
+  if (total === 0) return t('ui.task.planning')
+  const parts = [t('ui.task.tools', { completed, total })]
+  if (running > 0) parts.push(t('ui.task.running', { count: running }))
+  if (errored > 0) parts.push(t('ui.task.failed', { count: errored }))
   return parts.join(', ')
 }
 
@@ -32,12 +35,9 @@ export function isThinkingToggleShortcut(input: string, ctrl: boolean): boolean 
 export function resolveAssistantStreamDisplay(
   visibleText: string,
   thinkingText: string,
-  hasToolOutput: boolean,
-  interrupted: boolean,
+  _hasToolOutput: boolean,
+  _interrupted: boolean,
 ): { visibleText: string; thinkingText: string } {
-  if (!interrupted && !hasToolOutput && !visibleText.trim() && thinkingText.trim()) {
-    return { visibleText: thinkingText, thinkingText: '' }
-  }
   return { visibleText, thinkingText }
 }
 
@@ -50,29 +50,29 @@ export function formatElapsed(ms: number): string {
   return `${minutes}m${rest.toString().padStart(2, '0')}s`
 }
 
-export function formatTaskProgressLabel(progress: number): string {
-  if (progress >= 95 && progress < 100) return 'finishing'
+export function formatTaskProgressLabel(progress: number, t: Translator = DEFAULT_TRANSLATOR): string {
+  if (progress >= 95 && progress < 100) return t('ui.task.finishing')
   if (progress > 0 && progress < 95) return `${Math.round(progress)}%`
   return ''
 }
 
-export function formatTaskToolName(name: string): string {
+export function formatTaskToolName(name: string, t: Translator = DEFAULT_TRANSLATOR): string {
   switch (name) {
-    case 'read_file': return 'read'
-    case 'read_file_full': return 'read full'
-    case 'search_content': return 'search'
-    case 'search_files': return 'find files'
-    case 'search_symbols': return 'symbols'
-    case 'get_codemap': return 'codemap'
-    case 'write_file': return 'write'
-    case 'replace_file': return 'replace'
-    case 'edit_file': return 'edit'
-    case 'multi_edit': return 'multi-edit'
-    case 'run_command': return 'shell'
-    case 'read_terminal': return 'read terminal'
-    case 'write_terminal': return 'write terminal'
-    case 'list_terminals': return 'list terminals'
-    case 'kill_terminal': return 'stop terminal'
+    case 'read_file': return t('ui.task.tool.read')
+    case 'read_file_full': return t('ui.task.tool.readFull')
+    case 'search_content': return t('ui.task.tool.search')
+    case 'search_files': return t('ui.task.tool.findFiles')
+    case 'search_symbols': return t('ui.task.tool.symbols')
+    case 'get_codemap': return t('ui.task.tool.codemap')
+    case 'write_file': return t('ui.task.tool.write')
+    case 'replace_file': return t('ui.task.tool.replace')
+    case 'edit_file': return t('ui.task.tool.edit')
+    case 'multi_edit': return t('ui.task.tool.multiEdit')
+    case 'run_command': return t('ui.task.tool.shell')
+    case 'read_terminal': return t('ui.task.tool.readTerminal')
+    case 'write_terminal': return t('ui.task.tool.writeTerminal')
+    case 'list_terminals': return t('ui.task.tool.listTerminals')
+    case 'kill_terminal': return t('ui.task.tool.stopTerminal')
     default: return name
   }
 }

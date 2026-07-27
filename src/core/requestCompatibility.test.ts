@@ -31,6 +31,20 @@ describe('request compatibility', () => {
     expect(body).toEqual({ reasoning: { effort: 'xhigh' } })
   })
 
+  it('removes unsupported Responses verbosity without leaving an empty text object', () => {
+    const body = { text: { verbosity: 'low' }, stream: true }
+
+    expect(removeOpenAICompatibleRequestParam(body, 'text.verbosity')).toBe(true)
+    expect(body).toEqual({ stream: true })
+  })
+
+  it('maps a bare unsupported verbosity field back to Responses text verbosity', () => {
+    const body = { text: { verbosity: 'low' }, stream: true }
+
+    expect(removeOpenAICompatibleRequestParam(body, 'verbosity')).toBe(true)
+    expect(body).toEqual({ stream: true })
+  })
+
   it('strips nested Anthropic cache controls without changing content', () => {
     const body: Record<string, unknown> = {
       messages: [{ role: 'user', content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } }] }],

@@ -1,8 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { McpServerConfig, McpToolInfo } from './types'
-import type { ProcessSandbox } from '../sandbox/processSandbox'
-import type { SandboxSpawnPlan } from '../sandbox/types'
 
 export interface McpConnection {
   name: string
@@ -15,22 +13,11 @@ export interface McpConnection {
 
 export class McpClient {
   private connections: Map<string, McpConnection> = new Map()
-  private spawnPlans: Map<string, SandboxSpawnPlan> = new Map()
-
-  constructor(
-    private readonly processSandbox?: ProcessSandbox,
-    private readonly workspacePath: string = process.cwd(),
-  ) {}
 
   private buildEnvironment(config: McpServerConfig): Record<string, string> {
-    const defaultNames = process.platform === 'win32'
-      ? ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']
-      : ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR']
-    const environment: Record<string, string> = {}
-    for (const name of new Set([...defaultNames, ...(config.inheritEnv || [])])) {
-      const value = process.env[name]
-      if (typeof value === 'string') environment[name] = value
-    }
+    const environment = Object.fromEntries(
+      Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    )
     return { ...environment, ...(config.env || {}) }
   }
 
@@ -54,28 +41,13 @@ export class McpClient {
 
     try {
       const environment = this.buildEnvironment(config)
-      const plan = this.processSandbox?.prepare({
-        command: config.command,
-        args: config.args || [],
-        cwd: this.workspacePath,
-        env: environment,
-        trustedEnvironment: true,
-      })
-      const transport = new StdioClientTransport(plan ? {
-        command: plan.command,
-        args: plan.args,
-        env: plan.env as Record<string, string>,
-        cwd: plan.cwd,
-        stderr: 'pipe',
-      } : {
+      const transport = new StdioClientTransport({
         command: config.command,
         args: config.args || [],
         env: environment,
-        cwd: this.workspacePath,
         stderr: 'pipe',
       })
       conn.transport = transport
-      if (plan) this.spawnPlans.set(name, plan)
       transport.stderr?.on('data', () => {})
       await client.connect(transport)
       conn.status = 'connected'
@@ -84,7 +56,6 @@ export class McpClient {
       try {
         await conn.transport?.close()
       } catch {}
-      this.cleanupConnection(name, true)
       conn.status = 'error'
       conn.error = err.message
     }
@@ -130,15 +101,8 @@ export class McpClient {
     try {
       await conn.transport?.close()
     } catch {}
-    this.cleanupConnection(name, true)
     conn.status = 'closed'
     this.connections.delete(name)
-  }
-
-  private cleanupConnection(name: string, force: boolean): void {
-    const plan = this.spawnPlans.get(name)
-    this.spawnPlans.delete(name)
-    this.processSandbox?.cleanupProcess(plan, force)
   }
 
   async disconnectAll(): Promise<void> {

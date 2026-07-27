@@ -12,7 +12,7 @@ This public repository contains:
 
 - Ink CLI surface in `src/cli/`.
 - Shared agent runtime, system prompt, model config, skills, MCP, and task logic in `src/core/`.
-- Tool implementations, local history, and memory utilities in `src/tools/`.
+- Tool execution and memory utilities in `src/tools/`.
 - Shared contracts in `src/shared/` and `src/state/`.
 
 ## Working Rules

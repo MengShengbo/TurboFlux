@@ -36,7 +36,6 @@ export interface ContextSegment {
   summary: string
   isModelGenerated: boolean
   kind?: 'recap' | 'compact' | 'manual' | 'structured'
-  checkpointId?: string
   originalCharCount: number
   isValid: boolean
   createdAt?: number

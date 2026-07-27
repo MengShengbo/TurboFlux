@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_PROFILE } from '../profile'
 import { createAgentRuntime } from './agentRuntime'
 
 describe('createAgentRuntime runtime tasks', () => {
@@ -23,7 +24,6 @@ describe('createAgentRuntime runtime tasks', () => {
     })
 
     try {
-      expect(runtime.toolExecutor.getSandboxStatus().policy).toBe('workspace')
     } finally {
       await runtime.destroy()
       rmSync(workspace, { recursive: true, force: true })
@@ -36,7 +36,6 @@ describe('createAgentRuntime runtime tasks', () => {
       workspacePath: workspace,
       workspaceName: 'runtime-test',
       conversationId: 'conversation-1',
-      sandboxPolicy: 'full',
       connectMcp: false,
       config: {
         provider: 'custom',
@@ -61,6 +60,55 @@ describe('createAgentRuntime runtime tasks', () => {
         expect.objectContaining({ kind: 'shell', status: 'completed', ownerSessionId: 'conversation-1' }),
       ])
       expect(finishedTasks).toEqual([runtime.runtimeTaskManager.listTasks()[0].id])
+    } finally {
+      await runtime.destroy()
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('applies global configuration to every runtime consumer', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
+    const runtime = createAgentRuntime({
+      workspacePath: workspace,
+      workspaceName: 'runtime-test',
+      config: {
+        provider: 'openai',
+        apiKey: 'openai-key',
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-5.6',
+        contextWindow: 1_050_000,
+        maxTokens: 16_384,
+        approvalPolicy: 'ask',
+        gitEnabled: false,
+      },
+    })
+
+    try {
+      runtime.applyConfiguration({
+        provider: 'anthropic',
+        apiKey: 'anthropic-key',
+        baseUrl: 'https://api.anthropic.com/v1',
+        model: 'claude-opus-4-8',
+        contextWindow: 1_000_000,
+        maxTokens: 8192,
+        approvalPolicy: 'full',
+        gitEnabled: true,
+      }, {
+        profile: {
+          ...DEFAULT_PROFILE,
+          enabledPersonaIds: ['architect'],
+          defaultPersonaId: 'architect',
+        },
+      })
+
+      expect(runtime.stateProvider.getActiveConfig()).toEqual(expect.objectContaining({
+        provider: 'anthropic',
+        defaultModel: 'claude-opus-4-8',
+        contextWindow: 1_000_000,
+        maxTokens: 8192,
+      }))
+      expect(runtime.engine.getApprovalPolicy()).toBe('full')
+      expect(runtime.engine.getGitState().enabled).toBe(true)
     } finally {
       await runtime.destroy()
       rmSync(workspace, { recursive: true, force: true })

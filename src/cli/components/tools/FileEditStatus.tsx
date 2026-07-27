@@ -5,6 +5,7 @@ import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { SpinnerGlyph } from '../spinner/SpinnerGlyph'
 import type { ToolStatus } from './ToolCallTree'
+import { useI18n, type Translator } from '../../i18n/index'
 
 const FILE_EDIT_TOOLS = new Set(['write_file', 'replace_file', 'edit_file', 'multi_edit', 'delete_file'])
 
@@ -21,6 +22,7 @@ interface FileEditStatusProps {
 
 export function FileEditStatus({ tools, draft }: FileEditStatusProps) {
   const theme = useTheme()
+  const { t } = useI18n()
   const { columns } = useTerminalSize()
   const active = [...tools].reverse().find(tool => tool.status === 'running' && FILE_EDIT_TOOLS.has(tool.name))
 
@@ -28,13 +30,13 @@ export function FileEditStatus({ tools, draft }: FileEditStatusProps) {
 
   const path = active ? getPathFromArgs(active.args) : getPathFromPartialJson(draft?.partialJson)
   const name = active?.name ?? draft?.name ?? 'edit_file'
-  const verb = active ? getVerb(name) : getDraftVerb(name)
-  const size = !active && draft ? ` - ${formatBytes(draft.partialJson.length)} prepared` : ''
-  const label = `${path ? `${verb} ${path}` : `${verb} file`}${size}`
+  const verb = active ? getVerb(name, t) : getDraftVerb(name, t)
+  const size = !active && draft ? t('ui.file.prepared', { size: formatBytes(draft.partialJson.length) }) : ''
+  const label = `${path ? `${verb} ${path}` : t('ui.file.target', { verb })}${size}`
 
   return (
     <Box marginBottom={0}>
-      <Text color={theme.inactive}>File </Text>
+      <Text color={theme.inactive}>{t('ui.file.label')} </Text>
       <SpinnerGlyph
         lastActivity={active?.startTime ?? draft?.updatedAt}
         label={cliTruncate(label, Math.max(20, columns - 16), { position: 'middle' })}
@@ -47,25 +49,25 @@ export function isFileEditToolName(name: string): boolean {
   return FILE_EDIT_TOOLS.has(name)
 }
 
-function getVerb(name: string): string {
+function getVerb(name: string, t: Translator): string {
   switch (name) {
-    case 'write_file': return 'Writing'
-    case 'replace_file': return 'Replacing'
-    case 'edit_file': return 'Editing'
-    case 'multi_edit': return 'Applying edits to'
-    case 'delete_file': return 'Deleting'
-    default: return 'Editing'
+    case 'write_file': return t('ui.file.writing')
+    case 'replace_file': return t('ui.file.replacing')
+    case 'edit_file': return t('ui.file.editing')
+    case 'multi_edit': return t('ui.file.applying')
+    case 'delete_file': return t('ui.file.deleting')
+    default: return t('ui.file.editing')
   }
 }
 
-function getDraftVerb(name: string): string {
+function getDraftVerb(name: string, t: Translator): string {
   switch (name) {
-    case 'write_file': return 'Preparing write for'
-    case 'replace_file': return 'Preparing replacement for'
-    case 'edit_file': return 'Preparing edit for'
-    case 'multi_edit': return 'Preparing edits for'
-    case 'delete_file': return 'Preparing delete for'
-    default: return 'Preparing edit for'
+    case 'write_file': return t('ui.file.preparingWrite')
+    case 'replace_file': return t('ui.file.preparingReplace')
+    case 'edit_file': return t('ui.file.preparingEdit')
+    case 'multi_edit': return t('ui.file.preparingEdits')
+    case 'delete_file': return t('ui.file.preparingDelete')
+    default: return t('ui.file.preparingEdit')
   }
 }
 

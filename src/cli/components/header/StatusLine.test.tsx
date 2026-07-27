@@ -27,6 +27,7 @@ describe('StatusLine', () => {
           maxTokens: 16_384,
           reasoning: { effort: 'xhigh' },
           approvalPolicy: 'agent',
+          gitEnabled: true,
         }}
         tokenUsage={{ source: 'unknown' }}
       />,
@@ -50,9 +51,10 @@ describe('StatusLine', () => {
           maxTokens: 16_384,
           reasoning: { effort: 'high' },
           approvalPolicy: 'agent',
+          gitEnabled: true,
         }}
         tokenUsage={{ source: 'unknown' }}
-        gitEnabled
+        gitState={{ enabled: true, phase: 'detecting', snapshot: null, updatedAt: 1 }}
         mcpCount={4}
       />,
       72,
@@ -61,21 +63,6 @@ describe('StatusLine', () => {
     expect(output.split('\n')).toHaveLength(1)
     expect(output).toContain('approval:agent')
     expect(output).not.toContain('mcp:4')
-  })
-
-  it('surfaces an active security engagement in the primary status line', () => {
-    const output = renderStatus(
-      <StatusLine
-        config={{
-          provider: 'openai', apiKey: 'test', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6',
-          contextWindow: 200_000, maxTokens: 16_384, approvalPolicy: 'ask',
-        }}
-        tokenUsage={{ source: 'unknown' }}
-        securityProfile={{ mode: 'red', active: true, engagementId: 'sec-test', targets: ['example.com'] }}
-      />,
-      120,
-    )
-    expect(output).toContain('security:red')
   })
 
   it('adds secondary runtime state when space is available', () => {
@@ -89,10 +76,10 @@ describe('StatusLine', () => {
           contextWindow: 200_000,
           maxTokens: 16_384,
           approvalPolicy: 'agent',
+          gitEnabled: true,
         }}
         tokenUsage={{ source: 'provider', input: 40_000, output: 512, cached: 32_000 }}
-        gitEnabled
-        gitSnapshot={{
+        gitState={{ enabled: true, phase: 'ready', updatedAt: 1, snapshot: {
           branch: 'main',
           head: 'abc123',
           upstream: 'origin/main',
@@ -106,7 +93,7 @@ describe('StatusLine', () => {
           untrackedCount: 0,
           conflictedCount: 0,
           recentCommits: [],
-        }}
+        }}}
         mcpCount={2}
         terminalCount={1}
       />,

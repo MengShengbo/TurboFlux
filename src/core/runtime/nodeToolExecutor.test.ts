@@ -8,6 +8,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandOutput, Result } from '../../tools/executor.js'
 import { NodeToolExecutor } from './nodeToolExecutor.js'
+import { RuntimeTaskManager } from './runtimeTaskManager.js'
 import { hashText } from '../fileIO.js'
 
 function makeTempDir(prefix: string): string {
@@ -29,27 +30,13 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('NodeToolExecutor sandbox policies', () => {
-  it('applies red-team target scope checks to the shared command validation path', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
-    executor.setSecurityProfile({
-      mode: 'red', active: true, engagementId: 'sec-test', targets: ['example.com'], objective: 'bounded validation',
-      startedAt: Date.now(), expiresAt: Date.now() + 60_000,
-    })
-
-    await expect(executor.validateCommand('curl https://example.com/health', workspace)).resolves.toMatchObject({ success: true })
-    await expect(executor.validateCommand('curl https://outside.test', workspace)).resolves.toMatchObject({
-      success: false,
-      error: expect.stringContaining('authorized scope'),
-    })
-  }))
-
-  it('keeps workspace policy reads and writes inside the workspace', async () => withWorkspace(async ({ workspace, outside }) => {
-    const outsideFile = join(outside, 'secret.txt')
+describe('NodeToolExecutor file and process lifecycle', () => {
+  it('supports reads and writes outside the initial workspace', async () => withWorkspace(async ({ workspace, outside }) => {
+    const outsideFile = join(outside, 'outside.txt')
     writeFileSync(join(workspace, 'inside.txt'), 'inside', 'utf-8')
     writeFileSync(outsideFile, 'outside', 'utf-8')
 
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
 
     await expect(executor.readFile('inside.txt')).resolves.toMatchObject({
       success: true,
@@ -57,17 +44,15 @@ describe('NodeToolExecutor sandbox policies', () => {
     })
 
     const outsideRead = await executor.readFile(outsideFile)
-    expect(outsideRead.success).toBe(false)
-    expect(outsideRead.error).toContain('Path outside workspace')
+    expect(outsideRead).toMatchObject({ success: true, data: 'outside' })
 
-    const outsideWrite = await executor.writeFile(join(outside, 'new.txt'), 'nope')
-    expect(outsideWrite.success).toBe(false)
-    expect(outsideWrite.error).toContain('Path outside workspace')
-    expect(existsSync(join(outside, 'new.txt'))).toBe(false)
+    const outsideWrite = await executor.writeFile(join(outside, 'new.txt'), 'written')
+    expect(outsideWrite.success).toBe(true)
+    expect(readFileSync(join(outside, 'new.txt'), 'utf-8')).toBe('written')
   }))
 
   it('resolves relative paths against the workspace root', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
 
     const write = await executor.writeFile('nested/file.txt', 'hello')
     const read = await executor.readFile('nested/file.txt')
@@ -79,7 +64,7 @@ describe('NodeToolExecutor sandbox policies', () => {
 
   it('reports directories as non-file read targets', async () => withWorkspace(async ({ workspace }) => {
     mkdirSync(join(workspace, 'nested'), { recursive: true })
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
 
     const read = await executor.readFile('nested')
 
@@ -102,7 +87,7 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(readFileSync(filePath, 'utf-8')).toBe('editor change')
   }))
 
-  it('blocks workspace paths that escape through a symlink or junction', async () => withWorkspace(async ({ workspace, outside }) => {
+  it('follows paths through a symlink or junction', async () => withWorkspace(async ({ workspace, outside }) => {
     writeFileSync(join(outside, 'secret.txt'), 'outside', 'utf-8')
     const linkPath = join(workspace, 'linked')
     try {
@@ -114,53 +99,11 @@ describe('NodeToolExecutor sandbox policies', () => {
 
     const result = await executor.readFile(join(linkPath, 'secret.txt'))
 
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('Path outside workspace')
+    expect(result).toMatchObject({ success: true, data: 'outside' })
   }))
 
-  it('blocks writes and command execution in readonly policy', async () => withWorkspace(async ({ workspace }) => {
-    writeFileSync(join(workspace, 'inside.txt'), 'inside', 'utf-8')
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'readonly' })
-
-    await expect(executor.readFile('inside.txt')).resolves.toMatchObject({
-      success: true,
-      data: 'inside',
-    })
-
-    const write = await executor.writeFile('inside.txt', 'changed')
-    expect(write.success).toBe(false)
-    expect(write.error).toContain('read-only')
-
-    const command = await executor.runCommand('node -e "console.log(1)"', workspace)
-    expect(command.success).toBe(false)
-    expect(command.error).toContain('command execution is disabled')
-  }))
-
-  it('allows explicit outside paths in full policy', async () => withWorkspace(async ({ workspace, outside }) => {
-    const outsideFile = join(outside, 'allowed.txt')
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'full' })
-
-    const write = await executor.writeFile(outsideFile, 'outside ok')
-    const read = await executor.readFile(outsideFile)
-
-    expect(write.success).toBe(true)
-    expect(read).toMatchObject({ success: true, data: 'outside ok' })
-  }))
-
-  it('blocks relative traversal paths in workspace commands', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
-    const command = process.platform === 'win32'
-      ? 'cmd /c type ..\\outside.txt'
-      : 'cat ../outside.txt'
-
-    const result = await executor.runCommand(command, workspace)
-
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('relative path outside the workspace')
-  }))
-
-  it('requires an explicit permission decision for workspace shell commands', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+  it('requires an explicit permission decision for shell commands', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace)
 
     const blocked = await executor.runCommand('echo hello', workspace)
     const approved = await executor.runCommand('echo hello', workspace, {}, 5000, true)
@@ -171,7 +114,7 @@ describe('NodeToolExecutor sandbox policies', () => {
   }))
 
   it('reports non-zero process exits as failures', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
     const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(7)'], workspace)
     const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
 
@@ -180,28 +123,24 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(runtimeTask).toMatchObject({ status: 'failed', exitCode: 7, interactive: false })
   }))
 
-  it('blocks internal process execution in a readonly sandbox', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'readonly' })
+  it('preserves exact shell command exit codes', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace)
+    const result = await executor.runCommand('node -e "process.exit(7)"', workspace, {}, 5000, true)
 
-    const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(0)'], workspace)
-
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('read-only')
-    expect(executor.getRuntimeTaskManager().listTasks()).toHaveLength(0)
+    expect(result).toMatchObject({ success: false, data: { exitCode: 7 } })
   }))
 
-  it('blocks internal process arguments that escape the workspace sandbox', async () => withWorkspace(async ({ workspace, outside }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+  it('decodes shell output as UTF-8', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace)
+    const command = process.platform === 'win32' ? "Write-Output '你好，世界'" : "printf '你好，世界'"
+    const result = await executor.runCommand(command, workspace, {}, 5000, true)
 
-    const result = await executor.runProcess('git', ['add', '--', outside], workspace)
-
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('outside the workspace')
-    expect(executor.getRuntimeTaskManager().listTasks()).toHaveLength(0)
+    expect(result).toMatchObject({ success: true, data: { exitCode: 0 } })
+    expect(result.data?.stdout).toContain('你好，世界')
   }))
 
   it('tracks successful foreground processes through completion', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
 
     const result = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write("done"); process.stderr.write("warn")'], workspace)
     const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
@@ -224,7 +163,7 @@ describe('NodeToolExecutor sandbox policies', () => {
   }))
 
   it('does not create empty runtime log files for silent commands', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
 
     const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(0)'], workspace)
     const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
@@ -238,7 +177,7 @@ describe('NodeToolExecutor sandbox policies', () => {
   it('settles after the termination grace period when a timed-out process never closes', async () => withWorkspace(async ({ workspace }) => {
     vi.useFakeTimers()
     try {
-      const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+      const executor = new NodeToolExecutor(workspace)
       const proc = Object.assign(new EventEmitter(), {
         pid: 12345,
         stdout: new PassThrough(),
@@ -278,39 +217,39 @@ describe('NodeToolExecutor sandbox policies', () => {
     }
   }))
 
-  it('does not leak parent-process secrets into child commands', async () => withWorkspace(async ({ workspace }) => {
-    process.env.TURBOFLUX_TEST_SECRET = 'do-not-inherit'
+  it('passes the parent environment and explicit overrides to child commands', async () => withWorkspace(async ({ workspace }) => {
+    process.env.TURBOFLUX_TEST_SECRET = 'inherited'
     try {
       const executor = new NodeToolExecutor(workspace)
-      const hidden = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.TURBOFLUX_TEST_SECRET || "missing")'], workspace)
+      const inherited = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.TURBOFLUX_TEST_SECRET || "missing")'], workspace)
       const explicit = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.EXPLICIT_VALUE || "missing")'], workspace, { EXPLICIT_VALUE: 'allowed' })
-      const rejected = await executor.runProcess(process.execPath, ['-e', 'process.exit(0)'], workspace, { SERVICE_API_KEY: 'must-not-pass' })
+      const sensitive = await executor.runProcess(process.execPath, ['-e', 'process.stdout.write(process.env.SERVICE_API_KEY || "missing")'], workspace, { SERVICE_API_KEY: 'allowed' })
 
-      expect(hidden.data?.stdout).toBe('missing')
+      expect(inherited.data?.stdout).toBe('inherited')
       expect(explicit.data?.stdout).toBe('allowed')
-      expect(rejected.success).toBe(false)
-      expect(rejected.error).toContain('sensitive environment override')
+      expect(sensitive.data?.stdout).toBe('allowed')
     } finally {
       delete process.env.TURBOFLUX_TEST_SECRET
     }
   }))
 
-  it('blocks code map target paths that escape the workspace', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+  it('builds code maps for target paths outside the initial workspace', async () => withWorkspace(async ({ workspace, outside }) => {
+    writeFileSync(join(outside, 'External.ts'), 'export const external = true\n', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
 
     const result = await executor.getCodeMap({
       workspacePath: workspace,
-      targetPaths: ['..'],
+      targetPaths: [outside],
     })
 
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('Path outside workspace')
+    expect(result.success).toBe(true)
+    expect(JSON.stringify(result.data?.map)).toContain('External.ts')
   }))
 
   it('builds code maps from an explicit feature path outside src', async () => withWorkspace(async ({ workspace }) => {
     mkdirSync(join(workspace, 'frontend', 'components'), { recursive: true })
     writeFileSync(join(workspace, 'frontend', 'components', 'Card.tsx'), 'export function HolderCard() { return null }\n', 'utf-8')
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
 
     const result = await executor.getCodeMap({
       workspacePath: workspace,
@@ -491,54 +430,6 @@ describe('NodeToolExecutor sandbox policies', () => {
     expect(result.data?.map(hit => hit.path)).toEqual(['src/Target.ts'])
   }))
 
-  it('creates local history checkpoints for workspace files', async () => withWorkspace(async ({ workspace }) => {
-    const filePath = join(workspace, 'inside.txt')
-    writeFileSync(filePath, 'after', 'utf-8')
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
-
-    const result = await executor.checkpointCreate?.(workspace, 'test checkpoint', [filePath], 'explicit', {
-      [filePath]: 'before',
-    })
-
-    expect(result?.success).toBe(true)
-    expect(result?.checkpointId).toMatch(/^cp_/)
-    expect(result?.label).toBe('test checkpoint')
-  }))
-
-  it('lists and restores local history checkpoints', async () => withWorkspace(async ({ workspace }) => {
-    const filePath = join(workspace, 'inside.txt')
-    writeFileSync(filePath, 'checkpoint version', 'utf-8')
-    const executor = new NodeToolExecutor(workspace)
-    const created = await executor.checkpointCreate(workspace, 'restorable', [filePath], 'explicit', { [filePath]: 'before' })
-    writeFileSync(filePath, 'later edit', 'utf-8')
-
-    const listed = await executor.checkpointList(workspace, 10)
-    const restored = await executor.checkpointRestore(workspace, created.checkpointId)
-
-    expect(listed.data).toEqual(expect.arrayContaining([expect.objectContaining({ id: created.checkpointId })]))
-    expect(restored.success).toBe(true)
-    expect(restored.data?.safetyCheckpointId).toBeTruthy()
-    expect(readFileSync(filePath, 'utf-8')).toBe('checkpoint version')
-  }))
-
-  it('does not overwrite files when the pre-restore safety snapshot fails', async () => withWorkspace(async ({ workspace }) => {
-    const filePath = join(workspace, 'inside.txt')
-    writeFileSync(filePath, 'checkpoint version', 'utf-8')
-    const executor = new NodeToolExecutor(workspace)
-    const created = await executor.checkpointCreate(workspace, 'restorable', [filePath], 'explicit', { [filePath]: 'before' })
-    writeFileSync(filePath, 'important newer work', 'utf-8')
-    vi.spyOn((executor as any).localHistoryService, 'createSafetySnapshot').mockResolvedValue({
-      success: false,
-      error: 'disk full',
-    })
-
-    const restored = await executor.checkpointRestore(workspace, created.checkpointId)
-
-    expect(restored.success).toBe(false)
-    expect(restored.error).toContain('safety snapshot')
-    expect(readFileSync(filePath, 'utf-8')).toBe('important newer work')
-  }))
-
   it('discovers useful dot-directories but skips secret env files', async () => withWorkspace(async ({ workspace }) => {
     mkdirSync(join(workspace, '.github', 'workflows'), { recursive: true })
     writeFileSync(join(workspace, '.github', 'workflows', 'ci.yml'), 'name: ci', 'utf-8')
@@ -571,22 +462,12 @@ describe('NodeToolExecutor sandbox policies', () => {
     ]))
   }))
 
-  it('blocks local history checkpoints in readonly policy', async () => withWorkspace(async ({ workspace }) => {
-    const filePath = join(workspace, 'inside.txt')
-    writeFileSync(filePath, 'after', 'utf-8')
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'readonly' })
-
-    const result = await executor.checkpointCreate?.(workspace, 'blocked checkpoint', [filePath], 'explicit')
-
-    expect(result?.success).toBe(false)
-    expect(result?.error).toContain('read-only')
-  }))
 })
 
 const windowsIt = process.platform === 'win32' ? it : it.skip
 
 windowsIt('does not mistake Windows command switches for absolute paths', async () => withWorkspace(async ({ workspace }) => {
-  const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+  const executor = new NodeToolExecutor(workspace)
 
   const result = await executor.runCommand('cmd /c echo ok /s', workspace, {}, 5000, true)
 
@@ -684,7 +565,7 @@ it('preserves nested network causes in model request diagnostics', () => {
 })
 
 it('runs and inspects an agent background terminal session', async () => withWorkspace(async ({ workspace }) => {
-  const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+  const executor = new NodeToolExecutor(workspace)
 
   const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh'
   const created = await executor.ptyCreate?.({ cwd: workspace, shell })
@@ -737,37 +618,84 @@ it('runs and inspects an agent background terminal session', async () => withWor
   expect(readFileSync(runtimeTask!.logPath!, 'utf-8')).toContain('turbo-terminal-ok')
 }))
 
-it('revalidates complete commands written into a guarded background terminal', async () => withWorkspace(async ({ workspace, outside }) => {
-  const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
-  const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh'
-  const created = await executor.ptyCreate?.({ cwd: workspace, shell })
-  const sessionId = created?.data?.sessionId
-  expect(sessionId).toBeTruthy()
+it('runs one background command per session with exact exit state and incremental output', async () => withWorkspace(async ({ workspace }) => {
+  const executor = new NodeToolExecutor(workspace)
+  const command = `node -e "console.log('first'); setTimeout(() => { console.log('second'); process.exit(7) }, 1000)"`
+  const created = await executor.startBackgroundCommand(command, workspace, undefined, true)
 
-  const outsideFile = join(outside, 'escaped.txt')
-  const command = process.platform === 'win32'
-    ? `echo escaped > "${outsideFile}"`
-    : `printf escaped > "${outsideFile}"`
-  const midpoint = Math.max(1, Math.floor(command.length / 2))
-  const first = await executor.ptyWrite?.(sessionId!, command.slice(0, midpoint))
-  const blocked = await executor.ptyWrite?.(sessionId!, `${command.slice(midpoint)}\n`)
+  expect(created.success).toBe(true)
+  const sessionId = created.data!.sessionId
+  let first = await executor.ptyGetBuffer(sessionId)
+  for (let attempt = 0; attempt < 40 && !String(first.data || '').includes('first'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 25))
+    first = await executor.ptyGetBuffer(sessionId)
+  }
+  expect(first.data).toContain('first')
+  const cursor = first.lastSeq || 0
 
-  expect(first?.success).toBe(true)
-  expect(blocked?.success).toBe(false)
-  expect(blocked?.error).toContain('outside the workspace')
-  expect(existsSync(outsideFile)).toBe(false)
-  await executor.ptyKillAll?.()
+  let session = (await executor.ptyList()).sessions?.find(item => item.id === sessionId)
+  for (let attempt = 0; attempt < 120 && session?.status === 'running'; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 25))
+    session = (await executor.ptyList()).sessions?.find(item => item.id === sessionId)
+  }
+
+  const incremental = await executor.ptyGetBuffer(sessionId, cursor)
+  expect(incremental.data).toContain('second')
+  expect(incremental.data).not.toContain('first')
+  expect(session).toMatchObject({ status: 'error', exitCode: 7, command, canWrite: false })
+  const task = executor.getRuntimeTaskManager().listTasks({ kind: 'terminal' })[0]
+  expect(task).toMatchObject({ status: 'failed', exitCode: 7, command })
+  expect(readFileSync(task.logPath!, 'utf8')).toContain('second')
 }))
 
-it('denies web search when sandbox networking is disabled', async () => withWorkspace(async ({ workspace }) => {
-  const executor = new NodeToolExecutor(workspace, {
-    sandbox: { policy: 'workspace', enforcement: 'strict', network: 'deny', backend: 'guarded' },
+it('reports evicted output and keeps explicit stops out of the error state', async () => withWorkspace(async ({ workspace }) => {
+  const executor = new NodeToolExecutor(workspace)
+  const created = await executor.startBackgroundCommand('node -e "setInterval(() => {}, 1000)"', workspace, undefined, true)
+  const sessionId = created.data!.sessionId
+  const internal = executor as unknown as {
+    backgroundTerminals: Map<string, { proc: { stdout: EventEmitter } }>
+  }
+  const session = internal.backgroundTerminals.get(sessionId)!
+
+  for (let index = 0; index < 510; index += 1) {
+    session.proc.stdout.emit('data', Buffer.from(`chunk-${index}\n`))
+  }
+  const buffer = await executor.ptyGetBuffer(sessionId)
+  expect(buffer.firstSeq).toBeGreaterThan(1)
+  expect(buffer.omittedBytes).toBeGreaterThan(0)
+  expect(buffer.data).not.toContain('chunk-0\n')
+
+  expect(await executor.ptyKill(sessionId)).toMatchObject({ success: true })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const stopped = (await executor.ptyList()).sessions?.find(item => item.id === sessionId)
+  const task = executor.getRuntimeTaskManager().listTasks({ kind: 'terminal' })[0]
+  expect(stopped).toMatchObject({ status: 'exited', canWrite: false, error: undefined })
+  expect(task).toMatchObject({ status: 'stopped', error: undefined })
+}))
+
+it('preserves persisted sequence cursors when reading a recovered session', async () => withWorkspace(async ({ workspace }) => {
+  const logPath = join(workspace, 'recovered.jsonl')
+  writeFileSync(logPath, [
+    JSON.stringify({ timestamp: 100, channel: 'stdout', data: 'old\n', seq: 41 }),
+    JSON.stringify({ timestamp: 200, channel: 'stdout', data: 'new\n', seq: 42 }),
+    '',
+  ].join('\n'), 'utf8')
+  const manager = new RuntimeTaskManager({ recover: false })
+  const task = manager.createTask({
+    kind: 'terminal',
+    status: 'running',
+    command: 'npm run watch',
+    logPath,
+    outputBytes: 8,
+    metadata: { sessionId: 'term-recovered', firstSeq: 41, lastSeq: 42, omittedBytes: 128 },
   })
+  manager.completeTask(task.id, { exitCode: 0 })
+  const executor = new NodeToolExecutor(workspace, { runtimeTaskManager: manager })
 
-  const result = await executor.webSearch({ query: 'should not leave the process' })
-
-  expect(result.success).toBe(false)
-  expect(result.error).toContain('network policy denied')
+  const incremental = await executor.ptyGetBuffer('term-recovered', 41)
+  expect(incremental).toMatchObject({ firstSeq: 41, lastSeq: 42, omittedBytes: 0, data: 'new\n' })
+  const fullTail = await executor.ptyGetBuffer('term-recovered')
+  expect(fullTail).toMatchObject({ firstSeq: 41, lastSeq: 42, omittedBytes: 128, data: 'old\nnew\n' })
 }))
 
 describe('NodeToolExecutor webSearch', () => {
@@ -789,7 +717,7 @@ describe('NodeToolExecutor webSearch', () => {
       }),
     } as Response)
 
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
     const result = await executor.webSearch({ query: 'TurboFlux docs', limit: 3 })
 
     expect(result.success).toBe(true)
@@ -818,7 +746,7 @@ describe('NodeToolExecutor webSearch', () => {
       text: async () => html,
     } as Response)
 
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
     const result = await executor.webSearch({
       query: 'Node.js fetch AbortController',
       limit: 2,
@@ -861,7 +789,7 @@ describe('NodeToolExecutor webSearch', () => {
         text: async () => html,
       } as Response)
 
-    const executor = new NodeToolExecutor(workspace, { sandboxPolicy: 'workspace' })
+    const executor = new NodeToolExecutor(workspace)
     const result = await executor.webSearch({ query: 'Node.js learn', limit: 2 })
 
     expect(result.success).toBe(true)

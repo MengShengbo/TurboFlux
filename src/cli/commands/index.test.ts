@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { commandRegistry } from './index'
 import type { CommandContext } from './types'
+import { RuntimeTaskManager } from '../../core/runtime/runtimeTaskManager'
 
 function contextWithUsage(usage: { input?: number; output?: number; source?: 'provider' | 'unknown' }): CommandContext {
   return {
@@ -9,7 +10,6 @@ function contextWithUsage(usage: { input?: number; output?: number; source?: 'pr
       isRunning: () => false,
       isFastContextRunning: () => false,
       runStandaloneFastContextObjective: () => Promise.resolve(null),
-      getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
     } as CommandContext['engine'],
     config: {
       provider: 'custom',
@@ -19,6 +19,7 @@ function contextWithUsage(usage: { input?: number; output?: number; source?: 'pr
       contextWindow: 1_000_000,
       maxTokens: 16_384,
       approvalPolicy: 'ask',
+      gitEnabled: true,
     },
     modelPresets: [],
     workspacePath: process.cwd(),
@@ -37,7 +38,6 @@ function fullContext(overrides: Partial<CommandContext> = {}): CommandContext {
       isFastContextRunning: () => false,
       runStandaloneFastContextObjective: () => Promise.resolve(null),
       resetSession: () => {},
-      getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
     } as CommandContext['engine'],
     ...overrides,
   }
@@ -62,63 +62,70 @@ describe('/context', () => {
   })
 })
 
-describe('/security', () => {
-  it('activates a bounded red-team engagement when runtime controls are present', () => {
-    let profile: ReturnType<CommandContext['engine']['getSecurityProfile']> | undefined
-    const ctx = fullContext({
-      engine: {
-        getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
-        getApprovalPolicy: () => 'ask',
-        setSecurityProfile: next => { profile = next },
-      } as CommandContext['engine'],
-      sandboxStatus: {
-        policy: 'workspace', enforcement: 'strict', network: 'allow', backend: 'docker', resolvedBackend: 'docker',
-        dockerImage: 'sandbox', available: true, osIsolation: true, networkIsolated: false, writableRoots: [process.cwd()],
-      },
-    })
-    const result = commandRegistry.execute('/security red example.com | verify the public test API', ctx)
-    expect(result.type).toBe('text')
-    expect(result.text).toContain('Red-team research mode active')
-    expect(profile).toMatchObject({ mode: 'red', active: true, targets: ['example.com'] })
-  })
-
-  it('refuses red-team mode without strict OS isolation', () => {
-    const ctx = fullContext({
-      engine: {
-        getSecurityProfile: () => ({ mode: 'off', active: false, targets: [] }),
-        getApprovalPolicy: () => 'ask',
-        setSecurityProfile: () => {},
-      } as CommandContext['engine'],
-      sandboxStatus: {
-        policy: 'workspace', enforcement: 'guarded', network: 'allow', backend: 'guarded', resolvedBackend: 'guarded',
-        available: true, osIsolation: false, networkIsolated: false, writableRoots: [process.cwd()],
-      },
-    })
-    const result = commandRegistry.execute('/security red example.com | test', ctx)
-    expect(result.text).toContain('requires an available strict OS-isolated sandbox')
-  })
-
-  it('prevents approval bypass while a red-team engagement is active', () => {
-    let changed = false
-    const ctx = fullContext({
-      engine: {
-        getSecurityProfile: () => ({ mode: 'red', active: true, engagementId: 'sec-test', targets: ['example.com'] }),
-        setApprovalPolicy: () => { changed = true },
-      } as CommandContext['engine'],
-      setConfig: () => { changed = true },
-    })
-    const result = commandRegistry.execute('/approval full', ctx)
-    expect(result.text).toContain('unavailable during an active red-team engagement')
-    expect(changed).toBe(false)
-  })
-})
-
 describe('/fastcontext', () => {
   it('is no longer exposed as a manual command', () => {
     const result = commandRegistry.execute('/fastcontext', contextWithUsage({ source: 'unknown' }))
 
     expect(result.type).toBe('text')
     expect(result.text).toContain('Unknown command: /fastcontext')
+  })
+})
+
+describe('/git', () => {
+  it('reports state without toggling integration', () => {
+    let toggled = false
+    const ctx = fullContext({
+      engine: {
+        ...fullContext().engine,
+        getGitState: () => ({ enabled: true, phase: 'ready', snapshot: null, updatedAt: 1 }),
+        setGitEnabled: () => { toggled = true },
+      } as CommandContext['engine'],
+    })
+
+    const result = commandRegistry.execute('/git', ctx)
+
+    expect(result.text).toBe('Git: ready')
+    expect(toggled).toBe(false)
+  })
+
+  it('persists explicit Git disablement', () => {
+    let nextConfig: CommandContext['config'] | null = null
+    const ctx = fullContext({
+      setConfig: config => { nextConfig = config },
+    })
+
+    const result = commandRegistry.execute('/git off', ctx)
+
+    expect(result.text).toBe('Git integration disabled.')
+    expect(nextConfig?.gitEnabled).toBe(false)
+  })
+})
+
+describe('background terminal commands', () => {
+  it('shows durable task state with /ps and stops sessions with /stop', async () => {
+    const stop = vi.fn(async () => {})
+    const now = Date.now()
+    const manager = new RuntimeTaskManager({ now: () => now })
+    manager.createTask({
+      kind: 'terminal',
+      status: 'running',
+      command: 'npm run watch',
+      pid: 42,
+      startedAt: now - 3_600_000,
+      outputBytes: 2048,
+      metadata: { sessionId: 'term-1' },
+    }, { stop })
+    const ctx = fullContext({ runtimeTaskManager: manager })
+
+    const listed = commandRegistry.execute('/ps', ctx)
+    expect(listed.text).toContain('term-1 · running')
+    expect(listed.text).toContain('pid 42')
+    expect(listed.text).toContain('1h 0m')
+    expect(listed.text).toContain('2.0 KiB')
+
+    const stopped = commandRegistry.execute('/stop term-1', ctx)
+    expect(stopped.text).toBe('Stopping 1 background terminal...')
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce())
   })
 })
 
@@ -252,12 +259,7 @@ describe('native effort and approval commands', () => {
 
   it('persists the agent-decides approval policy', () => {
     let nextConfig: CommandContext['config'] | null = null
-    let enginePolicy = ''
     const ctx = fullContext({
-      engine: {
-        ...fullContext().engine,
-        setApprovalPolicy: policy => { enginePolicy = policy },
-      } as CommandContext['engine'],
       setConfig: config => { nextConfig = config },
     })
 
@@ -265,29 +267,5 @@ describe('native effort and approval commands', () => {
 
     expect(result.text).toContain('Approve low risk')
     expect(nextConfig?.approvalPolicy).toBe('agent')
-    expect(enginePolicy).toBe('agent')
-  })
-})
-
-describe('/sandbox', () => {
-  it('reports when the runtime only has policy guards', () => {
-    const result = commandRegistry.execute('/sandbox', fullContext({
-      sandboxStatus: {
-        policy: 'workspace',
-        enforcement: 'guarded',
-        network: 'allow',
-        backend: 'auto',
-        resolvedBackend: 'guarded',
-        available: true,
-        osIsolation: false,
-        networkIsolated: false,
-        writableRoots: [process.cwd()],
-        warning: 'Guarded mode is not an OS security boundary.',
-      },
-    }))
-
-    expect(result.text).toContain('workspace')
-    expect(result.text).toContain('policy guard only')
-    expect(result.text).toContain('not an OS security boundary')
   })
 })

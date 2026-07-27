@@ -1,8 +1,8 @@
 /**
  * Path resolution and normalization utilities for the agent engine.
  *
- * These functions handle cross-platform path resolution, workspace boundary
- * enforcement, and relative path conversion. Extracted from agentEngine.ts
+ * These functions handle cross-platform path resolution and relative path
+ * conversion. Extracted from agentEngine.ts
  * to keep the engine focused on orchestration.
  */
 
@@ -28,7 +28,6 @@ export function normalizePath(p: string): string {
 
 /**
  * Resolve a relative (or absolute) path against a workspace base path.
- * Throws if the resolved path escapes the workspace boundary.
  *
  * Handles common AI model quirks:
  * - Prefixing relative paths with `/` on Windows
@@ -55,15 +54,7 @@ export function resolvePath(basePath: string, relativePath: string): string {
   const isAbsolute = hasDriveLetter || isUNC || (startsWithSlash && !isWindowsEnv)
 
   if (isAbsolute) {
-    const normalizedAbsolute = normalizePath(relativePath)
-    const basePathNormalized = normalizePath(normalizedBase)
-    const isWindows = /^[A-Za-z]:/.test(basePathNormalized)
-    const a = isWindows ? normalizedAbsolute.toLowerCase() : normalizedAbsolute
-    const b = isWindows ? basePathNormalized.toLowerCase() : basePathNormalized
-    if (!a.startsWith(b + '/') && a !== b) {
-      throw new Error(`Absolute path outside workspace: ${relativePath}`)
-    }
-    return normalizedAbsolute
+    return normalizePath(relativePath)
   }
 
   // Strip leading `/` or `./` — AI models often prefix relative paths with
@@ -71,12 +62,6 @@ export function resolvePath(basePath: string, relativePath: string): string {
   const normalizedRelative = relativePath.replace(/\\/g, '/').replace(/^\.?\/+/, '')
   const resolvedPath = `${normalizedBase}/${normalizedRelative}`
   const normalizedResolved = normalizePath(resolvedPath)
-  const basePathNormalized = normalizePath(normalizedBase)
-
-  if (!normalizedResolved.startsWith(basePathNormalized + '/') && normalizedResolved !== basePathNormalized) {
-    throw new Error(`Path traversal detected: ${relativePath} resolves outside of workspace`)
-  }
-
   return normalizedResolved
 }
 

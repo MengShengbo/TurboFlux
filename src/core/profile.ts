@@ -357,19 +357,6 @@ export function getBuiltinPersonaIds(): string[] {
   return [...BUILTIN_PERSONA_IDS]
 }
 
-export function getOutputLanguageLabel(language: TurboFluxAiOutputLanguage, custom = '', uiLanguage: TurboFluxInterfaceLanguage = 'zh-CN'): string {
-  const labels: Record<TurboFluxAiOutputLanguage, { zh: string; en: string }> = {
-    'follow-user': { zh: '跟随用户语言', en: 'Follow user language' },
-    'zh-CN': { zh: '简体中文', en: 'Simplified Chinese' },
-    en: { zh: 'English', en: 'English' },
-    ja: { zh: '日本语', en: 'Japanese' },
-    ko: { zh: '한국어', en: 'Korean' },
-    custom: { zh: custom || '自定义语言', en: custom || 'Custom language' },
-  }
-  const label = labels[language]
-  return uiLanguage === 'en' ? label.en : label.zh
-}
-
 function outputLanguageInstruction(profile: TurboFluxProfile): string {
   switch (profile.aiOutputLanguage) {
     case 'zh-CN':

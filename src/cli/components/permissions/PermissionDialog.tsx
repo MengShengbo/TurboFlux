@@ -4,19 +4,24 @@ import figures from 'figures'
 import cliTruncate from 'cli-truncate'
 import { resolveBackground, useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
+import { createTranslator, useI18n, type Translator } from '../../i18n/index'
 
 export type PermissionDecision = 'allow-once' | 'allow-run' | 'allow-session' | 'deny'
 
-export const PERMISSION_OPTIONS: Array<{
+export function createPermissionOptions(t: Translator): Array<{
   decision: PermissionDecision
   label: string
   description: string
-}> = [
-  { decision: 'allow-once', label: 'Allow once', description: 'Approve only this request' },
-  { decision: 'allow-run', label: 'Allow for this run', description: 'Approve matching actions until this task ends' },
-  { decision: 'allow-session', label: 'Allow for this session', description: 'Remember matching requests until exit' },
-  { decision: 'deny', label: 'Deny', description: 'Block this request and return to the agent' },
-]
+}> {
+  return [
+    { decision: 'allow-once', label: t('ui.permission.allowOnce'), description: t('ui.permission.allowOnceDescription') },
+    { decision: 'allow-run', label: t('ui.permission.allowRun'), description: t('ui.permission.allowRunDescription') },
+    { decision: 'allow-session', label: t('ui.permission.allowSession'), description: t('ui.permission.allowSessionDescription') },
+    { decision: 'deny', label: t('ui.permission.deny'), description: t('ui.permission.denyDescription') },
+  ]
+}
+
+export const PERMISSION_OPTIONS = createPermissionOptions(createTranslator('en'))
 
 export function getNextPermissionIndex(current: number, direction: -1 | 1): number {
   return (current + direction + PERMISSION_OPTIONS.length) % PERMISSION_OPTIONS.length
@@ -36,6 +41,8 @@ interface PermissionDialogProps {
 
 export function PermissionDialog({ toolName, description, command, path, onDecision }: PermissionDialogProps) {
   const theme = useTheme()
+  const { t } = useI18n()
+  const permissionOptions = createPermissionOptions(t)
   const { columns } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [selected, setSelected] = useState(0)
@@ -89,13 +96,13 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
   return (
     <Box flexDirection="column" flexShrink={0} borderStyle="single" borderColor={theme.warning} paddingX={1}>
       <Box justifyContent="space-between">
-        <Text bold color={theme.warning}>Permission request</Text>
-        <Text color={theme.inactive}>REVIEW</Text>
+        <Text bold color={theme.warning}>{t('ui.permission.title')}</Text>
+        <Text color={theme.inactive}>{t('ui.permission.review')}</Text>
       </Box>
       <Box flexDirection="column">
-        <Text color={theme.inactive}>Tool    <Text color={theme.text} bold>{toolName}</Text></Text>
-        {path && <Text color={theme.inactive}>Target  <Text color={theme.brand}>{path}</Text></Text>}
-        <Text color={theme.inactive}>Reason  <Text color={theme.text}>{description}</Text></Text>
+        <Text color={theme.inactive}>{t('ui.permission.tool')}    <Text color={theme.text} bold>{toolName}</Text></Text>
+        {path && <Text color={theme.inactive}>{t('ui.permission.target')}  <Text color={theme.brand}>{path}</Text></Text>}
+        <Text color={theme.inactive}>{t('ui.permission.reason')}  <Text color={theme.text}>{description}</Text></Text>
         {command && (
           <Box paddingX={1} backgroundColor={resolveBackground(theme, 'codeBackground')}>
             <Text color={theme.brand} wrap="truncate-end">{command}</Text>
@@ -103,7 +110,7 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
         )}
       </Box>
       <Box flexDirection="column" marginTop={1}>
-        {PERMISSION_OPTIONS.map((option, index) => {
+        {permissionOptions.map((option, index) => {
           const isSelected = index === selected
           const selectedColor = option.decision === 'deny' ? theme.error : theme.brandShimmer
           return (
@@ -119,7 +126,7 @@ export function PermissionDialog({ toolName, description, command, path, onDecis
         })}
       </Box>
       <Box marginTop={1}>
-        <Text color={theme.subtle}>1/2/3/4 choose - arrows + Enter confirm</Text>
+        <Text color={theme.subtle}>{t('ui.permission.keys')}</Text>
       </Box>
     </Box>
   )

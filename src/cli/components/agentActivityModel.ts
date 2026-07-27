@@ -1,6 +1,8 @@
 import type { AgentRunPhase, AgentRunState } from '../../shared/agentTypes'
 import type { ToolStatus } from './tools/toolTypes'
 import type { StreamingToolDraft } from './tools/toolTypes'
+import { formatDraftToolLabel, formatRunningToolLabel } from './tools/toolPresentation'
+import { createTranslator, type Translator } from '../i18n/index'
 
 export interface ActivityModelInput {
   runState?: AgentRunState
@@ -22,29 +24,30 @@ export interface ActivityModel {
   hasTools: boolean
 }
 
-const PHASE_LABELS: Record<AgentRunPhase, string> = {
-  idle: 'Ready',
-  thinking: 'Thinking...',
-  tool_running: 'Working...',
-  awaiting_approval: 'Waiting for approval...',
-  awaiting_input: 'Waiting for input...',
-  paused: 'Paused',
-  aborting: 'Stopping...',
-  recoverable_error: 'Recovering...',
-  completed: 'Done',
-}
+const DEFAULT_TRANSLATOR = createTranslator('en')
 
-export function deriveActivityModel(input: ActivityModelInput): ActivityModel {
+export function deriveActivityModel(input: ActivityModelInput, t: Translator = DEFAULT_TRANSLATOR): ActivityModel {
+  const phaseLabels: Record<AgentRunPhase, string> = {
+    idle: t('ui.activity.phase.ready'),
+    thinking: t('ui.activity.phase.thinking'),
+    tool_running: t('ui.activity.phase.working'),
+    awaiting_approval: t('ui.activity.phase.awaitingApproval'),
+    awaiting_input: t('ui.activity.phase.awaitingInput'),
+    paused: t('ui.activity.phase.paused'),
+    aborting: t('ui.activity.phase.stopping'),
+    recoverable_error: t('ui.activity.phase.recovering'),
+    completed: t('ui.activity.phase.done'),
+  }
   const phase = input.runState?.phase ?? 'idle'
   const activeTool = [...input.tools].reverse().find(tool => tool.status === 'running')
   const hasThinking = Boolean(input.thinkingText?.trim())
   const hasAnswer = Boolean(input.streamText?.trim())
   const hasTools = input.tools.length > 0 || Boolean(input.draft)
-  const detail = (activeTool ? formatToolActivity(activeTool) : '')
-    || formatDraftActivity(input.draft)
+  const detail = (activeTool ? formatToolActivity(activeTool, t) : '')
+    || (input.draft ? `${formatDraftToolLabel(input.draft, t)}...` : '')
     || input.runState?.detail?.trim()
     || input.idleLabel?.trim()
-    || PHASE_LABELS[phase]
+    || phaseLabels[phase]
   const visible = phase !== 'idle' && phase !== 'completed'
     || hasThinking
     || hasAnswer
@@ -54,7 +57,7 @@ export function deriveActivityModel(input: ActivityModelInput): ActivityModel {
   return {
     visible,
     phase,
-    label: PHASE_LABELS[phase],
+    label: phaseLabels[phase],
     detail,
     activeTool,
     hasThinking,
@@ -63,45 +66,6 @@ export function deriveActivityModel(input: ActivityModelInput): ActivityModel {
   }
 }
 
-function formatDraftActivity(draft?: StreamingToolDraft | null): string {
-  if (!draft) return ''
-  const args = parseArgs(draft.partialJson)
-  const path = typeof args.path === 'string' ? args.path : ''
-  const verb = draft.name.includes('write') ? 'Preparing write'
-    : draft.name.includes('edit') || draft.name.includes('replace') ? 'Preparing edit'
-      : `Preparing ${draft.name.replaceAll('_', ' ')}`
-  return path ? `${verb} ${path}...` : `${verb}...`
-}
-
-export function formatToolActivity(tool: Pick<ToolStatus, 'name' | 'args'>): string {
-  const args = parseArgs(tool.args)
-  const path = typeof args.path === 'string' ? args.path : ''
-  const command = typeof args.command === 'string' ? args.command : ''
-  const query = typeof args.query === 'string' ? args.query : typeof args.pattern === 'string' ? args.pattern : ''
-
-  switch (tool.name) {
-    case 'write_file': return path ? `Writing ${path}...` : 'Writing file...'
-    case 'replace_file':
-    case 'edit_file':
-    case 'multi_edit': return path ? `Editing ${path}...` : 'Editing file...'
-    case 'delete_file': return path ? `Deleting ${path}...` : 'Deleting file...'
-    case 'run_command': return command ? `Running ${command}...` : 'Running command...'
-    case 'read_file':
-    case 'read_file_full': return path ? `Reading ${path}...` : 'Reading file...'
-    case 'search_content':
-    case 'search_files':
-    case 'search_symbols':
-    case 'search_semantic': return query ? `Searching ${query}...` : 'Searching...'
-    default: return `Using ${tool.name.replaceAll('_', ' ')}...`
-  }
-}
-
-function parseArgs(value?: string): Record<string, unknown> {
-  if (!value) return {}
-  try {
-    const parsed = JSON.parse(value)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
-  } catch {
-    return {}
-  }
+export function formatToolActivity(tool: Pick<ToolStatus, 'name' | 'args'>, t: Translator = DEFAULT_TRANSLATOR): string {
+  return `${formatRunningToolLabel(tool, t)}...`
 }
