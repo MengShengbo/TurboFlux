@@ -15,7 +15,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isJournalEntry(value: unknown): value is ConversationJournalEntry {
-  if (!isRecord(value) || value.version !== 1 || typeof value.type !== 'string' || !Number.isFinite(value.timestamp)) return false
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2) || typeof value.type !== 'string' || !Number.isFinite(value.timestamp)) return false
 
   switch (value.type) {
     case 'meta':
@@ -53,6 +53,22 @@ function isJournalEntry(value: unknown): value is ConversationJournalEntry {
       return Array.isArray(value.activeTurns)
         && Array.isArray(value.contextSegments)
         && Array.isArray(value.contextReservoir)
+    case 'queue_state':
+      return value.version === 2 && Array.isArray(value.inputs)
+    case 'draft_state':
+      return value.version === 2 && isRecord(value.draft) && typeof value.draft.text === 'string'
+    case 'input_state':
+      return value.version === 2
+        && typeof value.inputId === 'string'
+        && value.intent === 'steer'
+        && ['accepted', 'committed', 'rejected'].includes(String(value.state))
+        && typeof value.text === 'string'
+    case 'approval_state':
+      return value.version === 2
+        && typeof value.requestId === 'string'
+        && (value.requestKind === 'permission' || value.requestKind === 'input')
+        && ['requested', 'resolved', 'cancelled'].includes(String(value.state))
+        && typeof value.question === 'string'
     default:
       return false
   }
@@ -128,6 +144,20 @@ function createConversation(meta: ConversationMeta): PersistedConversation {
   }
 }
 
+function createInteractionState(conversation?: PersistedConversation | null): NonNullable<PersistedConversation['interactionState']> {
+  return {
+    queuedInputs: [...(conversation?.interactionState?.queuedInputs || [])],
+    draft: {
+      text: conversation?.interactionState?.draft.text || '',
+      attachments: conversation?.interactionState?.draft.attachments
+        ? [...conversation.interactionState.draft.attachments]
+        : undefined,
+    },
+    pendingSteering: [...(conversation?.interactionState?.pendingSteering || [])],
+    pendingApprovals: [...(conversation?.interactionState?.pendingApprovals || [])],
+  }
+}
+
 function upsertTurn(turns: AgentTurn[], turn: AgentTurn): void {
   const index = turns.findIndex(existing => existing.id === turn.id)
   if (index >= 0) turns[index] = turn
@@ -171,6 +201,7 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
   const journalToolResults = new Map<string, ToolResult>()
   let latestTimestamp = conversation?.updatedAt || 0
   let interrupted = false
+  let interactionState = createInteractionState(conversation)
 
   for (const entry of entries) {
     latestTimestamp = Math.max(latestTimestamp, entry.timestamp)
@@ -181,6 +212,7 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
         break
       case 'snapshot':
         conversation = cloneConversation(entry.conversation)
+        interactionState = createInteractionState(conversation)
         pendingStream = null
         pendingToolCalls.clear()
         journalToolResults.clear()
@@ -224,6 +256,40 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
         conversation.contextSegments = entry.contextSegments
         conversation.contextReservoir = entry.contextReservoir
         break
+      case 'queue_state':
+        interactionState.queuedInputs = entry.inputs.map(input => ({ ...input, attachments: input.attachments ? [...input.attachments] : undefined }))
+        break
+      case 'draft_state':
+        interactionState.draft = { ...entry.draft, attachments: entry.draft.attachments ? [...entry.draft.attachments] : undefined }
+        break
+      case 'input_state': {
+        const index = interactionState.pendingSteering.findIndex(input => input.id === entry.inputId)
+        if (entry.state === 'accepted') {
+          const pending = { id: entry.inputId, text: entry.text }
+          if (index >= 0) interactionState.pendingSteering[index] = pending
+          else interactionState.pendingSteering.push(pending)
+        } else if (index >= 0) {
+          interactionState.pendingSteering.splice(index, 1)
+        }
+        break
+      }
+      case 'approval_state': {
+        const index = interactionState.pendingApprovals.findIndex(request => request.requestId === entry.requestId)
+        if (entry.state === 'requested') {
+          const pending = {
+            requestId: entry.requestId,
+            requestKind: entry.requestKind,
+            question: entry.question,
+            toolName: entry.toolName,
+            path: entry.path,
+          }
+          if (index >= 0) interactionState.pendingApprovals[index] = pending
+          else interactionState.pendingApprovals.push(pending)
+        } else if (index >= 0) {
+          interactionState.pendingApprovals.splice(index, 1)
+        }
+        break
+      }
     }
   }
 
@@ -286,6 +352,7 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
     conversation.title = firstUserTurn.content.slice(0, 60).replace(/\n/g, ' ')
   }
   conversation.turnCount = conversation.turns.length
+  conversation.interactionState = interactionState
   conversation.updatedAt = Math.max(conversation.updatedAt, latestTimestamp)
   conversation.recovery = {
     interrupted,
@@ -296,6 +363,11 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
 }
 
 export function appendConversationJournal(id: string, entry: ConversationJournalEntry): void {
+  appendConversationJournalBatch(id, [entry])
+}
+
+export function appendConversationJournalBatch(id: string, entries: ConversationJournalEntry[]): void {
+  if (entries.length === 0) return
   const filePath = conversationPath(id, 'jsonl')
   if (!checkedJournalBoundaries.has(filePath) && existsSync(filePath)) {
     const descriptor = openSync(filePath, 'r')
@@ -312,7 +384,7 @@ export function appendConversationJournal(id: string, entry: ConversationJournal
     }
     if (needsBoundary) appendFileSync(filePath, '\n', 'utf-8')
   }
-  appendFileSync(filePath, `${JSON.stringify(entry)}\n`, { encoding: 'utf-8', mode: 0o600 })
+  appendFileSync(filePath, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n', { encoding: 'utf-8', mode: 0o600 })
   checkedJournalBoundaries.add(filePath)
   try { chmodSync(filePath, 0o600) } catch {}
 }

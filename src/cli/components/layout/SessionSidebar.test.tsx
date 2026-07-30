@@ -79,7 +79,7 @@ describe('SessionSidebar', () => {
           terminals={[]}
           mcpCount={0}
           task={null}
-          gitState={{ enabled: false, phase: 'disabled', snapshot: null, updatedAt: 1 }}
+          gitState={{ enabled: true, phase: 'unavailable', snapshot: null, updatedAt: 1 }}
         />
       </ThemeProvider>,
       { columns: 120 },
@@ -87,6 +87,7 @@ describe('SessionSidebar', () => {
 
     expect(output.split('\n').every(line => line.length <= 28)).toBe(true)
     expect(output).not.toContain('RUNTIME')
+    expect(output).not.toContain('REPO')
   })
 
   it('keeps the completed FastContext handoff visible', () => {

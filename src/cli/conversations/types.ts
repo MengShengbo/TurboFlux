@@ -1,4 +1,4 @@
-import type { AgentMode, AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
+import type { AgentAttachment, AgentMode, AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
 import type { ContextSegment } from '../../state/types'
 import type { ContextReservoirEntry } from '../../state/types'
 
@@ -19,11 +19,43 @@ export interface PersistedConversation extends ConversationMeta {
   activeTurns?: AgentTurn[]
   contextSegments?: ContextSegment[]
   contextReservoir?: ContextReservoirEntry[]
+  interactionState?: ConversationInteractionState
   recovery?: {
     interrupted: boolean
     truncatedJournal: boolean
     unresolvedToolCalls: number
   }
+}
+
+export interface ConversationQueuedInput {
+  id: string
+  prompt: string
+  attachments?: AgentAttachment[]
+}
+
+export interface ConversationDraftState {
+  text: string
+  attachments?: AgentAttachment[]
+}
+
+export interface ConversationPendingSteering {
+  id: string
+  text: string
+}
+
+export interface ConversationPendingApproval {
+  requestId: string
+  requestKind: 'permission' | 'input'
+  question: string
+  toolName?: string
+  path?: string
+}
+
+export interface ConversationInteractionState {
+  queuedInputs: ConversationQueuedInput[]
+  draft: ConversationDraftState
+  pendingSteering: ConversationPendingSteering[]
+  pendingApprovals: ConversationPendingApproval[]
 }
 
 export interface ConversationIndex {
@@ -48,3 +80,7 @@ export type ConversationJournalEntry =
       contextSegments: ContextSegment[]
       contextReservoir: ContextReservoirEntry[]
     }
+  | { version: 2; type: 'queue_state'; timestamp: number; inputs: ConversationQueuedInput[] }
+  | { version: 2; type: 'draft_state'; timestamp: number; draft: ConversationDraftState }
+  | { version: 2; type: 'input_state'; timestamp: number; inputId: string; intent: 'steer'; state: 'accepted' | 'committed' | 'rejected'; text: string; reason?: string }
+  | { version: 2; type: 'approval_state'; timestamp: number; requestId: string; requestKind: 'permission' | 'input'; state: 'requested' | 'resolved' | 'cancelled'; decision?: string; question: string; toolName?: string; path?: string }

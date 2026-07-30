@@ -1,3 +1,5 @@
+import { prefersReducedMotion } from '../../platform/terminalAttention'
+
 export const STARTUP_ANIMATION_MS = 960
 
 export interface StartupAnimationFrame {
@@ -35,7 +37,7 @@ export function shouldAnimateStartup(
   environment: NodeJS.ProcessEnv = process.env,
 ): boolean {
   if (!interactive || singleShot || !requested) return false
-  if (isTruthy(environment.TURBOFLUX_NO_ANIMATION) || isTruthy(environment.CI)) return false
+  if (prefersReducedMotion(environment)) return false
   return environment.TERM?.trim().toLowerCase() !== 'dumb'
 }
 
@@ -45,9 +47,4 @@ function clamp(value: number): number {
 
 function easeOutCubic(value: number): number {
   return 1 - Math.pow(1 - value, 3)
-}
-
-function isTruthy(value: string | undefined): boolean {
-  const normalized = value?.trim().toLowerCase()
-  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
 }

@@ -93,7 +93,7 @@ export function SessionSidebar({
   const contextRatio = Math.min(1, contextTotal / safeContextWindow)
   const elapsed = isRunning && runState.startedAt ? formatElapsed(Date.now() - runState.startedAt) : ''
   const gitSnapshot = gitState.snapshot
-  const showRepo = Boolean(gitSnapshot || gitState.error || gitState.operation || ['detecting', 'syncing', 'error', 'unavailable'].includes(gitState.phase))
+  const showRepo = Boolean(gitSnapshot || gitState.error || gitState.operation || ['detecting', 'syncing', 'error'].includes(gitState.phase))
   const showRuntime = mcpCount > 0 || activeTerminals > 0 || queuedCount > 0
 
   useEffect(() => {
@@ -151,7 +151,7 @@ export function SessionSidebar({
 
       {showRepo && (
         <Section title={t('ui.sidebar.repo')}>
-          {gitState.phase !== 'ready' && <SidebarRow label={t('ui.sidebar.state')} value={gitState.phase} width={width} color={gitState.phase === 'error' || gitState.phase === 'unavailable' ? theme.error : theme.warning} />}
+          {gitState.phase !== 'ready' && <SidebarRow label={t('ui.sidebar.state')} value={gitState.phase} width={width} color={gitState.phase === 'error' ? theme.error : theme.warning} />}
           {gitSnapshot && <SidebarRow label={t('ui.sidebar.branch')} value={`${gitSnapshot.branch}${gitSnapshot.head ? ` @ ${gitSnapshot.head.slice(0, 8)}` : ''}`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : theme.text} />}
           {gitSnapshot && <SidebarRow label={t('ui.sidebar.changes')} value={`${gitSnapshot.stagedCount}S ${gitSnapshot.unstagedCount}M ${gitSnapshot.untrackedCount}U ${gitSnapshot.conflictedCount}C`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : gitSnapshot.clean ? theme.success : theme.warning} />}
           {gitSnapshot && (gitSnapshot.ahead > 0 || gitSnapshot.behind > 0) && <SidebarRow label={t('ui.sidebar.tracking')} value={`+${gitSnapshot.ahead} / -${gitSnapshot.behind}`} width={width} color={theme.info} />}

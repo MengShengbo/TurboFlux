@@ -7,6 +7,7 @@ import type { SkillRuntime } from '../../core/skills/runtime'
 import type { McpClient } from '../../core/mcp/client'
 import type { RuntimeTaskManager } from '../../core/runtime/runtimeTaskManager'
 import type { MessageKey, Translator } from '../i18n/index'
+import type { FlowFeatureFlags } from '../state/flowFeatureFlags'
 
 export type CommandType = 'local' | 'local-jsx' | 'prompt'
 
@@ -23,6 +24,14 @@ export interface CommandContext {
   skillRuntime?: SkillRuntime
   mcpClient?: McpClient
   runtimeTaskManager?: RuntimeTaskManager
+  flowFeatures?: FlowFeatureFlags
+  notificationInbox?: {
+    snapshot: () => {
+      inbox: Array<{ id: string; title: string; detail?: string; count: number; category: string }>
+      resultCount: number
+    }
+    clearResults: () => number
+  }
   t: Translator
 }
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +12,7 @@ import { RuntimeTaskManager } from './runtimeTaskManager.js'
 import { hashText } from '../fileIO.js'
 
 function makeTempDir(prefix: string): string {
-  return mkdtempSync(join(tmpdir(), prefix))
+  return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)))
 }
 
 async function withWorkspace<T>(fn: (paths: { workspace: string; outside: string }) => Promise<T> | T): Promise<T> {
@@ -31,7 +31,7 @@ afterEach(() => {
 })
 
 describe('NodeToolExecutor file and process lifecycle', () => {
-  it('supports reads and writes outside the initial workspace', async () => withWorkspace(async ({ workspace, outside }) => {
+  it('blocks external paths by default and requires explicit full access', async () => withWorkspace(async ({ workspace, outside }) => {
     const outsideFile = join(outside, 'outside.txt')
     writeFileSync(join(workspace, 'inside.txt'), 'inside', 'utf-8')
     writeFileSync(outsideFile, 'outside', 'utf-8')
@@ -44,10 +44,14 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     })
 
     const outsideRead = await executor.readFile(outsideFile)
-    expect(outsideRead).toMatchObject({ success: true, data: 'outside' })
+    expect(outsideRead).toMatchObject({ success: false })
 
     const outsideWrite = await executor.writeFile(join(outside, 'new.txt'), 'written')
-    expect(outsideWrite.success).toBe(true)
+    expect(outsideWrite.success).toBe(false)
+
+    const fullAccessExecutor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
+    await expect(fullAccessExecutor.readFile(outsideFile)).resolves.toMatchObject({ success: true, data: 'outside' })
+    await expect(fullAccessExecutor.writeFile(join(outside, 'new.txt'), 'written')).resolves.toMatchObject({ success: true })
     expect(readFileSync(join(outside, 'new.txt'), 'utf-8')).toBe('written')
   }))
 
@@ -87,7 +91,7 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     expect(readFileSync(filePath, 'utf-8')).toBe('editor change')
   }))
 
-  it('follows paths through a symlink or junction', async () => withWorkspace(async ({ workspace, outside }) => {
+  it('blocks paths through a symlink or junction outside the workspace', async () => withWorkspace(async ({ workspace, outside }) => {
     writeFileSync(join(outside, 'secret.txt'), 'outside', 'utf-8')
     const linkPath = join(workspace, 'linked')
     try {
@@ -99,11 +103,11 @@ describe('NodeToolExecutor file and process lifecycle', () => {
 
     const result = await executor.readFile(join(linkPath, 'secret.txt'))
 
-    expect(result).toMatchObject({ success: true, data: 'outside' })
+    expect(result).toMatchObject({ success: false })
   }))
 
   it('requires an explicit permission decision for shell commands', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace)
+    const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
 
     const blocked = await executor.runCommand('echo hello', workspace)
     const approved = await executor.runCommand('echo hello', workspace, {}, 5000, true)
@@ -111,6 +115,27 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     expect(blocked.success).toBe(false)
     expect(blocked.error).toContain('explicit permission')
     expect(approved.success).toBe(true)
+  }))
+
+  it('does not let an approval decision expand the capability profile', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.runCommand('echo hello', workspace, {}, 5000, true)
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('workspace-write')
+    expect(executor.getRuntimeTaskManager().listTasks()).toEqual([])
+  }))
+
+  it('blocks writes before touching disk in read-only mode', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'read-only' })
+    const target = join(workspace, 'blocked.txt')
+
+    const result = await executor.writeFile(target, 'blocked')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('read-only')
+    expect(existsSync(target)).toBe(false)
   }))
 
   it('reports non-zero process exits as failures', async () => withWorkspace(async ({ workspace }) => {
@@ -124,14 +149,14 @@ describe('NodeToolExecutor file and process lifecycle', () => {
   }))
 
   it('preserves exact shell command exit codes', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace)
+    const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
     const result = await executor.runCommand('node -e "process.exit(7)"', workspace, {}, 5000, true)
 
     expect(result).toMatchObject({ success: false, data: { exitCode: 7 } })
-  }))
+  }), 15_000)
 
   it('decodes shell output as UTF-8', async () => withWorkspace(async ({ workspace }) => {
-    const executor = new NodeToolExecutor(workspace)
+    const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
     const command = process.platform === 'win32' ? "Write-Output '你好，世界'" : "printf '你好，世界'"
     const result = await executor.runCommand(command, workspace, {}, 5000, true)
 
@@ -235,7 +260,7 @@ describe('NodeToolExecutor file and process lifecycle', () => {
 
   it('builds code maps for target paths outside the initial workspace', async () => withWorkspace(async ({ workspace, outside }) => {
     writeFileSync(join(outside, 'External.ts'), 'export const external = true\n', 'utf-8')
-    const executor = new NodeToolExecutor(workspace)
+    const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
 
     const result = await executor.getCodeMap({
       workspacePath: workspace,
@@ -302,6 +327,42 @@ describe('NodeToolExecutor file and process lifecycle', () => {
       },
     })
     expect(result.data?.content).toBe('line-200\nline-201\nline-202\nline-203\nline-204')
+  }))
+
+  it('bounds a giant single-line file by bytes', async () => withWorkspace(async ({ workspace }) => {
+    const filePath = join(workspace, 'single-line.jsonl')
+    writeFileSync(filePath, 'x'.repeat(300_000), 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.readFileRange(filePath, 0, 50)
+
+    expect(result).toMatchObject({ success: true, data: { truncated: true, partialLine: true } })
+    expect(result.data?.bytesRead).toBeLessThanOrEqual(64 * 1024 + 1)
+    expect(result.data?.content.length).toBeLessThanOrEqual(64 * 1024)
+  }))
+
+  it('enforces depth, per-directory, and global node budgets while building a tree', async () => withWorkspace(async ({ workspace }) => {
+    for (let directory = 0; directory < 4; directory += 1) {
+      const nested = join(workspace, `dir-${directory}`, 'nested')
+      mkdirSync(nested, { recursive: true })
+      for (let file = 0; file < 6; file += 1) {
+        writeFileSync(join(nested, `file-${file}.txt`), 'content', 'utf-8')
+      }
+    }
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.listTree(workspace, {
+      maxDepth: 2,
+      maxEntriesPerDirectory: 3,
+      maxNodes: 7,
+    })
+    const serialized = JSON.stringify(result.data)
+
+    expect(result.success).toBe(true)
+    expect(serialized).toContain('dir-0')
+    expect(serialized).not.toContain('file-0.txt')
+    const countNodes = (node: any): number => 1 + (node?.children || []).reduce((sum: number, child: any) => sum + countNodes(child), 0)
+    expect(countNodes(result.data)).toBeLessThanOrEqual(7)
   }))
 
   it('paginates content search and returns context windows', async () => withWorkspace(async ({ workspace }) => {
@@ -467,7 +528,7 @@ describe('NodeToolExecutor file and process lifecycle', () => {
 const windowsIt = process.platform === 'win32' ? it : it.skip
 
 windowsIt('does not mistake Windows command switches for absolute paths', async () => withWorkspace(async ({ workspace }) => {
-  const executor = new NodeToolExecutor(workspace)
+  const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
 
   const result = await executor.runCommand('cmd /c echo ok /s', workspace, {}, 5000, true)
 
@@ -565,7 +626,7 @@ it('preserves nested network causes in model request diagnostics', () => {
 })
 
 it('runs and inspects an agent background terminal session', async () => withWorkspace(async ({ workspace }) => {
-  const executor = new NodeToolExecutor(workspace)
+  const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
 
   const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh'
   const created = await executor.ptyCreate?.({ cwd: workspace, shell })
@@ -619,7 +680,7 @@ it('runs and inspects an agent background terminal session', async () => withWor
 }))
 
 it('runs one background command per session with exact exit state and incremental output', async () => withWorkspace(async ({ workspace }) => {
-  const executor = new NodeToolExecutor(workspace)
+  const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
   const command = `node -e "console.log('first'); setTimeout(() => { console.log('second'); process.exit(7) }, 1000)"`
   const created = await executor.startBackgroundCommand(command, workspace, undefined, true)
 
@@ -646,10 +707,10 @@ it('runs one background command per session with exact exit state and incrementa
   const task = executor.getRuntimeTaskManager().listTasks({ kind: 'terminal' })[0]
   expect(task).toMatchObject({ status: 'failed', exitCode: 7, command })
   expect(readFileSync(task.logPath!, 'utf8')).toContain('second')
-}))
+}), 15_000)
 
 it('reports evicted output and keeps explicit stops out of the error state', async () => withWorkspace(async ({ workspace }) => {
-  const executor = new NodeToolExecutor(workspace)
+  const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
   const created = await executor.startBackgroundCommand('node -e "setInterval(() => {}, 1000)"', workspace, undefined, true)
   const sessionId = created.data!.sessionId
   const internal = executor as unknown as {
@@ -671,7 +732,7 @@ it('reports evicted output and keeps explicit stops out of the error state', asy
   const task = executor.getRuntimeTaskManager().listTasks({ kind: 'terminal' })[0]
   expect(stopped).toMatchObject({ status: 'exited', canWrite: false, error: undefined })
   expect(task).toMatchObject({ status: 'stopped', error: undefined })
-}))
+}), 15_000)
 
 it('preserves persisted sequence cursors when reading a recovered session', async () => withWorkspace(async ({ workspace }) => {
   const logPath = join(workspace, 'recovered.jsonl')

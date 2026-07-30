@@ -8,6 +8,7 @@ import {
   resolveAssistantStreamDisplay,
   resolveLandingFrameWidth,
   selectAutoMountedModel,
+  shouldUseFlowUi,
   shouldUseNoFlicker,
   shouldShowLandingView,
   sliceTurnsBeforeNthUserTurn,
@@ -62,6 +63,15 @@ describe('no-flicker mode selection', () => {
         process.env.TURBOFLUX_NO_FLICKER = previous
       }
     }
+  })
+})
+
+describe('Flow UI selection', () => {
+  it('uses Flow selectors by default and supports an emergency read-source rollback', () => {
+    expect(shouldUseFlowUi(undefined)).toBe(true)
+    expect(shouldUseFlowUi('1')).toBe(true)
+    expect(shouldUseFlowUi('off')).toBe(false)
+    expect(shouldUseFlowUi('0')).toBe(false)
   })
 })
 
@@ -184,6 +194,44 @@ describe('rewind helpers', () => {
 })
 
 describe('interrupted assistant messages', () => {
+  it('restores tool-loop assistant text as provisional instead of a final answer', () => {
+    const messages = turnsToMessages([
+      {
+        id: 'assistant-tool-step',
+        role: 'assistant',
+        content: 'The directory is probably empty.',
+        timestamp: 1,
+        toolCalls: [{ id: 'tool-1', name: 'list_directory', arguments: { path: 'C:/Desktop' } }],
+      },
+      {
+        id: 'tool-result',
+        role: 'tool_result',
+        content: 'list_directory: [ok]',
+        timestamp: 2,
+        toolResults: [{
+          toolCallId: 'tool-1',
+          name: 'list_directory',
+          output: '[DIR] project',
+          isError: false,
+        }],
+      },
+      {
+        id: 'assistant-final',
+        role: 'assistant',
+        content: 'The desktop contains project.',
+        timestamp: 3,
+      },
+    ])
+
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toMatchObject({
+      id: 'assistant-tool-step',
+      content: '',
+      tools: [expect.objectContaining({ id: 'tool-1', status: 'done' })],
+    })
+    expect(messages[1]).toMatchObject({ id: 'assistant-final', content: 'The desktop contains project.' })
+  })
+
   it('preserves the interrupted marker when restoring engine turns', () => {
     const messages = turnsToMessages([{
       id: 'partial-assistant',

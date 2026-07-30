@@ -17,6 +17,11 @@
     "build": "tsc",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
+    "test:flow": "vitest run src/cli/state src/cli/telemetry src/cli/platform/terminalAttention.test.ts src/cli/hooks/useTerminalSize.test.ts src/cli/components/App.test.ts src/cli/components/TranscriptViewport.test.ts src/cli/components/transcriptWindowing.test.ts src/cli/components/markdown/index.test.ts src/cli/components/layout/StartupAnimation.test.ts src/cli/components/input/terminalInputStateMachine.test.ts src/cli/components/input/PromptInput.test.ts src/cli/commands/index.test.ts src/cli/conversations/journalWriter.test.ts src/cli/conversations/recoveryExport.test.ts src/cli/conversations/manager.test.ts src/cli/conversations/store.test.ts src/core/agentEngine.approval.test.ts src/core/agentEngine.input.test.ts src/core/runtime/approvalCoordinator.test.ts src/core/runtime/capabilityBoundary.test.ts src/core/runtime/sessionRegistry.test.ts",
+    "perf:flow": "tsx scripts/flow-performance.ts",
+    "smoke:tui": "tsx scripts/tui-flow-smoke.ts",
+    "baseline:terminal": "tsx scripts/terminal-flow-baseline.ts",
+    "ci:flow": "npm run type-check && npm test && npm run perf:flow && npm run smoke:tui && npm run build",
     "bun:type-check": "bunx tsc --noEmit",
     "bun:test": "bunx vitest run",
     "bun:build": "bunx tsc",
@@ -28,6 +33,8 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/react": "^19.2.15",
+    "@xterm/headless": "^6.0.0",
+    "node-pty": "^1.1.0",
     "typescript": "^5.3.3",
     "vitest": "^4.1.7"
   },

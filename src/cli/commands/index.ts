@@ -4,8 +4,16 @@ import { type TurboFluxConfig, getPresetByIdOrModelFrom, applyPreset, redactConf
 import { existsSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { formatNativeReasoningSetting, getModelReasoningCapabilities } from '../../core/modelRegistry'
-import { APPROVAL_POLICY_LABELS, normalizeApprovalPolicy, type ReasoningEffort } from '../../shared/agentTypes'
+import {
+  APPROVAL_POLICY_LABELS,
+  CAPABILITY_PROFILE_LABELS,
+  normalizeApprovalPolicy,
+  normalizeCapabilityProfile,
+  type CapabilityProfile,
+  type ReasoningEffort,
+} from '../../shared/agentTypes'
 import { createTranslator, type Translator } from '../i18n/index'
+import { describeFlowFeatureFlags } from '../state/flowFeatureFlags'
 
 const DEFAULT_TRANSLATOR = createTranslator('en')
 
@@ -24,7 +32,11 @@ commandRegistry.register({
   descriptionKey: 'command.clear.description',
   type: 'local',
   execute: (_args, ctx) => {
-    ctx.conversationManager?.startNew()
+    try {
+      ctx.conversationManager?.startNew()
+    } catch {
+      return ctx.t('command.conversation.persistenceBlocked')
+    }
     ctx.engine.resetSession()
     ctx.setMessages([])
     return ctx.t('command.clear.done')
@@ -207,6 +219,75 @@ commandRegistry.register({
 })
 
 commandRegistry.register({
+  name: 'inbox',
+  descriptionKey: 'command.inbox.description',
+  argumentHint: '[clear]',
+  type: 'local',
+  execute: (args, ctx) => {
+    const inbox = ctx.notificationInbox
+    if (!inbox) return ctx.t('command.inbox.unavailable')
+    if (args.trim().toLowerCase() === 'clear') {
+      const cleared = inbox.clearResults()
+      return cleared > 0
+        ? ctx.t('command.inbox.cleared', { count: cleared })
+        : ctx.t('command.inbox.alreadyClear')
+    }
+    if (args.trim()) return ctx.t('command.inbox.usage')
+    const snapshot = inbox.snapshot()
+    const results = snapshot.inbox.filter(item => item.category === 'result-ready')
+    if (results.length === 0) return ctx.t('command.inbox.none')
+    return [
+      ctx.t('command.inbox.title', { count: snapshot.resultCount }),
+      ...results.map(item => `- ${item.title}${item.count > 1 ? ` x${item.count}` : ''}${item.detail ? ` - ${item.detail}` : ''}`),
+      ctx.t('command.inbox.reviewHint'),
+    ].join('\n')
+  },
+})
+
+commandRegistry.register({
+  name: 'flow',
+  descriptionKey: 'command.flow.description',
+  argumentHint: '[status|retry|export [path]]',
+  type: 'local',
+  execute: (args, ctx) => {
+    const manager = ctx.conversationManager
+    if (!manager) return ctx.t('command.flow.unavailable')
+    const [action = 'status', ...rest] = args.trim().split(/\s+/).filter(Boolean)
+    if (action === 'status') {
+      const health = manager.getPersistenceHealth()
+      return [
+        ctx.t('command.flow.status', {
+          status: health.status === 'healthy' ? ctx.t('command.flow.healthy') : ctx.t('command.flow.degraded'),
+        }),
+        ctx.t('command.flow.pending', {
+          recovery: health.pendingRecoveryEntries,
+          streaming: health.pendingStreamingEntries,
+        }),
+        ctx.t('command.flow.features', {
+          features: ctx.flowFeatures ? describeFlowFeatureFlags(ctx.flowFeatures) : ctx.t('command.flow.featuresUnknown'),
+        }),
+        health.error ? ctx.t('command.flow.error', { message: health.error }) : '',
+      ].filter(Boolean).join('\n')
+    }
+    if (action === 'retry') {
+      const health = manager.retryPersistence()
+      return health.status === 'healthy'
+        ? ctx.t('command.flow.retrySucceeded')
+        : ctx.t('command.flow.retryFailed', { message: health.error ?? ctx.t('command.flow.unknownError') })
+    }
+    if (action === 'export') {
+      try {
+        const target = manager.exportRecoveryBundle(rest.join(' ') || undefined)
+        return ctx.t('command.flow.exported', { path: target })
+      } catch (error) {
+        return ctx.t('command.flow.exportFailed', { message: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return ctx.t('command.flow.usage')
+  },
+})
+
+commandRegistry.register({
   name: 'stop',
   descriptionKey: 'command.stop.description',
   argumentHint: '[session-id|all]',
@@ -344,10 +425,35 @@ commandRegistry.register({
   },
 })
 
+commandRegistry.register({
+  name: 'capability',
+  descriptionKey: 'command.capability.description',
+  argumentHint: '[read-only|workspace-write|danger-full-access]',
+  type: 'local',
+  execute: (args, ctx) => {
+    const input = args.trim().toLowerCase()
+    const current = ctx.config.capabilityProfile || 'workspace-write'
+    if (!input) {
+      return ctx.t('command.capability.current', { label: capabilityLabel(current), profile: current })
+    }
+    if (!['read-only', 'workspace-write', 'danger-full-access'].includes(input)) {
+      return ctx.t('command.capability.usage')
+    }
+    const profile = normalizeCapabilityProfile(input, current)
+    const next = setConfigValue(ctx.config, 'capabilityProfile', profile)
+    ctx.setConfig(next)
+    return ctx.t('command.capability.set', { label: capabilityLabel(profile), profile })
+  },
+})
+
 function approvalLabel(policy: keyof typeof APPROVAL_POLICY_LABELS, ctx: CommandContext): string {
   if (policy === 'ask') return ctx.t('command.approval.ask')
   if (policy === 'agent') return ctx.t('command.approval.agent')
   return ctx.t('command.approval.full')
+}
+
+function capabilityLabel(profile: CapabilityProfile): string {
+  return CAPABILITY_PROFILE_LABELS[profile]
 }
 
 function renderBar(pct: number, width: number): string {
@@ -425,7 +531,11 @@ commandRegistry.register({
   type: 'local',
   execute: (_args, ctx) => {
     if (!ctx.conversationManager) return ctx.t('command.conversation.unavailable')
-    ctx.conversationManager.startNew()
+    try {
+      ctx.conversationManager.startNew()
+    } catch {
+      return ctx.t('command.conversation.persistenceBlocked')
+    }
     ctx.engine.resetSession()
     ctx.setMessages([])
     return ctx.t('command.conversation.started')

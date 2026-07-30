@@ -1227,11 +1227,17 @@ describe('runSubAgent', () => {
       requestCount += 1
       if (requestCount === 1) {
         return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'locate-final-recovery',
+          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'startRuntime' }) },
+        }] } }] }), { status: 200 })
+      }
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
           id: 'read-final-recovery',
           function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 3 }) },
         }] } }] }), { status: 200 })
       }
-      const range = requestCount === 2 ? [1, 10] : [1, 3]
+      const range = requestCount === 3 ? [1, 10] : [1, 3]
       return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
         id: `submit-final-recovery-${requestCount}`,
         function: { name: 'submit_code_map', arguments: JSON.stringify({
@@ -1260,7 +1266,7 @@ describe('runSubAgent', () => {
           description: 'test',
           driver: 'main-model',
           systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 2,
+          maxTurns: 3,
           maxParallel: 2,
         },
         objective: 'find runtime implementation',
@@ -1273,8 +1279,8 @@ describe('runSubAgent', () => {
       })
 
       expect(result.error).toBeUndefined()
-      expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('src/core.ts L1-L3') })
-      expect(requestCount).toBe(2)
+      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
+      expect(requestCount).toBe(3)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1355,6 +1361,12 @@ describe('runSubAgent', () => {
       requestCount += 1
       if (requestCount === 1) {
         return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'locate-before-read',
+          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'runtime' }) },
+        }] } }] }), { status: 200 })
+      }
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
           id: 'read-before-final',
           function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 5 }) },
         }] } }] }), { status: 200 })
@@ -1387,7 +1399,7 @@ describe('runSubAgent', () => {
           description: 'test',
           driver: 'main-model',
           systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 2,
+          maxTurns: 3,
           maxParallel: 2,
         },
         objective: 'find runtime implementation',
@@ -1399,9 +1411,134 @@ describe('runSubAgent', () => {
         requireGroundedReport: true,
       })
 
-      expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('src/core.ts L1-L5') })
-      const finalTools = requestBodies[1].tools.map((tool: any) => tool.function.name)
+      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L5') })
+      expect(requestBodies[0].tools.map((tool: any) => tool.function.name)).not.toContain('read_file')
+      expect(requestBodies[0].tools.map((tool: any) => tool.function.name)).not.toContain('submit_code_map')
+      const finalTools = requestBodies[2].tools.map((tool: any) => tool.function.name)
       expect(finalTools).toEqual(['submit_code_map'])
+      expect(requestBodies[2].tool_choice).toEqual({ type: 'function', function: { name: 'submit_code_map' } })
+      expect(requestBodies[2].parallel_tool_calls).toBe(false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('does not execute provider tool calls that were not offered on the final turn', async () => {
+    const originalFetch = globalThis.fetch
+    let requestCount = 0
+    globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'initial-search',
+          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'runtime' }) },
+        }] } }] }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+        id: requestCount === 2 ? 'initial-read' : 'forbidden-final-read',
+        function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 5 }) },
+      }] } }] }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    const readFile = vi.fn(async () => ({ success: true, data: 'line one\nline two\nline three\nline four\nline five' }))
+    const events: any[] = []
+    const executor = {
+      readFile,
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'fast_context',
+          label: 'FastContext',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: buildFastContextSystemPrompt(),
+          maxTurns: 3,
+          maxParallel: 2,
+        },
+        objective: 'find runtime implementation',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        requireGroundedReport: true,
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({
+        ok: false,
+        turns: 3,
+        error: expect.stringContaining('not offered for turn 3: read_file'),
+      })
+      expect(readFile).toHaveBeenCalledOnce()
+      const discoveryResponse = events.find(event => event.type === 'model_response' && event.turn === 1)
+      expect(discoveryResponse).toMatchObject({ retrievalPhase: 'scope_discovery' })
+      expect(discoveryResponse.offeredTools).not.toContain('read_file')
+      expect(discoveryResponse.offeredTools).not.toContain('submit_code_map')
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'model_response',
+        turn: 3,
+        offeredTools: ['submit_code_map'],
+        returnedTools: ['read_file'],
+        finalizationOnly: true,
+        retrievalPhase: 'finalization',
+      }))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('rejects paths that escape the delegated subagent scope', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+      id: 'escape-read',
+      function: { name: 'read_file', arguments: JSON.stringify({ path: '../outside.ts', offset: 1, limit: 10 }) },
+    }] } }] }), { status: 200 })) as unknown as typeof fetch
+
+    const readFile = vi.fn(async () => ({ success: true, data: 'should not be read' }))
+    const events: SubAgentEvent[] = []
+    const executor = {
+      readFile,
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const result = await runSubAgent({
+        definition: {
+          id: 'explorer',
+          label: 'Explorer',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'test',
+          maxTurns: 1,
+          maxParallel: 1,
+        },
+        objective: 'inspect only the delegated subtree',
+        workspacePath: 'C:/repo/src/core',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        onEvent: event => events.push(event),
+      })
+
+      expect(result).toMatchObject({ ok: true, truncated: true })
+      expect(readFile).not.toHaveBeenCalled()
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'tool_result',
+        tool: 'read_file',
+        ok: false,
+        summary: expect.stringContaining('Path escapes the delegated subagent scope'),
+      }))
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1542,6 +1679,12 @@ describe('runSubAgent', () => {
       requestCount += 1
       if (requestCount === 1) {
         return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'locate-old-module',
+          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'Grouper' }) },
+        }] } }] }), { status: 200 })
+      }
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
           id: 'read-old-module',
           function: { name: 'read_file', arguments: JSON.stringify({ path: 'lib/matplotlib/cbook/__init__.py', offset: 1, limit: 10 }) },
         }] } }] }), { status: 200 })
@@ -1573,7 +1716,7 @@ describe('runSubAgent', () => {
           description: 'test',
           driver: 'main-model',
           systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 2,
+          maxTurns: 3,
           maxParallel: 2,
         },
         objective: 'find Grouper serialization owner',
@@ -1585,7 +1728,7 @@ describe('runSubAgent', () => {
         requireGroundedReport: true,
       })
 
-      expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('lib/matplotlib/cbook.py') })
+      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('lib/matplotlib/cbook.py') })
       expect(result.evidence).toEqual(expect.arrayContaining([
         expect.objectContaining({ path: 'lib/matplotlib/cbook.py', reason: 'file read' }),
       ]))

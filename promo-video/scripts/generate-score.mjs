@@ -7,7 +7,7 @@ const channels = 2;
 const samples = sampleRate * duration;
 const bpm = 124;
 const beat = 60 / bpm;
-const cuts = [4.5, 9, 14, 19.667, 24, 30];
+const cuts = [145 / 30, 276 / 30, 421 / 30, 595 / 30, 726 / 30, 900 / 30];
 let seed = 0x5f3759df;
 const random = () => {
   seed = (seed * 1664525 + 1013904223) >>> 0;
@@ -36,6 +36,34 @@ for (let i = 0; i < samples; i++) {
   const hatAccent = Math.floor(t / eighth) % 2 === 1 ? 1 : .58;
   const hat = highNoise * hatEnv * .13 * hatAccent;
 
+  const keyInterval = 1.45 / 30;
+  const keyPhase = t >= .6 && t < 3.02 ? (t - .6) % keyInterval : 1;
+  const keyEnv = keyPhase < .018 ? Math.exp(-keyPhase * 260) : 0;
+  const keyboard = (highNoise * .055 + Math.sin(Math.PI * 2 * 2350 * keyPhase) * .025) * keyEnv;
+
+  let mechanical = 0;
+  for (const action of [96 / 30, 690 / 30, 924 / 30]) {
+    const after = t - action;
+    if (after >= 0 && after < .07) {
+      mechanical += (Math.sin(Math.PI * 2 * 780 * after) + highNoise * .7) * Math.exp(-after * 68) * .13;
+    }
+  }
+
+  let cardFoley = 0;
+  const agentLandings = [451, 462, 472, 481, 489];
+  const diffLandings = [750, 762, 774, 786, 798, 810, 822, 834];
+  for (const actionFrame of [...agentLandings, ...diffLandings]) {
+    const after = t - actionFrame / 30;
+    if (after >= 0 && after < .11) {
+      cardFoley += (highNoise * .62 + Math.sin(Math.PI * 2 * 310 * after)) * Math.exp(-after * 42) * .045;
+    }
+  }
+
+  const logoAfter = t - 1000 / 30;
+  const sparkle = logoAfter >= 0 && logoAfter < 1.25
+    ? (Math.sin(Math.PI * 2 * 1320 * logoAfter) + .55 * Math.sin(Math.PI * 2 * 1978 * logoAfter)) * Math.exp(-logoAfter * 3.5) * .045
+    : 0;
+
   const notes = [55, 55, 65.406, 49, 55, 73.416, 65.406, 49];
   const bassFreq = notes[beatIndex % notes.length];
   const bassEnv = Math.min(1, beatPhase * 35) * Math.exp(-beatPhase * 2.4);
@@ -54,7 +82,7 @@ for (let i = 0; i < samples; i++) {
   const introGain = Math.min(1, t / .6);
   const outroGain = t > 34.8 ? Math.max(0, (36 - t) / 1.2) : 1;
   const master = introGain * outroGain;
-  const monoMix = (kick + bass + pad + riser + impact) * master;
+  const monoMix = (kick + bass + pad + riser + impact + keyboard + mechanical + cardFoley + sparkle) * master;
   const left = Math.max(-.96, Math.min(.96, monoMix + hat * .82 * master));
   const right = Math.max(-.96, Math.min(.96, monoMix + hat * 1.18 * master));
   data.writeInt16LE(Math.round(left * 32767), i * 4);

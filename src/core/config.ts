@@ -4,7 +4,9 @@ import { join } from 'path'
 import { getSupportedModelSpec, normalizeNativeReasoningConfig, SUPPORTED_MODEL_SPECS } from './modelRegistry'
 import {
   normalizeApprovalPolicy,
+  normalizeCapabilityProfile,
   type ApprovalPolicy,
+  type CapabilityProfile,
   type NativeReasoningConfig,
 } from '../shared/agentTypes'
 import { loadCredentialSnapshot, saveCredentialSnapshot } from './credentialStore'
@@ -21,6 +23,7 @@ export interface TurboFluxConfig {
   modelCapabilities?: ModelCapabilities
   modelMetadataSources?: ModelMetadataSource[]
   approvalPolicy: ApprovalPolicy
+  capabilityProfile?: CapabilityProfile
   gitEnabled: boolean
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
@@ -234,6 +237,7 @@ const DEFAULT_CONFIG: TurboFluxConfig = {
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   maxTokens: DEFAULT_MAX_TOKENS,
   approvalPolicy: 'ask',
+  capabilityProfile: 'workspace-write',
   gitEnabled: true,
   reasoning: undefined,
   apiConfigs: [],
@@ -289,6 +293,7 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
   const contextWindow = positiveInteger(raw.contextWindow, DEFAULT_CONFIG.contextWindow)
   const maxTokens = positiveInteger(raw.maxTokens, DEFAULT_CONFIG.maxTokens)
   const approvalPolicy = normalizeApprovalPolicy(raw.approvalPolicy, DEFAULT_CONFIG.approvalPolicy)
+  const capabilityProfile = normalizeCapabilityProfile(raw.capabilityProfile, DEFAULT_CONFIG.capabilityProfile)
   const profiles = normalizeApiConfigProfiles((raw as any).apiConfigs)
   let activeApiConfigId = typeof raw.activeApiConfigId === 'string' ? raw.activeApiConfigId : undefined
   const activeProfile = profiles.find(profile => profile.id === activeApiConfigId)
@@ -328,6 +333,7 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
     modelCapabilities: selected?.modelCapabilities,
     modelMetadataSources: selected?.modelMetadataSources,
     approvalPolicy,
+    capabilityProfile,
     gitEnabled: raw.gitEnabled !== false,
     reasoning: selected?.reasoning ?? normalizeNativeReasoningConfig(model, raw.reasoning, provider, raw.modelCapabilities),
     apiConfigs: nextProfiles,
@@ -515,6 +521,11 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
         throw new Error('approvalPolicy must be ask, agent, or full')
       }
       return { ...config, approvalPolicy: normalizeApprovalPolicy(value.toLowerCase(), config.approvalPolicy) }
+    case 'capabilityProfile':
+      if (!['read-only', 'workspace-write', 'danger-full-access'].includes(value.toLowerCase())) {
+        throw new Error('capabilityProfile must be read-only, workspace-write, or danger-full-access')
+      }
+      return { ...config, capabilityProfile: normalizeCapabilityProfile(value.toLowerCase(), config.capabilityProfile) }
     case 'gitEnabled': {
       const normalized = value.toLowerCase()
       if (!['true', 'false', 'on', 'off', 'enabled', 'disabled'].includes(normalized)) {
@@ -566,7 +577,7 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
       return updateActive({ ...config, [key]: parsed } as TurboFluxConfig)
     }
     default:
-      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens, approvalPolicy, gitEnabled, reasoningEnabled, reasoningEffort, reasoningBudgetTokens`)
+      throw new Error(`Unknown config key "${key}". Valid keys: provider, apiKey, baseUrl, model, contextWindow, maxTokens, approvalPolicy, capabilityProfile, gitEnabled, reasoningEnabled, reasoningEffort, reasoningBudgetTokens`)
   }
 }
 

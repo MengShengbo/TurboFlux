@@ -13,10 +13,42 @@ const NUMBERED_RE = /^(\s*)\d+\.\s+(.+)$/gm
 const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g
 const HR_RE = /^---+$/gm
 
+const MAX_CACHE_ENTRIES = 512
+const MAX_CACHE_BYTES = 4 * 1024 * 1024
+
+interface MarkdownCacheEntry {
+  formatted: string
+  bytes: number
+}
+
+export interface MarkdownCacheStats {
+  hits: number
+  misses: number
+  evictions: number
+  entries: number
+  bytes: number
+  hitRate: number
+}
+
+const markdownCache = new Map<string, MarkdownCacheEntry>()
+let markdownCacheBytes = 0
+let markdownCacheHits = 0
+let markdownCacheMisses = 0
+let markdownCacheEvictions = 0
+
 export function formatMarkdown(text: string): string {
   if (!text) return ''
 
-  return text
+  const cached = markdownCache.get(text)
+  if (cached) {
+    markdownCacheHits += 1
+    markdownCache.delete(text)
+    markdownCache.set(text, cached)
+    return cached.formatted
+  }
+  markdownCacheMisses += 1
+
+  const formatted = text
     .replace(CODE_BLOCK_RE, (_match, lang, code) => {
       const langLabel = lang || 'code'
       const highlighted = highlightCode(code.trimEnd(), lang)
@@ -36,4 +68,39 @@ export function formatMarkdown(text: string): string {
     .replace(NUMBERED_RE, (_m, indent, t) => `${indent}${chalk.dim('-')} ${t}`)
     .replace(LINK_RE, (_m, label, url) => `${chalk.underline(label)} ${chalk.dim(`(${url})`)}`)
     .replace(HR_RE, () => chalk.dim('-'.repeat(40)))
+
+  const bytes = Buffer.byteLength(text, 'utf8') + Buffer.byteLength(formatted, 'utf8')
+  if (bytes <= MAX_CACHE_BYTES) {
+    markdownCache.set(text, { formatted, bytes })
+    markdownCacheBytes += bytes
+    while (markdownCache.size > MAX_CACHE_ENTRIES || markdownCacheBytes > MAX_CACHE_BYTES) {
+      const oldestKey = markdownCache.keys().next().value as string | undefined
+      if (oldestKey === undefined) break
+      const oldest = markdownCache.get(oldestKey)
+      markdownCache.delete(oldestKey)
+      markdownCacheBytes -= oldest?.bytes ?? 0
+      markdownCacheEvictions += 1
+    }
+  }
+  return formatted
+}
+
+export function getMarkdownCacheStats(): MarkdownCacheStats {
+  const total = markdownCacheHits + markdownCacheMisses
+  return {
+    hits: markdownCacheHits,
+    misses: markdownCacheMisses,
+    evictions: markdownCacheEvictions,
+    entries: markdownCache.size,
+    bytes: markdownCacheBytes,
+    hitRate: total === 0 ? 0 : markdownCacheHits / total,
+  }
+}
+
+export function resetMarkdownCache(): void {
+  markdownCache.clear()
+  markdownCacheBytes = 0
+  markdownCacheHits = 0
+  markdownCacheMisses = 0
+  markdownCacheEvictions = 0
 }

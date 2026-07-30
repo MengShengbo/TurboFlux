@@ -125,7 +125,7 @@ export function turnsToMessages(turns: AgentTurn[]): Message[] {
     return [{
       id: turn.id,
       role: turn.role,
-      content: turn.content,
+      content: isProvisionalAssistantTurn(turn) ? '' : turn.content,
       tools: tools && tools.length > 0 ? tools : undefined,
       changes: changes && changes.length > 0 ? changes : undefined,
       interrupted: turn.metadata?.interrupted === true,
@@ -139,6 +139,10 @@ export function turnsToMessages(turns: AgentTurn[]): Message[] {
   })
 }
 
+export function isProvisionalAssistantTurn(turn: AgentTurn): boolean {
+  return turn.role === 'assistant' && Boolean(turn.toolCalls?.length)
+}
+
 export function normalizeEnvFlag(value: string | undefined): string | undefined {
   return value?.trim().toLowerCase()
 }
@@ -149,6 +153,11 @@ export function shouldUseNoFlicker(interactive: boolean, singleShot?: string, re
   if (forced === '0' || forced === 'false' || forced === 'no' || forced === 'off') return false
   if (forced === '1' || forced === 'true' || forced === 'yes' || forced === 'on') return true
   return requested
+}
+
+export function shouldUseFlowUi(value = process.env.TURBOFLUX_FLOW_UI): boolean {
+  const forced = normalizeEnvFlag(value)
+  return forced !== '0' && forced !== 'false' && forced !== 'no' && forced !== 'off'
 }
 
 export function resolveLandingFrameWidth(columns: number): number {

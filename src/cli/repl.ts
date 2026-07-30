@@ -1,7 +1,7 @@
 import chalk from 'chalk'
 import { startInkApp } from './components/App'
 import type { TurboFluxConfig } from '../core/config'
-import type { ApprovalPolicy } from '../shared/agentTypes'
+import type { ApprovalPolicy, CapabilityProfile } from '../shared/agentTypes'
 import { loadMcpSettings } from '../core/mcp/settings'
 import { runSingleShot } from './singleShot'
 import { loadProfile } from '../core/profile'
@@ -14,18 +14,19 @@ export interface ReplOptions {
   verbose: boolean
   noFlicker?: boolean
   approvalPolicy?: ApprovalPolicy
+  capabilityProfile?: CapabilityProfile
   mcpServers?: string[]
   startupAnimation?: boolean
   transparentBackground?: boolean
 }
 
 export async function startRepl(options: ReplOptions): Promise<void> {
-  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation, transparentBackground } = options
+  const { workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, capabilityProfile, mcpServers, startupAnimation, transparentBackground } = options
   const t = createTranslator(loadProfile().interfaceLanguage)
 
   if (singleShot) {
     try {
-      await runSingleShot({ workspacePath, config, prompt: singleShot, verbose, approvalPolicy, mcpServers })
+      await runSingleShot({ workspacePath, config, prompt: singleShot, verbose, approvalPolicy, capabilityProfile, mcpServers })
     } catch (error) {
       process.stderr.write(`${t('repl.commandFailed', { message: error instanceof Error ? error.message : String(error) })}\n`)
       process.exitCode = 1
@@ -52,5 +53,5 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, mcpServers, startupAnimation, transparentBackground })
+  startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, capabilityProfile, mcpServers, startupAnimation, transparentBackground })
 }

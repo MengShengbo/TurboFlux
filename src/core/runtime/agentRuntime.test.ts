@@ -66,6 +66,41 @@ describe('createAgentRuntime runtime tasks', () => {
     }
   })
 
+  it('switches every runtime owner through one session registry', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
+    const runtime = createAgentRuntime({
+      workspacePath: workspace,
+      workspaceName: 'runtime-test',
+      conversationId: 'conversation-1',
+      config: {
+        provider: 'custom',
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        contextWindow: 100_000,
+        maxTokens: 4096,
+      },
+    })
+
+    try {
+      runtime.sessionRegistry.activate('conversation-2')
+
+      expect(runtime.engine.getConversationId()).toBe('conversation-2')
+      expect(runtime.engine.getSession().id).toBe('conversation-2')
+      expect(runtime.stateProvider.getConversationId()).toBe('conversation-2')
+      expect(runtime.runtimeTaskManager.getDefaultOwnerSessionId()).toBe('conversation-2')
+      expect(runtime.subAgentTaskManager.getOwnerSessionId()).toBe('conversation-2')
+
+      await runtime.toolExecutor.runProcess(process.execPath, ['-e', 'process.exit(0)'], workspace)
+      expect(runtime.runtimeTaskManager.listTasks()).toEqual([
+        expect.objectContaining({ ownerSessionId: 'conversation-2' }),
+      ])
+    } finally {
+      await runtime.destroy()
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   it('applies global configuration to every runtime consumer', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
     const runtime = createAgentRuntime({

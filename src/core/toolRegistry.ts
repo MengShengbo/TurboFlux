@@ -5,7 +5,7 @@ import { validateSchemaValue } from './schemaValidation'
 const tools: EnhancedToolDef[] = [
   {
     name: 'read_file',
-    description: 'Read a file with line numbers. When offset/limit are omitted, returns up to 2,000 lines so normal source files are available in one call. Use offset/limit only for very large files or a precise range found by search. Independent files or ranges can be read in parallel. Numbered snippets can be pasted directly into edit_file or multi_edit; the editor strips line-number prefixes.',
+    description: 'Read a bounded file range with line numbers. When offset/limit are omitted, returns up to 2,000 lines within a strict byte budget so normal source files fit in one call without allowing giant or single-line files to consume the context window. Continue from the returned offset or search for a precise range when truncated. Numbered snippets can be pasted directly into edit_file or multi_edit; the editor strips line-number prefixes.',
     category: 'read',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
@@ -15,11 +15,11 @@ const tools: EnhancedToolDef[] = [
     isReadOnly: true,
     isDestructive: false,
     isConcurrencySafe: true,
-    maxResultSizeChars: Infinity,
+    maxResultSizeChars: 64_000,
   },
   {
     name: 'read_file_full',
-    description: 'Read the entire file without the 2,000-line safety window. Use only when exact complete contents of a very large file are required.',
+    description: 'Read a larger bounded preview of a file. Files that exceed the safety budget are truncated with instructions to continue using read_file offset/limit; no file may consume the context window without a hard limit.',
     category: 'read',
     parameters: [
       { name: 'path', type: 'string', description: 'File path (relative to workspace root)', required: true },
@@ -27,7 +27,7 @@ const tools: EnhancedToolDef[] = [
     isReadOnly: true,
     isDestructive: false,
     isConcurrencySafe: true,
-    maxResultSizeChars: Infinity,
+    maxResultSizeChars: 96_000,
   },
   {
     name: 'write_file',
@@ -166,10 +166,11 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'explore_code',
-    description: `Start a background architecture map with FastContext Race. The model chooses query rewrites, evidence reads, next-hop tracing, ranking, and stopping while local tools perform deterministic search and bounded reads. The grounded result is injected automatically at a safe turn boundary. Continue only non-overlapping work while it runs; never poll it with read_agent/list_agents, duplicate broad retrieval, or call explore_code repeatedly. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
+    description: `Start a background architecture map with FastContext Race. The delegated path is the enforced retrieval root. Turn 1 performs bounded scope discovery without file reads; later turns read evidence and rank the edit frontier. The grounded result is injected automatically at a safe turn boundary. Continue only non-overlapping work while it runs; do not poll it, duplicate broad retrieval, or call explore_code repeatedly. After a terminal failure, read_agent can inspect its persisted transcript once for diagnosis. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
     category: 'read',
     parameters: [
       { name: 'objective', type: 'string', description: 'Concrete thing to locate or understand. Include visible UI text, behavior, suspected feature area, symbol names, and what answer should prove.', required: true },
+      { name: 'path', type: 'string', description: 'Explicit directory scope relative to the active workspace. Pass the smallest known project or subsystem directory; use "." only for a genuinely workspace-wide objective.', required: true },
       { name: 'context', type: 'string', description: 'Optional prior findings, paths already checked, or constraints. Do not ask the user for a path before using this when the path can be discovered.', required: false },
       { name: 'strategy', type: 'string', description: 'Compatibility field. FastContext uses the Race controller.', required: false, enum: ['autonomous-race'], default: 'autonomous-race' },
     ],
@@ -594,7 +595,7 @@ When NOT to use spawn_agent:
 - For a known string pattern in a known area, use search_content.
 - For a tiny known lookup where one targeted search is enough, stay with targeted read/search tools.
 
-Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results for ordinary subagents, list_agents to discover tasks, and cancel_agent to stop one. FastContext is push-driven through explore_code and must not be polled.
+Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results for ordinary subagents, list_agents to discover tasks, and cancel_agent to stop one. FastContext is push-driven and must not be polled while active; read_agent is available for one-shot postmortem inspection after it stops or fails.
 Launch multiple agents concurrently for independent topics and provide a highly specific objective.`,
     category: 'read',
     parameters: [
@@ -618,7 +619,7 @@ Launch multiple agents concurrently for independent topics and provide a highly 
   },
   {
     name: 'read_agent',
-    description: 'Read an ordinary background subagent status, final result when available, and a page of its persisted transcript. Never use this to poll FastContext; FastContext evidence is injected automatically.',
+    description: 'Read a background subagent status, final result, and a page of its persisted transcript. For FastContext, do not poll while active; use this after a terminal failure or explicit diagnostic request to inspect the existing runtime transcript.',
     category: 'read',
     parameters: [
       { name: 'agent_id', type: 'string', description: 'Agent ID returned by spawn_agent or list_agents.', required: true },

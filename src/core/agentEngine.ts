@@ -77,6 +77,7 @@ import { getSubAgentDefinition, runSubAgent, loadDynamicAgents, getAvailableAgen
 import type { ToolExecutor, WebSearchResult } from '../tools/executor'
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
 import type { TreeNode } from '../shared/types'
+import type { EnhancedToolDef } from '../shared/toolTypes'
 import { parseTextToolCalls, stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import {
   detectGitRepo,
@@ -87,7 +88,6 @@ import {
   formatGitSnapshotForPrompt,
   formatGitSnapshotForTool,
   gitCommit,
-  gitCommitPaths,
   gitCreateBranch,
   gitPush,
   gitRestorePaths,
@@ -102,6 +102,7 @@ import {
 import { hashText } from './fileIO'
 import { RuntimeTaskManager } from './runtime/runtimeTaskManager'
 import { SubAgentTaskManager, type SubAgentTaskSnapshot } from './runtime/subAgentTaskManager'
+import { ApprovalCoordinator } from './runtime/approvalCoordinator'
 
 type TaskSystemCreationEvent = {
   status: 'planning' | 'creating' | 'completed' | 'error'
@@ -126,6 +127,11 @@ export function splitTurnsForCompaction(turns: AgentTurn[], keepRecent: number):
 }
 
 const CANCELLED_TOOL_RESULT_TEXT = 'Cancelled before the tool completed.'
+const DEFAULT_MODEL_READ_LINES = 2_000
+const MODEL_READ_MAX_LINES = 2_000
+const MODEL_READ_MAX_BYTES = 48 * 1024
+const MODEL_READ_FULL_MAX_BYTES = 80 * 1024
+const DEFAULT_TOOL_RESULT_MAX_CHARS = 20_000
 
 function contentBlocks(message: Record<string, unknown>): Array<Record<string, unknown>> {
   if (Array.isArray(message.content)) {
@@ -258,7 +264,9 @@ export type AgentEventType =
   | { type: 'stream:start' }
   | { type: 'stream:end'; interrupted?: boolean }
   | { type: 'stream:usage'; usage: TokenUsage }
-  | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string; requestId?: string; toolName?: string; path?: string }
+  | { type: 'ask:user'; question: string; options?: string[]; reason?: string; command?: string; requestId?: string; toolName?: string; path?: string; queuedCount?: number }
+  | { type: 'approval:state'; requestId: string; requestKind: 'permission' | 'input'; state: 'requested' | 'resolved' | 'cancelled'; decision?: string; question: string; toolName?: string; path?: string }
+  | { type: 'input:state'; inputId: string; intent: 'steer'; state: 'accepted' | 'committed' | 'rejected'; text: string; reason?: string }
   | { type: 'active:task'; context: import('./taskManager').ActiveTaskContext | null }
   | { type: 'terminal:sessions'; sessions: TerminalSessionInfo[] }
   | { type: 'runtime-task:finished'; task: RuntimeTask }
@@ -279,6 +287,20 @@ export type AgentEventType =
   | { type: 'cache:modules'; modules: PromptModuleSnapshot[] }
 
 export type AgentEventListener = (event: AgentEventType) => void
+export type AgentEventRecorder = (event: AgentEventType) => void
+
+type AskUserEvent = Extract<AgentEventType, { type: 'ask:user' }>
+
+interface EngineInteractiveRequest {
+  id: string
+  kind: 'permission' | 'input'
+  event: AskUserEvent
+}
+
+interface PendingSteeringInput {
+  id: string
+  text: string
+}
 
 export { downgradeReasoningEffort } from './requestCompatibility'
 
@@ -385,6 +407,7 @@ interface ActiveFastContextRun {
   generation: number
   startedAt: number
   objective: string
+  workspacePath: string
   strategy: FastContextStrategy
   mode: FastContextRunMode
   phase: FastContextRunPhase
@@ -399,6 +422,7 @@ export class AgentEngine {
   private session: AgentSession
   private taskManager: TaskManager
   private listeners: Set<AgentEventListener> = new Set()
+  private eventRecorder: AgentEventRecorder | null = null
   private abortController: AbortController | null = null
   private currentStreamId: number | null = null
   private isPaused: boolean = false
@@ -406,10 +430,8 @@ export class AgentEngine {
   private pauseResolve: (() => void) | null = null
   private unsubscribeTaskManager: (() => void) | null = null
   private contextManager: ContextManager = new ContextManager()
-  private pendingAskUserResolve: ((response: string) => void) | null = null
-  private queuedAskUserResponse: string | null = null
+  private readonly interactiveRequests: ApprovalCoordinator<EngineInteractiveRequest, string>
   private toolCallTaskMap: Map<string, string> = new Map()
-  private touchedFilePaths: Set<string> = new Set()
   private fileBeforeSnapshots: Map<string, string | null> = new Map()
   private fastContextRun: ActiveFastContextRun | null = null
   private fastContextGeneration = 0
@@ -473,7 +495,8 @@ export class AgentEngine {
   private disabledToolNames: Set<string> = new Set()
   private pendingAssistantMessageId: string | null = null
   private currentRunPromise: Promise<AgentTurn[]> | null = null
-  private pendingSteeringMessages: string[] = []
+  private pendingSteeringMessages: PendingSteeringInput[] = []
+  private steeringOpen = false
   private runState: AgentRunState = { phase: 'idle', updatedAt: Date.now() }
   private forceContextCompactionBeforeNextCall = false
   private contextLimitRetryInProgress = false
@@ -485,6 +508,10 @@ export class AgentEngine {
 
   setMcpClient(client: McpClient): void {
     this.mcpClient = client
+  }
+
+  setEventRecorder(recorder: AgentEventRecorder | null): void {
+    this.eventRecorder = recorder
   }
 
   constructor(
@@ -501,6 +528,29 @@ export class AgentEngine {
       ownerSessionId: config.conversationId,
       storageDir: false,
     })
+    this.interactiveRequests = new ApprovalCoordinator(
+      (request, queuedCount) => {
+        this.setRunState(request.kind === 'permission' ? 'awaiting_approval' : 'awaiting_input', {
+          detail: request.kind === 'permission'
+            ? `Reviewing ${request.event.toolName || 'tool'}`
+            : 'Waiting for your answer',
+          activeTool: request.event.toolName,
+        })
+        this.emit({ ...request.event, queuedCount })
+      },
+      ({ request, state, decision }) => {
+        this.emit({
+          type: 'approval:state',
+          requestId: request.id,
+          requestKind: request.kind,
+          state,
+          decision,
+          question: request.event.question,
+          toolName: request.event.toolName,
+          path: request.event.path,
+        })
+      },
+    )
     this.permissions.setApprovalPolicy(config.approvalPolicy || 'agent')
     const now = Date.now()
     const gitEnabled = config.gitEnabled !== false
@@ -511,7 +561,7 @@ export class AgentEngine {
       updatedAt: now,
     }
     this.session = {
-      id: generateSessionId(),
+      id: config.conversationId || generateSessionId(),
       mode: config.mode,
       turns: [],
       currentTaskId: null,
@@ -548,6 +598,7 @@ export class AgentEngine {
     this.unsubscribeTaskManager?.()
     this.abortController?.abort()
     this.cancelFastContextRun('Agent engine destroyed', false)
+    this.interactiveRequests.cancelAll('deny')
     this.abortController = null
     this.currentStreamId = null
     this.subAgentTaskManager.destroy()
@@ -568,6 +619,16 @@ export class AgentEngine {
 
   setAppendSystemPrompt(appendSystemPrompt: string | undefined): void {
     this.config.appendSystemPrompt = appendSystemPrompt
+  }
+
+  setConversationId(conversationId: string): void {
+    this.config.conversationId = conversationId
+    this.session.id = conversationId
+    this.stateProvider.setConversationId?.(conversationId)
+  }
+
+  getConversationId(): string | undefined {
+    return this.config.conversationId
   }
 
   updateRuntimeConfiguration(update: Partial<Pick<AgentConfig,
@@ -602,23 +663,28 @@ export class AgentEngine {
     return this.runStandaloneFastContextObjective(objective, strategy)
   }
 
-  private startFastContextBackground(objective: string, strategy: FastContextStrategy = 'autonomous-race'): FastContextBackgroundStart {
-    return this.startFastContextRun(objective, strategy, 'agent')
+  private startFastContextBackground(
+    objective: string,
+    strategy: FastContextStrategy = 'autonomous-race',
+    workspacePath = this.config.workspacePath,
+  ): FastContextBackgroundStart {
+    return this.startFastContextRun(objective, strategy, 'agent', workspacePath)
   }
 
   private startFastContextRun(
     objective: string,
     strategy: FastContextStrategy,
     mode: FastContextRunMode,
+    workspacePath = this.config.workspacePath,
   ): FastContextBackgroundStart {
     const nextObjective = objective.trim()
-    if (!nextObjective || !this.config.workspacePath) {
+    if (!nextObjective || !workspacePath) {
       return { status: 'unavailable', objective: nextObjective, strategy, promise: null }
     }
     const activeRun = this.fastContextRun
     if (activeRun) {
       return {
-        status: activeRun.objective === nextObjective && activeRun.mode === mode ? 'running' : 'busy',
+        status: activeRun.objective === nextObjective && activeRun.mode === mode && activeRun.workspacePath === workspacePath ? 'running' : 'busy',
         objective: activeRun.objective,
         strategy: activeRun.strategy,
         promise: activeRun.promise,
@@ -635,7 +701,7 @@ export class AgentEngine {
       agentType: 'fast_context',
       label: 'FastContext',
       objective: nextObjective,
-      workspacePath: this.config.workspacePath,
+      workspacePath,
       ownerSessionId: this.config.conversationId,
       deliveryMode: mode === 'agent' ? 'push' : 'pull',
       parentAgentRunId: ownerAgentRunId ?? undefined,
@@ -646,6 +712,7 @@ export class AgentEngine {
         runId: taskId,
         agentId: taskId,
         strategy,
+        workspacePath,
         recordEvent: event => recordEvent(event),
       }),
       isSuccess: result => result !== null,
@@ -664,6 +731,7 @@ export class AgentEngine {
       generation,
       startedAt,
       objective: nextObjective,
+      workspacePath,
       strategy,
       mode,
       phase: 'running',
@@ -860,7 +928,8 @@ export class AgentEngine {
     if (!this.gitState.enabled) return false
     const generation = this.gitGeneration
     if (!this.config.workspacePath) {
-      this.updateGitState({ phase: 'unavailable', snapshot: null, error: 'No workspace selected' })
+      this.cachedGitStatus = null
+      this.updateGitState({ phase: 'unavailable', snapshot: null, error: undefined, operation: undefined })
       return false
     }
     if (this.gitDetected && !force) return this.gitState.phase === 'ready' || this.gitState.phase === 'syncing'
@@ -870,7 +939,7 @@ export class AgentEngine {
     if (generation !== this.gitGeneration || !this.gitState.enabled) return false
     if (!isRepo) {
       this.cachedGitStatus = null
-      this.updateGitState({ phase: 'unavailable', snapshot: null, error: 'Workspace is not a Git repository' })
+      this.updateGitState({ phase: 'unavailable', snapshot: null, error: undefined, operation: undefined })
       return false
     }
     await this.refreshGitStatus(generation)
@@ -883,6 +952,7 @@ export class AgentEngine {
 
   async refreshGitStatus(expectedGeneration = this.gitGeneration): Promise<void> {
     if (!this.gitState.enabled || !this.config.workspacePath) return
+    if (this.gitState.phase === 'unavailable' || this.gitState.phase === 'disabled') return
     const snapshot = await fetchGitSnapshot(this.config.workspacePath, this.toolExecutor).catch(() => null)
     if (expectedGeneration !== this.gitGeneration || !this.gitState.enabled) return
     this.cachedGitStatus = snapshot ? formatGitSnapshotForPrompt(snapshot) : null
@@ -1001,12 +1071,11 @@ export class AgentEngine {
     this.restoreFromMessages([])
     this.stateProvider.setContextSegments([])
     this.stateProvider.setContextReservoir([])
-    this.session.id = generateSessionId()
+    this.session.id = this.config.conversationId || generateSessionId()
     this.session.currentTaskId = null
     this.session.createdAt = now
     this.session.updatedAt = now
     this.session.totalTokens = { input: 0, output: 0 }
-    this.touchedFilePaths.clear()
     this.fileBeforeSnapshots.clear()
   }
 
@@ -1045,7 +1114,7 @@ export class AgentEngine {
       }
     }))
 
-    this.session.id = generateSessionId()
+    this.session.id = this.config.conversationId || generateSessionId()
     this.session.createdAt = turns[0]?.timestamp ?? Date.now()
     this.session.updatedAt = turns[turns.length - 1]?.timestamp ?? Date.now()
     this.session.totalTokens = turns.reduce((total, turn) => ({
@@ -1140,7 +1209,6 @@ export class AgentEngine {
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
     this.pendingAssistantMessageId = null
-    this.touchedFilePaths.clear()
     this.fileBeforeSnapshots.clear()
 
     let restoredTimestampFallback = Date.now()
@@ -1428,10 +1496,11 @@ export class AgentEngine {
     this.emit({ type: 'run:state', state: this.runState })
   }
 
-  submitSteeringMessage(message: string): boolean {
+  submitSteeringMessage(message: string, inputId = `steer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`): boolean {
     const trimmed = message.trim()
-    if (!trimmed || !this.currentRunPromise) return false
-    this.pendingSteeringMessages.push(trimmed)
+    if (!trimmed || !this.currentRunPromise || !this.steeringOpen) return false
+    this.pendingSteeringMessages.push({ id: inputId, text: trimmed })
+    this.emit({ type: 'input:state', inputId, intent: 'steer', state: 'accepted', text: trimmed })
     this.emit({ type: 'notification', message: 'Guidance added to the current run.', level: 'info' })
     return true
   }
@@ -1439,11 +1508,28 @@ export class AgentEngine {
   private consumeSteeringMessages(newTurns: AgentTurn[]): boolean {
     if (this.pendingSteeringMessages.length === 0) return false
     const messages = this.pendingSteeringMessages.splice(0)
-    const userTurn = this.createUserTurn(messages.join('\n\n'))
-    this.session.turns.push(userTurn)
-    newTurns.push(userTurn)
-    this.emit({ type: 'turn:start', turn: userTurn })
+    for (const message of messages) {
+      const userTurn = this.createUserTurn(message.text, undefined, message.id)
+      this.session.turns.push(userTurn)
+      newTurns.push(userTurn)
+      this.emit({ type: 'turn:start', turn: userTurn })
+      this.emit({ type: 'input:state', inputId: message.id, intent: 'steer', state: 'committed', text: message.text })
+    }
     return true
+  }
+
+  private rejectPendingSteeringMessages(reason: string): void {
+    const pending = this.pendingSteeringMessages.splice(0)
+    for (const message of pending) {
+      this.emit({
+        type: 'input:state',
+        inputId: message.id,
+        intent: 'steer',
+        state: 'rejected',
+        text: message.text,
+        reason,
+      })
+    }
   }
 
   publishRuntimeTaskFinished(task: RuntimeTask): void {
@@ -1456,7 +1542,8 @@ export class AgentEngine {
 
   abort(): void {
     if (this.currentRunPromise) this.setRunState('aborting', { detail: 'Stopping current run' })
-    this.pendingSteeringMessages = []
+    this.steeringOpen = false
+    this.rejectPendingSteeringMessages('Current run was interrupted before guidance was committed')
     this.abortController?.abort()
     this.cancelFastContextRun('FastContext cancelled with the current run')
     // Per-conv stream abort: only cancel THIS engine's HTTP stream in the
@@ -1472,30 +1559,17 @@ export class AgentEngine {
       this.pausePromise = null
       this.pauseResolve = null
     }
-    if (this.pendingAskUserResolve) {
-      this.pendingAskUserResolve('deny')
-      this.pendingAskUserResolve = null
-    }
+    this.interactiveRequests.cancelAll('deny')
   }
 
-  submitAskUserResponse(response: string): void {
-    if (this.pendingAskUserResolve) {
-      this.pendingAskUserResolve(response)
-      this.pendingAskUserResolve = null
-      return
-    }
-    this.queuedAskUserResponse = response
+  submitAskUserResponse(response: string, requestId?: string): boolean {
+    const targetId = requestId ?? this.interactiveRequests.getActiveRequest()?.id
+    if (!targetId) return false
+    return this.interactiveRequests.resolve(targetId, response)
   }
 
-  private waitForAskUserResponse(): Promise<string> {
-    if (this.queuedAskUserResponse !== null) {
-      const response = this.queuedAskUserResponse
-      this.queuedAskUserResponse = null
-      return Promise.resolve(response)
-    }
-    return new Promise(resolve => {
-      this.pendingAskUserResolve = resolve
-    })
+  getPendingInteractiveRequests(): { active: EngineInteractiveRequest | null; queued: EngineInteractiveRequest[]; pendingCount: number } {
+    return this.interactiveRequests.getSnapshot()
   }
 
   pause(): void {
@@ -1602,7 +1676,7 @@ export class AgentEngine {
     }
   }
 
-  async run(userMessage: string, options?: { reuseLastUserTurn?: boolean; attachments?: NonNullable<AgentTurn['metadata']>['attachments'] }): Promise<AgentTurn[]> {
+  async run(userMessage: string, options?: { reuseLastUserTurn?: boolean; attachments?: NonNullable<AgentTurn['metadata']>['attachments']; userTurnId?: string }): Promise<AgentTurn[]> {
     if (this.currentRunPromise) {
       throw new Error('AgentEngine.run() called while a previous run is still in flight')
     }
@@ -1615,7 +1689,8 @@ export class AgentEngine {
     await this.initializeGit()
     this.abortController = new AbortController()
     this.permissions.clearRunGrants()
-    this.pendingSteeringMessages = []
+    this.rejectPendingSteeringMessages('Previous run ended before guidance was committed')
+    this.steeringOpen = true
     this.setRunState('thinking', { detail: 'Preparing the next step' })
     this.currentRunToolNames = []
     this.currentRunReadFiles.clear()
@@ -1642,17 +1717,17 @@ export class AgentEngine {
       && this.session.turns[this.session.turns.length - 1]?.content === userMessage
 
     const newTurns: AgentTurn[] = []
-    if (!canReuseLastUserTurn) {
-      const userTurn = this.createUserTurn(userMessage, options?.attachments)
-      this.session.turns.push(userTurn)
-      this.emit({ type: 'turn:start', turn: userTurn })
-      newTurns.push(userTurn)
-    }
-
     let consecutiveToolErrors = 0
     const MAX_CONSECUTIVE_ERRORS = 1
 
     try {
+      if (!canReuseLastUserTurn) {
+        const userTurn = this.createUserTurn(userMessage, options?.attachments, options?.userTurnId)
+        this.session.turns.push(userTurn)
+        this.emit({ type: 'turn:start', turn: userTurn })
+        newTurns.push(userTurn)
+      }
+
       const waitedFastContextTaskIds = new Set<string>()
 
       while (true) {
@@ -1716,13 +1791,13 @@ export class AgentEngine {
         this.session.turns.push(resultTurn)
         newTurns.push(resultTurn)
 
-        const hasAskUser = assistantTurn.toolCalls!.some(tc => tc.name === 'ask_user')
-        if (hasAskUser) {
-          this.setRunState('awaiting_input', { detail: 'Waiting for your answer' })
-          const userResponse = await this.waitForAskUserResponse()
-          this.pendingAskUserResolve = null
-
-          const responseTurn = this.createUserTurn(userResponse)
+        const askUserCalls = assistantTurn.toolCalls!.filter(tc => tc.name === 'ask_user')
+        if (askUserCalls.length > 0) {
+          const responses: string[] = []
+          for (const askUserCall of askUserCalls) {
+            responses.push(await this.interactiveRequests.wait(askUserCall.id))
+          }
+          const responseTurn = this.createUserTurn(responses.join('\n\n'))
           this.session.turns.push(responseTurn)
           newTurns.push(responseTurn)
           this.emit({ type: 'turn:start', turn: responseTurn })
@@ -1730,6 +1805,8 @@ export class AgentEngine {
         }
       }
 
+      this.steeringOpen = false
+      this.rejectPendingSteeringMessages('Current turn finished before guidance was committed')
       this.session.updatedAt = Date.now()
       // Finalize any in_progress leaf tasks that the model forgot to flip
       // to completed/failed. Without this, tasks where every tool call has
@@ -1752,13 +1829,17 @@ export class AgentEngine {
         this.setRunState('recoverable_error', { detail: errorMsg, recoverable: true })
         this.emit({ type: 'error', error: errorMsg })
       }
+      this.steeringOpen = false
       this.permissions.clearRunGrants()
-      this.pendingSteeringMessages = []
+      this.rejectPendingSteeringMessages(errAborted
+        ? 'Current run was interrupted before guidance was committed'
+        : 'Current run failed before guidance was committed')
       throw error
     }
 
     this.permissions.clearRunGrants()
-    this.pendingSteeringMessages = []
+    this.steeringOpen = false
+    this.rejectPendingSteeringMessages('Current run ended before guidance was committed')
     return newTurns
     })()
     this.currentRunPromise = runPromise
@@ -2166,7 +2247,8 @@ Before retrying:
     runId: string
     strategy?: FastContextStrategy
     agentId?: string
-    recordEvent?: (event: FastContextScanEvent) => void
+    workspacePath?: string
+    recordEvent?: (event: unknown) => void
   }): Promise<FastContextScanResult | null> {
     const isCurrent = () => this.fastContextRun?.id === options.runId
     const emitIfCurrent = (event: AgentEventType) => {
@@ -2205,14 +2287,15 @@ Before retrying:
     // turns stay steady and targeted; this mode is the explicit fast lane.
     const startedAt = Date.now()
     const strategy = options.strategy || 'autonomous-race'
+    const workspacePath = options.workspacePath || this.config.workspacePath
     const profile = getFastContextProfile(strategy)
     const agentId = options.agentId || `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
     try {
-      if (!this.config.workspacePath) throw new Error('FastContext requires an open workspace')
+      if (!workspacePath) throw new Error('FastContext requires an open workspace')
       if (options.signal?.aborted) throw new Error('FastContext cancelled before start')
       const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
       const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
-      const workspaceSkeleton = await this.maybeBuildWorkspaceSkeleton(this.config.workspacePath)
+      const workspaceSkeleton = await this.maybeBuildWorkspaceSkeleton(workspacePath)
 
       emitIfCurrent({
         type: 'subagent:start',
@@ -2224,7 +2307,7 @@ Before retrying:
       })
       onEvent({ type: 'insight', text: `Running ${FAST_CONTEXT_ENGINE_ID} with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' })
       const result = await runFastContextSubagent({
-        workspacePath: this.config.workspacePath,
+        workspacePath,
         objective,
         toolExecutor: this.toolExecutor,
         apiKey: fastContextConfig?.apiKey || '',
@@ -2238,6 +2321,7 @@ Before retrying:
         abortSignal: options.signal,
         strategy,
         requestTimeoutMs: profile.requestTimeoutMs,
+        onTrace: event => options.recordEvent?.({ type: 'fast_context_trace', event }),
         onEvent,
       })
       emitIfCurrent({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: true, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
@@ -4011,7 +4095,11 @@ Before retrying:
       this.workspaceSkeletonPath = workspacePath
     }
     try {
-      const tree = await this.toolExecutor.listTree(workspacePath)
+      const tree = await this.toolExecutor.listTree(workspacePath, {
+        maxDepth: 2,
+        maxEntriesPerDirectory: 32,
+        maxNodes: 400,
+      })
       if (!tree.success || !tree.data) return undefined
 
       // Filter out noise (deps, build outputs, .git) so the skeleton stays
@@ -4339,42 +4427,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     }
     if (completedIds.size !== allResults.length) this.emitActiveTaskContext()
 
-    const hasFileOperations = toolCalls.some(tc =>
-      ['write_file', 'replace_file', 'edit_file', 'multi_edit', 'delete_file'].includes(tc.name)
-    )
-    if (hasFileOperations && this.config.workspacePath) {
-      const filePaths = Array.from(this.touchedFilePaths)
-      if (filePaths.length > 0) {
-        const gitReady = this.gitState.enabled && await this.initializeGit(this.gitState.phase !== 'ready')
-        if (!gitReady) {
-          this.emit({
-            type: 'notification',
-            level: 'warning',
-            message: this.gitState.phase === 'disabled'
-              ? 'Git auto-commit is disabled; AI file changes were not versioned.'
-              : `Git auto-commit unavailable: ${this.gitState.error || 'repository is not ready'}`,
-          })
-          this.touchedFilePaths.clear()
-          this.fileBeforeSnapshots.clear()
-        } else {
-          const gitResult = await this.runGitOperation('auto-commit', () => gitCommitPaths(
-            this.config.workspacePath!,
-            'chore(turboflux): commit AI changes',
-            filePaths,
-            this.toolExecutor,
-          ))
-          if (!gitResult.ok) {
-            this.emit({ type: 'notification', level: 'warning', message: `Git auto-commit failed: ${gitResult.error}` })
-          } else {
-            if (!gitResult.nothingToCommit) {
-              this.emit({ type: 'notification', level: 'success', message: `Git auto-commit ${gitResult.hash?.slice(0, 8) || 'created'}` })
-            }
-            this.touchedFilePaths.clear()
-            this.fileBeforeSnapshots.clear()
-          }
-        }
-      }
-    }
+    this.fileBeforeSnapshots.clear()
 
     return allResults
   }
@@ -4586,22 +4639,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       const executionArgs = toolCall.name === 'run_command'
         ? { ...toolCall.arguments, approved: true }
         : toolCall.arguments
-      const output = await this.dispatchTool(toolCall.name, executionArgs)
+      const output = await this.dispatchTool(toolCall.name, executionArgs, toolCall.id)
 
-      // Layer 0: Large result truncation.
-      // When a tool returns a very large output, keep only a short preview
-      // in the context window. The model is told the full output was truncated
-      // and can re-read the file with offset/limit if it needs more detail.
-      // Threshold: 20 000 chars ≈ 5 000 tokens — large enough to cover most
-      // useful reads (400 lines × ~50 chars/line = 20 000) while preventing
-      // single tool calls from consuming the entire context budget.
-      // read_file is exempt because it already has its own pagination via
-      // offset/limit; truncating it here would break the pagination contract.
-      const LARGE_RESULT_THRESHOLD = 20_000
-      const LARGE_RESULT_PREVIEW = 2_000
-      const isExemptFromTruncation = toolCall.name === 'read_file' || toolCall.name === 'read_file_full'
-      const truncatedOutput = (!isExemptFromTruncation && output.length > LARGE_RESULT_THRESHOLD)
-        ? `${output.slice(0, LARGE_RESULT_PREVIEW)}\n… <output truncated: ${output.length} chars total. Use a more specific query or read_file with offset/limit to get the relevant section.>`
+      const configuredResultLimit = (tool as EnhancedToolDef).maxResultSizeChars
+      const maxResultChars = Number.isFinite(configuredResultLimit)
+        ? Math.max(2_000, Number(configuredResultLimit))
+        : DEFAULT_TOOL_RESULT_MAX_CHARS
+      const truncationNotice = `\n… <output truncated: ${output.length} chars total; model result budget is ${maxResultChars} chars. Use a narrower query or read_file with offset/limit.>`
+      const previewChars = Math.max(1, maxResultChars - truncationNotice.length)
+      const truncatedOutput = output.length > maxResultChars
+        ? `${output.slice(0, previewChars)}${truncationNotice}`
         : output
 
       const isOutputFailure = this.isToolOutputFailure(toolCall.name, truncatedOutput)
@@ -4759,21 +4806,22 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     const command = typeof toolCall.arguments.command === 'string'
       ? toolCall.arguments.command
       : undefined
-    this.emit({
-      type: 'ask:user',
-      requestId: toolCall.id,
-      toolName: toolCall.name,
-      path: this.extractToolCallPath(toolCall),
-      question: command
-        ? `允许执行这个命令吗？`
-        : `允许执行 ${toolCall.name} 吗？`,
-      options: ['allow-once', 'allow-run', 'allow-session', 'deny'],
-      reason: result.reason || 'Operation requires approval',
-      command,
-    })
-
-    this.setRunState('awaiting_approval', { detail: `Reviewing ${toolCall.name}`, activeTool: toolCall.name })
-    const response = await this.waitForAskUserResponse()
+    const response = await this.interactiveRequests.request({
+      id: toolCall.id,
+      kind: 'permission',
+      event: {
+        type: 'ask:user',
+        requestId: toolCall.id,
+        toolName: toolCall.name,
+        path: this.extractToolCallPath(toolCall),
+        question: command
+          ? `允许执行这个命令吗？`
+          : `允许执行 ${toolCall.name} 吗？`,
+        options: ['allow-once', 'allow-run', 'allow-session', 'deny'],
+        reason: result.reason || 'Operation requires approval',
+        command,
+      },
+    }, { signal: this.abortController?.signal, cancelDecision: 'deny' })
     const decision = this.parsePermissionDecision(response)
     if (decision === 'deny') {
       return {
@@ -4789,6 +4837,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       this.permissions.grantRun(toolCall.name, toolCall.arguments)
     } else if (decision === 'allow-session') {
       this.permissions.grantSession(toolCall.name, toolCall.arguments)
+    }
+
+    if (this.interactiveRequests.getSnapshot().pendingCount === 0) {
+      this.setRunState('tool_running', { detail: `Running ${toolCall.name}`, activeTool: toolCall.name })
     }
 
     return null
@@ -4855,7 +4907,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     return lines.join('\n')
   }
 
-  private async dispatchTool(name: string, args: Record<string, unknown>): Promise<string> {
+  private async dispatchTool(name: string, args: Record<string, unknown>, toolCallId: string): Promise<string> {
     const workspace = this.stateProvider.getWorkspace()
     const basePath = workspace?.path || ''
 
@@ -4864,9 +4916,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       case 'read_file_full': {
         const filePath = this.resolvePath(basePath, args.path as string)
         const isFullRead = name === 'read_file_full'
-        const offset = isFullRead ? undefined : args.offset as number | undefined
+        const offset = isFullRead ? 1 : args.offset as number | undefined
         const requestedLimit = isFullRead ? undefined : args.limit as number | undefined
-        const limit = isFullRead ? undefined : requestedLimit ?? 2_000
+        const limit = Math.max(1, Math.min(MODEL_READ_MAX_LINES, Math.floor(requestedLimit ?? DEFAULT_MODEL_READ_LINES)))
+        const maxBytes = isFullRead ? MODEL_READ_FULL_MAX_BYTES : MODEL_READ_MAX_BYTES
         // with_line_numbers defaults true: cat -n style output makes
         // edit_file / multi_edit far more reliable because the model can
         // see exact line positions when planning targeted edits.
@@ -4874,19 +4927,57 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? args.with_line_numbers === true
           : args.with_line_numbers !== false
 
-        const result = await this.toolExecutor.readFile(filePath)
-        if (!result.success) {
-          const relPath = this.toWorkspaceRelative(basePath, filePath)
-          throw new Error(`${result.error || 'Unable to read file'} — resolved path: ${relPath}. Use search_files or list_directory to verify the correct path.`)
-        }
-
-        const rawContent = result.data ?? ''
-        const allLines = rawContent.split('\n')
-        const totalLines = allLines.length
         const startLine = offset || 1
         const start = Math.max(0, startLine - 1)
-        const end = limit ? start + limit : totalLines
-        const slice = allLines.slice(start, end)
+        let slice: string[]
+        let truncated = false
+        let partialLine = false
+        let totalLines: number | undefined
+        if (this.toolExecutor.readFileRange) {
+          const result = await this.toolExecutor.readFileRange(filePath, start, limit, maxBytes)
+          if (!result.success) {
+            const relPath = this.toWorkspaceRelative(basePath, filePath)
+            throw new Error(`${result.error || 'Unable to read file'} — resolved path: ${relPath}. Use search_files or list_directory to verify the correct path.`)
+          }
+          const rangeContent = result.data?.content ?? ''
+          slice = rangeContent ? rangeContent.split('\n') : []
+          truncated = result.data?.truncated === true
+          partialLine = result.data?.partialLine === true
+        } else {
+          const result = await this.toolExecutor.readFile(filePath)
+          if (!result.success) {
+            const relPath = this.toWorkspaceRelative(basePath, filePath)
+            throw new Error(`${result.error || 'Unable to read file'} — resolved path: ${relPath}. Use search_files or list_directory to verify the correct path.`)
+          }
+          const allLines = (result.data ?? '').split('\n')
+          totalLines = allLines.length
+          const selectedLines = allLines.slice(start, start + limit)
+          slice = []
+          let bytes = 0
+          for (const line of selectedLines) {
+            const remaining = maxBytes - bytes
+            if (remaining <= 0) {
+              truncated = true
+              break
+            }
+            const buffer = Buffer.from(line, 'utf8')
+            if (buffer.length > remaining && slice.length > 0) {
+              truncated = true
+              break
+            }
+            const bounded = buffer.length > remaining
+              ? buffer.subarray(0, remaining).toString('utf8').replace(/�$/, '')
+              : line
+            bytes += Buffer.byteLength(bounded, 'utf8') + 1
+            slice.push(bounded)
+            if (buffer.length > remaining) {
+              truncated = true
+              partialLine = true
+              break
+            }
+          }
+          truncated ||= start + slice.length < totalLines
+        }
         const returnedLines = slice.length
 
         // Render with line numbers in cat -n format
@@ -4898,13 +4989,13 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
 
         // Moderate files should fit in one model round. Very large files retain
         // an explicit continuation hint so callers can jump to a searched range.
-        const truncated = (start + returnedLines) < totalLines
-        if (!isFullRead && limit && truncated) {
+        if (truncated) {
+          if (partialLine) {
+            return `[line ${startLine} exceeds the ${Math.floor(maxBytes / 1024)} KiB model read budget; showing a bounded preview only. Line-based continuation cannot resume inside this line. Use search_content for a precise anchor or a structured log/task reader for JSONL records.]\n${content}`
+          }
           const nextOffset = startLine + returnedLines
-          const fullHint = requestedLimit
-            ? `call read_file with offset=${nextOffset}, limit=${limit} to continue`
-            : `showing the first ${returnedLines} lines; call read_file with offset=${nextOffset}, limit=${limit} to continue, or use a targeted search to jump to the relevant range`
-          return `[lines ${startLine}-${startLine - 1 + returnedLines} of ${totalLines}; ${fullHint}]\n${content}`
+          const knownTotal = totalLines ? ` of ${totalLines}` : ''
+          return `[lines ${startLine}-${startLine - 1 + returnedLines}${knownTotal}; bounded to ${limit} lines / ${Math.floor(maxBytes / 1024)} KiB; call read_file with offset=${nextOffset}, limit=${Math.min(limit, 400)} to continue, or search for a precise range]\n${content}`
         }
         return content
       }
@@ -4917,9 +5008,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           label: 'AI write_file',
           expectNotExists: true,
         })
-        if (result.success) {
-          this.touchedFilePaths.add(filePath)
-        }
         return result.success ? `File written: ${args.path}` : `Error: ${result.error}`
       }
 
@@ -4935,9 +5023,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           label: 'AI replace_file',
           expectedHash: hashText(existing.data || ''),
         })
-        if (result.success) {
-          this.touchedFilePaths.add(filePath)
-        }
         return result.success ? `File replaced: ${args.path}` : `Error: ${result.error}`
       }
 
@@ -4961,9 +5046,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           label: 'AI edit_file',
           expectedHash: hashText(readResult.data || ''),
         })
-        if (writeResult.success) {
-          this.touchedFilePaths.add(filePath)
-        }
         return writeResult.success
           ? `File edited: ${args.path}${replaceAll ? ` (${editResult.replacements} replacements)` : ''}`
           : `Error: ${writeResult.error}`
@@ -5005,9 +5087,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           label: 'AI multi_edit',
           expectedHash: hashText(readResult.data || ''),
         })
-        if (writeResult.success) {
-          this.touchedFilePaths.add(filePath)
-        }
         return writeResult.success
           ? `File edited: ${args.path} (${rawEdits.length} edits applied: ${summary.join(', ')})`
           : `Error: ${writeResult.error}`
@@ -5131,7 +5210,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           ? `\n\nParent context:\n${args.context.trim()}`
           : ''
         const scanObjective = `${objective}${context}`
-        const background = this.startFastContextBackground(scanObjective, strategy)
+        const requestedPath = typeof args.path === 'string' ? args.path.trim() : ''
+        const scopedWorkspace = requestedPath ? this.resolvePath(basePath, requestedPath) : basePath
+        const background = this.startFastContextBackground(scanObjective, strategy, scopedWorkspace)
         if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
         if (background.status === 'busy') {
           return `FastContext is already working on: ${background.objective}\nContinue only non-overlapping work; do not poll it, repeat broad retrieval, or call explore_code again.`
@@ -5139,7 +5220,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (background.status === 'running') {
           return 'FastContext is already running for this objective. Continue only non-overlapping work; evidence will be injected automatically. Do not poll it.'
         }
-        return 'FastContext background scan started. Continue only non-overlapping reasoning or work; avoid duplicating its broad retrieval. Use a targeted tool only for a specific fact needed immediately. Ranked evidence will be injected automatically; do not call read_agent or list_agents for it.'
+        return `FastContext background scan started. Agent ID: ${background.taskId}. Scope: ${this.toWorkspaceRelative(basePath, scopedWorkspace)}. Continue only non-overlapping work; ranked evidence will be injected automatically. Do not poll it while running. If it ends failed or the user asks for diagnostics, inspect its persisted transcript once with read_agent.`
       }
 
       case 'list_memories': {
@@ -5471,9 +5552,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           label: 'AI delete_file',
           expectedHash: hashText(existing.data || ''),
         })
-        if (result.success) {
-          this.touchedFilePaths.add(filePath)
-        }
         return result.success ? `File deleted: ${args.path}` : `Error: ${result.error}`
       }
 
@@ -5684,13 +5762,18 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       }
 
       case 'ask_user': {
-        this.emit({
-          type: 'ask:user',
-          question: args.question as string,
-          options: args.options as string[] | undefined,
-          reason: args.reason as string | undefined,
-          command: args.command as string | undefined,
-        })
+        void this.interactiveRequests.request({
+          id: toolCallId,
+          kind: 'input',
+          event: {
+            type: 'ask:user',
+            requestId: toolCallId,
+            question: args.question as string,
+            options: args.options as string[] | undefined,
+            reason: args.reason as string | undefined,
+            command: args.command as string | undefined,
+          },
+        }, { signal: this.abortController?.signal, cancelDecision: 'deny' })
         return `[Awaiting user response] ${args.question}`
       }
 
@@ -5715,17 +5798,8 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!task) return `Error: unknown agent_id "${agentId}".`
         if (task.deliveryMode === 'push') {
           if (task.runtimeTask.status === 'running' || task.runtimeTask.status === 'starting') {
-            if (agentId === this.fastContextRun?.id) await this.waitForCurrentFastContext(this.fastContextRun)
+            return `FastContext ${agentId} is still running. Its result will be injected automatically; continue non-overlapping work and do not poll it.`
           }
-          const refreshed = this.subAgentTaskManager.getTask(agentId) || task
-          const status = refreshed.runtimeTask.status
-          if (status === 'completed') {
-            return `FastContext completed. Ranked evidence is injected automatically into the next model turn. Do not call read_agent again for ${agentId}.`
-          }
-          if (status === 'failed' || status === 'stopped' || status === 'interrupted') {
-            return `FastContext ${status}${refreshed.runtimeTask.error ? `: ${refreshed.runtimeTask.error}` : '.'} Continue with targeted search/read tools; do not poll this task again.`
-          }
-          return `FastContext is still running in the background. Its result will be injected automatically; do not poll ${agentId} again.`
         }
         const transcript = this.subAgentTaskManager.readTranscript(agentId, {
           offset: typeof args.offset === 'number' ? args.offset : undefined,
@@ -5785,9 +5859,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
             return `FastContext is already running on: ${background.objective}. Continue useful non-overlapping work; do not call read_agent or list_agents for it.`
           }
           if (background.status === 'running') {
-            return 'FastContext is already running for this objective. Continue useful non-overlapping work; do not poll it.'
-          }
-          return 'FastContext started in the background. Continue useful non-overlapping work; its ranked evidence will be injected automatically. Do not call read_agent or list_agents for it.'
+          return 'FastContext is already running for this objective. Continue useful non-overlapping work; do not poll it while active.'
+        }
+          return `FastContext started in the background. Agent ID: ${background.taskId}. Continue useful non-overlapping work; its ranked evidence will be injected automatically. Use read_agent only after it reaches a terminal state and diagnostics are needed.`
         }
         if (!this.config.workspacePath) {
           return 'Error: no workspace open; cannot spawn subagent.'
@@ -5944,9 +6018,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     return toWorkspaceRelative(basePath, filePath)
   }
 
-  private createUserTurn(content: string, attachments?: NonNullable<AgentTurn['metadata']>['attachments']): AgentTurn {
+  private createUserTurn(content: string, attachments?: NonNullable<AgentTurn['metadata']>['attachments'], id = generateTurnId()): AgentTurn {
     return {
-      id: generateTurnId(),
+      id,
       role: 'user',
       content,
       timestamp: Date.now(),
@@ -6027,6 +6101,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private emit(event: AgentEventType): void {
+    this.eventRecorder?.(event)
     for (const listener of this.listeners) {
       listener(event)
     }

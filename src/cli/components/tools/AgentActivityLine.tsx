@@ -4,6 +4,7 @@ import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { SPINNER_INTERVAL_MS } from '../spinner/constants'
 import { useTheme } from '../../theme/index'
 import { TURBOFLUX_ACCENTS } from '../../theme/palette'
+import { prefersReducedMotion } from '../../platform/terminalAttention'
 
 interface AgentActivityLineProps {
   active: boolean
@@ -32,10 +33,11 @@ const SWEEP_COLORS = [
 export function AgentActivityLine({ active, persistent = false, width: requestedWidth }: AgentActivityLineProps) {
   const { columns } = useTerminalSize()
   const theme = useTheme()
+  const reducedMotion = prefersReducedMotion()
   const [frame, setFrame] = useState(0)
 
   useEffect(() => {
-    if (!active) return
+    if (!active || reducedMotion) return
     setFrame(0)
 
     const interval = setInterval(() => {
@@ -43,13 +45,15 @@ export function AgentActivityLine({ active, persistent = false, width: requested
     }, SPINNER_INTERVAL_MS)
 
     return () => clearInterval(interval)
-  }, [active])
+  }, [active, reducedMotion])
 
   if (!active && !persistent) return null
 
   const width = Math.max(0, Math.min(requestedWidth ?? columns - 3, columns - 3))
   const segments = active
-    ? buildAgentActivityLineFrame(width, frame)
+    ? reducedMotion
+      ? [{ text: '-'.repeat(width), color: theme.brand, bold: false }]
+      : buildAgentActivityLineFrame(width, frame)
     : [{ text: '─'.repeat(width), color: theme.subtle, bold: false }]
 
   return (

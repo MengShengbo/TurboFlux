@@ -6,7 +6,9 @@ import { loadConfig, redactConfig, saveConfig, setConfigValue } from '../core/co
 import { runSetup } from './setup'
 import {
   normalizeApprovalPolicy,
+  normalizeCapabilityProfile,
   type ApprovalPolicy,
+  type CapabilityProfile,
 } from '../shared/agentTypes'
 import { configureNetworkProxy } from '../core/networkProxy'
 import { loadProfile } from '../core/profile'
@@ -33,6 +35,7 @@ program
   .option('--transparent', t('cli.transparent'))
   .option('--opaque', t('cli.opaque'))
   .option('--approval-policy <policy>', t('cli.approvalPolicy'))
+  .option('--capability-profile <profile>', t('cli.capabilityProfile'))
   .option('--mcp <servers>', t('cli.mcp'))
   .action(async (workspace: string, opts) => {
     const workspacePath = resolve(workspace)
@@ -48,6 +51,13 @@ program
     const approvalPolicy: ApprovalPolicy | undefined = rawApprovalPolicy
       ? normalizeApprovalPolicy(rawApprovalPolicy)
       : undefined
+    const rawCapabilityProfile = opts.capabilityProfile ? String(opts.capabilityProfile).toLowerCase() : undefined
+    if (rawCapabilityProfile && !['read-only', 'workspace-write', 'danger-full-access'].includes(rawCapabilityProfile)) {
+      throw new Error(t('cli.invalidCapability', { profile: rawCapabilityProfile }))
+    }
+    const capabilityProfile: CapabilityProfile | undefined = rawCapabilityProfile
+      ? normalizeCapabilityProfile(rawCapabilityProfile)
+      : undefined
     const mcpServers = typeof opts.mcp === 'string'
       ? opts.mcp.split(',').map((name: string) => name.trim()).filter(Boolean)
       : undefined
@@ -58,6 +68,7 @@ program
       verbose: opts.verbose || false,
       noFlicker: opts.scrollback !== true,
       approvalPolicy,
+      capabilityProfile,
       mcpServers,
       startupAnimation: opts.animation !== false,
       transparentBackground: opts.opaque

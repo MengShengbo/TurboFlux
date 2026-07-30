@@ -101,6 +101,12 @@ describe('FastContext controller', () => {
       requestCount += 1
       if (requestCount === 1) {
         return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
+          id: 'locate-owner',
+          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'owner' }) },
+        }] } }] }), { status: 200 })
+      }
+      if (requestCount === 2) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
           id: 'read-owner',
           function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/owner.ts', offset: 1, limit: 20 }) },
         }] } }] }), { status: 200 })
@@ -152,10 +158,10 @@ describe('FastContext controller', () => {
       expect(result.engine).toBe('fcrace-v1')
       expect(FAST_CONTEXT_RACE_TOOLS).toEqual(['search_content', 'search_files', 'search_symbol', 'read_file', 'submit_code_map'])
       expect(result.telemetry).toMatchObject({
-        toolCalls: 1,
+        toolCalls: 2,
         readCalls: 1,
-        searchCalls: 0,
-        internalOperations: 1,
+        searchCalls: 1,
+        internalOperations: 2,
         internalReadOperations: 1,
       })
       expect(result.truncated).toBe(false)

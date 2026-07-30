@@ -1,0 +1,205 @@
+import { describe, expect, it } from 'vitest'
+import { AgentFlowController } from './agentFlowController'
+
+describe('AgentFlowController', () => {
+  it('projects a complete approved tool run without invariant violations', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.handle({ type: 'run:state', state: { phase: 'thinking', updatedAt: 1 } })
+    bridge.handle({ type: 'turn:start', turn: { id: 'turn-1', role: 'user', content: 'edit', timestamp: 2 } })
+    bridge.handle({ type: 'tool:call', toolCall: { id: 'tool-1', name: 'write_file', arguments: { path: 'a.ts' } } })
+    bridge.handle({ type: 'approval:state', requestId: 'tool-1', requestKind: 'permission', state: 'requested', question: 'Allow?', toolName: 'write_file' })
+    bridge.handle({ type: 'ask:user', requestId: 'tool-1', question: 'Allow?', toolName: 'write_file' })
+    bridge.presentApproval('tool-1')
+    bridge.handle({ type: 'approval:state', requestId: 'tool-1', requestKind: 'permission', state: 'resolved', decision: 'allow-once', question: 'Allow?', toolName: 'write_file' })
+    bridge.handle({ type: 'tool:result', toolResult: { toolCallId: 'tool-1', name: 'write_file', output: 'ok', isError: false } })
+    bridge.handle({ type: 'stream:start' })
+    bridge.handle({ type: 'stream:delta', text: 'done' })
+    bridge.handle({ type: 'stream:end' })
+    bridge.handle({ type: 'session:complete', session: { id: 'thread-1', mode: 'vibe', turns: [], currentTaskId: null, createdAt: 1, updatedAt: 2, totalTokens: { input: 0, output: 0 } } })
+
+    const state = bridge.store.getThread('thread-1')!
+    expect(state.run).toMatchObject({ phase: 'terminal', outcome: 'succeeded' })
+    expect(state.approvals['tool-1']).toMatchObject({ status: 'resolved', decision: 'allow-once' })
+    expect(state.tools['tool-1']).toMatchObject({ status: 'completed' })
+    expect(state.streams.answer).toMatchObject({ status: 'ended', tail: 'done' })
+    expect(state.violations).toEqual([])
+  })
+
+  it('owns queued input order and attachment payloads', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.enqueueInput({
+      id: 'queue-1',
+      prompt: 'next',
+      attachments: [{ id: 'image1', type: 'image', path: 'a.png', mime: 'image/png', filename: 'a.png', size: 10 }],
+    })
+
+    expect(bridge.getQueuedInputs()).toEqual([expect.objectContaining({
+      id: 'queue-1',
+      prompt: 'next',
+      attachments: [expect.objectContaining({ id: 'image1', path: 'a.png' })],
+    })])
+  })
+
+  it('keeps queued work runnable after a failed foreground run', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.startRun('first')
+    bridge.enqueueInput({ id: 'queue-1', prompt: 'second' })
+    bridge.enqueueInput({ id: 'queue-2', prompt: 'third' })
+
+    bridge.handle({ type: 'error', error: 'first run failed' })
+
+    expect(bridge.isForegroundBusy()).toBe(false)
+    expect(bridge.takeNextQueuedInput()).toMatchObject({ id: 'queue-1', prompt: 'second' })
+    expect(bridge.getQueuedInputs()).toEqual([expect.objectContaining({ id: 'queue-2' })])
+    expect(bridge.store.getThread('thread-1')?.run).toMatchObject({
+      phase: 'terminal',
+      outcome: 'failed',
+      error: 'first run failed',
+    })
+    expect(bridge.store.getThread('thread-1')?.violations).toEqual([])
+  })
+
+  it('uses detailed engine phases as the authoritative run state', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.startRun('inspect project')
+    bridge.handle({
+      type: 'run:state',
+      state: {
+        phase: 'tool_running',
+        activeTool: 'list_directory',
+        detail: 'Inspecting workspace',
+        startedAt: 10,
+        updatedAt: 20,
+      },
+    })
+
+    expect(bridge.store.getThread('thread-1')?.run).toMatchObject({
+      phase: 'active',
+      objective: 'inspect project',
+      agentState: {
+        phase: 'tool_running',
+        activeTool: 'list_directory',
+        detail: 'Inspecting workspace',
+      },
+    })
+  })
+
+  it('owns mode, usage, task, FastContext, and tool draft state', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.startRun('build feature')
+    bridge.handle({ type: 'mode:change', from: 'vibe', to: 'plan' })
+    bridge.handle({ type: 'stream:usage', usage: { input: 120, output: 30, total: 150, source: 'provider' } })
+    bridge.handle({
+      type: 'active:task',
+      context: {
+        taskId: 'task-1',
+        title: 'Build feature',
+        priority: 'major',
+        progress: 40,
+        toolCalls: [{ toolCallId: 'tool-1', toolName: 'write_file', status: 'running' }],
+        startedAt: 10,
+      },
+    })
+    bridge.handle({
+      type: 'stream:tool_call_delta',
+      toolCallId: 'tool-1',
+      toolName: 'write_file',
+      partialJson: '{"path":"src/app.ts"',
+    })
+    bridge.handle({
+      type: 'fast_context:event',
+      runId: 'fc-1',
+      event: { type: 'progress', files: 12, absorbed: 8, hits: 3 },
+    })
+
+    const state = bridge.store.getThread('thread-1')!
+    expect(state.mode).toBe('plan')
+    expect(state.tokenUsage).toMatchObject({ input: 120, output: 30, source: 'provider' })
+    expect(state.activeTask).toMatchObject({ taskId: 'task-1', progress: 40 })
+    expect(state.toolDraft).toMatchObject({ id: 'tool-1', name: 'write_file' })
+    expect(state.fastContext).toMatchObject({ runId: 'fc-1', status: 'running', files: 12, hits: 3 })
+    expect(state.violations).toEqual([])
+  })
+
+  it('promotes a dequeued input to a committed turn without cancelling it', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.syncQueue([{ id: 'queue-1', prompt: 'next' }])
+    bridge.syncQueue([])
+    bridge.handle({ type: 'turn:start', turn: { id: 'queue-1', role: 'user', content: 'next', timestamp: 2 } })
+
+    const state = bridge.store.getThread('thread-1')!
+    expect(state.inputs['queue-1']).toMatchObject({ intent: 'queued-turn', status: 'committed', text: 'next' })
+    expect(state.inputQueue).toEqual([])
+    expect(state.violations).toEqual([])
+  })
+
+  it('isolates state after switching threads', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.syncQueue([{ id: 'queue-1', prompt: 'first' }])
+    bridge.activateThread('thread-2')
+
+    expect(bridge.store.getThread('thread-1')?.inputQueue).toEqual(['queue-1'])
+    expect(bridge.store.getThread('thread-2')?.inputQueue).toEqual([])
+  })
+
+  it('projects journal degradation and recovery into visible Flow state', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.setPersistenceStatus(new Error('disk unavailable'))
+    expect(bridge.store.getThread('thread-1')?.persistence).toMatchObject({
+      phase: 'degraded',
+      error: 'disk unavailable',
+    })
+
+    bridge.setPersistenceStatus(null)
+    expect(bridge.store.getThread('thread-1')?.persistence).toMatchObject({ phase: 'clean' })
+  })
+
+  it('projects subagents and terminal sessions as background runtime facts', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.handle({
+      type: 'subagent:start',
+      agentId: 'agent-1',
+      agentType: 'reviewer',
+      label: 'Reviewing changes',
+      objective: 'Review the patch',
+      runKind: 'spawn_agent',
+    })
+    bridge.handle({
+      type: 'terminal:sessions',
+      sessions: [{
+        id: 'term-1',
+        pid: 123,
+        shell: 'pwsh',
+        shellId: 'pwsh',
+        shellLabel: 'PowerShell',
+        cwd: 'C:\\workspace',
+        status: 'running',
+        createdAt: 1,
+        updatedAt: 1,
+        isAgentSession: true,
+        title: 'npm test',
+      }],
+    })
+
+    expect(Object.values(bridge.store.getThread('thread-1')!.runtimes).filter(item => item.status === 'running')).toHaveLength(2)
+
+    bridge.handle({ type: 'subagent:end', agentId: 'agent-1', agentType: 'reviewer', ok: true, elapsedMs: 10, runKind: 'spawn_agent' })
+    bridge.handle({
+      type: 'runtime-task:finished',
+      task: {
+        id: 'task-1',
+        kind: 'terminal',
+        status: 'completed',
+        command: 'npm test',
+        createdAt: 1,
+        startedAt: 1,
+        updatedAt: 2,
+        endedAt: 2,
+        metadata: { sessionId: 'term-1' },
+      },
+    })
+
+    expect(Object.values(bridge.store.getThread('thread-1')!.runtimes).filter(item => item.status === 'running')).toHaveLength(0)
+    expect(bridge.store.getThread('thread-1')!.violations).toEqual([])
+  })
+})

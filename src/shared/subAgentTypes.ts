@@ -78,6 +78,15 @@ export type SubAgentEvent =
   | { type: 'model_wait'; turn: number; elapsedMs: number; timeoutMs: number }
   | { type: 'model_retry'; turn: number; attempt: number; delayMs: number; reason: string }
   | {
+      type: 'model_response'
+      turn: number
+      protocol: string
+      offeredTools: string[]
+      returnedTools: string[]
+      finalizationOnly: boolean
+      retrievalPhase: 'scope_discovery' | 'evidence_retrieval' | 'finalization'
+    }
+  | {
       type: 'turn_complete'
       turn: number
       calls: number

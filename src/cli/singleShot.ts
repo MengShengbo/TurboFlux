@@ -2,7 +2,7 @@ import { basename } from 'node:path'
 import type { AgentEventType } from '../core/agentEngine'
 import type { TurboFluxConfig } from '../core/config'
 import { createAgentRuntime } from '../core/runtime/agentRuntime'
-import type { AgentTurn, ApprovalPolicy, ToolCall } from '../shared/agentTypes'
+import type { AgentTurn, ApprovalPolicy, CapabilityProfile, ToolCall } from '../shared/agentTypes'
 import { stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import { commandRegistry } from './commands/index'
 import { ConversationManager } from './conversations/manager'
@@ -17,6 +17,7 @@ export interface SingleShotOptions {
   prompt: string
   verbose: boolean
   approvalPolicy?: ApprovalPolicy
+  capabilityProfile?: CapabilityProfile
   mcpServers?: string[]
   stdout?: Pick<NodeJS.WriteStream, 'write'>
   stderr?: Pick<NodeJS.WriteStream, 'write'>
@@ -111,6 +112,7 @@ export async function runSingleShot(options: SingleShotOptions): Promise<void> {
     config: options.config,
     conversationPrefix: 'cli-command',
     approvalPolicy: options.approvalPolicy,
+    capabilityProfile: options.capabilityProfile,
     connectMcp: Boolean(options.mcpServers?.length),
     mcpServers: options.mcpServers,
     registerSkills: skillRuntime => commandRegistry.registerSkills(skillRuntime),
@@ -118,9 +120,9 @@ export async function runSingleShot(options: SingleShotOptions): Promise<void> {
   const reporter = new SingleShotProgressReporter(writeProgress, options.verbose, Date.now, t)
   const conversations = new ConversationManager(runtime.engine, options.config, options.workspacePath, error => {
     if (error) writeProgress(`[${t('single.warning')}] ${t('single.historyUnavailable', { message: singleLine(error.message, 240) })}\n`)
-  })
+  }, runtime.sessionRegistry)
+  runtime.engine.setEventRecorder(event => conversations.recordEvent(event))
   const unsubscribe = runtime.engine.subscribe(event => {
-    conversations.recordEvent(event)
     reporter.handle(event)
   })
 
@@ -131,8 +133,9 @@ export async function runSingleShot(options: SingleShotOptions): Promise<void> {
     if (finalText) stdout.write(`${finalText}\n`)
   } finally {
     unsubscribe()
-    conversations.destroy()
     await runtime.destroy()
+    runtime.engine.setEventRecorder(null)
+    conversations.destroy()
   }
 }
 

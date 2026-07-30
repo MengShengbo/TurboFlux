@@ -85,6 +85,14 @@ describe('setConfigValue', () => {
     expect(reasoning.reasoning?.effort).toBe('xhigh')
   })
 
+  it('stores capability profiles independently from approval policy', () => {
+    const next = setConfigValue(baseConfig, 'capabilityProfile', 'danger-full-access')
+
+    expect(next.capabilityProfile).toBe('danger-full-access')
+    expect(next.approvalPolicy).toBe('ask')
+    expect(() => setConfigValue(baseConfig, 'capabilityProfile', 'unbounded')).toThrow(/capabilityProfile/)
+  })
+
 })
 
 describe('provider presets', () => {

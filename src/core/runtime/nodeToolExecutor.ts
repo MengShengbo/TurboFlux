@@ -16,17 +16,20 @@ import type {
   FileRangeResult,
   CommandOutput,
   RequestOptions,
+  ListTreeOptions,
   WebSearchResult,
 } from '../../tools/executor'
 import type { TreeNode } from '../../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../../shared/codeIndexTypes'
 import type { MemoryKind, MemoryScope } from '../../shared/memoryTypes'
 import type { TerminalOutputChunk, TerminalSessionInfo, TerminalStartCommandResult } from '../../shared/terminalTypes'
+import type { CapabilityProfile } from '../../shared/agentTypes'
 import { MemoryService } from '../../tools/memory/service'
 import { hashText, writeFileAtomicSync } from '../fileIO'
 import { RuntimeTaskManager } from './runtimeTaskManager'
 import { getChildProcessSpawnOptions, getDefaultShellSpec, getProcessGroupSignal, usesProcessGroup } from '../../platform/process'
 import { RuntimeLogWriter } from './runtimeLogWriter'
+import { CapabilityBoundary, type FilesystemAccess } from './capabilityBoundary'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
@@ -34,6 +37,7 @@ const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
 export interface NodeToolExecutorOptions {
   runtimeTaskManager?: RuntimeTaskManager
   ownerSessionId?: string
+  capabilityProfile?: CapabilityProfile
 }
 
 interface BackgroundTerminalSession {
@@ -76,18 +80,20 @@ const CODE_SEARCH_EXCLUDE_GLOBS = Array.from(CODE_SEARCH_SKIPPED_DIRS, directory
 const DEFAULT_SEARCH_LIMIT = 50
 const MAX_SEARCH_LIMIT = 500
 const DEFAULT_READ_RANGE_LINES = 180
-const DEFAULT_READ_RANGE_BYTES = 256 * 1024
+const DEFAULT_READ_RANGE_BYTES = 64 * 1024
 
 export class NodeToolExecutor implements ToolExecutor {
   private memoryService: MemoryService
   private workspaceRoot: string
+  private capabilityBoundary: CapabilityBoundary
   private backgroundTerminals: Map<string, BackgroundTerminalSession> = new Map()
   private activeStreams: Map<number, AbortController> = new Map()
   private runtimeTaskManager: RuntimeTaskManager
 
   constructor(private workspacePath: string, options: NodeToolExecutorOptions = {}) {
     this.memoryService = new MemoryService()
-    this.workspaceRoot = resolveNativePath(workspacePath)
+    this.capabilityBoundary = new CapabilityBoundary(workspacePath, options.capabilityProfile)
+    this.workspaceRoot = this.capabilityBoundary.workspaceRoot
     this.runtimeTaskManager = options.runtimeTaskManager || new RuntimeTaskManager({
       defaultOwnerSessionId: options.ownerSessionId,
     })
@@ -97,10 +103,18 @@ export class NodeToolExecutor implements ToolExecutor {
     return this.runtimeTaskManager
   }
 
+  getCapabilityProfile(): CapabilityProfile {
+    return this.capabilityBoundary.getProfile()
+  }
+
+  setCapabilityProfile(profile: CapabilityProfile): void {
+    this.capabilityBoundary.setProfile(profile)
+  }
+
   private createRuntimeTaskLog(taskId: string): string {
-    const directory = this.resolvePath(join(this.workspaceRoot, RUNTIME_LOG_DIRECTORY))
+    const directory = this.resolvePath(join(this.workspaceRoot, RUNTIME_LOG_DIRECTORY), 'write')
     mkdirSync(directory, { recursive: true })
-    return this.resolvePath(join(directory, `${taskId}.jsonl`))
+    return this.resolvePath(join(directory, `${taskId}.jsonl`), 'write')
   }
 
   async readFile(path: string): Promise<Result<string>> {
@@ -130,6 +144,7 @@ export class NodeToolExecutor implements ToolExecutor {
       let lineIndex = 0
       let bytesRead = 0
       let truncated = false
+      let partialLine = false
 
       stream = createReadStream(safePath, { encoding: 'utf-8' })
       reader = createInterface({ input: stream, crlfDelay: Infinity })
@@ -148,14 +163,19 @@ export class NodeToolExecutor implements ToolExecutor {
           break
         }
         const rawBytes = Buffer.byteLength(rawLine, 'utf-8')
+        if (rawBytes > remainingBytes && lines.length > 0) {
+          truncated = true
+          break
+        }
         const line = rawBytes > remainingBytes
-          ? Buffer.from(rawLine, 'utf-8').subarray(0, remainingBytes).toString('utf-8')
+          ? Buffer.from(rawLine, 'utf-8').subarray(0, remainingBytes).toString('utf-8').replace(/�$/, '')
           : rawLine
         lines.push(line)
         bytesRead += Buffer.byteLength(line, 'utf-8') + 1
         lineIndex += 1
         if (rawBytes > remainingBytes) {
           truncated = true
+          partialLine = true
           break
         }
       }
@@ -168,6 +188,7 @@ export class NodeToolExecutor implements ToolExecutor {
           endLine: normalizedOffset + lines.length,
           truncated,
           bytesRead,
+          partialLine,
         },
       }
     } catch (e) {
@@ -180,10 +201,10 @@ export class NodeToolExecutor implements ToolExecutor {
 
   async writeFile(path: string, content: string, metadata?: Record<string, unknown>): Promise<Result<void>> {
     try {
-      const safePath = this.resolvePath(path)
+      let safePath = this.resolvePath(path, 'write')
       const dir = dirname(safePath)
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-      this.resolvePath(safePath)
+      safePath = this.resolvePath(safePath, 'write')
       if (metadata?.expectNotExists === true && existsSync(safePath)) {
         return { success: false, error: `Write conflict: file already exists: ${path}` }
       }
@@ -203,7 +224,7 @@ export class NodeToolExecutor implements ToolExecutor {
 
   async deleteFile(path: string, options?: { recursive?: boolean; expectedHash?: string }): Promise<Result<void>> {
     try {
-      const safePath = this.resolvePath(path)
+      const safePath = this.resolvePath(path, 'write')
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
       const expectedHash = options?.expectedHash
       if (typeof expectedHash === 'string') {
@@ -219,9 +240,12 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async listTree(path: string): Promise<Result<TreeNode>> {
+  async listTree(path: string, options: ListTreeOptions = {}): Promise<Result<TreeNode>> {
     try {
-      const root = this.buildTree(this.resolvePath(path), 3)
+      const maxDepth = Math.max(0, Math.min(5, Math.floor(options.maxDepth ?? 3)))
+      const maxEntriesPerDirectory = Math.max(1, Math.min(500, Math.floor(options.maxEntriesPerDirectory ?? 500)))
+      const maxNodes = Math.max(1, Math.min(20_000, Math.floor(options.maxNodes ?? 20_000)))
+      const root = this.buildTree(this.resolvePath(path), maxDepth, 0, { remaining: maxNodes }, maxEntriesPerDirectory)
       return { success: true, data: root }
     } catch (e) {
       return { success: false, error: String(e) }
@@ -799,7 +823,7 @@ export class NodeToolExecutor implements ToolExecutor {
     const children: CodeMapNode[] = []
     try {
       const entries = readdirSync(absPath, { withFileTypes: true })
-        .filter(e => !this.shouldSkipEntry(e.name))
+        .filter(e => !e.isSymbolicLink() && !this.shouldSkipEntry(e.name))
         .sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1))
 
       for (const entry of entries.slice(0, Math.max(1, maxChildrenPerPath))) {
@@ -863,7 +887,7 @@ export class NodeToolExecutor implements ToolExecutor {
 
   async memoryRemember(data: { content?: string; text?: string; kind: MemoryKind; scope: MemoryScope; workspacePath: string; conversationId?: string }): Promise<Result<{ id: string; deduplicated?: boolean }>> {
     try {
-      const safeWorkspacePath = this.resolvePath(data.workspacePath)
+      const safeWorkspacePath = this.resolvePath(data.workspacePath, 'write')
       const result = await this.memoryService.remember({
         workspacePath: safeWorkspacePath,
         text: data.content ?? data.text ?? '',
@@ -880,7 +904,7 @@ export class NodeToolExecutor implements ToolExecutor {
 
   async memoryForget(data: { id: string; workspacePath: string }): Promise<Result<void>> {
     try {
-      const safeWorkspacePath = this.resolvePath(data.workspacePath)
+      const safeWorkspacePath = this.resolvePath(data.workspacePath, 'write')
       const result = await this.memoryService.forget({ workspacePath: safeWorkspacePath, id: data.id })
       if (!result.success) return { success: false, error: result.error }
       return { success: true }
@@ -965,7 +989,7 @@ export class NodeToolExecutor implements ToolExecutor {
     let runtimeTaskId: string | undefined
     let logPath: string | undefined
     try {
-      const safeCwd = this.resolvePath(cwd)
+      const safeCwd = this.resolvePath(cwd, 'write')
       const runtimeTask = this.runtimeTaskManager.createTask({
         kind: 'shell',
         command: [command, ...args].join(' '),
@@ -1164,7 +1188,8 @@ export class NodeToolExecutor implements ToolExecutor {
 
   private validateCommandSync(command: string, cwd: string): { success: true; cwd: string } | { success: false; error: string } {
     try {
-      const safeCwd = this.resolvePath(cwd)
+      this.capabilityBoundary.assertCommandAllowed()
+      const safeCwd = this.resolvePath(cwd, 'write')
       return { success: true, cwd: safeCwd }
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
@@ -1196,7 +1221,8 @@ export class NodeToolExecutor implements ToolExecutor {
   async ptyCreate(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session: TerminalSessionInfo }>> {
     let safeCwd: string
     try {
-      safeCwd = this.resolvePath(options?.cwd || this.workspaceRoot)
+      this.capabilityBoundary.assertCommandAllowed()
+      safeCwd = this.resolvePath(options?.cwd || this.workspaceRoot, 'write')
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -2097,30 +2123,35 @@ export class NodeToolExecutor implements ToolExecutor {
   }
 
   // Helper methods
-  private resolvePath(path: string): string {
-    return this.resolveAgainstWorkspace(path)
+  private resolvePath(path: string, access: FilesystemAccess = 'read'): string {
+    return this.capabilityBoundary.resolvePath(path, access)
   }
 
-  private resolveAgainstWorkspace(path: string): string {
-    return isAbsolute(path)
-      ? resolveNativePath(path)
-      : resolveNativePath(this.workspaceRoot, path || '.')
-  }
-
-  private buildTree(dirPath: string, maxDepth: number, depth = 0): TreeNode {
+  private buildTree(
+    dirPath: string,
+    maxDepth: number,
+    depth = 0,
+    budget: { remaining: number } = { remaining: 20_000 },
+    maxEntriesPerDirectory = 500,
+  ): TreeNode {
     const name = depth === 0 ? dirPath : dirPath.split(/[\\/]/).pop() || dirPath
     const node: TreeNode = { name, type: 'directory', children: [] }
+    budget.remaining = Math.max(0, budget.remaining - 1)
 
-    if (depth >= maxDepth) return node
+    if (depth >= maxDepth || budget.remaining <= 0) return node
 
     try {
       const entries = readdirSync(dirPath, { withFileTypes: true })
+        .filter(entry => !entry.isSymbolicLink() && !this.shouldSkipEntry(entry.name))
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .slice(0, maxEntriesPerDirectory)
       for (const entry of entries) {
-        if (this.shouldSkipEntry(entry.name)) continue
+        if (budget.remaining <= 0) break
         const fullPath = join(dirPath, entry.name)
         if (entry.isDirectory()) {
-          node.children!.push(this.buildTree(fullPath, maxDepth, depth + 1))
+          node.children!.push(this.buildTree(fullPath, maxDepth, depth + 1, budget, maxEntriesPerDirectory))
         } else {
+          budget.remaining -= 1
           node.children!.push({ name: entry.name, type: 'file' })
         }
       }
@@ -2227,7 +2258,7 @@ export class NodeToolExecutor implements ToolExecutor {
     try {
       const entries = readdirSync(dir, { withFileTypes: true })
       for (const entry of entries) {
-        if (this.shouldSkipEntry(entry.name)) continue
+        if (entry.isSymbolicLink() || this.shouldSkipEntry(entry.name)) continue
         const fullPath = join(dir, entry.name)
         if (entry.isDirectory()) {
           this.walkDir(fullPath, callback, depth + 1)
