@@ -259,6 +259,8 @@ src/tools/        工具执行与记忆
 src/shared/       共享类型
 ```
 
+完整的架构、开发、测试、配置、发布与排障文档见 [`docs/README.md`](docs/README.md)。参与贡献前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
 ## License
 
 MIT
