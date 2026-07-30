@@ -106,7 +106,7 @@ function parseTranscript(content: string): SubAgentTranscriptRecord[] {
 
 export class SubAgentTaskManager {
   private readonly runtimeTaskManager: RuntimeTaskManager
-  private readonly ownerSessionId?: string
+  private ownerSessionId?: string
   private readonly storageDir: string | null
   private readonly now: () => number
   private readonly descriptors = new Map<string, SubAgentTaskDescriptor>()
@@ -137,6 +137,14 @@ export class SubAgentTaskManager {
         error: event.task.error,
       })
     })
+  }
+
+  setOwnerSessionId(ownerSessionId: string): void {
+    this.ownerSessionId = ownerSessionId
+  }
+
+  getOwnerSessionId(): string | undefined {
+    return this.ownerSessionId
   }
 
   startTask<TResult>(input: StartSubAgentTaskInput<TResult>): StartedSubAgentTask<TResult> {

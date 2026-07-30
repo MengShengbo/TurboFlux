@@ -38,8 +38,36 @@ describe('LandingView', () => {
     expect(promptRow).toBeGreaterThan(brandRow)
     expect(output).toContain('我们该构建什么？')
     expect(output).toContain('工作区 C:/workspace/turboflux')
+    expect(output).toContain('Flow v2 已就绪 · 输入可恢复 · /flow status')
     expect(output).not.toContain('STATUS')
     expect(lines.every(line => line.length <= 120)).toBe(true)
+  })
+
+  it('makes the fallback state visible without changing the layout', () => {
+    const output = renderToString(
+      <ThemeProvider>
+        <I18nProvider locale="en">
+          <Box width={100} height={30}>
+            <LandingView
+              frameWidth={72}
+              workspacePath="C:/workspace/turboflux"
+              mood="idle"
+              hasApiKey
+              logoReveal={1}
+              showVersion
+              showWorkspace
+              showPrompt
+              flowEnabled={false}
+              prompt={<Text>{'> '}</Text>}
+            />
+          </Box>
+        </I18nProvider>
+      </ThemeProvider>,
+      { columns: 100 },
+    )
+
+    expect(output).toContain('Flow core active · compact UI · /flow status')
+    expect(output.split('\n')).toHaveLength(30)
   })
 
   it('keeps the landing prompt visible when slash completions expand', () => {

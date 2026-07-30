@@ -90,6 +90,14 @@ export class RuntimeTaskManager {
     if (options.recover !== false) this.recoverFromJournal()
   }
 
+  setDefaultOwnerSessionId(ownerSessionId: string): void {
+    this.options.defaultOwnerSessionId = ownerSessionId
+  }
+
+  getDefaultOwnerSessionId(): string | undefined {
+    return this.options.defaultOwnerSessionId
+  }
+
   createTask(input: CreateRuntimeTaskInput, control?: RuntimeTaskControl): RuntimeTask {
     const now = input.startedAt ?? this.now()
     const id = input.id || this.generateId(input.kind, now)

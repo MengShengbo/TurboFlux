@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Text } from 'ink'
 import { useTheme } from '../../theme/index'
 import { SPINNER_CHARS, SPINNER_INTERVAL_MS, STALL_THRESHOLD_MS, STALL_TRANSITION_MS } from './constants'
+import { prefersReducedMotion } from '../../platform/terminalAttention'
 
 interface SpinnerGlyphProps {
   lastActivity?: number
@@ -10,6 +11,7 @@ interface SpinnerGlyphProps {
 
 export function SpinnerGlyph({ lastActivity, label }: SpinnerGlyphProps) {
   const theme = useTheme()
+  const reducedMotion = prefersReducedMotion()
   const [frame, setFrame] = useState(0)
   const [stallIntensity, setStallIntensity] = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -21,6 +23,7 @@ export function SpinnerGlyph({ lastActivity, label }: SpinnerGlyphProps) {
   }, [lastActivity])
 
   useEffect(() => {
+    if (reducedMotion) return
     intervalRef.current = setInterval(() => {
       setFrame(f => (f + 1) % SPINNER_CHARS.length)
 
@@ -36,7 +39,7 @@ export function SpinnerGlyph({ lastActivity, label }: SpinnerGlyphProps) {
     }, SPINNER_INTERVAL_MS)
 
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
-  }, [])
+  }, [reducedMotion])
 
   const char = SPINNER_CHARS[frame]
   const color = stallIntensity > 0 ? lerpHex(theme.brand, theme.inactive, stallIntensity) : theme.brand

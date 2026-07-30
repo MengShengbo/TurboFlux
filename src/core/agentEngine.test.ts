@@ -296,9 +296,15 @@ describe('AgentEngine read bandwidth', () => {
       maxTokens: 4096,
     }, workspace)
     const executor = new NodeToolExecutor(workspace)
-    vi.spyOn(executor, 'readFile').mockResolvedValue({
+    const readFileRange = vi.spyOn(executor, 'readFileRange').mockResolvedValue({
       success: true,
-      data: Array.from({ length: 2_100 }, (_, index) => `line ${index + 1}`).join('\n'),
+      data: {
+        content: Array.from({ length: 2_000 }, (_, index) => `line ${index + 1}`).join('\n'),
+        startLine: 1,
+        endLine: 2_000,
+        truncated: true,
+        bytesRead: 18_893,
+      },
     })
     const engine = new AgentEngine({
       mode: 'vibe',
@@ -314,9 +320,52 @@ describe('AgentEngine read bandwidth', () => {
     try {
       const output = await dispatchTool('read_file', { path: 'src/example.ts' })
 
-      expect(output).toContain('[lines 1-2000 of 2100;')
+      expect(output).toContain('[lines 1-2000; bounded to 2000 lines / 48 KiB;')
       expect(output).toContain('2000→line 2000')
       expect(output).not.toContain('2001→line 2001')
+      expect(readFileRange).toHaveBeenCalledWith(expect.any(String), 0, 2_000, 48 * 1024)
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('does not offer a false line offset after truncating a giant single line', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+    }, {
+      readFileRange: vi.fn(async () => ({
+        success: true,
+        data: {
+          content: 'x'.repeat(48 * 1024),
+          startLine: 1,
+          endLine: 1,
+          truncated: true,
+          bytesRead: 48 * 1024,
+          partialLine: true,
+        },
+      })),
+    } as unknown as ToolExecutor, stateProvider)
+    const dispatchTool = (engine as unknown as {
+      dispatchTool: (name: string, args: Record<string, unknown>) => Promise<string>
+    }).dispatchTool.bind(engine)
+
+    try {
+      const output = await dispatchTool('read_file', { path: 'conversation.jsonl', limit: 50 })
+
+      expect(output).toContain('showing a bounded preview only')
+      expect(output).toContain('structured log/task reader')
+      expect(output).not.toContain('offset=2')
     } finally {
       engine.destroy()
     }
@@ -641,12 +690,16 @@ describe('AgentEngine FastContext scheduling', () => {
       const result = await executeSingleTool({
         id: 'explore-1',
         name: 'explore_code',
-        arguments: { objective: 'map the CLI entry point and execution flow' },
+        arguments: { objective: 'map the CLI entry point and execution flow', path: 'src' },
       })
 
       expect(result.isError).toBe(false)
       expect(result.output).toContain('background scan started')
+      expect(result.output).toContain('Scope: src')
       expect(engine.isFastContextRunning()).toBe(true)
+      const activeRun = (engine as unknown as { fastContextRun: { id: string } | null }).fastContextRun
+      expect((engine as any).subAgentTaskManager
+        .getTask(activeRun!.id)?.workspacePath.replace(/\\/g, '/')).toMatch(/\/src$/)
 
       engine.abort()
       await new Promise(resolve => setTimeout(resolve, 0))
@@ -745,11 +798,59 @@ describe('AgentEngine Git integration state', () => {
   })
 
   it('keeps configured integration enabled while marking non-repositories unavailable', async () => {
-    const engine = createEngine(async () => ({ success: false, error: 'not a repository', data: { stdout: '', stderr: 'not a repository', exitCode: 128 } }))
+    const runProcess = vi.fn(async () => ({ success: false, error: 'not a repository', data: { stdout: '', stderr: 'not a repository', exitCode: 128 } }))
+    const engine = createEngine(runProcess)
 
     try {
       await expect(engine.initializeGit(true)).resolves.toBe(false)
-      expect(engine.getGitState()).toMatchObject({ enabled: true, phase: 'unavailable', snapshot: null })
+      expect(engine.getGitState()).toMatchObject({ enabled: true, phase: 'unavailable', snapshot: null, error: undefined })
+
+      await engine.refreshGitStatus()
+
+      expect(engine.getGitState()).toMatchObject({ enabled: true, phase: 'unavailable', snapshot: null, error: undefined })
+      expect(runProcess).toHaveBeenCalledOnce()
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('does not run Git when file tools modify the workspace', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const runProcess = vi.fn(async () => ({ success: true, data: { stdout: '', stderr: '', exitCode: 0 } }))
+    const readFile = vi.fn(async () => ({ success: true, data: 'before\n' }))
+    const writeFile = vi.fn(async () => ({ success: true }))
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+      gitEnabled: true,
+    }, { runProcess, readFile, writeFile } as unknown as ToolExecutor, stateProvider)
+    const executeToolCalls = (engine as unknown as {
+      executeToolCalls: (toolCalls: ToolCall[]) => Promise<ToolResult[]>
+    }).executeToolCalls.bind(engine)
+
+    try {
+      const results = await executeToolCalls([{
+        id: 'replace-without-commit',
+        name: 'replace_file',
+        arguments: { path: 'src/example.ts', content: 'after\n' },
+      }])
+
+      expect(results).toHaveLength(1)
+      expect(results[0]).toMatchObject({
+        isError: false,
+        changeSummary: { operation: 'edit', before: 'before\n', after: 'after\n' },
+      })
+      expect(writeFile).toHaveBeenCalledOnce()
+      expect(runProcess).not.toHaveBeenCalled()
     } finally {
       engine.destroy()
     }

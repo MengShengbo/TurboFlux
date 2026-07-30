@@ -1,4 +1,4 @@
-import type { AgentConfig, AgentMode, ApprovalPolicy } from '../../shared/agentTypes'
+import type { AgentConfig, AgentMode, ApprovalPolicy, CapabilityProfile } from '../../shared/agentTypes'
 import { join } from 'node:path'
 import { AgentEngine } from '../agentEngine'
 import { McpClient } from '../mcp/client'
@@ -10,6 +10,7 @@ import { RuntimeTaskManager } from './runtimeTaskManager'
 import { SubAgentTaskManager } from './subAgentTaskManager'
 import { DefaultAgentStateProvider, type AgentRuntimeConfig } from './stateProvider'
 import { buildProfileSystemPromptSection, loadProfile, type TurboFluxProfile } from '../profile'
+import { SessionRegistry } from './sessionRegistry'
 
 export interface CreateAgentRuntimeOptions {
   workspacePath: string
@@ -19,6 +20,7 @@ export interface CreateAgentRuntimeOptions {
   conversationPrefix?: string
   mode?: AgentMode
   approvalPolicy?: ApprovalPolicy
+  capabilityProfile?: CapabilityProfile
   shell?: string
   connectMcp?: boolean
   mcpServers?: string[]
@@ -34,9 +36,11 @@ export interface AgentRuntime {
   subAgentTaskManager: SubAgentTaskManager
   skillRuntime: SkillRuntime
   mcpClient: McpClient
+  sessionRegistry: SessionRegistry
   applyConfiguration: (config: AgentRuntimeConfig, options?: {
     profile?: TurboFluxProfile
     approvalPolicy?: ApprovalPolicy
+    capabilityProfile?: CapabilityProfile
   }) => void
   disconnect: () => Promise<void>
   destroy: () => Promise<void>
@@ -50,6 +54,7 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
   return {
     mode: options.mode || 'vibe',
     approvalPolicy: options.approvalPolicy || options.config.approvalPolicy || 'ask',
+    capabilityProfile: options.capabilityProfile || options.config.capabilityProfile || 'workspace-write',
     gitEnabled: options.config.gitEnabled !== false,
     temperature: 0.7,
     workspacePath: options.workspacePath,
@@ -65,6 +70,7 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
 
 export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRuntime {
   const conversationId = options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`
+  const sessionRegistry = new SessionRegistry(conversationId)
   const stateProvider = new DefaultAgentStateProvider(options.config, options.workspacePath, { conversationId })
   const runtimeTaskManager = new RuntimeTaskManager({
     defaultOwnerSessionId: conversationId,
@@ -77,6 +83,7 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
   })
   const toolExecutor = new NodeToolExecutor(options.workspacePath, {
     runtimeTaskManager,
+    capabilityProfile: options.capabilityProfile || options.config.capabilityProfile || 'workspace-write',
   })
   const engine = new AgentEngine(
     {
@@ -89,6 +96,15 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
   )
   const unsubscribeRuntimeTasks = runtimeTaskManager.subscribe(event => {
     if (event.type === 'runtime-task:finished') engine.publishRuntimeTaskFinished(event.task)
+  })
+  const removeSessionGuard = sessionRegistry.addGuard(() => {
+    if (engine.isRunning()) throw new Error('Cannot switch conversations while the agent is running')
+  })
+  const unsubscribeSessionIdentity = sessionRegistry.subscribe(({ currentId }) => {
+    engine.setConversationId(currentId)
+    stateProvider.setConversationId(currentId)
+    runtimeTaskManager.setDefaultOwnerSessionId(currentId)
+    subAgentTaskManager.setOwnerSessionId(currentId)
   })
 
   const skillRuntime = new SkillRuntime(options.workspacePath)
@@ -126,6 +142,7 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
 
   const applyConfiguration: AgentRuntime['applyConfiguration'] = (config, updateOptions = {}) => {
     stateProvider.updateConfig(config)
+    toolExecutor.setCapabilityProfile(updateOptions.capabilityProfile ?? config.capabilityProfile ?? 'workspace-write')
     engine.updateRuntimeConfiguration({
       approvalPolicy: updateOptions.approvalPolicy ?? config.approvalPolicy,
       gitEnabled: config.gitEnabled !== false,
@@ -143,12 +160,15 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
     subAgentTaskManager,
     skillRuntime,
     mcpClient,
+    sessionRegistry,
     applyConfiguration,
     disconnect,
     destroy: async () => {
       await disconnect()
       await runtimeTaskManager.stopAll('Agent runtime destroyed')
       await toolExecutor.ptyKillAll?.()
+      unsubscribeSessionIdentity()
+      removeSessionGuard()
       unsubscribeRuntimeTasks()
       engine.destroy()
     },

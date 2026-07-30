@@ -9,6 +9,8 @@ import { getSafeFrameWidth } from '../../terminalLayout'
 import { isTerminalMouseInput } from '../../terminalMouse'
 import type { Theme } from '../../theme/types'
 import { useI18n } from '../../i18n/index'
+import { stripTerminalFocusSequences } from '../../platform/terminalAttention'
+import { TerminalInputStateMachine } from './terminalInputStateMachine'
 
 type PromptAppearance = 'default' | 'landing'
 
@@ -25,6 +27,8 @@ interface PromptInputProps {
   onDoubleEsc?: () => void
   onPasteImage?: () => boolean
   onPasteText?: (pastedText: string, nextValue: string) => PasteTextResult | null
+  onUserActivity?: () => void
+  onInputMutation?: () => void
   mode?: string
   width?: number
   placeholder?: string
@@ -46,8 +50,26 @@ export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'met
     (key.meta && normalized === 'v')
 }
 
+export function sanitizePromptInputChunk(input: string): string {
+  return stripTerminalFocusSequences(input)
+}
+
 function clampCursor(offset: number, value: string): number {
   return Math.max(0, Math.min(offset, value.length))
+}
+
+export function previousTextOffset(value: string, offset: number): number {
+  const normalized = clampCursor(offset, value)
+  if (normalized === 0) return 0
+  const previous = Array.from(value.slice(0, normalized)).at(-1)
+  return Math.max(0, normalized - (previous?.length ?? 1))
+}
+
+export function nextTextOffset(value: string, offset: number): number {
+  const normalized = clampCursor(offset, value)
+  if (normalized >= value.length) return value.length
+  const next = Array.from(value.slice(normalized))[0]
+  return Math.min(value.length, normalized + (next?.length ?? 1))
 }
 
 export interface PromptHistoryNavigation {
@@ -176,7 +198,7 @@ export function getImageTokenRangeAfterDelete(value: string, offset: number): { 
   return { start: offset, end: fullEnd }
 }
 
-export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, mode, width, placeholder: requestedPlaceholder, appearance = 'default', historyRef: sharedHistoryRef }: PromptInputProps) {
+export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDoubleEsc, onPasteImage, onPasteText, onUserActivity, onInputMutation, mode, width, placeholder: requestedPlaceholder, appearance = 'default', historyRef: sharedHistoryRef }: PromptInputProps) {
   const theme = useTheme()
   const { t } = useI18n()
   const { columns } = useTerminalSize()
@@ -189,6 +211,7 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const historyRef = sharedHistoryRef ?? internalHistoryRef
   const historyIdxRef = useRef<number>(-1)
   const historyDraftRef = useRef('')
+  const terminalInputStateRef = useRef(new TerminalInputStateMachine())
 
   const completions = useMemo(() => {
     if (!value.startsWith('/') || value.includes(' ')) return []
@@ -207,6 +230,7 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   }, [value])
 
   const replaceValue = useCallback((nextValue: string, nextCursor = nextValue.length, resetHistory = true) => {
+    if (nextValue !== value) onInputMutation?.()
     onChange(nextValue)
     setCursorOffset(clampCursor(nextCursor, nextValue))
     setSelectedIdx(0)
@@ -214,7 +238,7 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       historyIdxRef.current = -1
       historyDraftRef.current = ''
     }
-  }, [onChange])
+  }, [onChange, onInputMutation, value])
 
   const insertText = useCallback((text: string) => {
     if (!text) return
@@ -239,23 +263,35 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       historyIdxRef.current = -1
       historyDraftRef.current = ''
     }
+    terminalInputStateRef.current.reset()
     onSubmit(val)
   }, [onSubmit])
 
   usePaste((text) => {
-    if (text.length === 0 && onPasteImage?.()) return
+    onUserActivity?.()
+    if (text.length === 0) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
+      if (onPasteImage?.()) return
+    } else {
+      terminalInputStateRef.current.noteExplicitPaste(text)
+    }
     insertPastedText(text)
   }, { isActive: isInteractive })
 
   useInput((ch, key) => {
-    if (isTerminalMouseInput(ch)) return
+    onUserActivity?.()
+    const inputChunk = sanitizePromptInputChunk(ch)
+    if (!inputChunk && ch.length > 0) return
+    if (isTerminalMouseInput(inputChunk)) return
 
-    if (isImagePasteShortcut(ch, key)) {
+    if (isImagePasteShortcut(inputChunk, key)) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       onPasteImage?.()
       return
     }
 
     if (key.escape) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       const now = Date.now()
       if (now - lastEscRef.current < 300) {
         onDoubleEsc?.()
@@ -266,9 +302,13 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       return
     }
 
-    if ((key.ctrl || key.shift) && (key.upArrow || key.downArrow)) return
+    if ((key.ctrl || key.shift) && (key.upArrow || key.downArrow)) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
+      return
+    }
 
     if (key.upArrow) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       if (showCompletions) {
         setSelectedIdx(i => Math.max(i - 1, 0))
       } else {
@@ -281,6 +321,7 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     }
 
     if (key.downArrow) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       if (showCompletions) {
         setSelectedIdx(i => Math.min(i + 1, completions.length - 1))
       } else {
@@ -293,10 +334,12 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     }
 
     if (key.shift && key.tab) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       return
     }
 
     if (key.tab && showCompletions) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       const cmd = completions[selectedIdx]
       if (cmd) {
         replaceValue('/' + cmd.name + ' ')
@@ -306,7 +349,13 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     }
 
     if (key.return) {
+      if (!key.ctrl && !key.meta && terminalInputStateRef.current.shouldInsertNewline()) {
+        terminalInputStateRef.current.noteInsertedNewline()
+        insertText('\n')
+        return
+      }
       if ((key.ctrl || key.meta) && onAlternateSubmit) {
+        terminalInputStateRef.current.reset()
         onAlternateSubmit(value)
       } else {
         handleSubmit(value)
@@ -315,51 +364,62 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     }
 
     if (key.leftArrow) {
-      setCursorOffset(offset => getImageTokenBefore(value, offset)?.start ?? Math.max(0, offset - 1))
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
+      setCursorOffset(offset => getImageTokenBefore(value, offset)?.start ?? previousTextOffset(value, offset))
       return
     }
 
     if (key.rightArrow) {
-      setCursorOffset(offset => getImageTokenAfter(value, offset)?.end ?? Math.min(value.length, offset + 1))
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
+      setCursorOffset(offset => getImageTokenAfter(value, offset)?.end ?? nextTextOffset(value, offset))
       return
     }
 
     if (key.home) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       setCursorOffset(0)
       return
     }
 
     if (key.end) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       setCursorOffset(value.length)
       return
     }
 
     if (key.backspace) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       if (cursorOffset > 0) {
         const token = getImageTokenRangeBeforeDelete(value, cursorOffset)
         if (token) {
           replaceValue(value.slice(0, token.start) + value.slice(token.end), token.start)
         } else {
-          replaceValue(value.slice(0, cursorOffset - 1) + value.slice(cursorOffset), cursorOffset - 1)
+          const previousOffset = previousTextOffset(value, cursorOffset)
+          replaceValue(value.slice(0, previousOffset) + value.slice(cursorOffset), previousOffset)
         }
       }
       return
     }
 
     if (key.delete) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
       if (cursorOffset < value.length) {
         const token = getImageTokenRangeAfterDelete(value, cursorOffset)
         if (token) {
           replaceValue(value.slice(0, token.start) + value.slice(token.end), token.start)
         } else {
-          replaceValue(value.slice(0, cursorOffset) + value.slice(cursorOffset + 1), cursorOffset)
+          replaceValue(value.slice(0, cursorOffset) + value.slice(nextTextOffset(value, cursorOffset)), cursorOffset)
         }
       }
       return
     }
 
-    if (key.ctrl || key.meta) return
-    insertText(ch)
+    if (key.ctrl || key.meta) {
+      terminalInputStateRef.current.noteModifiedOrNavigationInput()
+      return
+    }
+    terminalInputStateRef.current.notePlainText(inputChunk)
+    insertText(inputChunk)
   }, { isActive: isInteractive })
 
   const placeholder = requestedPlaceholder ?? (mode === 'plan' ? t('ui.prompt.plan')

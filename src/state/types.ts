@@ -59,6 +59,7 @@ export interface AgentStateProvider {
   getFastContextModel?(): APIModel | null
   getWorkspace(): WorkspaceInfo | null
   getConversationId(): string | null
+  setConversationId?(conversationId: string): void
   getContextSegments(): ContextSegment[]
   addContextSegment(segment: ContextSegment): void
   setContextSegments(segments: ContextSegment[]): void

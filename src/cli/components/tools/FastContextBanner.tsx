@@ -5,6 +5,7 @@ import type { FastContextScanEvent, FastContextScanPhase } from '../../../core/f
 import { SPINNER_CHARS, SPINNER_INTERVAL_MS } from '../spinner/constants'
 import type { FastContextUiSummary } from '../layout/fastContextUi'
 import { useI18n } from '../../i18n/index'
+import { prefersReducedMotion } from '../../platform/terminalAttention'
 
 const SPIN = SPINNER_CHARS
 const TICK_MS = SPINNER_INTERVAL_MS
@@ -38,6 +39,7 @@ interface FastContextBannerProps {
 export function FastContextBanner({ events, summary, isActive }: FastContextBannerProps) {
   const theme = useTheme()
   const { t } = useI18n()
+  const reducedMotion = prefersReducedMotion()
   const [tick, setTick] = useState(0)
   const state = useMemo(() => {
     const recent = events.reduce(processEvent, createScanState())
@@ -51,10 +53,10 @@ export function FastContextBanner({ events, summary, isActive }: FastContextBann
   }, [events, summary])
 
   useEffect(() => {
-    if (!isActive) return
+    if (!isActive || reducedMotion) return
     const id = setInterval(() => setTick(t => t + 1), TICK_MS)
     return () => clearInterval(id)
-  }, [isActive])
+  }, [isActive, reducedMotion])
 
   if (!isActive && !['completed', 'cancelled', 'error'].includes(state.phase)) return null
 

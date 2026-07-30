@@ -49,5 +49,6 @@ describe('startup animation selection', () => {
     expect(shouldAnimateStartup(true, undefined, true, { CI: 'true' })).toBe(false)
     expect(shouldAnimateStartup(true, undefined, true, { TERM: 'dumb' })).toBe(false)
     expect(shouldAnimateStartup(true, undefined, true, { TURBOFLUX_NO_ANIMATION: '1' })).toBe(false)
+    expect(shouldAnimateStartup(true, undefined, true, { TURBOFLUX_REDUCED_MOTION: '1' })).toBe(false)
   })
 })

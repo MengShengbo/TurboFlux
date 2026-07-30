@@ -11,6 +11,7 @@ import {
   type FastContextTraceTone,
 } from './fastContextStageModel'
 import { useI18n } from '../../i18n/index'
+import { prefersReducedMotion } from '../../platform/terminalAttention'
 
 const TYPEWRITER_INTERVAL_MS = 36
 
@@ -24,6 +25,7 @@ interface FastContextStageProps {
 export function FastContextStage({ events, summary, isActive, width }: FastContextStageProps) {
   const theme = useTheme()
   const { t } = useI18n()
+  const reducedMotion = prefersReducedMotion()
   const [tick, setTick] = useState(0)
   const model = useMemo(() => projectFastContextStage(events, summary, 10, t), [events, summary, t])
   const title = t('ui.fastContext.title')
@@ -37,10 +39,10 @@ export function FastContextStage({ events, summary, isActive, width }: FastConte
   const contentWidth = Math.max(12, width - 4)
 
   useEffect(() => {
-    if (!isActive) return
+    if (!isActive || reducedMotion) return
     const timer = setInterval(() => setTick(value => value + 1), SPINNER_INTERVAL_MS)
     return () => clearInterval(timer)
-  }, [isActive])
+  }, [isActive, reducedMotion])
 
   if (!visible) return <Box flexGrow={1} />
 
@@ -55,7 +57,7 @@ export function FastContextStage({ events, summary, isActive, width }: FastConte
       <Text color={theme.divider}>{'-'.repeat(contentWidth)}</Text>
       <Box>
         {isActive && <Text color={theme.brand}>{SPINNER_CHARS[tick % SPINNER_CHARS.length]} </Text>}
-        {isActive
+        {isActive && !reducedMotion
           ? <TypewriterTitle text={title} />
           : <Text color={theme.brand} bold>{title}</Text>}
       </Box>

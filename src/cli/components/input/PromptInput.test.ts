@@ -11,7 +11,10 @@ import {
   getPromptEditorViewport,
   isImagePasteShortcut,
   navigatePromptHistory,
+  nextTextOffset,
+  previousTextOffset,
   resolvePromptChrome,
+  sanitizePromptInputChunk,
 } from './PromptInput'
 import { darkTheme } from '../../theme/index'
 import { ThemeProvider } from '../../theme/index'
@@ -30,6 +33,14 @@ describe('isImagePasteShortcut', () => {
     expect(isImagePasteShortcut('v', { ctrl: false, meta: false })).toBe(false)
     expect(isImagePasteShortcut('x', { ctrl: true, meta: false })).toBe(false)
     expect(isImagePasteShortcut('', { ctrl: false, meta: false })).toBe(false)
+  })
+})
+
+describe('terminal focus reports', () => {
+  it('never inserts full or Ink-normalized focus sequences into the draft', () => {
+    expect(sanitizePromptInputChunk('\u001b[O')).toBe('')
+    expect(sanitizePromptInputChunk('[I')).toBe('')
+    expect(sanitizePromptInputChunk('[O[Ihello')).toBe('hello')
   })
 })
 
@@ -206,5 +217,19 @@ describe('prompt editor viewport', () => {
     const viewport = getPromptEditorViewport('中文输入测试', '中文输入'.length, 7)
     expect(viewport.cursorChar).toBe('测')
     expect(viewport.width).toBeLessThanOrEqual(7)
+  })
+})
+
+describe('Unicode cursor boundaries', () => {
+  it('moves across emoji without splitting surrogate pairs', () => {
+    const value = 'a😀b'
+    expect(nextTextOffset(value, 1)).toBe(3)
+    expect(previousTextOffset(value, 3)).toBe(1)
+  })
+
+  it('moves one CJK code point at a time', () => {
+    const value = '测试'
+    expect(nextTextOffset(value, 0)).toBe(1)
+    expect(previousTextOffset(value, 2)).toBe(1)
   })
 })

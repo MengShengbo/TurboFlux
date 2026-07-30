@@ -237,4 +237,52 @@ describe.sequential('conversation journal store', () => {
     expect(recovered?.turns.map(item => item.role)).toEqual(['user', 'assistant', 'tool_result', 'assistant'])
     expect(recovered?.turns.at(-1)).toMatchObject({ content: 'partial explanation', metadata: { interrupted: true } })
   })
+
+  it('recovers queue, draft, pending steer, and unresolved approvals from v2 state records', () => {
+    appendConversationJournal('interaction-1', { version: 1, type: 'meta', timestamp: 100, meta: meta('interaction-1') })
+    appendConversationJournal('interaction-1', {
+      version: 2,
+      type: 'queue_state',
+      timestamp: 101,
+      inputs: [{ id: 'queue-1', prompt: 'run tests' }],
+    })
+    appendConversationJournal('interaction-1', {
+      version: 2,
+      type: 'draft_state',
+      timestamp: 102,
+      draft: { text: 'unfinished thought' },
+    })
+    appendConversationJournal('interaction-1', {
+      version: 2,
+      type: 'input_state',
+      timestamp: 103,
+      inputId: 'steer-1',
+      intent: 'steer',
+      state: 'accepted',
+      text: 'also update docs',
+    })
+    appendConversationJournal('interaction-1', {
+      version: 2,
+      type: 'approval_state',
+      timestamp: 104,
+      requestId: 'approval-1',
+      requestKind: 'permission',
+      state: 'requested',
+      question: 'Allow write?',
+      toolName: 'write_file',
+    })
+
+    expect(loadConversation('interaction-1')?.interactionState).toEqual({
+      queuedInputs: [{ id: 'queue-1', prompt: 'run tests' }],
+      draft: { text: 'unfinished thought', attachments: undefined },
+      pendingSteering: [{ id: 'steer-1', text: 'also update docs' }],
+      pendingApprovals: [{
+        requestId: 'approval-1',
+        requestKind: 'permission',
+        question: 'Allow write?',
+        toolName: 'write_file',
+        path: undefined,
+      }],
+    })
+  })
 })

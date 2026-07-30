@@ -180,6 +180,78 @@ describe('/clear', () => {
     expect(reset).toBe(1)
     expect(clearedMessages).toBe(true)
   })
+
+  it('keeps the active session intact when persistence blocks the switch', () => {
+    const resetSession = vi.fn()
+    const setMessages = vi.fn()
+    const ctx = fullContext({
+      engine: {
+        ...fullContext().engine,
+        resetSession,
+      } as CommandContext['engine'],
+      conversationManager: {
+        startNew: () => { throw new Error('disk full') },
+      } as CommandContext['conversationManager'],
+      setMessages,
+    })
+
+    const result = commandRegistry.execute('/clear', ctx)
+
+    expect(result.text).toContain('/flow retry')
+    expect(resetSession).not.toHaveBeenCalled()
+    expect(setMessages).not.toHaveBeenCalled()
+  })
+})
+
+describe('/flow', () => {
+  it('reports feature and persistence health without starting model work', () => {
+    const ctx = fullContext({
+      flowFeatures: {
+        flowUi: true,
+        transcriptWindowing: false,
+        notifications: true,
+        streamScheduler: true,
+        journalBatching: true,
+      },
+      conversationManager: {
+        getPersistenceHealth: () => ({
+          status: 'degraded',
+          error: 'disk full',
+          degradedAt: 1,
+          pendingRecoveryEntries: 2,
+          pendingStreamingEntries: 3,
+        }),
+      } as CommandContext['conversationManager'],
+    })
+
+    const result = commandRegistry.execute('/flow status', ctx)
+
+    expect(result.text).toContain('Persistence: degraded')
+    expect(result.text).toContain('transcriptWindowing=off')
+    expect(result.text).toContain('disk full')
+  })
+
+  it('exposes retry and read-only export recovery actions', () => {
+    const retryPersistence = vi.fn(() => ({
+      status: 'healthy' as const,
+      error: null,
+      degradedAt: null,
+      pendingRecoveryEntries: 0,
+      pendingStreamingEntries: 0,
+    }))
+    const exportRecoveryBundle = vi.fn(() => 'C:\\safe\\recovery.json')
+    const ctx = fullContext({
+      conversationManager: {
+        retryPersistence,
+        exportRecoveryBundle,
+      } as unknown as CommandContext['conversationManager'],
+    })
+
+    expect(commandRegistry.execute('/flow retry', ctx).text).toContain('recovered')
+    expect(commandRegistry.execute('/flow export recovery.json', ctx).text).toContain('C:\\safe\\recovery.json')
+    expect(retryPersistence).toHaveBeenCalledOnce()
+    expect(exportRecoveryBundle).toHaveBeenCalledWith('recovery.json')
+  })
 })
 
 describe('/config', () => {

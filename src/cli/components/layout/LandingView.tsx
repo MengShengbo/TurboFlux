@@ -14,6 +14,7 @@ interface LandingViewProps {
   showWorkspace: boolean
   showPrompt: boolean
   prompt: React.ReactNode
+  flowEnabled?: boolean
 }
 
 export function LandingView({
@@ -26,6 +27,7 @@ export function LandingView({
   showWorkspace,
   showPrompt,
   prompt,
+  flowEnabled = true,
 }: LandingViewProps) {
   const { t } = useI18n()
   return (
@@ -48,6 +50,9 @@ export function LandingView({
         showWorkspace={showWorkspace}
         showConnector
       />
+      <Text color={flowEnabled ? "#76c7a1" : "#d6a85f"}>
+        {showWorkspace ? t(flowEnabled ? 'ui.landing.flowReady' : 'ui.landing.flowFallback') : ' '}
+      </Text>
       <Box width={frameWidth} flexDirection="column" alignItems="center" marginTop={2} flexShrink={0}>
         {showPrompt ? (
           <>

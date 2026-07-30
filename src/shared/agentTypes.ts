@@ -2,6 +2,8 @@ export type AgentMode = 'vibe' | 'plan'
 
 export type ApprovalPolicy = 'ask' | 'agent' | 'full'
 
+export type CapabilityProfile = 'read-only' | 'workspace-write' | 'danger-full-access'
+
 export type LegacyApprovalPolicy = 'request' | 'auto'
 
 export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
@@ -243,6 +245,7 @@ export interface AgentSession {
 export interface AgentConfig {
   mode: AgentMode
   approvalPolicy?: ApprovalPolicy
+  capabilityProfile?: CapabilityProfile
   temperature: number
   maxTokens: number
   /** @deprecated Main-agent runs are user-controlled and do not enforce a turn budget. */
@@ -291,10 +294,30 @@ export const APPROVAL_POLICY_DESCRIPTIONS: Record<ApprovalPolicy, string> = {
   full: 'Skip approval prompts for allowed operations; explicit deny rules remain active.',
 }
 
+export const CAPABILITY_PROFILE_LABELS: Record<CapabilityProfile, string> = {
+  'read-only': 'Read only',
+  'workspace-write': 'Workspace write',
+  'danger-full-access': 'Danger: full access',
+}
+
+export const CAPABILITY_PROFILE_DESCRIPTIONS: Record<CapabilityProfile, string> = {
+  'read-only': 'Read files inside the workspace; block writes and commands.',
+  'workspace-write': 'Read and write inside the workspace; block host commands and external paths.',
+  'danger-full-access': 'Allow host commands and paths outside the workspace within the approval policy.',
+}
+
 export function normalizeApprovalPolicy(value: unknown, fallback: ApprovalPolicy = 'ask'): ApprovalPolicy {
   if (value === 'ask' || value === 'agent' || value === 'full') return value
   if (value === 'request') return 'ask'
   if (value === 'auto') return 'agent'
+  return fallback
+}
+
+export function normalizeCapabilityProfile(
+  value: unknown,
+  fallback: CapabilityProfile = 'workspace-write',
+): CapabilityProfile {
+  if (value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access') return value
   return fallback
 }
 

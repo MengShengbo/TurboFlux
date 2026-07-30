@@ -67,4 +67,12 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('Do not restate the request, enumerate every file or search performed')
     expect(prompt).toContain('only when the user explicitly asks for a detailed explanation')
   })
+
+  it('does not let provisional tool commentary masquerade as evidence', () => {
+    const prompt = buildSystemPrompt('vibe')
+
+    expect(prompt).toContain('Never claim a tool found, changed, or proved anything until its result is present')
+    expect(prompt).toContain('acknowledge any contradiction')
+    expect(prompt).toContain('Never say the user misremembered')
+  })
 })

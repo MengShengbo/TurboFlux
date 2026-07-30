@@ -59,6 +59,7 @@ export interface FileRangeResult {
   endLine: number
   truncated: boolean
   bytesRead: number
+  partialLine?: boolean
 }
 
 export interface WebSearchResult {
@@ -85,13 +86,19 @@ export interface RequestOptions {
   timeoutMs?: number
 }
 
+export interface ListTreeOptions {
+  maxDepth?: number
+  maxEntriesPerDirectory?: number
+  maxNodes?: number
+}
+
 export interface ToolExecutor {
   // File operations
   readFile(path: string): Promise<Result<string>>
   readFileRange?(path: string, offset?: number, limit?: number, maxBytes?: number): Promise<Result<FileRangeResult>>
   writeFile(path: string, content: string, metadata?: Record<string, unknown>): Promise<Result<void>>
   deleteFile(path: string, options?: Record<string, any>): Promise<Result<void>>
-  listTree(path: string): Promise<Result<TreeNode>>
+  listTree(path: string, options?: ListTreeOptions): Promise<Result<TreeNode>>
 
   // Search operations
   searchFiles(pattern: string, basePath: string, options?: SearchFilesOptions): Promise<Result<{ matches: string[]; truncated?: boolean; offset?: number; limit?: number }>>

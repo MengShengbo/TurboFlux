@@ -2,6 +2,7 @@ import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, Co
 import type { FastContextModelConfig, ModelCapabilities, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
 import type {
   ApprovalPolicy,
+  CapabilityProfile,
   NativeReasoningConfig,
 } from '../../shared/agentTypes'
 
@@ -14,6 +15,7 @@ export interface AgentRuntimeConfig {
   maxTokens: number
   modelCapabilities?: ModelCapabilities
   approvalPolicy?: ApprovalPolicy
+  capabilityProfile?: CapabilityProfile
   gitEnabled?: boolean
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
@@ -117,6 +119,10 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
 
   getConversationId(): string | null {
     return this.conversationId
+  }
+
+  setConversationId(conversationId: string): void {
+    this.conversationId = conversationId
   }
 
   getContextSegments(): ContextSegment[] {

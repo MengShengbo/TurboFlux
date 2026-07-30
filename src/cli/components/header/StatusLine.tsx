@@ -9,6 +9,7 @@ import { formatNativeReasoningSetting } from '../../../core/modelRegistry'
 import type { GitIntegrationState } from '../../../core/gitService'
 import type { AgentMode, TokenUsage } from '../../../shared/agentTypes'
 import { useI18n } from '../../i18n/index'
+import type { PrimaryFlowActivity } from '../../state/flowSelectors'
 
 interface StatusLineProps {
   config: TurboFluxConfig
@@ -18,6 +19,11 @@ interface StatusLineProps {
   gitState?: GitIntegrationState
   mcpCount?: number
   terminalCount?: number
+  attentionLabel?: string
+  activity?: PrimaryFlowActivity
+  backgroundCount?: number
+  queueCount?: number
+  resultCount?: number
   width?: number
 }
 
@@ -34,6 +40,11 @@ export function StatusLine({
   gitState,
   mcpCount = 0,
   terminalCount = 0,
+  attentionLabel,
+  activity,
+  backgroundCount = 0,
+  queueCount = 0,
+  resultCount = 0,
   width: requestedWidth,
 }: StatusLineProps) {
   const theme = useTheme()
@@ -70,10 +81,33 @@ export function StatusLine({
           : !gitSnapshot
             ? `git:${gitState.phase}`
       : `git:${gitSnapshot.branch}${gitTracking ? ` ${gitTracking}` : ''}${gitSnapshot.conflictedCount > 0 ? ` !${gitSnapshot.conflictedCount}` : gitChangedCount > 0 ? ` · ${t('ui.status.gitChanged', { count: gitChangedCount })}` : ` ${t('ui.status.gitClean')}`}`
+  const compactModelPart = columns < 82 ? cliTruncate(modelPart, 12, { position: 'end' }) : modelPart
+  const activityLabel = activity ? (() => {
+    switch (activity.code) {
+      case 'thinking': return t('ui.status.activity.thinking')
+      case 'working': return t('ui.status.activity.working')
+      case 'responding': return t('ui.status.activity.responding')
+      case 'review-required': return t('ui.status.activity.reviewRequired')
+      case 'input-required': return t('ui.status.activity.inputRequired')
+      case 'stopping': return t('ui.status.activity.stopping')
+      case 'interrupted': return t('ui.status.activity.interrupted')
+      case 'needs-attention': return t('ui.status.activity.needsAttention')
+      case 'history-unavailable': return t('ui.status.activity.historyUnavailable')
+      case 'ready': return t('ui.status.activity.ready')
+    }
+  })() : attentionLabel
+  const activityPart = activityLabel && activity?.detail
+    ? t('ui.status.activity.detail', { activity: activityLabel, detail: cliTruncate(activity.detail, 24, { position: 'end' }) })
+    : activityLabel
   const primaryParts = [
-    modelPart,
-    reasoningSetting ? `reason:${reasoningSetting}` : '',
+    resultCount > 0 ? t('ui.status.inbox', { count: resultCount }) : '',
+    queueCount > 0 ? t('ui.status.queue', { count: queueCount }) : '',
+    backgroundCount > 0 ? t('ui.status.background', { count: backgroundCount }) : '',
+    activityPart || '',
+    compactModelPart,
+    columns >= 82 && reasoningSetting ? `reason:${reasoningSetting}` : '',
     `approval:${config.approvalPolicy}`,
+    `cap:${config.capabilityProfile || 'workspace-write'}${config.capabilityProfile === 'danger-full-access' ? '!' : ''}`,
   ].filter(Boolean)
   const secondaryParts = [
     gitPart,
@@ -99,6 +133,24 @@ export function StatusLine({
   const usageWidth = hasProviderUsage && total > 0 ? barWidth + 7 : 0
   const textWidth = Math.max(12, frameWidth - 9 - usageWidth)
   const statusText = cliTruncate(parts.join(' | '), textWidth, { position: 'middle' })
+  const phaseLabel = activity?.kind === 'action-required' || attentionLabel
+    ? t('ui.status.action')
+    : activity?.kind === 'error'
+      ? t('ui.status.alert')
+      : activity?.kind === 'stopping'
+        ? t('ui.status.stop')
+        : activity?.kind === 'streaming'
+          ? t('ui.status.reply')
+          : activity?.kind === 'working'
+            ? t('ui.status.work')
+            : MODE_LABELS[mode]
+  const phaseColor = activity?.kind === 'action-required' || activity?.kind === 'stopping'
+    ? theme.warning
+    : activity?.kind === 'error'
+      ? theme.error
+      : activity?.kind === 'streaming'
+        ? theme.info
+        : mode === 'vibe' ? theme.success : theme.info
 
   return (
     <Box
@@ -109,8 +161,10 @@ export function StatusLine({
       justifyContent="space-between"
     >
       <Box flexDirection="row" flexGrow={1} minWidth={0}>
-        <Text color={mode === 'vibe' ? theme.success : theme.info} bold>{MODE_LABELS[mode]}</Text>
-        <Text color={theme.divider}> | </Text>
+        <Box flexDirection="row" flexShrink={0}>
+          <Text color={phaseColor} bold>{phaseLabel}</Text>
+          <Text color={theme.divider}> | </Text>
+        </Box>
         <Text color={theme.statusLine} wrap="truncate-end">{statusText}</Text>
         {hasProviderUsage && total > 0 && <Text> </Text>}
         {hasProviderUsage && total > 0 && <Text color={barColor}>{bar}</Text>}

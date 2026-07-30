@@ -31,7 +31,6 @@ describe('user-visible string boundaries', () => {
       'components/messages/ThinkingBlock.tsx',
       'components/tools/ActiveWorkPanel.tsx',
       'components/tools/FastContextBanner.tsx',
-      'components/tools/FileEditStatus.tsx',
       'components/tools/QueuedPromptList.tsx',
       'components/tools/TerminalSessionsFooter.tsx',
       'components/tools/ToolActivityList.tsx',
@@ -50,6 +49,10 @@ describe('user-visible string boundaries', () => {
     }
 
     expect(violations).toEqual([])
+    const app = read('components/App.tsx')
+    expect(app).not.toContain("'Thinking...'")
+    expect(app).not.toContain('`Selected message ')
+    expect(app).not.toContain('`Mounted ${')
   })
 
   it('requires catalog keys for every static slash-command description', () => {

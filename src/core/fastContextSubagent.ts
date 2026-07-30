@@ -34,6 +34,7 @@ interface RunParams {
   requestTimeoutMs?: number
   strategy?: FastContextStrategy
   onEvent?: (event: FastContextScanEvent) => void
+  onTrace?: (event: SubAgentEvent) => void
 }
 
 function trimText(value: string, max = 220): string {
@@ -148,15 +149,32 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
   }
 
   const onSubAgentEvent = (event: SubAgentEvent): void => {
+    params.onTrace?.(event)
     if (event.type === 'turn_start') {
       currentTurn = event.turn
-      emit({ type: 'worker', id: `controller-turn-${event.turn}`, label: `adaptive search ${event.turn}`, status: 'running' })
+      const turnLabel = event.turn === 1 ? 'scope discovery' : `evidence retrieval ${event.turn - 1}`
+      emit({ type: 'worker', id: `controller-turn-${event.turn}`, label: turnLabel, status: 'running' })
       emit({
         type: 'phase',
-        phase: event.turn === event.maxTurns ? 'ranking' : 'mapping',
+        phase: event.turn > 1 && event.turn === event.maxTurns ? 'ranking' : 'mapping',
         wave: event.turn,
         maxWaves: event.maxTurns,
-        insight: event.turn === 1 ? 'forming causal hypotheses' : 'following the highest-information next hop',
+        insight: event.turn === 1 ? 'selecting the smallest credible ownership area before file reads' : 'reading grounded owners and following concrete next hops',
+      })
+      return
+    }
+    if (event.type === 'model_response') {
+      const insight = event.retrievalPhase === 'scope_discovery'
+        ? 'scope-discovery plan received; executing only bounded locator searches'
+        : event.retrievalPhase === 'finalization'
+          ? 'grounded frontier ready; accepting only the final ranked code map'
+          : 'retrieval plan received; executing bounded evidence reads'
+      emit({
+        type: 'phase',
+        phase: event.retrievalPhase === 'finalization' ? 'ranking' : 'mapping',
+        wave: event.turn,
+        maxWaves: definition.maxTurns,
+        insight,
       })
       return
     }
@@ -172,7 +190,8 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
         outputTokens: event.outputTokens || 0,
         cacheReadTokens: event.cacheReadTokens || 0,
       })
-      emit({ type: 'worker', id: `controller-turn-${event.turn}`, label: `adaptive search ${event.turn}`, status: 'completed' })
+      const turnLabel = event.turn === 1 ? 'scope discovery' : `evidence retrieval ${event.turn - 1}`
+      emit({ type: 'worker', id: `controller-turn-${event.turn}`, label: turnLabel, status: 'completed' })
       return
     }
     if (event.type === 'model_wait') {
@@ -238,7 +257,7 @@ export async function runFastContextSubagent(params: RunParams): Promise<FastCon
     userPrompt: [
       `Objective: ${params.objective}`,
       '',
-      'Run FastContext as an adaptive model-led retrieval loop. Recover the complete minimal evidence-grounded edit frontier, not merely one plausible file. Read direct owners, preserve tightly coupled propagation surfaces discovered by exact search or symbol evidence, batch independent work, and submit as soon as no named unread owner can change the top-ten ranking.',
+      'Turn 1 is scope discovery only: use targeted search anchors to select the smallest credible ownership area. Starting on turn 2, read direct owners and preserve tightly coupled propagation surfaces discovered by exact search or symbol evidence. Recover the complete minimal evidence-grounded edit frontier, not merely one plausible file, and submit as soon as no named unread owner can change the top-ten ranking.',
     ].join('\n'),
     onEvent: onSubAgentEvent,
   })

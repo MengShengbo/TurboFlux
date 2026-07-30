@@ -147,7 +147,7 @@ describe('AgentEngine background subagent tools', () => {
     }
   })
 
-  it('waits once for a running FastContext task instead of exposing a pollable transcript', async () => {
+  it('returns immediately for running FastContext and exposes its transcript after termination', async () => {
     const workspacePath = mkdtempSync(path.join(tmpdir(), 'turboflux-fast-context-push-'))
     const runtime = createAgentRuntime({
       workspacePath,
@@ -180,17 +180,16 @@ describe('AgentEngine background subagent tools', () => {
       const activeRun = (runtime.engine as unknown as { fastContextRun: { id: string } | null }).fastContextRun
       expect(activeRun?.id).toBeTruthy()
       expect(runtime.subAgentTaskManager.getTask(activeRun!.id)?.deliveryMode).toBe('push')
-      let settled = false
-      const read = dispatchTool('read_agent', { agent_id: activeRun!.id }).then(result => {
-        settled = true
-        return result
-      })
-      await new Promise(resolve => setTimeout(resolve, 10))
-      expect(settled).toBe(false)
+      await expect(dispatchTool('read_agent', { agent_id: activeRun!.id })).resolves.toContain('still running')
 
       await dispatchTool('cancel_agent', { agent_id: activeRun!.id })
-      await expect(read).resolves.toContain('stopped')
-      expect(await dispatchTool('read_agent', { agent_id: activeRun!.id })).not.toContain('Transcript records')
+      const postmortem = await dispatchTool('read_agent', { agent_id: activeRun!.id })
+      expect(postmortem).toContain('Status: stopped')
+      expect(postmortem).toContain('Transcript records')
+      expect(runtime.subAgentTaskManager.readTranscript(activeRun!.id, { offset: 0, limit: 200 }).records).toContainEqual(expect.objectContaining({
+        type: 'event',
+        event: expect.objectContaining({ type: 'fast_context_trace' }),
+      }))
     } finally {
       await runtime.destroy()
       rmSync(workspacePath, { recursive: true, force: true })

@@ -84,7 +84,7 @@ export const Dashboard: React.FC<{frame?: number; dense?: boolean}> = ({frame = 
       </div>
       <div style={{display: 'grid', gridTemplateRows: '88px 1fr 104px', minWidth: 0}}>
         <div style={{display: 'flex', alignItems: 'center', gap: 12, padding: '0 28px', borderBottom: `1px solid ${C.line}`}}>
-          <Badge color={C.cyan}>VIBE</Badge><Badge color={C.info}>GPT-5 · HIGH</Badge><Badge color={C.green}>LOCAL</Badge>
+          <Badge color={C.cyan}>VIBE</Badge><Badge color={C.info}>PLAN</Badge><Badge color={C.info}>GPT-5 · HIGH</Badge><Badge color={C.green}>SESSION RESUMED</Badge>
           <div style={{marginLeft: 'auto', display: 'flex', gap: 12, color: C.muted, fontSize: 14}}><span>QUEUE 02</span><span>·</span><span>CTX 146K</span></div>
         </div>
         <div style={{padding: dense ? 22 : 30, overflow: 'hidden'}}>
@@ -117,7 +117,7 @@ export const SceneLabel: React.FC<{eyebrow: string; title: string; subtitle: str
   <div style={{textAlign: align, fontFamily: mono}}>
     <div style={{color: C.cyan, letterSpacing: 4, fontSize: 18, fontWeight: 700}}>{eyebrow}</div>
     <div style={{color: C.white, fontSize: 64, lineHeight: 1.1, fontWeight: 800, letterSpacing: -3, marginTop: 16}}>{title}</div>
-    <div style={{color: C.muted, fontSize: 22, lineHeight: 1.55, marginTop: 18}}>{subtitle}</div>
+    <div style={{color: C.muted, fontSize: 32, lineHeight: 1.45, marginTop: 22}}>{subtitle}</div>
   </div>
 );
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { isAbsolute, join, relative } from 'path'
+import { isAbsolute, relative, resolve } from 'path'
 import type { CodeMapNode, CodeSearchHit } from '../shared/codeIndexTypes'
 import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../shared/subAgentTypes'
 import type { NativeReasoningConfig } from '../shared/agentTypes'
@@ -56,9 +56,14 @@ export function loadDynamicAgents(workspacePath: string): void {
 }
 
 function resolveWorkspacePath(workspacePath: string, pathValue: unknown): string {
-  const path = String(pathValue || '')
-  if (!path) return workspacePath
-  return isAbsolute(path) ? path : join(workspacePath, path)
+  const scopeRoot = resolve(workspacePath)
+  const path = String(pathValue || '').trim()
+  const candidate = path ? resolve(scopeRoot, path) : scopeRoot
+  const scopeRelative = relative(scopeRoot, candidate)
+  if (scopeRelative === '..' || scopeRelative.startsWith('../') || scopeRelative.startsWith('..\\') || isAbsolute(scopeRelative)) {
+    throw new Error(`Path escapes the delegated subagent scope: ${path}`)
+  }
+  return candidate
 }
 
 function toWorkspaceRelative(workspacePath: string, filePath: string): string {
@@ -213,9 +218,9 @@ Tools:
 - submit_code_map(edit_frontier, supporting_context, unresolved, frontier_complete)
 
 Protocol:
-1. Start with two to four independent, discriminative anchors from the objective: exact identifiers, literals, configuration keys, API names, named files, stack frames, or concrete ownership hypotheses. Run independent searches in parallel.
+1. Turn 1 is scope discovery only: use two to four independent, discriminative search anchors from the objective to identify the smallest credible ownership area. File reads are unavailable during this turn.
 2. Use search_symbol only for a concrete identifier. Use search_content for literals, references, registrations, imports, and semantic anchors. Search results are discovery evidence, not proof of ownership.
-3. Read probable direct owners immediately. If a hit is only a caller, wrapper, example, test, or registration site, follow the imported or invoked symbol to its implementation owner.
+3. Starting on turn 2, read the probable direct owners selected from discovery. If a hit is only a caller, wrapper, example, test, or registration site, follow the imported or invoked symbol to its implementation owner.
 4. After each read wave apply the edit counterfactual: if only the current edit frontier changed, would the named behavior and variants be fixed? Follow only a concrete unread symbol or path that can change the answer.
 5. Batch independent searches and reads in the same turn. Do not repeat equivalent calls; exact repeats are cached and provide no new information.
 6. Stop when no named unread owner can materially change the ranked edit frontier. Simple exact-owner tasks should finish early; complex tasks may use the full hard turn budget.
@@ -780,6 +785,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     content: options.userPrompt || [
       `Objective: ${objective}`,
       retrievalContext ? `\nCaller-supplied retrieval context (starting points, not proof):\n${retrievalContext}` : '',
+      isFastContextDefinition ? '\nRetrieval protocol: turn 1 is scope discovery only. Locate the smallest credible ownership area with search tools; do not read files until the next turn.' : '',
       '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Rank the probable direct edit target first; represent supporting architecture through grounded relationships.',
     ].filter(Boolean).join('\n'),
   })
@@ -969,6 +975,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     emit({ type: 'turn_start', turn, maxTurns: turnLimit })
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
+    let responseToolViolation = ''
     const waitStartedAt = Date.now()
     const requestDeadline = waitStartedAt + requestTimeoutMs
     emit({ type: 'model_wait', turn, elapsedMs: 0, timeoutMs: requestTimeoutMs })
@@ -990,12 +997,20 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         const finalizationOnly = strictFastContext
           && hasModelReadEvidence()
           && (options.submissionOnly === true || turn === turnLimit)
+        const scopeDiscoveryOnly = strictFastContext && turn === 1 && !finalizationOnly
+        const retrievalPhase = finalizationOnly
+          ? 'finalization'
+          : scopeDiscoveryOnly
+            ? 'scope_discovery'
+            : 'evidence_retrieval'
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = messages.map(message => ({ ...message }))
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
         const requestTools = finalizationOnly
           ? availableTools.filter(tool => tool.function.name === 'submit_code_map')
-          : availableTools
+          : scopeDiscoveryOnly
+            ? availableTools.filter(tool => tool.function.name !== 'read_file' && tool.function.name !== 'submit_code_map')
+            : availableTools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
               model: modelId,
@@ -1040,6 +1055,14 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           if (reasoningRequest?.reasoningEffort && reasoningRequest.reasoningEffort !== 'none') requestBody.reasoning_effort = reasoningRequest.reasoningEffort
           if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
           requestBody.parallel_tool_calls = true
+        }
+        if (finalizationOnly) {
+          requestBody.tool_choice = protocol === 'anthropic_messages'
+            ? { type: 'tool', name: 'submit_code_map', disable_parallel_tool_use: true }
+            : protocol === 'openai_responses'
+              ? { type: 'function', name: 'submit_code_map' }
+              : { type: 'function', function: { name: 'submit_code_map' } }
+          if (protocol !== 'anthropic_messages') requestBody.parallel_tool_calls = false
         }
         if (requestTools.length === 0) {
           delete requestBody.tools
@@ -1183,6 +1206,22 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           messageText = choice.message?.content || ''
           responseToolCalls = choice.message?.tool_calls || []
         }
+        const offeredToolNames = new Set(requestTools.map(tool => tool.function.name))
+        const unexpectedToolNames = Array.from(new Set(responseToolCalls
+          .map(call => call.function.name)
+          .filter(name => !offeredToolNames.has(name))))
+        emit({
+          type: 'model_response',
+          turn,
+          protocol,
+          offeredTools: Array.from(offeredToolNames),
+          returnedTools: responseToolCalls.map(call => call.function.name),
+          finalizationOnly,
+          retrievalPhase,
+        })
+        if (unexpectedToolNames.length > 0) {
+          responseToolViolation = `FastContext provider returned tool(s) not offered for turn ${turn}: ${unexpectedToolNames.join(', ')}. The calls were not executed.`
+        }
         resolvedProtocol = protocol
         rememberProtocol(activeProtocolCacheKey, protocol)
         parsedResponse = true
@@ -1205,6 +1244,29 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     } finally {
       clearInterval(waitTimer)
       modelElapsedMs = Date.now() - waitStartedAt
+    }
+
+    if (responseToolViolation) {
+      emit({ type: 'error', message: responseToolViolation })
+      emit({
+        type: 'turn_complete',
+        turn,
+        calls: 0,
+        modelElapsedMs,
+        toolElapsedMs: 0,
+        totalElapsedMs: Date.now() - turnStartedAt,
+        inputTokens: turnInputTokens,
+        outputTokens: turnOutputTokens,
+        cacheReadTokens: turnCacheReadTokens,
+      })
+      return {
+        ok: false,
+        turns: turn,
+        elapsedMs: Date.now() - startedAt,
+        evidence: collectedEvidence,
+        truncated: true,
+        error: responseToolViolation,
+      }
     }
 
     const submissionCalls = responseToolCalls.filter(call => call.function.name === 'submit_code_map')
@@ -1468,9 +1530,15 @@ function toolCallSignature(name: string, args: Record<string, any>): string {
 function buildSearchContentBatchRequest(args: Record<string, any>, workspacePath: string) {
   const pattern = String(args.pattern || '').trim()
   if (!pattern) return null
+  let basePath: string
+  try {
+    basePath = args.path ? resolveWorkspacePath(workspacePath, args.path) : resolveWorkspacePath(workspacePath, '')
+  } catch {
+    return null
+  }
   return {
     pattern,
-    basePath: args.path ? resolveWorkspacePath(workspacePath, args.path) : workspacePath,
+    basePath,
     filePattern: args.file_pattern,
     caseInsensitive: args.case_sensitive !== true,
     options: {
@@ -1704,10 +1772,13 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
     case 'search_symbols': {
       const query = String(args.query || '').trim()
       if (!query) return { ok: true, output: 'No symbol query provided.', summary: 'symbol search skipped', evidence }
+      const scopedPath = typeof args.path === 'string' && args.path.trim()
+        ? resolveWorkspacePath(workspacePath, args.path)
+        : undefined
       const res = await executor.searchCodeSymbols({
         workspacePath,
         query,
-        path: typeof args.path === 'string' ? args.path : undefined,
+        path: scopedPath,
         kind: typeof args.symbol_kind === 'string' ? args.symbol_kind : undefined,
         kinds: typeof args.symbol_kind === 'string' ? [args.symbol_kind] : undefined,
         limit: 20,
@@ -1737,11 +1808,14 @@ async function executeSubAgentTool(name: string, args: Record<string, any>, work
 
     case 'get_codemap': {
       const query = String(args.query || args.path || '').trim()
+      const scopedPath = typeof args.path === 'string' && args.path.trim()
+        ? resolveWorkspacePath(workspacePath, args.path)
+        : undefined
       const res = await executor.getCodeMap({
         workspacePath,
         query,
-        targetPaths: typeof args.path === 'string' ? [args.path] : undefined,
-        path: typeof args.path === 'string' ? args.path : undefined,
+        targetPaths: scopedPath ? [scopedPath] : undefined,
+        path: scopedPath,
         maxPaths: 8,
         maxChildrenPerPath: 5,
       })

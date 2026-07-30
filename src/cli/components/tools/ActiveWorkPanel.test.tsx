@@ -24,7 +24,7 @@ describe('ActiveWorkPanel', () => {
       { columns: 88 },
     )
 
-    expect(output).toContain('Activity 2 working')
+    expect(output).toContain('Activity active calls: 2')
     expect(output).toContain('Reading src/App.tsx')
     expect(output).toContain('Editing src/App.tsx')
   })
@@ -51,7 +51,7 @@ describe('ActiveWorkPanel', () => {
       { columns: 88 },
     )
 
-    expect(output).toContain('Activity 1 working')
+    expect(output).toContain('Activity active calls: 1')
     expect(output).toContain('Preparing Write file: src/new-file.ts')
   })
 

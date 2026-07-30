@@ -107,4 +107,31 @@ describe('StatusLine', () => {
     expect(output).toContain('mcp:2')
     expect(output).toContain('term:1')
   })
+
+  it('keeps flow action, queue, and inbox visible at ordinary widths', () => {
+    const output = renderStatus(
+      <StatusLine
+        config={{
+          provider: 'openai',
+          apiKey: 'test',
+          baseUrl: 'https://api.openai.com/v1',
+          model: 'gpt-5.6',
+          contextWindow: 200_000,
+          maxTokens: 16_384,
+          approvalPolicy: 'agent',
+          gitEnabled: true,
+        }}
+        tokenUsage={{ source: 'unknown' }}
+        activity={{ kind: 'action-required', code: 'review-required', label: 'Review required', detail: 'write_file' }}
+        queueCount={2}
+        resultCount={1}
+      />,
+      82,
+    )
+
+    expect(output).toContain('ACTION')
+    expect(output).toContain('inbox:1')
+    expect(output).toContain('queue:2')
+    expect(output).toContain('Review required')
+  })
 })

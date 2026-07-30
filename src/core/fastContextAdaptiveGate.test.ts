@@ -3,7 +3,7 @@ import type { ToolExecutor } from '../tools/executor'
 import { runFastContextSubagent } from './fastContextSubagent'
 
 describe('FastContext adaptive controller', () => {
-  it('finishes a simple grounded owner task in two provider turns', async () => {
+  it('finishes a simple grounded owner task after discovery and reading', async () => {
     const originalFetch = globalThis.fetch
     const requestTools: string[][] = []
     let requestCount = 0
@@ -12,8 +12,10 @@ describe('FastContext adaptive controller', () => {
       const body = JSON.parse(String(init?.body))
       requestTools.push(toolNames(body))
       const toolCall = requestCount === 1
-        ? call('read-owner', 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
-        : call('submit-owner', 'submit_code_map', {
+        ? call('locate-owner', 'search_content', { pattern: 'RuntimeOwner' })
+        : requestCount === 2
+          ? call('read-owner', 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
+          : call('submit-owner', 'submit_code_map', {
             candidates: [candidate('src/owner.ts', 'runtime owner', 'owner', 'resolve', 0.96, 0)],
             relationships: [],
             frontier_complete: true,
@@ -36,10 +38,11 @@ describe('FastContext adaptive controller', () => {
         model: 'gpt-5.5',
       })
 
-      expect(requestCount).toBe(2)
-      expect(requestTools[0]).toEqual(expect.arrayContaining(['read_file', 'search_content', 'submit_code_map']))
+      expect(requestCount).toBe(3)
+      expect(requestTools[0]).toEqual(expect.arrayContaining(['search_content', 'search_files', 'search_symbol']))
+      expect(requestTools[0]).not.toEqual(expect.arrayContaining(['read_file', 'submit_code_map']))
       expect(requestTools[1]).toEqual(expect.arrayContaining(['read_file', 'search_content', 'submit_code_map']))
-      expect(requestTools[1]).toEqual(requestTools[0])
+      expect(requestTools[2]).toEqual(requestTools[1])
       expect(requestTools.flat()).not.toContain('request_more_search')
       expect(result.evidencePack).toContain('1. src/owner.ts')
     } finally {
@@ -108,8 +111,10 @@ describe('FastContext adaptive controller', () => {
       const body = JSON.parse(String(init?.body))
       requestBodies.push(body)
       const toolCall = requestCount === 1
-        ? call('read-symptom', 'read_file', { path: 'src/symptom.ts', offset: 1, limit: 10 })
+        ? call('locate-runtime', 'search_content', { pattern: 'RuntimeServer' })
         : requestCount === 2
+          ? call('read-symptom', 'read_file', { path: 'src/symptom.ts', offset: 1, limit: 10 })
+          : requestCount === 3
           ? call('submit-incomplete', 'submit_code_map', {
               candidates: [candidate('src/symptom.ts', 'symptom owner', 'owner', 'resolve', 0.82, 0)],
               relationships: [],
@@ -119,7 +124,7 @@ describe('FastContext adaptive controller', () => {
               searches_tried: ['RuntimeServer'],
               uncertainty: ['src/runtime/server.ts contains RuntimeServer according to search results, but it was not read and may own cleanup.'],
             })
-          : requestCount === 3
+          : requestCount === 4
             ? call('read-runtime', 'read_file', { path: 'src/runtime/server.ts', offset: 1, limit: 10 })
             : call('submit-closed', 'submit_code_map', {
                 candidates: [
@@ -147,7 +152,7 @@ describe('FastContext adaptive controller', () => {
         model: 'gpt-5.5',
       })
 
-      expect(requestCount).toBe(2)
+      expect(requestCount).toBe(3)
       expect(result.evidencePack).toContain('src/symptom.ts')
       expect(result.evidencePack).toContain('src/runtime/server.ts contains RuntimeServer')
     } finally {
@@ -164,9 +169,9 @@ describe('FastContext adaptive controller', () => {
       const body = JSON.parse(String(init?.body))
       requestBodies.push(body)
       const toolCall = requestCount === 1
-        ? call('read-owner', 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
+        ? call('search-missing', 'search_content', { pattern: 'DefinitelyMissingSymbol' })
         : requestCount === 2
-          ? call('search-missing', 'search_content', { pattern: 'DefinitelyMissingSymbol' })
+          ? call('read-owner', 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
           : call('submit-owner', 'submit_code_map', {
               candidates: [candidate('src/owner.ts', 'runtime owner', 'owner', 'resolve', 0.96, 0)],
               relationships: [],
@@ -208,9 +213,11 @@ describe('FastContext adaptive controller', () => {
       requestCount += 1
       const body = JSON.parse(String(init?.body))
       requestBodies.push(body)
-      const toolCall = requestCount <= 2
-        ? call(`read-owner-${requestCount}`, 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
-        : call('submit-owner', 'submit_code_map', {
+      const toolCall = requestCount === 1
+        ? call('locate-owner', 'search_content', { pattern: 'RuntimeOwner' })
+        : requestCount <= 3
+          ? call(`read-owner-${requestCount}`, 'read_file', { path: 'src/owner.ts', offset: 1, limit: 10 })
+          : call('submit-owner', 'submit_code_map', {
             candidates: [candidate('src/owner.ts', 'runtime owner', 'owner', 'resolve', 0.96, 0)],
             relationships: [],
             frontier_complete: true,
@@ -234,8 +241,8 @@ describe('FastContext adaptive controller', () => {
       })
 
       expect(toolExecutor.readFileRange).toHaveBeenCalledTimes(1)
-      expect(JSON.stringify(requestBodies[2])).toContain('[Cached exact repeat; no new execution.]')
-      expect(JSON.stringify(requestBodies[2])).toContain('E1 | read |')
+      expect(JSON.stringify(requestBodies[3])).toContain('[Cached exact repeat; no new execution.]')
+      expect(JSON.stringify(requestBodies[3])).toContain('E1 | read |')
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -270,12 +277,12 @@ describe('FastContext adaptive controller', () => {
     globalThis.fetch = vi.fn(async () => {
       requestCount += 1
       const toolCall = requestCount === 1
-        ? call('read-entry', 'read_file', { path: 'src/entry.ts', offset: 1, limit: 10 })
+        ? null
         : requestCount === 2
-          ? null
+          ? call('read-entry', 'read_file', { path: 'src/entry.ts', offset: 1, limit: 10 })
           : requestCount === 3
-            ? null
-            : call('submit-chain', 'submit_code_map', {
+          ? null
+          : call('submit-chain', 'submit_code_map', {
                 edit_frontier: [
                   { evidence_ids: ['E4', 'E5'], role: 'causal owners', edit_kind: 'implementation', confidence: 'high', why: 'read-grounded candidate across both implementation files' },
                 ],
@@ -283,7 +290,7 @@ describe('FastContext adaptive controller', () => {
                 frontier_complete: true,
                 unresolved: [],
               })
-      if (requestCount === 2) {
+      if (requestCount === 1) {
         return responseMany([
           call('search-first', 'search_symbol', { query: 'FirstOwner' }),
           call('search-second', 'search_symbol', { query: 'SecondOwner' }),

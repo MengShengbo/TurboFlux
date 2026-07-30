@@ -24,7 +24,7 @@ describe('ToolCallTree history policy', () => {
     const compact = renderToString(<ThemeProvider><ToolCallTree tools={tools} verbose={false} expanded={false} /></ThemeProvider>, { columns: 88 })
     const expanded = renderToString(<ThemeProvider><ToolCallTree tools={tools} verbose={false} expanded /></ThemeProvider>, { columns: 88 })
 
-    expect(compact).toContain('Activity 2 complete')
+    expect(compact).toContain('Activity completed calls: 2')
     expect(compact).toContain('Read src/App.tsx')
     expect(compact).toContain('Run npm test')
     expect(expanded).toContain('Read src/App.tsx')
@@ -56,7 +56,7 @@ describe('ToolCallTree history policy', () => {
       { columns: 88 },
     )
 
-    expect(output).toContain('1 failed')
+    expect(output).toContain('incomplete calls: 1')
     expect(output).toContain('missing.ts')
   })
 
