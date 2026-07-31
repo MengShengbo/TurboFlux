@@ -88,15 +88,6 @@ export interface FlowNotificationItem {
   updatedAt: number
 }
 
-export interface FlowFastContextState {
-  runId: string | null
-  status: 'idle' | 'running' | 'completed'
-  phase?: string
-  files: number
-  hits: number
-  updatedAt: number
-}
-
 export interface FlowToolDraftState {
   id: string
   name: string
@@ -122,7 +113,6 @@ export interface ThreadFlowState {
   mode: AgentMode
   tokenUsage: TokenUsage
   activeTask: FlowActiveTask | null
-  fastContext: FlowFastContextState
   toolDraft: FlowToolDraftState | null
   draft: { text: string; attachmentIds: string[] }
   inputs: Record<string, FlowInputItem>
@@ -171,7 +161,6 @@ export function createThreadFlowState(sessionId: string, threadId: string): Thre
     mode: 'vibe',
     tokenUsage: { source: 'unknown' },
     activeTask: null,
-    fastContext: { runId: null, status: 'idle', files: 0, hits: 0, updatedAt: 0 },
     toolDraft: null,
     draft: { text: '', attachmentIds: [] },
     inputs: {},
@@ -301,7 +290,6 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
         tools: {},
         streams: { answer: emptyStream('answer'), thinking: emptyStream('thinking') },
         activeTask: null,
-        fastContext: { runId: null, status: 'idle', files: 0, hits: 0, updatedAt: event.at },
         toolDraft: null,
       }
     }
@@ -318,9 +306,6 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
         ...state,
         activeTask: null,
         toolDraft: null,
-        fastContext: state.fastContext.status === 'running'
-          ? { ...state.fastContext, status: 'completed', updatedAt: event.at }
-          : state.fastContext,
         run: {
           ...state.run,
           phase,
@@ -367,43 +352,6 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
               toolCalls: event.payload.task.toolCalls.map(toolCall => ({ ...toolCall })),
             }
           : null,
-      }
-    case 'fast_context.started':
-      return {
-        ...state,
-        fastContext: {
-          runId: event.payload.runId,
-          status: 'running',
-          files: 0,
-          hits: 0,
-          updatedAt: event.at,
-        },
-      }
-    case 'fast_context.progressed':
-      return {
-        ...state,
-        fastContext: {
-          ...state.fastContext,
-          runId: event.payload.runId,
-          status: 'running',
-          phase: event.payload.phase ?? state.fastContext.phase,
-          files: event.payload.files ?? state.fastContext.files,
-          hits: event.payload.hits ?? state.fastContext.hits,
-          updatedAt: event.at,
-        },
-      }
-    case 'fast_context.completed':
-      return {
-        ...state,
-        fastContext: {
-          ...state.fastContext,
-          runId: event.payload.runId,
-          status: 'completed',
-          phase: 'completed',
-          files: event.payload.files,
-          hits: event.payload.hits,
-          updatedAt: event.at,
-        },
       }
     case 'tool.draft_changed': {
       const id = event.itemId

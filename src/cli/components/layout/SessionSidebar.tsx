@@ -2,9 +2,6 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
 import { resolveBackground, useTheme } from '../../theme/index'
-import type { FastContextUiSummary } from './fastContextUi'
-import { FastContextStage } from './FastContextStage'
-import type { FastContextScanEvent } from '../../../core/fastContextTypes'
 import type { ActiveTaskContext } from '../../../core/taskManager'
 import type { GitIntegrationState } from '../../../core/gitService'
 import type { AgentRunState, TokenUsage } from '../../../shared/agentTypes'
@@ -28,9 +25,6 @@ interface SessionSidebarProps {
   draft: StreamingToolDraft | null
   streamText?: string
   thinkingText?: string
-  fastContextEvents: readonly FastContextScanEvent[]
-  fastContextSummary: FastContextUiSummary
-  fastContextActive: boolean
   subagents: readonly DeveloperSubAgentActivity[]
   queuedCount: number
   terminals: TerminalSessionInfo[]
@@ -54,9 +48,6 @@ export function SessionSidebar({
   draft,
   streamText,
   thinkingText,
-  fastContextEvents,
-  fastContextSummary,
-  fastContextActive,
   subagents,
   queuedCount,
   terminals,
@@ -78,8 +69,6 @@ export function SessionSidebar({
     draft,
     streamText,
     thinkingText,
-    fastContextSummary,
-    fastContextActive,
     subagents,
     terminals: activeTerminals,
     queuedCount,
@@ -171,12 +160,6 @@ export function SessionSidebar({
         </Section>
       )}
 
-      <FastContextStage
-        events={fastContextEvents}
-        summary={fastContextSummary}
-        isActive={fastContextActive}
-        width={width}
-      />
       <Text color={isRunning ? theme.brandShimmer : theme.success}>{`● ${t(isRunning ? 'common.working' : 'common.ready')}`}</Text>
     </Box>
   )

@@ -1,6 +1,5 @@
 import type { ActiveTaskContext } from '../../core/taskManager'
 import type { AgentRunState } from '../../shared/agentTypes'
-import type { FastContextUiSummary } from './layout/fastContextUi'
 import { deriveActivityModel } from './agentActivityModel'
 import type { StreamingToolDraft } from './tools/toolTypes'
 import type { ToolStatus } from './tools/toolTypes'
@@ -27,8 +26,6 @@ export interface DeveloperFlowInput {
   draft: StreamingToolDraft | null
   streamText?: string
   thinkingText?: string
-  fastContextSummary: FastContextUiSummary
-  fastContextActive: boolean
   subagents: readonly DeveloperSubAgentActivity[]
   terminals: number
   queuedCount: number
@@ -95,32 +92,11 @@ export function deriveDeveloperFlow(input: DeveloperFlowInput, t: Translator = D
   if (runningSubagent) {
     return flow(t('ui.flow.background'), t('ui.flow.agentWorking', { agent: runningSubagent.label }), 'active', background)
   }
-  if (input.fastContextActive) {
-    return flow(t('ui.flow.exploring'), t('ui.flow.fastContextState', { state: formatFastContextPhase(input.fastContextSummary.phase, t) }), 'active', background)
-  }
-
   return flow(t('ui.runState.ready'), t('ui.flow.readyNext'), 'success', background)
 }
 
 function buildBackgroundSummary(input: DeveloperFlowInput, t: Translator): string[] {
   const items: string[] = []
-  if (input.fastContextActive) {
-    const state = formatFastContextPhase(input.fastContextSummary.phase, t)
-    items.push(input.fastContextSummary.absorbed > 0
-      ? t('ui.flow.fcEvidence', { state, count: input.fastContextSummary.absorbed })
-      : t('ui.flow.fcState', { state }))
-  } else if (
-    input.isRunning
-    && input.fastContextSummary.events > 0
-    && input.fastContextSummary.phase === 'completed'
-  ) {
-    items.push(t('ui.flow.fcEvidenceReady'))
-  } else if (input.fastContextSummary.events > 0 && input.fastContextSummary.phase === 'error') {
-    items.push(t('ui.flow.fcFailed'))
-  } else if (input.isRunning && input.fastContextSummary.events > 0 && input.fastContextSummary.phase === 'cancelled') {
-    items.push(t('ui.flow.fcCancelled'))
-  }
-
   for (const agent of input.subagents.slice(-2)) {
     if (agent.status === 'completed') items.push(t('ui.flow.agentResultReady', { agent: agent.label }))
     else if (agent.status === 'failed') items.push(t('ui.flow.agentFailed', { agent: agent.label }))
@@ -139,15 +115,6 @@ function flow(
   background: string[],
 ): DeveloperFlowModel {
   return { label, detail: trimTrailingEllipsis(detail), tone, background }
-}
-
-function formatFastContextPhase(phase: FastContextUiSummary['phase'], t: Translator): string {
-  if (phase === 'synthesizing') return t('ui.flow.fcAssembling')
-  if (phase === 'ranking') return t('ui.flow.fcRanking')
-  if (phase === 'mapping' || phase === 'scanning') return t('ui.flow.fcMapping')
-  if (phase === 'completed') return t('ui.flow.fcReady')
-  if (phase === 'cancelled') return t('ui.flow.fcCancelledState')
-  return t('ui.flow.fcAttention')
 }
 
 function normalizeSubagentDetail(detail: string, t: Translator): string {

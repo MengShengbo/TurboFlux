@@ -50,7 +50,7 @@ turboflux [workspace]
 1. 创建 Runtime、ConversationManager、FlowController、遥测和终端 attention。
 2. 订阅 `AgentEngine` 全部事件并把事件分发到 React 展示状态、Flow Store 和会话持久化。
 3. 管理输入草稿、图片附件、历史、steering、queued prompts、Ctrl-C、双 Esc rewind 和 slash command。
-4. 管理 streaming/thinking 缓冲、工具状态、FastContext、子代理、PTY、Git、通知和审批 modal。
+4. 管理 streaming/thinking 缓冲、工具状态、子代理、PTY、Git、通知和审批 modal。
 5. 计算 cockpit/sidebar/landing 布局并在两套渲染模式中输出 Ink 树。
 
 这不是“理想边界”，而是当前代码事实。它也是首要工程热点：新增交互若直接继续写入 App，会增加闭包、ref、effect 和清理顺序的耦合。
@@ -69,7 +69,7 @@ Flow reducer 会记录 `sequence_gap`、`missing_item_id`、`unknown_item`、`te
 
 ### React 展示缓存
 
-App 仍直接持有 stream buffer、thinking buffer、current tools、change summaries、FastContext UI event buffer、subagent activity、terminal sessions、pending ask、overlay、cursor、scroll rows、startup elapsed 和 notification snapshot。这些值用于及时绘制或兼容旧路径，不是 durable truth。
+App 仍直接持有 stream buffer、thinking buffer、current tools、change summaries、subagent activity、terminal sessions、pending ask、overlay、cursor、scroll rows、startup elapsed 和 notification snapshot。这些值用于及时绘制或兼容旧路径，不是 durable truth。
 
 ## Flow 不等于持久化日志
 
@@ -113,9 +113,9 @@ Runtime Journal 位于工作区 `.turboflux/runtime/journal.jsonl`，记录 Runt
 ## 核心后端在 TUI 中的角色
 
 - `createAgentRuntime()` 是对象图组合根，但不是产品入口；TUI App 和 single-shot 都调用它。
-- `AgentEngine` 管理模型协议候选（Anthropic Messages、OpenAI Responses、OpenAI-compatible）、stream 解析、工具循环、上下文压缩、steering、FastContext、Git、权限和事件。
+- `AgentEngine` 管理模型协议候选（Anthropic Messages、OpenAI Responses、OpenAI-compatible）、stream 解析、工具循环、上下文压缩、steering、Git、权限和事件。
 - `NodeToolExecutor` 集中实现文件、搜索、代码地图、记忆、命令、PTY、网络请求和工具结果分页，是第二个大热点。
-- `RuntimeTaskManager` 统一 shell/terminal/agent/fast_context/mcp/workflow/remote 任务，并负责输出日志、控制和恢复。
+- `RuntimeTaskManager` 统一 shell/terminal/agent/mcp/workflow/remote 任务，并负责输出日志、控制和恢复。
 - `SubAgentTaskManager` 在 Runtime Task 上增加 transcript、owner session 和结果。
 
 这些服务被 TUI 消费，但 TUI 不应把它们误写成独立 daemon 或桌面 IPC 层；当前代码是单进程组合。
@@ -125,7 +125,7 @@ Runtime Journal 位于工作区 `.turboflux/runtime/journal.jsonl`，记录 Runt
 | 优先级 | 事实 | 影响 |
 | --- | --- | --- |
 | P0 | `App.tsx` 创建服务、桥接所有事件并渲染两套树 | 变更影响面大，清理顺序依赖 effect |
-| P0 | `AgentEngine` 同时拥有协议、上下文、Git、权限、工具调度、FastContext 和事件 | 单测和协议变更需要跨大文件定位 |
+| P0 | `AgentEngine` 同时拥有协议、上下文、Git、权限、工具调度和事件 | 单测和协议变更需要跨大文件定位 |
 | P0 | `NodeToolExecutor` 同时拥有文件、搜索、PTY、命令、网络和记忆 | 本地能力边界与工具分派难以独立演进 |
 | P1 | Flow Store 是内存投影，Conversation Journal 是另一套事件映射 | 恢复后 Flow seq/violations 不可直接追溯 |
 | P1 | 固定 cockpit 与 scrollback 两套渲染逻辑并存 | 新 UI 需要验证两条路径 |

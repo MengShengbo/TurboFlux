@@ -57,7 +57,7 @@ export const WindowFrame: React.FC<{
 
 const statusRows = [
   ['01', '理解目标与约束', 'done'],
-  ['02', 'FastContext 证据检索', 'done'],
+  ['02', '定位并读取关键实现', 'done'],
   ['03', '并行实施与验证', 'active'],
   ['04', '结构化 Git 交付', 'queued'],
 ];
@@ -91,7 +91,7 @@ export const Dashboard: React.FC<{frame?: number; dense?: boolean}> = ({frame = 
           <div style={{fontSize: dense ? 16 : 18, color: C.muted}}>~/studio/aurora <span style={{color: C.cyan}}>on feature/auth-proof</span></div>
           <div style={{fontSize: dense ? 24 : 29, lineHeight: 1.45, marginTop: 18, color: C.white}}>审计认证流程，修复并交付可审查补丁。</div>
           <div style={{marginTop: 28, display: 'flex', flexDirection: 'column', gap: dense ? 12 : 17, fontSize: dense ? 15 : 17}}>
-            <LogRow frame={frame} cue={20} tag="FAST" color={C.info} text="隔离映射 184 files · 12 candidates ranked" />
+            <LogRow frame={frame} cue={20} tag="SEARCH" color={C.info} text="search_symbols refreshToken · 12 matches" />
             <LogRow frame={frame} cue={31} tag="TOOL" color={C.cyan} text="read src/auth/session.ts · src/api/token.ts" />
             <LogRow frame={frame} cue={42} tag="AGENT" color={C.yellow} text="3 workers active · test runner detached" />
             <LogRow frame={frame} cue={55} tag="DONE" color={C.green} text="patch verified · diff ready for review" />

@@ -69,45 +69,6 @@ export const WorkbenchScene: React.FC = () => {
   </AbsoluteFill>;
 };
 
-const evidence = [
-  {stage: 'MAP', count: '184 FILES', path: 'src/auth/** · src/api/**', note: '建立隔离索引', color: C.info},
-  {stage: 'READ', count: '36 CANDIDATES', path: 'session.ts · token.ts · guard.ts', note: '读取关键上下文', color: C.cyan},
-  {stage: 'RANK', count: '12 EVIDENCE', path: 'refreshToken() · requireScope()', note: '按相关性排序', color: C.yellow},
-  {stage: 'HANDOFF', count: '7 FINDINGS', path: '证据、路径、风险与下一步', note: '交还主 Agent', color: C.green},
-];
-
-const EvidenceRow: React.FC<{frame: number; cue: number; item: typeof evidence[number]; index: number}> = ({frame, cue, item, index}) => {
-  const {fps} = useVideoConfig();
-  const p = spring({frame: frame - cue, fps, config: {damping: 15, stiffness: 150, mass: .75}});
-  const settle = ease(frame, cue + 15, cue + 21);
-  return <div style={{height: 122, position: 'relative', perspective: 900}}>
-    <div style={{height: 112, display: 'grid', gridTemplateColumns: '150px 210px 1fr 220px', alignItems: 'center', padding: '0 28px', boxSizing: 'border-box', border: `1px solid ${C.line}`, background: C.panel2, borderRadius: 12, transform: `translateY(${-110 * (1 - p)}px) rotateX(${16 * (1 - p)}deg) scale(${1 + .045 * (1 - settle) * p})`, transformOrigin: '50% 100%', opacity: p, boxShadow: `0 ${22 * (1 - p)}px 50px rgba(0,0,0,.55)`}}>
-      <div style={{fontFamily: mono, color: item.color, fontSize: 21, fontWeight: 800}}>{item.stage}</div>
-      <div style={{fontFamily: mono, color: C.white, fontSize: 18}}>{item.count}</div>
-      <div style={{fontFamily: mono, color: C.muted, fontSize: 17}}>{item.path}</div>
-      <div style={{fontFamily: mono, color: C.dim, fontSize: 15, textAlign: 'right'}}>{item.note}</div>
-    </div>
-    <div style={{position: 'absolute', left: '50%', bottom: 9, height: 2, width: `${settle * 100}%`, transform: 'translateX(-50%)', background: item.color, opacity: (1 - ease(frame, cue + 21, cue + 30)), boxShadow: `0 0 14px ${item.color}`}} />
-  </div>;
-};
-
-export const FastContextScene: React.FC = () => {
-  const frame = useCurrentFrame();
-  return <AbsoluteFill style={{background: C.bg, overflow: 'hidden', padding: '76px 110px', boxSizing: 'border-box'}}>
-    <GridBackground opacity={.1} />
-    <div style={{position: 'relative', display: 'grid', gridTemplateColumns: '560px 1fr', gap: 72, height: '100%'}}>
-      <div style={{display: 'flex', flexDirection: 'column', justifyContent: 'center', opacity: ease(frame, 0, 20)}}>
-        <SceneLabel eyebrow="01 / FASTCONTEXT" title="证据先于结论。" subtitle="隔离映射、读取、排序，再把最相关的证据交还主 Agent。" />
-        <div style={{marginTop: 42, display: 'flex', gap: 12}}><Badge color={C.info}>ISOLATED</Badge><Badge color={C.green}>RANKED</Badge><Badge>TRACEABLE</Badge></div>
-      </div>
-      <div style={{display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3}}>
-        {evidence.map((item, index) => <EvidenceRow key={item.stage} frame={frame} cue={18 + index * 18} item={item} index={index} />)}
-      </div>
-    </div>
-    <div style={{position: 'absolute', right: 82, top: 54, fontFamily: mono, color: C.dim, fontSize: 14, letterSpacing: 2}}>EVIDENCE ENGINE / 04 STAGES</div>
-  </AbsoluteFill>;
-};
-
 const agents = [
   {name: 'RESEARCH', detail: 'auth flow mapped', color: C.info, x: 190, y: 180},
   {name: 'IMPLEMENT', detail: '2 files patched', color: C.cyan, x: 190, y: 600},
@@ -145,7 +106,7 @@ export const AgentsScene: React.FC = () => {
       <div style={{display: 'flex', gap: 10, marginTop: 28}}>{['TOOLS 07', 'AGENTS 05', 'QUEUE 02'].map((text) => <Badge key={text} color={C.info}>{text}</Badge>)}</div>
     </div>
     {agents.map((agent, index) => <AgentCard key={agent.name} frame={frame} cue={18 + index * Math.max(5, 12 - index)} agent={agent} index={index} />)}
-    <div style={{position: 'absolute', left: 82, top: 72, fontFamily: mono, opacity: ease(frame, 8, 22)}}><div style={{color: C.cyan, fontSize: 16, letterSpacing: 4}}>02 / ORCHESTRATION</div><div style={{color: C.white, fontSize: 58, fontWeight: 800, marginTop: 12}}>不是等待。是并行推进。</div></div>
+    <div style={{position: 'absolute', left: 82, top: 72, fontFamily: mono, opacity: ease(frame, 8, 22)}}><div style={{color: C.cyan, fontSize: 16, letterSpacing: 4}}>01 / ORCHESTRATION</div><div style={{color: C.white, fontSize: 58, fontWeight: 800, marginTop: 12}}>不是等待。是并行推进。</div></div>
   </AbsoluteFill>;
 };
 
@@ -209,7 +170,7 @@ export const GitScene: React.FC = () => {
     <GridBackground opacity={.1} />
     <div style={{position: 'relative', height: '100%', display: 'grid', gridTemplateColumns: '480px 1fr', gap: 66}}>
       <div style={{display: 'flex', flexDirection: 'column', justifyContent: 'center', opacity: ease(frame, 0, 18)}}>
-        <SceneLabel eyebrow="03 / REVIEWABLE DELIVERY" title="不只完成。还能证明。" subtitle="测试结果、结构化 diff 与 Git 状态，在交付前一起落定。" />
+        <SceneLabel eyebrow="02 / REVIEWABLE DELIVERY" title="不只完成。还能证明。" subtitle="测试结果、结构化 diff 与 Git 状态，在交付前一起落定。" />
         <div style={{marginTop: 40, display: 'flex', flexDirection: 'column', gap: 12}}>
           <Badge color={C.green}>✓ 672 PASSED · 3 SKIPPED</Badge>
           <Badge color={C.muted}>1 KNOWN GIT TIMEOUT</Badge>

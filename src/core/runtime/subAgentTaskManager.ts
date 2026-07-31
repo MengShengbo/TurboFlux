@@ -9,19 +9,16 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import type { RuntimeTask, RuntimeTaskKind, RuntimeTaskStatus } from '../../shared/runtimeTaskTypes'
-import type { SubAgentDeliveryMode } from '../../shared/subAgentTypes'
 import type { RuntimeTaskManager } from './runtimeTaskManager'
 
 export interface SubAgentTaskDescriptor {
   id: string
-  kind: Extract<RuntimeTaskKind, 'agent' | 'fast_context'>
+  kind: Extract<RuntimeTaskKind, 'agent'>
   agentType: string
   label: string
   objective: string
   workspacePath: string
   ownerSessionId?: string
-  deliveryMode: SubAgentDeliveryMode
-  parentAgentRunId?: number
   startedAt: number
   transcriptPath: string
 }
@@ -44,14 +41,12 @@ export interface StartSubAgentTaskContext {
 }
 
 export interface StartSubAgentTaskInput<TResult> {
-  kind: Extract<RuntimeTaskKind, 'agent' | 'fast_context'>
+  kind: Extract<RuntimeTaskKind, 'agent'>
   agentType: string
   label: string
   objective: string
   workspacePath: string
   ownerSessionId?: string
-  deliveryMode?: SubAgentDeliveryMode
-  parentAgentRunId?: number
   controller?: AbortController
   timeoutMs?: number
   run: (context: StartSubAgentTaskContext) => Promise<TResult>
@@ -160,8 +155,6 @@ export class SubAgentTaskManager {
       objective: input.objective,
       workspacePath: input.workspacePath,
       ownerSessionId: input.ownerSessionId || this.ownerSessionId,
-      deliveryMode: input.deliveryMode || (input.kind === 'fast_context' ? 'push' : 'pull'),
-      parentAgentRunId: input.parentAgentRunId,
       startedAt,
       transcriptPath,
     }
@@ -320,7 +313,6 @@ export class SubAgentTaskManager {
       if (!start?.task?.id || this.runtimeTaskManager.getTask(start.task.id)) continue
       const descriptor: SubAgentTaskDescriptor = {
         ...start.task,
-        deliveryMode: start.task.deliveryMode || (start.task.kind === 'fast_context' ? 'push' : 'pull'),
         transcriptPath,
       }
       this.descriptors.set(descriptor.id, descriptor)
@@ -413,7 +405,7 @@ export class SubAgentTaskManager {
     }
   }
 
-  private generateId(kind: Extract<RuntimeTaskKind, 'agent' | 'fast_context'>, now: number): string {
+  private generateId(kind: Extract<RuntimeTaskKind, 'agent'>, now: number): string {
     let id: string
     do {
       this.sequence += 1

@@ -76,7 +76,6 @@ describe('AgentEngine background subagent tools', () => {
 
       expect(agentId).toBeTruthy()
       expect(runtime.subAgentTaskManager.getTask(agentId!)?.runtimeTask.status).toBe('running')
-      expect(runtime.subAgentTaskManager.getTask(agentId!)?.deliveryMode).toBe('pull')
       expect(await dispatchTool('list_agents', {})).toContain(`[running] ${agentId}`)
 
       for (let attempt = 0; !resolveFetch && attempt < 50; attempt += 1) {
@@ -93,7 +92,6 @@ describe('AgentEngine background subagent tools', () => {
       expect(result).toContain('The runtime starts in agentRuntime.ts.')
       expect(result).toContain('Transcript:')
       expect(events.some(event => event.type === 'subagent:progress')).toBe(true)
-      expect(events.some(event => event.type === 'fast_context:event')).toBe(false)
     } finally {
       unsubscribe()
       await runtime.destroy()
@@ -142,96 +140,6 @@ describe('AgentEngine background subagent tools', () => {
       await waitForStatus(() => runtime.subAgentTaskManager.getTask(agentId!)?.runtimeTask.status, 'stopped')
       expect(await dispatchTool('read_agent', { agent_id: agentId })).toContain('Status: stopped')
     } finally {
-      await runtime.destroy()
-      rmSync(workspacePath, { recursive: true, force: true })
-    }
-  })
-
-  it('returns immediately for running FastContext and exposes its transcript after termination', async () => {
-    const workspacePath = mkdtempSync(path.join(tmpdir(), 'turboflux-fast-context-push-'))
-    const runtime = createAgentRuntime({
-      workspacePath,
-      workspaceName: 'fast-context-push-test',
-      conversationId: 'conversation-fast-context-push',
-      approvalPolicy: 'full',
-      connectMcp: false,
-      config: {
-        provider: 'custom',
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        contextWindow: 100_000,
-        maxTokens: 4096,
-      },
-    })
-    const dispatchTool = (runtime.engine as unknown as {
-      dispatchTool: (name: string, args: Record<string, unknown>) => Promise<string>
-    }).dispatchTool.bind(runtime.engine)
-    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener('abort', () => {
-        const error = new Error('Aborted')
-        error.name = 'AbortError'
-        reject(error)
-      }, { once: true })
-    })) as unknown as typeof fetch
-
-    try {
-      expect(await dispatchTool('explore_code', { objective: 'Map the runtime owner' })).toContain('background scan started')
-      const activeRun = (runtime.engine as unknown as { fastContextRun: { id: string } | null }).fastContextRun
-      expect(activeRun?.id).toBeTruthy()
-      expect(runtime.subAgentTaskManager.getTask(activeRun!.id)?.deliveryMode).toBe('push')
-      await expect(dispatchTool('read_agent', { agent_id: activeRun!.id })).resolves.toContain('still running')
-
-      await dispatchTool('cancel_agent', { agent_id: activeRun!.id })
-      const postmortem = await dispatchTool('read_agent', { agent_id: activeRun!.id })
-      expect(postmortem).toContain('Status: stopped')
-      expect(postmortem).toContain('Transcript records')
-      expect(runtime.subAgentTaskManager.readTranscript(activeRun!.id, { offset: 0, limit: 200 }).records).toContainEqual(expect.objectContaining({
-        type: 'event',
-        event: expect.objectContaining({ type: 'fast_context_trace' }),
-      }))
-    } finally {
-      await runtime.destroy()
-      rmSync(workspacePath, { recursive: true, force: true })
-    }
-  })
-
-  it('emits one run-scoped terminal event when FastContext is aborted', async () => {
-    const workspacePath = mkdtempSync(path.join(tmpdir(), 'turboflux-fast-context-abort-'))
-    const runtime = createAgentRuntime({
-      workspacePath,
-      workspaceName: 'fast-context-abort-test',
-      conversationId: 'conversation-fast-context-abort',
-      approvalPolicy: 'full',
-      connectMcp: false,
-      config: {
-        provider: 'custom',
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        contextWindow: 100_000,
-        maxTokens: 4096,
-      },
-    })
-    const events: Array<{ type: string; runId?: string }> = []
-    const unsubscribe = runtime.engine.subscribe(event => events.push(event))
-    const dispatchTool = (runtime.engine as unknown as {
-      dispatchTool: (name: string, args: Record<string, unknown>) => Promise<string>
-    }).dispatchTool.bind(runtime.engine)
-    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener('abort', () => reject(new Error('Aborted')), { once: true })
-    })) as unknown as typeof fetch
-
-    try {
-      await dispatchTool('explore_code', { objective: 'Map the runtime owner' })
-      const activeRun = (runtime.engine as unknown as { fastContextRun: { id: string } | null }).fastContextRun
-      runtime.engine.abort()
-      await new Promise(resolve => setTimeout(resolve, 0))
-      const completeEvents = events.filter(event => event.type === 'fast_context:complete')
-      expect(completeEvents).toHaveLength(1)
-      expect(completeEvents[0]?.runId).toBe(activeRun?.id)
-    } finally {
-      unsubscribe()
       await runtime.destroy()
       rmSync(workspacePath, { recursive: true, force: true })
     }

@@ -75,23 +75,6 @@
     #f1 .status { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 28px; }
     #f1 .status .panel { padding: 16px; }
 
-    /* Frame 2 */
-    #f2 .heading { position: absolute; left: 84px; top: 68px; z-index: 2; }
-    #f2 h2 { margin: 14px 0 0; font-size: 58px; letter-spacing: -.05em; }
-    #f2 .main-shell { position: absolute; left: 82px; right: 82px; top: 208px; height: 720px; }
-    #f2 .workspace { display: grid; grid-template-columns: 1fr 410px; height: calc(100% - 54px); }
-    #f2 .trace { padding: 34px 38px; border-right: 1px solid var(--divider); }
-    #f2 .sidebar { padding: 30px 28px; background: rgba(10,10,10,.92); }
-    #f2 .stage-row { display: flex; align-items: center; gap: 12px; margin: 28px 0 34px; color: var(--subtle); }
-    #f2 .stage-row .on { color: var(--green); }
-    #f2 .evidence { display: grid; grid-template-columns: 210px 1fr 88px; gap: 16px; align-items: center; padding: 16px 18px; margin-bottom: 12px; border: 1px solid #242424; border-radius: 10px; background: #0c0c0c; }
-    #f2 .evidence strong { color: var(--brand); }
-    #f2 .score { text-align: right; color: var(--green); }
-    #f2 .section-title { color: var(--info); font-size: 16px; margin: 24px 0 8px; }
-    #f2 .bar { height: 7px; border-radius: 8px; background: #212121; overflow: hidden; }
-    #f2 .bar i { display: block; height: 100%; width: 63%; background: linear-gradient(90deg, var(--info), var(--green)); }
-    #f2 .metric { display: flex; justify-content: space-between; padding: 7px 0; color: var(--muted); font-size: 15px; }
-
     /* Frame 3 */
     #f3 .heading { position: absolute; left: 92px; top: 82px; width: 600px; }
     #f3 h2 { margin: 14px 0 0; font-size: 68px; line-height: 1.04; letter-spacing: -.06em; }
@@ -122,8 +105,8 @@
       <div class="terminal">
         <div class="kicker">VIBE / GPT-5.6 / HIGH</div>
         <div class="command"><span class="green">›</span> 检查上传流程，修复错误并验证交付</div>
-        <div><span class="brand">FastContext</span> 正在建立代码证据地图…</div>
-        <div class="muted">MAP → READ → RANK → HANDOFF</div>
+        <div><span class="brand">search_symbols</span> 正在定位上传流程实现…</div>
+        <div class="muted">SEARCH → READ → PATCH → VERIFY</div>
         <div class="status">
           <div class="panel"><div class="muted">FILES</div><strong class="brand">127</strong></div>
           <div class="panel"><div class="muted">EVIDENCE</div><strong class="green">14</strong></div>
@@ -132,37 +115,6 @@
       </div>
     </div>
     <div class="caption">INTENT → CONTEXT → ACTION → PROOF</div>
-  </section>
-
-  <section class="frame" id="f2">
-    <div class="grid"></div><div class="noise"></div>
-    <div class="heading"><div class="eyebrow">FastContext</div><h2>证据先于结论。</h2></div>
-    <div class="shell main-shell">
-      <div class="shell-bar"><span class="dot active"></span><span>Evidence Engine / adaptive retrieval</span><span style="margin-left:auto" class="pill">isolated context</span></div>
-      <div class="workspace">
-        <div class="trace">
-          <div class="stage-row"><span class="on">MAP</span><span>›</span><span class="on">READ</span><span>›</span><span class="on">RANK</span><span>›</span><span>HANDOFF</span></div>
-          <div class="evidence"><strong>agentEngine.ts</strong><span class="muted">主循环与工具调度</span><span class="score">0.98</span></div>
-          <div class="evidence"><strong>permissions.ts</strong><span class="muted">权限策略与危险命令门控</span><span class="score">0.95</span></div>
-          <div class="evidence"><strong>gitService.ts</strong><span class="muted">隔离提交与恢复边界</span><span class="score">0.91</span></div>
-          <div class="evidence"><strong>App.tsx</strong><span class="muted">状态、活动与交互桥接</span><span class="score">0.89</span></div>
-          <div style="margin-top:34px" class="muted">只把紧凑证据交给主 Agent。原始检索留在隔离上下文。</div>
-        </div>
-        <aside class="sidebar">
-          <div class="brand" style="font-size:24px;font-weight:700">TurboFlux</div>
-          <div class="section-title">STATUS</div><div class="green">探索项目</div>
-          <div class="section-title">CONTEXT</div><div class="bar"><i></i></div>
-          <div class="metric"><span>used</span><span>124k / 200k</span></div>
-          <div class="section-title">RUNTIME</div>
-          <div class="metric"><span>Agent</span><span class="green">2 active</span></div>
-          <div class="metric"><span>Terminal</span><span class="brand">1 running</span></div>
-          <div class="metric"><span>Queue</span><span>2 prompts</span></div>
-          <div class="section-title">REPOSITORY</div>
-          <div class="metric"><span>branch</span><span>feature/upload</span></div>
-          <div class="metric"><span>changes</span><span class="warning">3M 1U</span></div>
-        </aside>
-      </div>
-    </div>
   </section>
 
   <section class="frame" id="f3">

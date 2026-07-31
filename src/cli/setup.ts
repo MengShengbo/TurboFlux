@@ -13,7 +13,6 @@ import {
   loadConfig,
   saveApiConfigProfile,
   saveConfig,
-  setFastContextModelConfig,
   switchActiveApiConfig,
   type ProviderPreset,
   type TurboFluxApiConfigProfile,
@@ -65,7 +64,6 @@ type SetupAction =
   | 'menu'
   | 'init'
   | 'api'
-  | 'fastcontext'
   | 'language'
   | 'persona'
   | 'custom'
@@ -78,7 +76,6 @@ const MAIN_ACTIONS = new Set<SetupAction>([
   'menu',
   'init',
   'api',
-  'fastcontext',
   'language',
   'persona',
   'custom',
@@ -143,7 +140,6 @@ function normalizeAction(action?: string): SetupAction {
   if (!normalized) return 'menu'
   if (['1', 'i', 'init', 'full', 'start'].includes(normalized)) return 'init'
   if (['2', 'api', 'model', 'provider', 'providers', 'config'].includes(normalized)) return 'api'
-  if (['fc', 'fastcontext', 'fast-context', 'fast_context', 'subagent', 'sub-agent'].includes(normalized)) return 'fastcontext'
   if (['3', 'lang', 'language'].includes(normalized)) return 'language'
   if (['4', 'persona', 'style', 'output-style', 'output'].includes(normalized)) return 'persona'
   if (['5', 'custom', 'instructions', 'prompt'].includes(normalized)) return 'custom'
@@ -229,7 +225,6 @@ function printSummary(config: TurboFluxConfig, profile: TurboFluxProfile): void 
   console.log(`  ${t('setup.current.maxTokens')}: ${config.maxTokens.toLocaleString()}`)
   console.log(`  ${t('setup.current.reasoning')}: ${formatNativeReasoningSetting(config.model, config.reasoning, config.provider) || `(${t('common.providerDefault')})`}`)
   console.log(`  ${t('setup.current.approvalPolicy')}: ${approvalPolicyLabel(config.approvalPolicy, t)} (${config.approvalPolicy})`)
-  console.log(`  ${t('setup.current.fastContextModel')}: ${t('setup.current.fastContextFollowMain')}`)
   console.log(`  ${t('setup.current.interfaceLanguage')}: ${profile.interfaceLanguage}`)
   console.log(`  ${t('setup.current.aiOutputLanguage')}: ${outputLanguage}`)
   console.log(`  ${t('setup.current.persona')}: ${personaName} (${profile.defaultPersonaId})`)
@@ -687,13 +682,6 @@ async function configureApi(options: SetupOptions = {}): Promise<TurboFluxConfig
   return configureApiDirect(options)
 }
 
-async function configureFastContextModel(): Promise<TurboFluxConfig> {
-  const config = setFastContextModelConfig(await loadConfig(), { mode: 'follow-main' })
-  saveConfig(config)
-  console.log(chalk.green(setupText('setup.fastContext.followMain')))
-  return config
-}
-
 async function configureLanguage(options: SetupOptions = {}): Promise<TurboFluxProfile> {
   let profile = loadProfile()
   const interfaceInput = options.allLang || options.configLang || options.lang
@@ -950,9 +938,6 @@ async function runMenu(options: SetupOptions = {}): Promise<void> {
       case 'api':
         await configureApi()
         break
-      case 'fastcontext':
-        await configureFastContextModel()
-        break
       case 'language':
         profile = await configureLanguage()
         break
@@ -1005,9 +990,6 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
         return
       case 'api':
         await configureApi(options)
-        return
-      case 'fastcontext':
-        await configureFastContextModel()
         return
       case 'language':
         await configureLanguage(options)

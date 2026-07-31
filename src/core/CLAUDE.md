@@ -16,7 +16,6 @@ Important files:
 - `permissions.ts`: execution-time safety gates.
 - `systemPrompt.ts`: static mode/tool guidance and dynamic context assembly.
 - `contextManager.ts`: history shaping and provider message formatting.
-- `fastContextSubagent.ts`: FastContext subagent wrapper.
 - `subAgent.ts`: isolated subagent runner.
 
 Removed design:
@@ -24,8 +23,6 @@ Removed design:
 - `adaptiveRouter.ts` and route-aware tool filtering were removed. They relied
   on hardcoded natural-language intent buckets and could turn agentic requests
   into no-tool chat turns. Do not reintroduce semantic route gates in code.
-- The local deterministic FastContext scanner was removed. FastContext is a
-  subagent-only fast lane; ordinary turns should stay narrow and targeted.
 
 Design rule:
 

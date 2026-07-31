@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SubAgentDefinition } from '../shared/subAgentTypes'
 import type { ToolExecutor } from '../tools/executor'
-import { __testClearSubAgentProtocolCache, __testTraceDefinitionReadLimit, buildFastContextSystemPrompt, getSubAgentDefinition, loadDynamicAgents, registerAgent, runSubAgent } from './subAgent'
+import { __testClearSubAgentProtocolCache, __testTraceDefinitionReadLimit, getSubAgentDefinition, loadDynamicAgents, registerAgent, runSubAgent } from './subAgent'
 import type { SubAgentEvent } from '../shared/subAgentTypes'
 
 function delay(ms: number): Promise<void> {
@@ -53,10 +53,6 @@ describe('runSubAgent', () => {
     expect(__testTraceDefinitionReadLimit({ startLine: 754, endLine: 759, symbolKind: 'class' })).toBe(160)
     expect(__testTraceDefinitionReadLimit({ startLine: 20, endLine: 25, symbolKind: 'function' })).toBe(40)
     expect(__testTraceDefinitionReadLimit({ startLine: 1, endLine: 400, symbolKind: 'class' })).toBe(220)
-  })
-
-  it('keeps FastContext history bounded by atomic tool outputs', () => {
-    expect(buildFastContextSystemPrompt()).toContain('exact repeats are cached')
   })
 
   it('honors a definition-level disabled thinking policy', async () => {
@@ -159,8 +155,8 @@ describe('runSubAgent', () => {
       getCodeMap: async () => ({ success: true, data: { map: [] } }),
     } as unknown as ToolExecutor
     const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
+      id: 'test_agent',
+      label: 'Test Agent',
       description: 'test',
       driver: 'main-model',
       systemPrompt: 'test',
@@ -337,8 +333,8 @@ describe('runSubAgent', () => {
     } as unknown as ToolExecutor
 
     const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
+      id: 'test_agent',
+      label: 'Test Agent',
       description: 'test',
       driver: 'deepseek-flash',
       systemPrompt: 'test',
@@ -566,8 +562,8 @@ describe('runSubAgent', () => {
       getCodeMap: async () => ({ success: true, data: { map: [] } }),
     } as unknown as ToolExecutor
     const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
+      id: 'test_agent',
+      label: 'Test Agent',
       description: 'test',
       driver: 'main-model',
       systemPrompt: 'test',
@@ -621,8 +617,8 @@ describe('runSubAgent', () => {
       getCodeMap: async () => ({ success: true, data: { map: [] } }),
     } as unknown as ToolExecutor
     const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
+      id: 'test_agent',
+      label: 'Test Agent',
       description: 'test',
       driver: 'main-model',
       systemPrompt: 'test',
@@ -664,8 +660,8 @@ describe('runSubAgent', () => {
       getCodeMap: async () => ({ success: true, data: { map: [] } }),
     } as unknown as ToolExecutor
     const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
+      id: 'test_agent',
+      label: 'Test Agent',
       description: 'test',
       driver: 'main-model',
       systemPrompt: 'test',
@@ -714,7 +710,7 @@ describe('runSubAgent', () => {
         }), { status: 200 })
       }
       return new Response(JSON.stringify({
-        choices: [{ message: { content: 'RANKED_CODE_MAP\nUNCERTAINTY: no evidence' } }],
+        choices: [{ message: { content: 'No matching evidence found.' } }],
       }), { status: 200 })
     }) as unknown as typeof fetch
 
@@ -726,8 +722,8 @@ describe('runSubAgent', () => {
       getCodeMap: async () => ({ success: true, data: { map: [] } }),
     } as unknown as ToolExecutor
     const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
+      id: 'test_agent',
+      label: 'Test Agent',
       description: 'test',
       driver: 'main-model',
       systemPrompt: 'test',
@@ -749,88 +745,6 @@ describe('runSubAgent', () => {
       expect(result.ok).toBe(true)
       expect(requestBodies).toHaveLength(2)
       expect(JSON.stringify(requestBodies[1].messages)).not.toContain('last search wave returned no matches')
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('requires read evidence before accepting a FastContext final report', async () => {
-    const originalFetch = globalThis.fetch
-    const requestBodies: any[] = []
-    let requestCount = 0
-    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      requestBodies.push(JSON.parse(String(init?.body)))
-      requestCount += 1
-      if (requestCount === 1) {
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: 'RANKED_CODE_MAP\n1. src/a.ts candidate only' } }],
-        }), { status: 200 })
-      }
-      if (requestCount === 2) {
-        return new Response(JSON.stringify({
-          choices: [{
-            message: {
-              content: '',
-              tool_calls: [{
-                id: 'read-1',
-                function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/a.ts', offset: 1, limit: 20 }) },
-              }],
-            },
-          }],
-        }), { status: 200 })
-      }
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: 'submit-1',
-        function: { name: 'submit_code_map', arguments: JSON.stringify({
-          candidates: [{ path: 'src/a.ts', start_line: 1, end_line: 2, role: 'entry', confidence: 'high', why: 'read and confirmed' }],
-          relationships: [{ from: 'entry', to: 'run', relationship: 'invokes', evidence_path: 'src/a.ts', start_line: 1, end_line: 2 }],
-          rejected_hypotheses: [],
-          searches_tried: ['entry identifier'],
-          uncertainty: ['none'],
-        }) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    const executor = {
-      readFile: async () => ({ success: true, data: 'export const entry = true\nrun()' }),
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchContent: async () => ({ success: true, data: [] }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-    const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
-      description: 'test',
-      driver: 'main-model',
-      systemPrompt: buildFastContextSystemPrompt(),
-      maxTurns: 3,
-      maxParallel: 2,
-    }
-
-    try {
-      const result = await runSubAgent({
-        definition,
-        objective: 'find entry',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        requireGroundedReport: true,
-        initialEvidence: [{
-          path: 'src/a.ts',
-          startLine: 1,
-          endLine: 1,
-          preview: 'src/a.ts',
-          reason: 'prefetch search: entry',
-        }],
-      })
-
-      expect(result).toMatchObject({ ok: true, finalText: expect.stringContaining('L1-L2') })
-      expect(requestBodies).toHaveLength(3)
-      expect(JSON.stringify(requestBodies[1].messages)).toContain('Search snippets and paths are not proof')
-      expect(result.evidence?.some(evidence => evidence.reason === 'file read')).toBe(true)
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -920,8 +834,8 @@ describe('runSubAgent', () => {
       readFile: async () => ({ success: true, data: '' }),
     } as unknown as ToolExecutor
     const definition: SubAgentDefinition = {
-      id: 'fast_context',
-      label: 'FastContext',
+      id: 'test_agent',
+      label: 'Test Agent',
       description: 'test',
       driver: 'main-model',
       systemPrompt: 'test',
@@ -1086,414 +1000,6 @@ describe('runSubAgent', () => {
     }
   })
 
-  it.skip('normalizes an oversized structured submission to read evidence', async () => {
-    const originalFetch = globalThis.fetch
-    const requestBodies: any[] = []
-    let requestCount = 0
-    const submission = (startLine: number, endLine: number) => ({
-      candidates: [{ path: 'src/core.ts', start_line: startLine, end_line: endLine, role: 'implementation', confidence: 'high', why: 'verified implementation' }],
-      relationships: [{ from: 'caller', to: 'startRuntime', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: startLine, end_line: endLine }],
-      rejected_hypotheses: [],
-      searches_tried: ['startRuntime symbol'],
-      uncertainty: ['none'],
-    })
-    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      requestBodies.push(JSON.parse(String(init?.body)))
-      requestCount += 1
-      if (requestCount === 1) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'read-1',
-          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 3 }) },
-        }] } }] }), { status: 200 })
-      }
-      const range = requestCount === 2 ? [50, 60] : [1, 3]
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: `submit-${requestCount}`,
-        function: { name: 'submit_code_map', arguments: JSON.stringify(submission(range[0], range[1])) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    const executor = {
-      readFile: async () => ({ success: true, data: 'export function startRuntime() {\n  return true\n}' }),
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchContent: async () => ({ success: true, data: [] }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    try {
-      const result = await runSubAgent({
-        definition: {
-          id: 'fast_context',
-          label: 'FastContext',
-          description: 'test',
-          driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 3,
-          maxParallel: 2,
-        },
-        objective: 'find runtime implementation',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        requireGroundedReport: true,
-      })
-
-      expect(result.error).toBeUndefined()
-      expect(result).toMatchObject({ ok: true, turns: 2, finalText: expect.stringContaining('src/core.ts L1-L3') })
-      expect(requestBodies).toHaveLength(2)
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('supports a wider grounded candidate budget for repository censuses', async () => {
-    const originalFetch = globalThis.fetch
-    let requestBody: any
-    const candidates = Array.from({ length: 15 }, (_, index) => ({
-      path: `src/migration/Use${index}.ts`,
-      start_line: 1,
-      end_line: 4,
-      role: 'direct deprecated API occurrence',
-      edit_kind: 'implementation',
-      confidence: 'high',
-      why: 'read-confirmed migration target',
-    }))
-    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      requestBody = JSON.parse(String(init?.body))
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: 'submit-census',
-        function: { name: 'submit_code_map', arguments: JSON.stringify({
-          candidates,
-          relationships: [],
-          rejected_hypotheses: [],
-          searches_tried: ['legacy API census'],
-          uncertainty: ['none'],
-        }) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-    const executor = {
-      readFile: async () => ({ success: true, data: '' }),
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchContent: async () => ({ success: true, data: [] }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    try {
-      const result = await runSubAgent({
-        definition: {
-          id: 'fast_context',
-          label: 'FastContext Census',
-          description: 'test',
-          driver: 'main-model',
-          systemPrompt: 'submit the census',
-          maxTurns: 1,
-          maxParallel: 1,
-        },
-        objective: 'replace every deprecated API call',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'census-test',
-        baseUrl: 'http://census-candidates.test',
-        model: 'census-model',
-        requireGroundedReport: true,
-        submissionOnly: true,
-        maxCandidates: 15,
-        initialEvidence: candidates.map(candidate => ({
-          path: candidate.path,
-          startLine: 1,
-          endLine: 4,
-          preview: 'legacyClient.send()',
-          content: 'legacyClient.send()',
-          reason: 'file read',
-        })),
-      })
-
-      expect(result.codeMap?.candidates).toHaveLength(15)
-      const tools = requestBody.tools as Array<{ function?: { name?: string; parameters?: { properties?: { candidates?: { maxItems?: number } } } } }>
-      expect(tools[0].function?.parameters?.properties?.edit_frontier?.maxItems).toBe(15)
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('clamps a final submission to an already-read range without another provider turn', async () => {
-    const originalFetch = globalThis.fetch
-    let requestCount = 0
-    globalThis.fetch = vi.fn(async () => {
-      requestCount += 1
-      if (requestCount === 1) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'locate-final-recovery',
-          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'startRuntime' }) },
-        }] } }] }), { status: 200 })
-      }
-      if (requestCount === 2) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'read-final-recovery',
-          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 3 }) },
-        }] } }] }), { status: 200 })
-      }
-      const range = requestCount === 3 ? [1, 10] : [1, 3]
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: `submit-final-recovery-${requestCount}`,
-        function: { name: 'submit_code_map', arguments: JSON.stringify({
-          candidates: [{ path: 'src/core.ts', start_line: range[0], end_line: range[1], role: 'implementation', confidence: 'high', why: 'verified implementation' }],
-          relationships: [{ from: 'caller', to: 'startRuntime', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: range[0], end_line: range[1] }],
-          rejected_hypotheses: [],
-          searches_tried: ['core runtime'],
-          uncertainty: ['none'],
-        }) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    const executor = {
-      readFile: async () => ({ success: true, data: 'export function startRuntime() {\n  return true\n}' }),
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchContent: async () => ({ success: true, data: [] }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    try {
-      const result = await runSubAgent({
-        definition: {
-          id: 'fast_context',
-          label: 'FastContext',
-          description: 'test',
-          driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 3,
-          maxParallel: 2,
-        },
-        objective: 'find runtime implementation',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        requireGroundedReport: true,
-      })
-
-      expect(result.error).toBeUndefined()
-      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L3') })
-      expect(requestCount).toBe(3)
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it.skip('accepts a submitted range covered by adjacent read slices', async () => {
-    const originalFetch = globalThis.fetch
-    let requestCount = 0
-    globalThis.fetch = vi.fn(async () => {
-      requestCount += 1
-      if (requestCount <= 2) {
-        const offset = requestCount === 1 ? 1 : 4
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: `read-${requestCount}`,
-          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset, limit: 3 }) },
-        }] } }] }), { status: 200 })
-      }
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: 'submit-adjacent',
-        function: { name: 'submit_code_map', arguments: JSON.stringify({
-          candidates: [
-            { path: 'src/core.ts', start_line: 2, end_line: 5, role: 'implementation', confidence: 'high', why: 'covered by adjacent reads' },
-            { path: 'src/core.ts', start_line: 1, end_line: 2, role: 'synchronized copy', edit_kind: 'mirror', confidence: 'high', why: 'requires the same edit' },
-            { path: 'src/unread.ts', start_line: 1, end_line: 20, role: 'test', confidence: 'low', why: 'not actually read' },
-          ],
-          relationships: [{ from: 'entry', to: 'implementation', relationship: 'delegates', evidence_path: 'src/core.ts', start_line: 2, end_line: 5 }],
-          rejected_hypotheses: [],
-          searches_tried: ['core runtime'],
-          uncertainty: ['none'],
-        }) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    const executor = {
-      readFile: async () => ({ success: true, data: 'line one\nline two\nline three\nline four\nline five\nline six' }),
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchContent: async () => ({ success: true, data: [] }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    try {
-      const result = await runSubAgent({
-        definition: {
-          id: 'fast_context',
-          label: 'FastContext',
-          description: 'test',
-          driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 3,
-          maxParallel: 2,
-        },
-        objective: 'find runtime implementation',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        requireGroundedReport: true,
-      })
-
-      expect(result.error).toBeUndefined()
-      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L2-L5') })
-      expect(result.finalText).toContain('1. src/core.ts L2-L5 kind=implementation')
-      expect(result.finalText).not.toContain('src/unread.ts')
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('exposes only submit_code_map during the reserved final turn', async () => {
-    const originalFetch = globalThis.fetch
-    const requestBodies: any[] = []
-    let requestCount = 0
-    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body))
-      requestBodies.push(body)
-      requestCount += 1
-      if (requestCount === 1) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'locate-before-read',
-          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'runtime' }) },
-        }] } }] }), { status: 200 })
-      }
-      if (requestCount === 2) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'read-before-final',
-          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 5 }) },
-        }] } }] }), { status: 200 })
-      }
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: 'submit-final',
-        function: { name: 'submit_code_map', arguments: JSON.stringify({
-          candidates: [{ path: 'src/core.ts', start_line: 1, end_line: 6, role: 'implementation', confidence: 'high', why: 'verified implementation' }],
-          relationships: [{ from: 'entry', to: 'implementation', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: 1, end_line: 5 }],
-          rejected_hypotheses: [],
-          searches_tried: ['core runtime'],
-          uncertainty: ['none'],
-        }) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    const executor = {
-      readFile: async () => ({ success: true, data: 'line one\nline two\nline three\nline four\nline five' }),
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchContent: async () => ({ success: true, data: [] }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    try {
-      const result = await runSubAgent({
-        definition: {
-          id: 'fast_context',
-          label: 'FastContext',
-          description: 'test',
-          driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 3,
-          maxParallel: 2,
-        },
-        objective: 'find runtime implementation',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        requireGroundedReport: true,
-      })
-
-      expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('src/core.ts L1-L5') })
-      expect(requestBodies[0].tools.map((tool: any) => tool.function.name)).not.toContain('read_file')
-      expect(requestBodies[0].tools.map((tool: any) => tool.function.name)).not.toContain('submit_code_map')
-      const finalTools = requestBodies[2].tools.map((tool: any) => tool.function.name)
-      expect(finalTools).toEqual(['submit_code_map'])
-      expect(requestBodies[2].tool_choice).toEqual({ type: 'function', function: { name: 'submit_code_map' } })
-      expect(requestBodies[2].parallel_tool_calls).toBe(false)
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('does not execute provider tool calls that were not offered on the final turn', async () => {
-    const originalFetch = globalThis.fetch
-    let requestCount = 0
-    globalThis.fetch = vi.fn(async () => {
-      requestCount += 1
-      if (requestCount === 1) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'initial-search',
-          function: { name: 'search_symbol', arguments: JSON.stringify({ query: 'runtime' }) },
-        }] } }] }), { status: 200 })
-      }
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: requestCount === 2 ? 'initial-read' : 'forbidden-final-read',
-        function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 5 }) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    const readFile = vi.fn(async () => ({ success: true, data: 'line one\nline two\nline three\nline four\nline five' }))
-    const events: any[] = []
-    const executor = {
-      readFile,
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchContent: async () => ({ success: true, data: [] }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    try {
-      const result = await runSubAgent({
-        definition: {
-          id: 'fast_context',
-          label: 'FastContext',
-          description: 'test',
-          driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 3,
-          maxParallel: 2,
-        },
-        objective: 'find runtime implementation',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        requireGroundedReport: true,
-        onEvent: event => events.push(event),
-      })
-
-      expect(result).toMatchObject({
-        ok: false,
-        turns: 3,
-        error: expect.stringContaining('not offered for turn 3: read_file'),
-      })
-      expect(readFile).toHaveBeenCalledOnce()
-      const discoveryResponse = events.find(event => event.type === 'model_response' && event.turn === 1)
-      expect(discoveryResponse).toMatchObject({ retrievalPhase: 'scope_discovery' })
-      expect(discoveryResponse.offeredTools).not.toContain('read_file')
-      expect(discoveryResponse.offeredTools).not.toContain('submit_code_map')
-      expect(events).toContainEqual(expect.objectContaining({
-        type: 'model_response',
-        turn: 3,
-        offeredTools: ['submit_code_map'],
-        returnedTools: ['read_file'],
-        finalizationOnly: true,
-        retrievalPhase: 'finalization',
-      }))
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
   it('rejects paths that escape the delegated subagent scope', async () => {
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
@@ -1597,81 +1103,6 @@ describe('runSubAgent', () => {
     }
   })
 
-  it('forces strict FastContext to submit a structured grounded execution flow', async () => {
-    const originalFetch = globalThis.fetch
-    const requestBodies: any[] = []
-    let requestCount = 0
-    globalThis.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-      requestBodies.push(JSON.parse(String(init?.body)))
-      requestCount += 1
-      if (requestCount === 1) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: 'src/core.ts looks relevant' } }] }), { status: 200 })
-      }
-      if (requestCount === 2) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'search-1',
-          function: { name: 'search_content', arguments: JSON.stringify({ pattern: 'startRuntime' }) },
-        }] } }] }), { status: 200 })
-      }
-      if (requestCount === 3) {
-        return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-          id: 'read-1',
-          function: { name: 'read_file', arguments: JSON.stringify({ path: 'src/core.ts', offset: 1, limit: 20 }) },
-        }] } }] }), { status: 200 })
-      }
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: 'submit-1',
-        function: { name: 'submit_code_map', arguments: JSON.stringify({
-          candidates: [
-            { path: 'src/core.ts', start_line: 1, end_line: 3, role: 'execution-core', confidence: 'high', why: 'read and confirmed' },
-            { path: 'src/core.ts', start_line: 1, end_line: 2, role: 'runtime caller', confidence: 'medium', why: 'same grounded range' },
-          ],
-          relationships: [{ from: 'caller', to: 'startRuntime', relationship: 'invokes', evidence_path: 'src/core.ts', start_line: 1, end_line: 3 }],
-          rejected_hypotheses: [],
-          searches_tried: ['startRuntime'],
-          uncertainty: ['none'],
-        }) },
-      }] } }] }), { status: 200 })
-    }) as unknown as typeof fetch
-
-    const executor = {
-      searchContent: async () => ({ success: true, data: [{ file: 'C:/repo/src/core.ts', line: 1, text: 'export function startRuntime() {' }] }),
-      readFile: async () => ({ success: true, data: 'export function startRuntime() {\n  return true\n}' }),
-      searchFiles: async () => ({ success: true, data: { matches: [] } }),
-      searchCodeSymbols: async () => ({ success: true, data: [] }),
-      getCodeMap: async () => ({ success: true, data: { map: [] } }),
-    } as unknown as ToolExecutor
-
-    try {
-      const result = await runSubAgent({
-        definition: {
-          id: 'fast_context',
-          label: 'FastContext',
-          description: 'test',
-          driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt(),
-          maxTurns: 4,
-          maxParallel: 2,
-        },
-        objective: 'trace runtime lifecycle',
-        workspacePath: 'C:/repo',
-        toolExecutor: executor,
-        apiKey: 'test',
-        baseUrl: 'http://example.test',
-        model: 'test-model',
-        requireGroundedReport: true,
-      })
-
-      expect(result).toMatchObject({ ok: true, turns: 4, finalText: expect.stringContaining('EDIT_FRONTIER') })
-      expect(result.evidence).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'src/core.ts', reason: 'file read' })]))
-      expect(requestBodies).toHaveLength(4)
-      expect(JSON.stringify(requestBodies[3].messages)).toContain('EVIDENCE_HANDLES')
-      expect(JSON.stringify(requestBodies[3].messages)).toContain('src/core.ts looks relevant')
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
   it('resolves a missing package index path to the historical module file', async () => {
     const originalFetch = globalThis.fetch
     let requestCount = 0
@@ -1689,12 +1120,7 @@ describe('runSubAgent', () => {
           function: { name: 'read_file', arguments: JSON.stringify({ path: 'lib/matplotlib/cbook/__init__.py', offset: 1, limit: 10 }) },
         }] } }] }), { status: 200 })
       }
-      return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{
-        id: 'submit-old-module',
-        function: { name: 'submit_code_map', arguments: JSON.stringify({
-          candidates: [{ path: 'lib/matplotlib/cbook.py', start_line: 1, end_line: 2, role: 'runtime owner', confidence: 'high', why: 'resolved and read' }],
-        }) },
-      }] } }] }), { status: 200 })
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'lib/matplotlib/cbook.py owns Grouper serialization.' } }] }), { status: 200 })
     }) as unknown as typeof fetch
 
     const executor = {
@@ -1711,11 +1137,11 @@ describe('runSubAgent', () => {
     try {
       const result = await runSubAgent({
         definition: {
-          id: 'fast_context',
-          label: 'FastContext',
+          id: 'test_agent',
+          label: 'Test Agent',
           description: 'test',
           driver: 'main-model',
-          systemPrompt: buildFastContextSystemPrompt(),
+          systemPrompt: 'Use grounded repository evidence.',
           maxTurns: 3,
           maxParallel: 2,
         },
@@ -1725,7 +1151,6 @@ describe('runSubAgent', () => {
         apiKey: 'test',
         baseUrl: 'http://example.test',
         model: 'test-model',
-        requireGroundedReport: true,
       })
 
       expect(result).toMatchObject({ ok: true, turns: 3, finalText: expect.stringContaining('lib/matplotlib/cbook.py') })

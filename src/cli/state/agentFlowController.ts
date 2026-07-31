@@ -197,7 +197,6 @@ export class AgentFlowController {
         this.startedStreams.clear()
         break
       case 'subagent:start': {
-        if (event.runKind !== 'spawn_agent') break
         const id = `subagent:${event.agentId}`
         if (!this.runtimeItems.has(id)) {
           this.runtimeItems.add(id)
@@ -206,7 +205,6 @@ export class AgentFlowController {
         break
       }
       case 'subagent:end': {
-        if (event.runKind !== 'spawn_agent') break
         const id = `subagent:${event.agentId}`
         if (!this.runtimeItems.has(id)) {
           this.runtimeItems.add(id)
@@ -227,26 +225,6 @@ export class AgentFlowController {
                 toolCalls: event.context.toolCalls.map(toolCall => ({ ...toolCall })),
               }
             : null,
-        }, { runId: this.activeRunId || undefined })
-        break
-      case 'fast_context:event': {
-        const current = this.store.getThread(this.threadId)?.fastContext
-        if (current?.runId !== event.runId || current.status !== 'running') {
-          publish('fast_context.started', { runId: event.runId }, { runId: this.activeRunId || undefined })
-        }
-        publish('fast_context.progressed', {
-          runId: event.runId,
-          phase: event.event.type === 'phase' ? event.event.phase : undefined,
-          files: event.event.type === 'progress' ? event.event.files : undefined,
-          hits: event.event.type === 'progress' ? event.event.hits : undefined,
-        }, { runId: this.activeRunId || undefined })
-        break
-      }
-      case 'fast_context:complete':
-        publish('fast_context.completed', {
-          runId: event.runId,
-          files: event.result.filesScanned,
-          hits: event.result.hits.length,
         }, { runId: this.activeRunId || undefined })
         break
       case 'terminal:sessions':

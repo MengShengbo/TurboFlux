@@ -11,12 +11,12 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('<identity>')
   })
 
-  it('guides broad code location through explore_code without fixed triggers', () => {
+  it('guides code location through direct search without fixed triggers', () => {
     const prompt = buildSystemPrompt('vibe')
 
-    expect(prompt).toContain('explore_code')
+    expect(prompt).toContain('search_content/search_files/search_symbols/get_codemap')
     expect(prompt).toContain('Do not rely on fixed trigger words')
-    expect(prompt).toContain('for simple directed searches, use search_content/search_files/search_symbols directly')
+    expect(prompt).toContain('read the strongest owners')
   })
 
   it('guides current and external facts through web_search', () => {

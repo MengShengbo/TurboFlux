@@ -101,7 +101,6 @@ describe('TurnStrategyPlanner', () => {
     expect(names).toContain('list_directory')
     expect(names).toContain('search_content')
     expect(names).toContain('get_codemap')
-    expect(names).toContain('explore_code')
   })
 
   it('keeps read output canonical for direct editing', () => {

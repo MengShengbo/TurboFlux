@@ -276,7 +276,6 @@ function writeIsolatedConfiguration(directory: string, baseUrl: string): void {
       updatedAt: now,
     }],
     activeApiConfigId: 'smoke',
-    fastContextModel: { mode: 'follow-main' },
   }, null, 2)}\n`, 'utf8')
   writeFileSync(join(directory, 'profile.json'), `${JSON.stringify({
     version: 3,

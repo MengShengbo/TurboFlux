@@ -66,7 +66,7 @@ Codex CLI 的关键优势不是某个单独组件，而是一套相互配合的�
 - 审批会立即产生“需要行动”信号，但在用户刚输入后延迟抢占焦点；
 - resize、paste burst、线程切换、非当前线程审批都被当作状态机问题处理。
 
-TurboFlux 已具备很好的产品基础：乐观消息、运行中 steer、下一轮 queue、首响应前中断恢复、会话 JSONL 恢复、RuntimeTaskManager、TaskManager、FastContext、后台终端、子代理、diff 和一组纯 UI selector。它不需要照搬 Codex，也不应先重写为 app-server。
+TurboFlux 已具备很好的产品基础：乐观消息、运行中 steer、下一轮 queue、首响应前中断恢复、会话 JSONL 恢复、RuntimeTaskManager、TaskManager、后台终端、子代理、diff 和一组纯 UI selector。它不需要照搬 Codex，也不应先重写为 app-server。
 
 以下是**改造前基线**中最需要修复的确定性与信任边界，不代表当前工作树仍保留这些缺陷：
 
@@ -79,7 +79,7 @@ TurboFlux 已具备很好的产品基础：乐观消息、运行中 steer、下�
 | P1 | 每个 delta 同步写 journal，长 transcript 全量渲染 | 热路径 I/O 和格式化会竞争按键反馈预算 |
 | P1 | 会话、Runtime 与任务 owner 的身份不统一 | 切换会话后后台状态可能归属错误或混杂 |
 
-本轮已完成上述 P0/P1 的主要工程闭环：并行审批改为 FIFO request registry，能力边界独立于审批策略，steer 拥有 accepted/committed/rejected/restored 协议，会话 identity 由 `SessionRegistry` 协调，journal 使用按 durability 分级的单写者，渲染和通知进入独立调度器；`AgentFlowController + FlowStore` 已接管 run、queue、approval、tool、stream、runtime、mode、usage、task、FastContext 与 tool draft，现有 TUI 只通过 selectors 读取执行事实。后续又补齐失败批次保留、degraded 全局提交门禁、`/flow status|retry|export`、核心性能块 feature flags、终端焦点/桌面通知/reduced-motion、共享 resize 订阅、真实 ConPTY 四轮队列 smoke，以及 Windows/SSH 基线报告和外部 paint evidence 门禁。仍未完成的是 `App.tsx` 的物理拆分与真实设备 physical paint/通知送达矩阵。
+本轮已完成上述 P0/P1 的主要工程闭环：并行审批改为 FIFO request registry，能力边界独立于审批策略，steer 拥有 accepted/committed/rejected/restored 协议，会话 identity 由 `SessionRegistry` 协调，journal 使用按 durability 分级的单写者，渲染和通知进入独立调度器；`AgentFlowController + FlowStore` 已接管 run、queue、approval、tool、stream、runtime、mode、usage、task 与 tool draft，现有 TUI 只通过 selectors 读取执行事实。后续又补齐失败批次保留、degraded 全局提交门禁、`/flow status|retry|export`、核心性能块 feature flags、终端焦点/桌面通知/reduced-motion、共享 resize 订阅、真实 ConPTY 四轮队列 smoke，以及 Windows/SSH 基线报告和外部 paint evidence 门禁。仍未完成的是 `App.tsx` 的物理拆分与真实设备 physical paint/通知送达矩阵。
 
 ### 1.2 已执行的架构决策
 
@@ -90,7 +90,7 @@ TurboFlux 已具备很好的产品基础：乐观消息、运行中 steer、下�
 3. Flow 状态只通过 selectors 读取；phase/action/queue、输入回执与后台摘要已驱动现有 TUI，React 中平行的 Agent 执行状态已删除。
 4. 将副作用拆给 `ApprovalCoordinator`、`ApprovalPresentationScheduler`、`ConversationJournalWriter`、`AdaptiveStreamScheduler` 与 `NotificationCoordinator`。
 5. 由 `AgentFlowController` 把现有 AgentEvent 归一化进单一 FlowStore，不重写 AgentEngine，也不建立第二套副作用 owner。
-6. 保留现有 Conversation journal、RuntimeTaskManager、TaskManager、FastContext 和三组纯 selector，并迁移到新事件协议。
+6. 保留现有 Conversation journal、RuntimeTaskManager、TaskManager 和三组纯 selector，并迁移到新事件协议。
 
 ### 1.3 当前落地快照
 
@@ -332,7 +332,6 @@ flowchart LR
     EX --> RTM[RuntimeTaskManager]
     E --> TM[TaskManager]
     E --> SA[SubAgentTaskManager]
-    E --> FC[FastContext]
     E -- AgentEventType --> APP
     APP --> CM[ConversationManager]
     CM --> J[Conversation JSONL]
@@ -341,7 +340,7 @@ flowchart LR
     APP --> DF[Developer flow selectors]
 ```
 
-纯文本降级：`App.tsx` 同时连接输入、AgentEngine、事件订阅、ConversationManager 和 UI；AgentEngine 再直接协调模型、权限、工具、Task、子代理与 FastContext；Conversation 与 Runtime 各有独立 journal。
+纯文本降级：`App.tsx` 同时连接输入、AgentEngine、事件订阅、ConversationManager 和 UI；AgentEngine 再直接协调模型、权限、工具、Task 与子代理；Conversation 与 Runtime 各有独立 journal。
 
 ### 4.2 一次主运行的真实序列
 
@@ -430,7 +429,7 @@ sequenceDiagram
 - **中断恢复**：首个响应前中断可恢复 prompt 与附件；已有部分结果时可形成 interrupted assistant。
 - **Conversation JSONL**：能回放用户 turn、stream/thinking delta、tool call/result，修复截断尾行，并补齐未闭合工具调用。
 - **RuntimeTaskManager journal**：运行任务有独立生命周期、日志与恢复语义。
-- **TaskManager / FastContext / 后台终端 / 子代理 / diff**：这些是 TurboFlux 的差异化资产，不应在 UI 重构中被替换。
+- **TaskManager / 后台终端 / 子代理 / diff**：这些是 TurboFlux 的差异化资产，不应在 UI 重构中被替换。
 - **纯 selector**：`developerFlowModel`、`agentActivityModel`、`toolLifecycleModel` 已经证明可以把复杂事件压缩为可测试的展示模型。
 
 ---
@@ -619,7 +618,7 @@ Engine 定义 `pause()` / `resume()` 与 `paused` phase，但 UI 未找到调用
 
 ### F-015 · P2 · 固定 80ms flush 与固定 FPS 缺少负载反馈
 
-默认 alternate screen 最大 24 FPS，stream/fast-context UI 常用固定 80ms timer。低负载时可能不够即时，高 burst 时又无法快速追赶。应基于 queue depth、oldest age、paint cost 与 input activity 自适应，并带迟滞。
+默认 alternate screen 最大 24 FPS，stream UI 常用固定 80ms timer。低负载时可能不够即时，高 burst 时又无法快速追赶。应基于 queue depth、oldest age、paint cost 与 input activity 自适应，并带迟滞。
 
 ### F-016 · P2 · 缺少端到端状态流与性能门禁
 
@@ -1184,7 +1183,7 @@ Flag 在 session start 固定，避免同一 run 中途切换展示或调度策�
 1. AgentEngine 保持模型、工具与审批副作用 owner，不复制执行路径。
 2. AgentFlowController 把 AgentEvent 归一化为带稳定 identity 的 FlowEvent。
 3. FlowStore/reducer 持有每线程 run、input、approval、tool、stream、runtime 与 usage 事实。
-4. React 只读取 selectors，不再持有平行的 `isRunning`、queue、mode、usage、task、FastContext 或 tool draft 状态。
+4. React 只读取 selectors，不再持有平行的 `isRunning`、queue、mode、usage、task 或 tool draft 状态。
 5. ownership test、controller test、Golden Trace 与真实 ConPTY queue smoke 共同防止双真相源回归。
 
 ### 10.4 Journal v2 迁移
@@ -1404,7 +1403,7 @@ Event contract
 4. **不迷信 8 行/120ms。** 这些阈值适合 Codex 当前 renderer；TurboFlux 必须根据平台基线调参。
 5. **不复制所有 popup 与命令。** 只迁移减少状态歧义和焦点抢占的机制。
 6. **不把 alternate screen 当作心流必要条件。** fixed layout 有稳定性优势，scrollback 也有原生检索和终端可访问性价值，应按使用模式选择。
-7. **不因对齐 Codex 删除差异化能力。** FastContext、TaskManager、RuntimeTaskManager、后台终端和多 provider 应保留。
+7. **不因对齐 Codex 删除差异化能力。** TaskManager、RuntimeTaskManager、后台终端和多 provider 应保留。
 8. **不先做视觉模仿。** spinner、配色、ASCII 装饰无法修复 resolver race、journal stall 或输入丢失。
 
 ---
@@ -1519,6 +1518,6 @@ Event contract
 7. 长 transcript、burst delta 和 Windows 输入是否在预算内？
 8. feature flag 关闭后，旧 journal 和旧 UI 是否仍可工作？
 9. telemetry 是否证明减少了不确定性，而不是只证明用户停留更久？
-10. 这项设计是否保留 TurboFlux 的 FastContext、Task、Runtime 与多 provider 优势？
+10. 这项设计是否保留 TurboFlux 的 Task、Runtime 与多 provider 优势？
 
 最终原则：**让开发者把注意力放在问题上，而不是放在猜测 Agent 现在到底处于什么状态上。**

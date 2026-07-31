@@ -1,5 +1,5 @@
 import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
-import type { FastContextModelConfig, ModelCapabilities, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
+import type { ModelCapabilities, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
 import type {
   ApprovalPolicy,
   CapabilityProfile,
@@ -20,7 +20,6 @@ export interface AgentRuntimeConfig {
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
-  fastContextModel?: FastContextModelConfig
 }
 
 export interface RuntimeTokenUsageEvent {
@@ -76,14 +75,6 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
 
   getActiveConfig(): APIConfig | null {
     return this.apiConfigFromRuntimeConfig(this.config)
-  }
-
-  getFastContextConfig(): APIConfig | null {
-    return this.getActiveConfig()
-  }
-
-  getFastContextModel(): APIModel | null {
-    return this.getActiveModel()
   }
 
   private apiConfigFromRuntimeConfig(config: AgentRuntimeConfig): APIConfig | null {

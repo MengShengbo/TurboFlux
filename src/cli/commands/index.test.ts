@@ -8,8 +8,6 @@ function contextWithUsage(usage: { input?: number; output?: number; source?: 'pr
     engine: {
       getContextUsage: () => usage,
       isRunning: () => false,
-      isFastContextRunning: () => false,
-      runStandaloneFastContextObjective: () => Promise.resolve(null),
     } as CommandContext['engine'],
     config: {
       provider: 'custom',
@@ -35,8 +33,6 @@ function fullContext(overrides: Partial<CommandContext> = {}): CommandContext {
     engine: {
       getContextUsage: () => ({ source: 'unknown' }),
       isRunning: () => false,
-      isFastContextRunning: () => false,
-      runStandaloneFastContextObjective: () => Promise.resolve(null),
       resetSession: () => {},
     } as CommandContext['engine'],
     ...overrides,
@@ -59,15 +55,6 @@ describe('/context', () => {
     expect(result.text).toContain('Context usage: 42,000 / 1,000,000 tokens')
     expect(result.text).toContain('Last provider prompt_tokens: 42,000')
     expect(result.text).toContain('Last provider completion_tokens: 500')
-  })
-})
-
-describe('/fastcontext', () => {
-  it('is no longer exposed as a manual command', () => {
-    const result = commandRegistry.execute('/fastcontext', contextWithUsage({ source: 'unknown' }))
-
-    expect(result.type).toBe('text')
-    expect(result.text).toContain('Unknown command: /fastcontext')
   })
 })
 

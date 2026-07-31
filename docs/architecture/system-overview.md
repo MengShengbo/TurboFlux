@@ -65,7 +65,7 @@ Flow 事件 schema v2 带 session/thread/run/turn/item identity 和 thread-local
 | Landing | `LandingView`、`StartupAnimation` | App 派生的消息/运行/overlay 条件 |
 | Prompt | `PromptInput`、`TerminalInputStateMachine` | React value/ref + command registry |
 | Transcript | `MessageList`、`WindowedMessageList`、`TranscriptViewport` | App messages + viewport metrics |
-| Active work | `ActiveWorkPanel`、`ToolCallTree`、`FastContextBanner` | Engine events + Flow selectors |
+| Active work | `ActiveWorkPanel`、`ToolCallTree` | Engine events + Flow selectors |
 | Approval | `ApprovalPresentationScheduler`、`PermissionDialog` | Engine interactive request + Flow approval |
 | Status | `StatusLine`、`AgentActivityLine` | Flow primary activity + Git/model/terminal counts |
 | Sidebar | `SessionSidebar`、`CockpitRails` | App 本地展示状态与 Flow 派生状态 |
@@ -74,7 +74,7 @@ Flow 事件 schema v2 带 session/thread/run/turn/item identity 和 thread-local
 
 ## 辅助能力
 
-模型协议、工具执行、Git、MCP、Skills、FastContext、子代理和 Runtime Tasks 都由 TUI 通过 Runtime 使用。它们不是独立进程；除可选 `src/server` 外，默认所有能力在同一 Node 进程内执行。
+模型协议、工具执行、Git、MCP、Skills、子代理和 Runtime Tasks 都由 TUI 通过 Runtime 使用。它们不是独立进程；除可选 `src/server` 外，默认所有能力在同一 Node 进程内执行。
 
 ## 当前边界与工程热点
 

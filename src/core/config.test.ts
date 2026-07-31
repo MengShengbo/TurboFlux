@@ -5,12 +5,9 @@ import {
   configFromProviderPreset,
   createApiConfigProfile,
   createEmptyConfig,
-  deleteApiConfigProfile,
-  getFastContextApiConfig,
   getProviderPreset,
   saveApiConfigProfile,
   setConfigValue,
-  setFastContextModelConfig,
   switchActiveApiConfig,
   type TurboFluxConfig,
 } from './config'
@@ -152,56 +149,5 @@ describe('API config profiles', () => {
     expect(switched.provider).toBe('custom')
     expect(switched.model).toBe('qwen-local')
     expect(switched.apiConfigs).toHaveLength(2)
-  })
-
-  it('keeps FastContext on the active main model', () => {
-    let config = createEmptyConfig()
-    const main = createApiConfigProfile({
-      name: 'Main',
-      provider: 'openai',
-      apiKey: 'sk-main',
-      baseUrl: 'https://api.openai.com/v1',
-      model: 'gpt-5.5',
-    })
-    const fast = createApiConfigProfile({
-      name: 'FastContext',
-      provider: 'custom',
-      apiKey: 'sk-fast',
-      baseUrl: 'https://fast.example/v1',
-      model: 'fast-context-model',
-    })
-
-    config = saveApiConfigProfile(config, main, true)
-    config = saveApiConfigProfile(config, fast, false)
-    config = setFastContextModelConfig(config, { mode: 'api-config', apiConfigId: fast.id })
-
-    expect(config.fastContextModel?.mode).toBe('follow-main')
-    expect(getFastContextApiConfig(config)).toBeUndefined()
-  })
-
-  it('falls back to follow-main when deleting the FastContext profile', () => {
-    let config = createEmptyConfig()
-    const main = createApiConfigProfile({
-      name: 'Main',
-      provider: 'openai',
-      apiKey: 'sk-main',
-      baseUrl: 'https://api.openai.com/v1',
-      model: 'gpt-5.5',
-    })
-    const fast = createApiConfigProfile({
-      name: 'FastContext',
-      provider: 'custom',
-      apiKey: 'sk-fast',
-      baseUrl: 'https://fast.example/v1',
-      model: 'fast-context-model',
-    })
-
-    config = saveApiConfigProfile(config, main, true)
-    config = saveApiConfigProfile(config, fast, false)
-    config = setFastContextModelConfig(config, { mode: 'api-config', apiConfigId: fast.id })
-    const next = deleteApiConfigProfile(config, fast.id)
-
-    expect(next.fastContextModel?.mode).toBe('follow-main')
-    expect(getFastContextApiConfig(next)).toBeUndefined()
   })
 })

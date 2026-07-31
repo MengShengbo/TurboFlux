@@ -5,7 +5,6 @@ import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
 import type { ToolStatus } from './tools/ToolCallTree'
 import { ActiveWorkPanel } from './tools/ActiveWorkPanel'
-import { FastContextBanner } from './tools/FastContextBanner'
 import { ConversationHistory, type ConversationEntry } from './ConversationHistory'
 import { RewindSelector } from './input/RewindSelector'
 import { ModelPicker } from './input/ModelPicker'
@@ -15,7 +14,6 @@ import { MessageList } from './messages/MessageList'
 import { WindowedMessageList } from './messages/WindowedMessageList'
 import { useOverlayStack } from '../hooks/useOverlayStack'
 import { useMessageCursor } from '../hooks/useMessageCursor'
-import type { FastContextScanEvent } from '../../core/fastContextTypes'
 import type { SubAgentEvent } from '../../shared/subAgentTypes'
 import type { AgentAttachment, AgentTurn, ApprovalPolicy, CapabilityProfile, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
@@ -43,7 +41,6 @@ import {
   selectAgentRunState,
   selectAgentMode,
   selectActiveTask,
-  selectFastContextActive,
   selectIsForegroundBusy,
   selectPendingSteeringInputs,
   selectPrimaryActivity,
@@ -80,7 +77,6 @@ import { resolveCockpitLayout } from './layout/CockpitRails'
 import { SessionSidebar } from './layout/SessionSidebar'
 import { LandingView } from './layout/LandingView'
 import { getStartupAnimationFrame, shouldAnimateStartup, STARTUP_ANIMATION_MS } from './layout/StartupAnimation'
-import { appendFastContextUiEvents, createFastContextUiSummary, reduceFastContextUiSummary } from './layout/fastContextUi'
 import type { DeveloperSubAgentActivity } from './developerFlowModel'
 import { DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, parseTerminalMouseWheel, shouldEnableMouseTracking } from '../terminalMouse'
 import { captureClipboardImageAttachment, hasImageReference, imageAttachmentFingerprint, imagePlaceholderForIndex, reconcileDraftImagePrompt, resolveImagePrompt } from '../imageAttachments'
@@ -326,8 +322,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const modelDiscoveryRequestRef = useRef(0)
   const [lastActivity, setLastActivity] = useState<number>(Date.now())
   const [convListRevision, setConvListRevision] = useState(0)
-  const [fcEvents, setFcEvents] = useState<FastContextScanEvent[]>([])
-  const [fcSummary, setFcSummary] = useState(createFastContextUiSummary)
   const [subAgentActivities, setSubAgentActivities] = useState<DeveloperSubAgentActivity[]>([])
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
   const [, setChangeSummaries] = useState<ChangeSummary[]>([])
@@ -370,9 +364,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const streamTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastAssistantTurnInterruptedRef = useRef(false)
   const lastActivityPaintRef = useRef(0)
-  const fcEventBufferRef = useRef<FastContextScanEvent[]>([])
-  const fcFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const fcRunIdRef = useRef<string | null>(null)
   const inputRef = useRef('')
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
   const pendingAskRef = useRef<PendingAsk | null>(null)
@@ -470,7 +461,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const currentMode = activeFlowState ? selectAgentMode(activeFlowState) : 'vibe'
   const tokenUsage = activeFlowState ? selectTokenUsage(activeFlowState) : { source: 'unknown' as const }
   const activeTask = activeFlowState ? selectActiveTask(activeFlowState) : null
-  const fcActive = activeFlowState ? selectFastContextActive(activeFlowState) : false
   const streamingToolDraft = activeFlowState ? selectToolDraft(activeFlowState) : null
   const activeObjective = activeFlowState?.run.objective && activeFlowState.run.startedAt
     ? { prompt: activeFlowState.run.objective, startedAt: activeFlowState.run.startedAt }
@@ -665,41 +655,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (isInteractive) process.stdout.write('\u001b]0;\u0007')
   }, [approvalPresentationScheduler, convManager, flowBridge, flowTelemetry, isInteractive])
 
-  const flushFastContextUi = useCallback(() => {
-    if (fcFlushTimerRef.current) {
-      clearTimeout(fcFlushTimerRef.current)
-      fcFlushTimerRef.current = null
-    }
-    const events = fcEventBufferRef.current
-    if (events.length === 0) return
-    fcEventBufferRef.current = []
-    setFcEvents(current => appendFastContextUiEvents(current, events))
-    setFcSummary(current => reduceFastContextUiSummary(current, events))
-    setLastActivity(Date.now())
-  }, [])
-
-  const queueFastContextUiEvent = useCallback((event: FastContextScanEvent) => {
-    fcEventBufferRef.current.push(event)
-    if (!fcFlushTimerRef.current) {
-      fcFlushTimerRef.current = setTimeout(flushFastContextUi, 80)
-    }
-  }, [flushFastContextUi])
-
-  const discardFastContextUiBuffer = useCallback(() => {
-    if (fcFlushTimerRef.current) {
-      clearTimeout(fcFlushTimerRef.current)
-      fcFlushTimerRef.current = null
-    }
-    fcEventBufferRef.current = []
-  }, [])
-
-  const resetFastContextUi = useCallback(() => {
-    discardFastContextUiBuffer()
-    fcRunIdRef.current = null
-    setFcEvents([])
-    setFcSummary(createFastContextUiSummary())
-  }, [discardFastContextUiBuffer])
-
   const appendMessages = useCallback((nextMessages: Message[], options?: { forceLatest?: boolean }) => {
     if (nextMessages.length === 0) return
 
@@ -740,7 +695,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     clearStreamFlushTimer()
     setStreamText('')
     setStreamThinkingText('')
-    resetFastContextUi()
     setTerminalSessions([])
     dismissPendingAsk()
     flowBridge.replaceQueue([])
@@ -752,7 +706,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setCursorMode(false)
     clear()
     setMood('idle')
-  }, [engine, stateProvider, clearStreamFlushTimer, clear, replaceMessages, resetFastContextUi, dismissPendingAsk, flowBridge])
+  }, [engine, stateProvider, clearStreamFlushTimer, clear, replaceMessages, dismissPendingAsk, flowBridge])
 
   const getRewindContextSegments = useCallback((turns: AgentTurn[]) => {
     const boundaryTime = turns.reduce((max, turn) => Math.max(max, turn.timestamp), 0)
@@ -1029,33 +983,18 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           }
           markActivity()
           break
-        case 'fast_context:event':
-          if (fcRunIdRef.current !== event.runId) {
-            discardFastContextUiBuffer()
-            fcRunIdRef.current = event.runId
-            setFcEvents([])
-            setFcSummary(createFastContextUiSummary())
-          }
-          queueFastContextUiEvent(event.event)
-          break
-        case 'fast_context:complete':
-          if (fcRunIdRef.current !== event.runId) break
-          flushFastContextUi()
-          break
         case 'subagent:start':
-          if (event.runKind === 'spawn_agent') {
-            setSubAgentActivities(current => [
-              ...current.filter(activity => activity.id !== event.agentId),
-              {
-                id: event.agentId,
-                label: event.label,
-                objective: event.objective,
-                detail: t('ui.subagent.starting'),
-                startedAt: Date.now(),
-                status: 'running',
-              },
-            ])
-          }
+          setSubAgentActivities(current => [
+            ...current.filter(activity => activity.id !== event.agentId),
+            {
+              id: event.agentId,
+              label: event.label,
+              objective: event.objective,
+              detail: t('ui.subagent.starting'),
+              startedAt: Date.now(),
+              status: 'running',
+            },
+          ])
           break
         case 'subagent:progress':
           setSubAgentActivities(current => current.map(activity => activity.id === event.agentId
@@ -1063,25 +1002,23 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             : activity))
           break
         case 'subagent:end':
-          if (event.runKind === 'spawn_agent') {
-            setSubAgentActivities(current => current.map(activity => activity.id === event.agentId
-              ? {
-                  ...activity,
-                  status: event.ok ? 'completed' : 'failed',
-                  completedAt: Date.now(),
-                  detail: event.ok ? t('ui.subagent.resultReady') : t('common.failed'),
-                }
-              : activity))
-            notificationCoordinator.raise({
-              id: `subagent-result:${event.agentId}`,
-              category: event.ok ? 'result-ready' : 'error',
-              title: event.ok
-                ? t('ui.app.subagentResultReady', { agent: event.agentType })
-                : t('ui.app.subagentFailed', { agent: event.agentType }),
-              sourceId: event.agentId,
-            })
-            syncNotificationSnapshot()
-          }
+          setSubAgentActivities(current => current.map(activity => activity.id === event.agentId
+            ? {
+                ...activity,
+                status: event.ok ? 'completed' : 'failed',
+                completedAt: Date.now(),
+                detail: event.ok ? t('ui.subagent.resultReady') : t('common.failed'),
+              }
+            : activity))
+          notificationCoordinator.raise({
+            id: `subagent-result:${event.agentId}`,
+            category: event.ok ? 'result-ready' : 'error',
+            title: event.ok
+              ? t('ui.app.subagentResultReady', { agent: event.agentType })
+              : t('ui.app.subagentFailed', { agent: event.agentType }),
+            sourceId: event.agentId,
+          })
+          syncNotificationSnapshot()
           break
         case 'active:task':
           break
@@ -1205,7 +1142,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     })
     return () => {
       clearStreamFlushTimer()
-      discardFastContextUiBuffer()
       if (runControlHintTimerRef.current) clearTimeout(runControlHintTimerRef.current)
       unsub()
       void runtime.destroy().catch(() => {}).finally(() => {
@@ -1213,7 +1149,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         convManager.destroy()
       })
     }
-  }, [engine, runtime, convManager, flowBridge, clearStreamFlushTimer, appendMessages, replaceMessages, setComposedInput, queueFastContextUiEvent, flushFastContextUi, discardFastContextUiBuffer, markActivity, showRunControlHint, genMsgId, noFlickerActive, t, dismissPendingAsk, schedulePendingAsk, notificationCoordinator, syncNotificationSnapshot, streamScheduler, terminalLatencyTracker, flowFeatures.streamScheduler])
+  }, [engine, runtime, convManager, flowBridge, clearStreamFlushTimer, appendMessages, replaceMessages, setComposedInput, markActivity, showRunControlHint, genMsgId, noFlickerActive, t, dismissPendingAsk, schedulePendingAsk, notificationCoordinator, syncNotificationSnapshot, streamScheduler, terminalLatencyTracker, flowFeatures.streamScheduler])
 
   const getConversationEntries = useCallback((): ConversationEntry[] => {
     const convs = convManager.list()
@@ -1369,7 +1305,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setStreamText('')
     setStreamThinkingText('')
     updateCurrentTools(() => [])
-    resetFastContextUi()
     updateChangeSummaries(() => [])
     dismissPendingAsk()
     notificationCoordinator.acknowledgeCategory('turn-complete')
@@ -1438,7 +1373,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       if (flowBridge.getQueuedInputs().length > 0) setTimeout(runNextQueuedPrompt, 0)
     }
     if (singleShot) exit()
-  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, resetFastContextUi, showRunControlHint, modelDiscoveryStatus.isRefreshing, t, dismissPendingAsk, notificationCoordinator, syncNotificationSnapshot, convManager, flowBridge])
+  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, showRunControlHint, modelDiscoveryStatus.isRefreshing, t, dismissPendingAsk, notificationCoordinator, syncNotificationSnapshot, convManager, flowBridge])
 
   useEffect(() => {
     runPromptRef.current = runPrompt
@@ -1785,9 +1720,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const reasoningActive = Boolean(reasoningLabel && reasoningLabel !== 'off' && isRunning && runState.phase === 'thinking')
   const conversationFrameWidth = Math.max(24, cockpit.contentWidth - 2)
 
-  const runningNode = (isRunning || fcActive || subAgentActivities.length > 0 || queuedPrompts.length > 0) ? (
+  const runningNode = (isRunning || subAgentActivities.length > 0 || queuedPrompts.length > 0) ? (
     <Box flexDirection="column" marginBottom={1}>
-      {!cockpit.showSidebar && !noFlickerActive && (fcActive || fcEvents.length > 0) && <FastContextBanner events={fcEvents} summary={fcSummary} isActive={fcActive} />}
       {!noFlickerActive && <SubAgentProgressLine activities={subAgentActivities} />}
       {!noFlickerActive && activeTask && <TaskProgressLine task={activeTask} />}
       <ActiveWorkPanel
@@ -1804,7 +1738,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         reasoningActive={reasoningActive}
         showThinking={showThinking}
         verbose={verbose}
-        idleLabel={isRunning && !visibleStreamText && currentTools.length === 0 && !fcActive && !pendingAsk ? t('ui.activity.phase.thinking') : null}
+        idleLabel={isRunning && !visibleStreamText && currentTools.length === 0 && !pendingAsk ? t('ui.activity.phase.thinking') : null}
         availableWidth={noFlickerActive
           ? cockpit.contentWidth - 4
           : terminal.columns - 4}
@@ -2154,9 +2088,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   draft={streamingToolDraft}
                   streamText={streamTextForDisplay}
                   thinkingText={streamThinkingText}
-                  fastContextEvents={fcEvents}
-                  fastContextSummary={fcSummary}
-                  fastContextActive={fcActive}
                   subagents={subAgentActivities}
                   queuedCount={queuedPrompts.length}
                   terminals={terminalSessions}

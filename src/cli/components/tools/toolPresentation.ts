@@ -13,7 +13,6 @@ const READ_TOOLS = new Set([
   'search_symbol',
   'search_semantic',
   'get_codemap',
-  'explore_code',
   'web_search',
 ])
 
@@ -45,7 +44,6 @@ export function formatToolLabel(name: string, argsJson?: string, t: Translator =
     case 'search_symbols': return t('ui.tool.symbol', { target: str('query') })
     case 'search_semantic': return t('ui.tool.semantic', { target: str('query') })
     case 'get_codemap': return t('ui.tool.codemap', { target: str('path') ? ` ${str('path')}` : '' })
-    case 'explore_code': return t('ui.tool.explore', { target: (str('objective') || str('query')).slice(0, 80) })
     case 'web_search': return t('ui.tool.web', { target: str('query').slice(0, 80) })
     case 'run_command': return t('ui.tool.run', { target: str('command') })
     case 'git_status': return t('ui.tool.gitStatus')
@@ -88,7 +86,6 @@ export function formatRunningToolLabel(tool: Pick<ToolStatus, 'name' | 'args'>, 
     case 'search_symbols': return t('ui.tool.running.symbol', { target: str('query') })
     case 'search_semantic': return t('ui.tool.running.semantic', { target: str('query') })
     case 'get_codemap': return t('ui.tool.running.codemap', { target: str('path') ? ` ${str('path')}` : '' })
-    case 'explore_code': return t('ui.tool.running.explore', { target: str('objective') || str('query') })
     case 'web_search': return t('ui.tool.running.web', { target: str('query') })
     case 'run_command': return t('ui.tool.running.run', { target: str('command') })
     default: return t('ui.tool.running.default', { target: formatToolLabel(tool.name, tool.args, t) })
@@ -116,7 +113,6 @@ function formatDraftToolName(name: string, t: Translator): string {
   if (name === 'search_symbols') return t('ui.tool.name.searchSymbols')
   if (name === 'search_semantic') return t('ui.tool.name.searchSemantic')
   if (name === 'get_codemap') return t('ui.tool.name.codemap')
-  if (name === 'explore_code') return t('ui.tool.name.exploreCode')
   if (name === 'web_search') return t('ui.tool.name.webSearch')
   if (name === 'run_command') return t('ui.tool.name.runCommand')
   return humanizeToolName(name)

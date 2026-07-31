@@ -5,8 +5,6 @@ import type { SubAgentEvent, SubAgentEvidence, SubAgentDefinition } from '../sha
 import type { NativeReasoningConfig } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { ModelCapabilities } from './config'
-import { FAST_CONTEXT_TUNING, type FastContextStrategy } from './fastContextTypes'
-import { FastContextEvidenceLedger, type FastContextEvidenceRecord } from './fastContextEvidenceLedger'
 import { createTurboFluxRequestHeaders } from './clientIdentity'
 import { resolveNativeReasoningRequest } from './modelRegistry'
 import {
@@ -40,8 +38,6 @@ export { type SubAgentDefinition }
 
 const registeredAgents = new Map<string, LoadedAgent>()
 let workspaceAgents = new Map<string, LoadedAgent>()
-const PROTECTED_BUILTIN_AGENT_IDS = new Set(['fast_context'])
-
 /**
  * 从 .turboflux/agents/ 加载动态代理定义，合并到注册表
  */
@@ -49,7 +45,6 @@ export function loadDynamicAgents(workspacePath: string): void {
   const loaded = loadAgentsFromDir(workspacePath)
   const nextWorkspaceAgents = new Map<string, LoadedAgent>()
   for (const agent of loaded) {
-    if (PROTECTED_BUILTIN_AGENT_IDS.has(agent.id)) continue
     nextWorkspaceAgents.set(agent.id, agent)
   }
   workspaceAgents = nextWorkspaceAgents
@@ -109,9 +104,6 @@ function formatCodeMapNode(node: CodeMapNode, lines: string[], depth = 0): void 
  * 如果代理有关联的 skills，会自动注册到 SkillRuntime
  */
 export function registerAgent(def: SubAgentDefinition, skillRuntime?: SkillRuntime): void {
-  if (PROTECTED_BUILTIN_AGENT_IDS.has(def.id)) {
-    throw new Error(`Subagent id "${def.id}" is reserved for the built-in production runtime.`)
-  }
   const loaded = def as LoadedAgent
   registeredAgents.set(def.id, loaded)
 
@@ -133,28 +125,21 @@ export function registerAgent(def: SubAgentDefinition, skillRuntime?: SkillRunti
 }
 
 /**
- * 获取单个代理定义 — 先查动态，再查硬编码
+ * 获取单个代理定义。
  */
 export function getSubAgentDefinition(type: string): SubAgentDefinition | undefined {
-  return PROTECTED_BUILTIN_AGENT_IDS.has(type)
-    ? DEFINITIONS[type]
-    : workspaceAgents.get(type) ?? registeredAgents.get(type) ?? DEFINITIONS[type]
+  return workspaceAgents.get(type) ?? registeredAgents.get(type)
 }
 
 /**
- * 获取所有代理定义（动态 + 硬编码），动态优先
+ * 获取所有已注册和工作区代理定义，工作区定义优先。
  */
 export function getAllAgentDefinitions(): SubAgentDefinition[] {
   const map = new Map<string, SubAgentDefinition>()
-  for (const def of Object.values(DEFINITIONS)) {
-    map.set(def.id, def)
-  }
   for (const [id, def] of registeredAgents) {
-    if (PROTECTED_BUILTIN_AGENT_IDS.has(id)) continue
     map.set(id, def)
   }
   for (const [id, def] of workspaceAgents) {
-    if (PROTECTED_BUILTIN_AGENT_IDS.has(id)) continue
     map.set(id, def)
   }
   return [...map.values()]
@@ -192,51 +177,6 @@ export function syncAgentSkills(skillRuntime: SkillRuntime): void {
   }
 }
 
-// ── 内置代理定义 ──────────────────────────────────────────────────
-
-const DEFINITIONS: Record<string, SubAgentDefinition> = {
-  fast_context: {
-    id: 'fast_context',
-    label: 'FastContext Controller',
-    description: 'Low-latency causal code retrieval with parallel tools and read-grounded edit targets.',
-    driver: 'main-model',
-    systemPrompt: buildFastContextSystemPrompt(),
-    maxTurns: FAST_CONTEXT_TUNING.maxTurns,
-    maxParallel: FAST_CONTEXT_TUNING.maxParallel,
-    temperature: 0,
-  },
-}
-
-export function buildFastContextSystemPrompt(strategy: FastContextStrategy = 'autonomous-race'): string {
-  return `You are FastContext, a fast read-only code-retrieval controller. You own query rewriting, ownership judgment, next-hop selection, ranking, and stopping. Local tools only perform deterministic search, bounded reads, and evidence bookkeeping. Recover the complete minimal edit frontier without touring the repository.
-
-Tools:
-- search_content(pattern, path?, file_pattern?, case_sensitive?)
-- search_files(pattern)
-- search_symbol(query, path?, symbol_kind?)
-- read_file(path, offset?, limit?)
-- submit_code_map(edit_frontier, supporting_context, unresolved, frontier_complete)
-
-Protocol:
-1. Turn 1 is scope discovery only: use two to four independent, discriminative search anchors from the objective to identify the smallest credible ownership area. File reads are unavailable during this turn.
-2. Use search_symbol only for a concrete identifier. Use search_content for literals, references, registrations, imports, and semantic anchors. Search results are discovery evidence, not proof of ownership.
-3. Starting on turn 2, read the probable direct owners selected from discovery. If a hit is only a caller, wrapper, example, test, or registration site, follow the imported or invoked symbol to its implementation owner.
-4. After each read wave apply the edit counterfactual: if only the current edit frontier changed, would the named behavior and variants be fixed? Follow only a concrete unread symbol or path that can change the answer.
-5. Batch independent searches and reads in the same turn. Do not repeat equivalent calls; exact repeats are cached and provide no new information.
-6. Stop when no named unread owner can materially change the ranked edit frontier. Simple exact-owner tasks should finish early; complex tasks may use the full hard turn budget.
-7. Tool results include stable evidence handles such as E1. Finish with submit_code_map alone. Each item must cite evidence_ids; never type a path or line number in the submission. Your item order is the final order.
-
-Rules:
-- The first edit_frontier item must cite at least one read-confirmed evidence handle.
-- Other edit_frontier items may use exact search evidence when they are tightly coupled propagation surfaces; supporting-only files belong in supporting_context.
-- Prefer runtime source, contracts, state/config, persistence, and failure paths over prose documentation or generic entry files.
-- Prefer narrow, targeted reads (offset+limit) over full-file reads.
-- Do not repeat an equivalent search after it fails; change the semantic hypothesis or follow a concrete next hop.
-- Do not enumerate the repository, expand generic synonyms, or collect peripheral context for completeness.
-- If you cannot produce a grounded submission, fail explicitly. No local semantic fallback exists.
-- Do NOT expose hidden reasoning. Call tools and return concise, evidence-backed findings.`
-}
-
 export interface RunSubAgentOptions {
   definition: SubAgentDefinition
   objective: string
@@ -253,15 +193,8 @@ export interface RunSubAgentOptions {
   abortSignal?: AbortSignal
   requestTimeoutMs?: number
   maxTransientAttempts?: number
-  retrievalContext?: string
-  initialEvidence?: SubAgentEvidence[]
-  submissionOnly?: boolean
   userPrompt?: string
   allowedTools?: string[]
-  requiredAuditPaths?: string[]
-  requiredCandidatePaths?: string[]
-  requireGroundedReport?: boolean
-  maxCandidates?: number
   onEvent?: (event: SubAgentEvent) => void
 }
 
@@ -273,30 +206,11 @@ export interface SubAgentResult {
   evidence?: SubAgentEvidence[]
   error?: string
   truncated?: boolean
-  codeMap?: SubmittedCodeMap
 }
 
 interface ToolCallRequest {
   id: string
   function: { name: string; arguments: string }
-}
-
-export interface SubmittedCandidate {
-  path: string
-  startLine: number
-  endLine: number
-  evidenceIds: string[]
-  role: string
-  editKind: 'owner' | 'mirror' | 'implementation' | 'consumer' | 'test' | 'supporting'
-  confidence: 'high' | 'medium' | 'low'
-  why: string
-}
-
-export interface SubmittedCodeMap {
-  candidates: SubmittedCandidate[]
-  supportingContext: SubmittedCandidate[]
-  frontierComplete: boolean
-  unresolved: string[]
 }
 
 type SubAgentMessage = { role: string; content: string; tool_calls?: ToolCallRequest[]; tool_call_id?: string }
@@ -566,188 +480,6 @@ function subAgentPromptCacheKey(params: {
   return `tf:subagent:${params.model}:${params.definition.id}:${digest}`.slice(0, 240)
 }
 
-function stringList(value: unknown, maxItems: number, maxLength = 240): string[] {
-  if (!Array.isArray(value)) return []
-  return value
-    .map(item => String(item || '').replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .slice(0, maxItems)
-    .map(item => item.slice(0, maxLength))
-}
-
-function normalizeEditKind(value: unknown, role: string): SubmittedCandidate['editKind'] {
-  const normalized = String(value || '').trim().toLowerCase()
-  if (['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'].includes(normalized)) {
-    return normalized as SubmittedCandidate['editKind']
-  }
-  if (/mirror|duplicate|synchron|same[- ]edit/.test(role)) return 'mirror'
-  if (/root[- ]cause|owner|definition|default|schema|parser rule|state transition/.test(role)) return 'owner'
-  if (/test|verification/.test(role)) return 'test'
-  if (/caller|consumer|entry|lifecycle/.test(role)) return 'consumer'
-  if (/implementation|core|handler|runtime/.test(role)) return 'implementation'
-  return 'supporting'
-}
-
-function evidenceIdsForSubmission(
-  candidate: Record<string, any>,
-  workspacePath: string,
-  ledger: FastContextEvidenceLedger,
-): string[] {
-  const explicitIds = stringList(candidate.evidence_ids ?? candidate.evidenceIds, 12, 24)
-    .map(id => id.toUpperCase())
-  if (explicitIds.length > 0) return explicitIds
-
-  const legacyPath = toWorkspaceRelative(workspacePath, String(candidate.path || '').trim()).toLowerCase()
-  if (!legacyPath) return []
-  const startLine = Math.max(1, Math.floor(Number(candidate.start_line ?? candidate.startLine) || 1))
-  const endLine = Math.max(startLine, Math.floor(Number(candidate.end_line ?? candidate.endLine) || startLine))
-  return ledger.records()
-    .filter(record => record.evidence.path.toLowerCase() === legacyPath
-      && record.evidence.startLine <= endLine
-      && record.evidence.endLine >= startLine)
-    .map(record => record.id)
-}
-
-function materializeSubmittedCandidates(
-  value: Record<string, any>,
-  workspacePath: string,
-  ledger: FastContextEvidenceLedger,
-  supporting = false,
-): SubmittedCandidate[] {
-  const evidenceIds = evidenceIdsForSubmission(value, workspacePath, ledger)
-  const records = ledger.resolve(evidenceIds)
-  const role = String(value.role || '').replace(/\s+/g, ' ').trim().slice(0, 80)
-  const editKind = supporting ? 'supporting' : normalizeEditKind(value.edit_kind ?? value.editKind, role.toLowerCase())
-  const confidence = ['high', 'medium', 'low'].includes(value.confidence) ? value.confidence : 'medium'
-  const why = String(value.why || '').replace(/\s+/g, ' ').trim().slice(0, 320)
-
-  if (records.length === 0) {
-    return [{
-      path: '',
-      startLine: 1,
-      endLine: 1,
-      evidenceIds,
-      role,
-      editKind,
-      confidence,
-      why,
-    }]
-  }
-
-  const recordsByPath = new Map<string, FastContextEvidenceRecord[]>()
-  for (const record of records) {
-    const pathRecords = recordsByPath.get(record.evidence.path) || []
-    pathRecords.push(record)
-    recordsByPath.set(record.evidence.path, pathRecords)
-  }
-
-  return [...recordsByPath.values()].map(pathRecords => ({
-    path: pathRecords[0].evidence.path,
-    startLine: Math.min(...pathRecords.map(record => record.evidence.startLine)),
-    endLine: Math.max(...pathRecords.map(record => record.evidence.endLine)),
-    evidenceIds: pathRecords.map(record => record.id),
-    role,
-    editKind,
-    confidence,
-    why,
-  }))
-}
-
-function parseSubmittedCodeMap(
-  value: Record<string, any>,
-  workspacePath: string,
-  ledger: FastContextEvidenceLedger,
-  maxCandidates = 10,
-): SubmittedCodeMap {
-  const editFrontier = Array.isArray(value.edit_frontier ?? value.editFrontier)
-    ? value.edit_frontier ?? value.editFrontier
-    : Array.isArray(value.candidates) ? value.candidates : []
-  const supportingContext = Array.isArray(value.supporting_context ?? value.supportingContext)
-    ? value.supporting_context ?? value.supportingContext
-    : []
-  return {
-    candidates: editFrontier
-      .slice(0, Math.max(1, Math.min(40, maxCandidates)))
-      .flatMap((candidate: Record<string, any>) => materializeSubmittedCandidates(candidate, workspacePath, ledger))
-      .slice(0, Math.max(1, Math.min(40, maxCandidates))),
-    supportingContext: supportingContext
-      .slice(0, 12)
-      .flatMap((candidate: Record<string, any>) => materializeSubmittedCandidates(candidate, workspacePath, ledger, true))
-      .slice(0, 12),
-    frontierComplete: value.frontier_complete ?? value.frontierComplete ?? true,
-    unresolved: [
-      ...stringList(value.unresolved, 8),
-      ...stringList(value.unresolved_edit_paths ?? value.unresolvedEditPaths, 8),
-      ...stringList(value.rejected_hypotheses ?? value.rejectedHypotheses, 8),
-      ...stringList(value.uncertainty, 8),
-    ].filter((item, index, all) => all.indexOf(item) === index).slice(0, 12),
-  }
-}
-
-function validateSubmittedCandidate(candidate: SubmittedCandidate, ledger: FastContextEvidenceLedger): string | null {
-  if (!candidate.evidenceIds.length) return 'every submitted item requires at least one evidence_id'
-  const missing = candidate.evidenceIds.filter(id => !ledger.has(id))
-  if (missing.length > 0) return `unknown evidence handle(s): ${missing.join(', ')}`
-  if (!candidate.path) return 'all evidence_ids for one item must resolve to the same file'
-  if (!candidate.role || !candidate.why) return 'every submitted item requires role and why'
-  return null
-}
-
-function validateSubmittedCodeMap(report: SubmittedCodeMap, ledger: FastContextEvidenceLedger): string | null {
-  if (report.candidates.length === 0) return 'at least one grounded architecture node is required'
-  const firstRecords = ledger.resolve(report.candidates[0].evidenceIds)
-  if (!firstRecords.some(record => record.readConfirmed)) return 'the first edit_frontier item must cite read-confirmed evidence'
-  for (const candidate of report.candidates) {
-    const error = validateSubmittedCandidate(candidate, ledger)
-    if (error) return error
-  }
-  for (const candidate of report.supportingContext) {
-    const error = validateSubmittedCandidate(candidate, ledger)
-    if (error) return error
-  }
-  return null
-}
-
-function validateRequiredAuditPaths(report: SubmittedCodeMap, requiredPaths: string[] | undefined): string | null {
-  if (!requiredPaths?.length) return null
-  const normalize = (value: string) => value.replace(/\\/g, '/').toLowerCase()
-  const submitted = new Set(report.candidates.map(candidate => normalize(candidate.path)))
-  const rejected = report.unresolved.map(item => normalize(item))
-  const missing = [...new Set(requiredPaths.map(normalize))]
-    .filter(path => !submitted.has(path) && !rejected.some(reason => reason.includes(path)))
-  return missing.length > 0
-    ? `high-confidence source seeds require an explicit disposition; include each candidate or name its full path with a source-grounded rejection: ${missing.join(', ')}`
-    : null
-}
-
-function validateRequiredCandidatePaths(report: SubmittedCodeMap, requiredPaths: string[] | undefined): string | null {
-  if (!requiredPaths?.length) return null
-  const normalize = (value: string) => value.replace(/\\/g, '/').toLowerCase()
-  const submitted = new Set(report.candidates.map(candidate => normalize(candidate.path)))
-  const missing = [...new Set(requiredPaths.map(normalize))].filter(path => !submitted.has(path))
-  return missing.length > 0
-    ? `the implementation-frontier contract requires these read-confirmed candidates in the ranked map: ${missing.join(', ')}`
-    : null
-}
-
-export function renderSubmittedCodeMap(report: SubmittedCodeMap): string {
-  const lines = ['RANKED_CODE_MAP', 'EDIT_FRONTIER']
-  report.candidates.forEach((candidate, index) => {
-    lines.push(`${index + 1}. ${candidate.path} L${candidate.startLine}-L${candidate.endLine} kind=${candidate.editKind} role=${candidate.role} confidence=${candidate.confidence} evidence=${candidate.evidenceIds.join(',')}`)
-    lines.push(`   why: ${candidate.why}`)
-  })
-  lines.push('', 'SUPPORTING_CONTEXT')
-  lines.push(...(report.supportingContext.length > 0
-    ? report.supportingContext.flatMap(item => [
-        `- ${item.path} L${item.startLine}-L${item.endLine} role=${item.role} evidence=${item.evidenceIds.join(',')}`,
-        `  why: ${item.why}`,
-      ])
-    : ['- none']))
-  lines.push('', 'UNRESOLVED', ...(report.unresolved.length > 0 ? report.unresolved.map(item => `- ${item}`) : ['- none']))
-  lines.push('', `FRONTIER_COMPLETE: ${report.frontierComplete ? 'yes' : 'no'}`)
-  return lines.join('\n')
-}
-
 export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgentResult> {
   const {
     definition,
@@ -768,7 +500,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
   const requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? 120_000)
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
-  const isFastContextDefinition = definition.id === 'fast_context'
 
   const messages: SubAgentMessage[] = []
 
@@ -779,15 +510,12 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     messages.push({ role: 'assistant', content: 'READY' })
   }
 
-  const retrievalContext = options.retrievalContext?.trim()
   messages.push({
     role: 'user',
     content: options.userPrompt || [
       `Objective: ${objective}`,
-      retrievalContext ? `\nCaller-supplied retrieval context (starting points, not proof):\n${retrievalContext}` : '',
-      isFastContextDefinition ? '\nRetrieval protocol: turn 1 is scope discovery only. Locate the smallest credible ownership area with search tools; do not read files until the next turn.' : '',
-      '\nBuild an architecture code map: recover execution and data flow, ownership boundaries, state/config/persistence, implementation families, change-impact edges, and failure paths. Rank the probable direct edit target first; represent supporting architecture through grounded relationships.',
-    ].filter(Boolean).join('\n'),
+      '\nUse the available read-only tools as needed. Return a concise result grounded in the files and line ranges you inspected, and state any remaining uncertainty.',
+    ].join('\n'),
   })
 
   const tools: Array<Record<string, any>> = [
@@ -877,51 +605,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     },
   ]
 
-  if (isFastContextDefinition) {
-    tools.push({
-      type: 'function',
-      function: {
-        name: 'submit_code_map',
-        description: 'Submit the final ranked, read-grounded implementation files. Call this alone when no named unread owner can materially change the ranking.',
-        parameters: {
-          type: 'object',
-          properties: {
-            edit_frontier: {
-              type: 'array',
-              maxItems: Math.max(1, Math.min(40, options.maxCandidates ?? 10)),
-              items: {
-                type: 'object',
-                properties: {
-                  evidence_ids: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^E\\d+$' }, description: 'Evidence handles returned by tools, in order of importance.' },
-                  role: { type: 'string' },
-                  edit_kind: { type: 'string', enum: ['owner', 'mirror', 'implementation', 'consumer', 'test', 'supporting'] },
-                  confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-                  why: { type: 'string' },
-                },
-                required: ['evidence_ids', 'role', 'confidence', 'why'],
-              },
-            },
-            supporting_context: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  evidence_ids: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^E\\d+$' } },
-                  role: { type: 'string' },
-                  confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-                  why: { type: 'string' },
-                },
-                required: ['evidence_ids', 'role', 'why'],
-              },
-            },
-            unresolved: { type: 'array', maxItems: 8, items: { type: 'string' }, description: 'Named paths or hypotheses that remain unresolved.' },
-            frontier_complete: { type: 'boolean', description: 'No named unread owner can change the ranked edit frontier.' },
-          },
-          required: ['edit_frontier'],
-        },
-      },
-    })
-  }
   const allowedToolNames = options.allowedTools ? new Set(options.allowedTools) : undefined
   const availableTools = allowedToolNames
     ? tools.filter(tool => allowedToolNames.has(tool.function.name))
@@ -934,16 +617,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     return { ok: false, finalText: '', evidence: [], turns: 0, elapsedMs: Date.now() - startedAt, truncated: false, error: message }
   }
   let turn = 0
-  const collectedEvidence: SubAgentEvidence[] = [...(options.initialEvidence || [])]
+  const collectedEvidence: SubAgentEvidence[] = []
   const evidenceKeys = new Set(collectedEvidence.map(evidence => `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`))
-  let searchRecoveryUsed = false
-  let reportRecoveryUsed = false
-  let submissionRejections = 0
-  let previousSubmissionError = ''
   const toolResultCache = new Map<string, ToolExecResult>()
   const activeProtocolCacheKey = protocolCacheKey({ baseUrl, provider, model: modelId, apiKey, customHeaders })
   let resolvedProtocol: ModelProtocol | null = getCachedProtocol(activeProtocolCacheKey)
-  const strictFastContext = isFastContextDefinition && options.requireGroundedReport === true
   const turnLimit = definition.maxTurns
   const effectiveReasoning: NativeReasoningConfig | undefined = definition.thinking === 'disabled'
     ? { enabled: false, effort: 'none' }
@@ -951,18 +629,13 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       ? { ...reasoning, enabled: true, effort: definition.thinking }
       : reasoning
 
-  const evidenceLedger = new FastContextEvidenceLedger(options.initialEvidence || [])
-
-  const addEvidence = (evidence: SubAgentEvidence): { record: FastContextEvidenceRecord; isNew: boolean } => {
+  const addEvidence = (evidence: SubAgentEvidence): boolean => {
     const key = `${evidence.path}:${evidence.startLine}-${evidence.endLine}:${evidence.reason}`
-    const registration = evidenceLedger.register(evidence)
-    if (evidenceKeys.has(key)) return registration
+    if (evidenceKeys.has(key)) return false
     evidenceKeys.add(key)
     collectedEvidence.push(evidence)
-    return registration
+    return true
   }
-
-  const hasModelReadEvidence = (): boolean => evidenceLedger.records().some(record => record.readConfirmed)
 
   while (turn < turnLimit) {
     if (abortSignal?.aborted) break
@@ -994,23 +667,10 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
         const url = buildModelProtocolUrl(baseUrl, protocol)
-        const finalizationOnly = strictFastContext
-          && hasModelReadEvidence()
-          && (options.submissionOnly === true || turn === turnLimit)
-        const scopeDiscoveryOnly = strictFastContext && turn === 1 && !finalizationOnly
-        const retrievalPhase = finalizationOnly
-          ? 'finalization'
-          : scopeDiscoveryOnly
-            ? 'scope_discovery'
-            : 'evidence_retrieval'
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = messages.map(message => ({ ...message }))
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
-        const requestTools = finalizationOnly
-          ? availableTools.filter(tool => tool.function.name === 'submit_code_map')
-          : scopeDiscoveryOnly
-            ? availableTools.filter(tool => tool.function.name !== 'read_file' && tool.function.name !== 'submit_code_map')
-            : availableTools
+        const requestTools = availableTools
         const requestBody: Record<string, unknown> = protocol === 'anthropic_messages'
           ? {
               model: modelId,
@@ -1056,14 +716,6 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           if (reasoningRequest?.outputConfig) requestBody.output_config = reasoningRequest.outputConfig
           requestBody.parallel_tool_calls = true
         }
-        if (finalizationOnly) {
-          requestBody.tool_choice = protocol === 'anthropic_messages'
-            ? { type: 'tool', name: 'submit_code_map', disable_parallel_tool_use: true }
-            : protocol === 'openai_responses'
-              ? { type: 'function', name: 'submit_code_map' }
-              : { type: 'function', function: { name: 'submit_code_map' } }
-          if (protocol !== 'anthropic_messages') requestBody.parallel_tool_calls = false
-        }
         if (requestTools.length === 0) {
           delete requestBody.tools
           delete requestBody.tool_choice
@@ -1075,7 +727,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             model: modelId,
             workspacePath,
             codemap,
-            tools: strictFastContext ? availableTools : requestTools,
+            tools: requestTools,
           })
           if (protocol === 'openai_responses' && /gpt-5\.5/i.test(modelId)) {
             requestBody.prompt_cache_retention = '24h'
@@ -1216,11 +868,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           protocol,
           offeredTools: Array.from(offeredToolNames),
           returnedTools: responseToolCalls.map(call => call.function.name),
-          finalizationOnly,
-          retrievalPhase,
         })
         if (unexpectedToolNames.length > 0) {
-          responseToolViolation = `FastContext provider returned tool(s) not offered for turn ${turn}: ${unexpectedToolNames.join(', ')}. The calls were not executed.`
+          responseToolViolation = `Subagent provider returned tool(s) not offered for turn ${turn}: ${unexpectedToolNames.join(', ')}. The calls were not executed.`
         }
         resolvedProtocol = protocol
         rememberProtocol(activeProtocolCacheKey, protocol)
@@ -1269,105 +919,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       }
     }
 
-    const submissionCalls = responseToolCalls.filter(call => call.function.name === 'submit_code_map')
-
-    if (submissionCalls.length > 0) {
-      const submission = submissionCalls[0]
-      let submissionArgs: Record<string, any> = {}
-      let submissionError = responseToolCalls.length === 1 ? '' : 'submit_code_map must be called alone, without retrieval tools'
-      try {
-        submissionArgs = JSON.parse(submission.function.arguments || '{}')
-      } catch {
-        submissionError = 'submit_code_map arguments are not valid JSON'
-      }
-      const report = parseSubmittedCodeMap(submissionArgs, workspacePath, evidenceLedger, options.maxCandidates)
-      submissionError ||= validateSubmittedCodeMap(report, evidenceLedger) || ''
-      submissionError ||= validateRequiredAuditPaths(report, options.requiredAuditPaths) || ''
-      submissionError ||= validateRequiredCandidatePaths(report, options.requiredCandidatePaths) || ''
-      if (!submissionError) {
-        const finalText = renderSubmittedCodeMap(report)
-        emit({ type: 'final', text: finalText })
-        emit({
-          type: 'turn_complete',
-          turn,
-          calls: 1,
-          modelElapsedMs,
-          toolElapsedMs: 0,
-          totalElapsedMs: Date.now() - turnStartedAt,
-          inputTokens: turnInputTokens,
-          outputTokens: turnOutputTokens,
-          cacheReadTokens: turnCacheReadTokens,
-        })
-        return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText, evidence: collectedEvidence, codeMap: report }
-      }
-      submissionRejections = previousSubmissionError === submissionError ? submissionRejections + 1 : 1
-      previousSubmissionError = submissionError
-      if (submissionRejections >= 2 || turn >= turnLimit) {
-        const error = `FastContext submission rejected: ${submissionError}`
-        emit({ type: 'error', message: error })
-        return {
-          ok: false,
-          turns: turn,
-          elapsedMs: Date.now() - startedAt,
-          evidence: collectedEvidence,
-          codeMap: report.candidates.length > 0 ? report : undefined,
-          truncated: true,
-          error,
-        }
-      }
-      messages.push({ role: 'assistant', content: messageText, tool_calls: [submission] })
-      messages.push({ role: 'tool', tool_call_id: submission.id, content: `Rejected: ${submissionError}` })
-      messages.push({
-        role: 'user',
-        content: 'Correct only the mechanical evidence error. Read a missing candidate only when the rejection identifies it; otherwise resubmit the grounded subset immediately.',
-      })
-      emit({ type: 'tool_result', tool: 'submit_code_map', ok: false, summary: submissionError, turn })
-      emit({
-        type: 'turn_complete',
-        turn,
-        calls: 1,
-        modelElapsedMs,
-        toolElapsedMs: 0,
-        totalElapsedMs: Date.now() - turnStartedAt,
-        inputTokens: turnInputTokens,
-        outputTokens: turnOutputTokens,
-        cacheReadTokens: turnCacheReadTokens,
-      })
-      continue
-    }
-
     if (responseToolCalls.length === 0) {
-      if (strictFastContext && collectedEvidence.length === 0 && !searchRecoveryUsed && turn < turnLimit) {
-        messages.push({ role: 'assistant', content: messageText })
-        messages.push({
-          role: 'user',
-          content: 'Recovery search: the first pass produced no concrete evidence. Rewrite the objective into exact identifiers, visible text, and likely file globs; run a different search strategy before concluding.',
-        })
-        searchRecoveryUsed = true
-        continue
-      }
-      if (strictFastContext && !hasModelReadEvidence() && turn < turnLimit) {
-        messages.push({ role: 'assistant', content: messageText })
-        messages.push({
-          role: 'user',
-          content: 'Search snippets and paths are not proof. Read the strongest implementation ranges now, then follow only concrete symbols or paths exposed by that source.',
-        })
-        continue
-      }
-      if (strictFastContext && !reportRecoveryUsed && turn < turnLimit) {
-        messages.push({ role: 'assistant', content: messageText })
-        messages.push({
-          role: 'user',
-          content: 'Do not return a prose report. Finish by calling submit_code_map with evidence_ids from the ledger.',
-        })
-        reportRecoveryUsed = true
-        continue
-      }
-      if (strictFastContext) {
-        const error = 'FastContext ended without a valid submit_code_map call'
-        emit({ type: 'error', message: error })
-        return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
-      }
       emit({ type: 'final', text: messageText })
       emit({
         type: 'turn_complete',
@@ -1461,18 +1013,16 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       })
 
       for (const ev of result.evidence) {
-        const registration = addEvidence(ev)
-        if (registration.isNew) {
+        if (addEvidence(ev)) {
           emit({ type: 'evidence', evidence: ev })
         }
       }
 
       const stableOutput = boundToolOutput(tc.function.name, result.output)
-      const handles = evidenceLedger.format(result.evidence.map(item => evidenceLedger.register(item).record))
       messages.push({
         role: 'tool' as any,
         tool_call_id: tc.id,
-        content: [reused ? '[Cached exact repeat; no new execution.]' : '', stableOutput, handles].filter(Boolean).join('\n'),
+        content: [reused ? '[Cached exact repeat; no new execution.]' : '', stableOutput].filter(Boolean).join('\n'),
       })
     }
 
@@ -1487,22 +1037,8 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       outputTokens: turnOutputTokens,
       cacheReadTokens: turnCacheReadTokens,
     })
-
-
-    if (strictFastContext && turn === turnLimit - 1) {
-      messages.push({
-        role: 'user',
-        content: 'The hard safety limit allows one final provider turn. Call submit_code_map using only read-confirmed evidence. If the frontier is still materially open, fail explicitly rather than inventing completeness.',
-      })
-    }
-
   }
 
-  if (strictFastContext) {
-    const error = 'FastContext exhausted its turn budget without a valid evidence map'
-    emit({ type: 'error', message: error })
-    return { ok: false, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: true, error }
-  }
   return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, evidence: collectedEvidence, truncated: turn >= turnLimit }
 }
 

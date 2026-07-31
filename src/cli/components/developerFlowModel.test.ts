@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import { createFastContextUiSummary } from './layout/fastContextUi'
 import { deriveDeveloperFlow, type DeveloperFlowInput } from './developerFlowModel'
 
 function input(overrides: Partial<DeveloperFlowInput> = {}): DeveloperFlowInput {
@@ -8,8 +7,6 @@ function input(overrides: Partial<DeveloperFlowInput> = {}): DeveloperFlowInput 
     isRunning: false,
     tools: [],
     draft: null,
-    fastContextSummary: createFastContextUiSummary(),
-    fastContextActive: false,
     subagents: [],
     terminals: 0,
     queuedCount: 0,
@@ -41,13 +38,10 @@ describe('developer flow model', () => {
     expect(model.detail).toBe('Writing src/App.tsx')
   })
 
-  it('keeps background retrieval and delegated work visible', () => {
-    const summary = { ...createFastContextUiSummary(), phase: 'ranking' as const, absorbed: 6, events: 12 }
+  it('keeps delegated work and terminals visible', () => {
     const model = deriveDeveloperFlow(input({
       isRunning: true,
       runState: { phase: 'thinking', updatedAt: 2 },
-      fastContextActive: true,
-      fastContextSummary: summary,
       subagents: [{
         id: 'review-1',
         label: 'Reviewer',
@@ -61,7 +55,6 @@ describe('developer flow model', () => {
     }))
 
     expect(model.background).toEqual([
-      'FC ranking · 6 evidence',
       'Reviewer 2/5',
       '1 terminal active',
       '2 queued',
@@ -82,15 +75,5 @@ describe('developer flow model', () => {
     }))
 
     expect(model.background).toContain('Reviewer result ready')
-  })
-
-  it('shows standalone FastContext as active exploration', () => {
-    const model = deriveDeveloperFlow(input({
-      fastContextActive: true,
-      fastContextSummary: { ...createFastContextUiSummary(), phase: 'mapping', events: 2 },
-    }))
-
-    expect(model.label).toBe('EXPLORING')
-    expect(model.detail).toBe('FastContext is mapping')
   })
 })

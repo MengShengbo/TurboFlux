@@ -11,9 +11,4 @@ describe('CLI i18n', () => {
     expect(t('ui.app.modelSwitched', { model: 'gpt-5.6' })).toBe('模型已切换为 gpt-5.6')
     expect(t('ui.app.modelSwitched')).toContain('{model}')
   })
-
-  it('keeps technical identifiers intact across locales', () => {
-    expect(createTranslator('zh-CN')('setup.fastContext.followMain')).toContain('FastContext')
-    expect(createTranslator('en')('setup.fastContext.followMain')).toContain('FastContext')
-  })
 })

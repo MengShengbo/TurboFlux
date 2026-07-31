@@ -111,7 +111,7 @@ describe('ActiveWorkPanel', () => {
         <ActiveWorkPanel
           tools={[]}
           draft={null}
-          streamText="我正在核对 FastContext 返回的证据。"
+          streamText="我正在核对后台代理返回的证据。"
           thinkingText=""
           lastActivity={Date.now()}
           runState={{ phase: 'thinking', updatedAt: Date.now() }}
@@ -122,7 +122,7 @@ describe('ActiveWorkPanel', () => {
     )
 
     expect(output).toContain('MAIN AGENT')
-    expect(output).toContain('我正在核对 FastContext 返回的证据。')
+    expect(output).toContain('我正在核对后台代理返回的证据。')
   })
 
   it('shows live reasoning status before the first reasoning token arrives', () => {

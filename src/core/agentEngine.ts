@@ -46,10 +46,8 @@ import {
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
 import { ToolExecutionLedger } from './toolExecutionLedger'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
-import { FAST_CONTEXT_ENGINE_ID, getFastContextProfile, normalizeFastContextStrategy, type FastContextScanEvent, type FastContextScanResult, type FastContextStrategy } from './fastContextTypes'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
 import type { RuntimeTask } from '../shared/runtimeTaskTypes'
-import { runFastContextSubagent } from './fastContextSubagent'
 import { isMcpTool, parseMcpToolName, executeMcpTool, getMcpAgentTools, validateMcpToolArgs } from './mcp/toolBridge'
 import type { McpClient } from './mcp/client'
 import type { SubAgentEvent, SubAgentEvidence } from '../shared/subAgentTypes'
@@ -278,11 +276,9 @@ export type AgentEventType =
   }
   | { type: 'context:segment_created'; segment: ContextSegment }
   | { type: 'git:state'; state: GitIntegrationState }
-  | { type: 'fast_context:event'; runId: string; event: FastContextScanEvent }
-  | { type: 'fast_context:complete'; runId: string; result: FastContextScanResult }
-  | { type: 'subagent:start'; agentId: string; agentType: string; label: string; objective: string; runKind: 'fast_context' | 'spawn_agent' }
-  | { type: 'subagent:progress'; agentId: string; agentType: string; label: string; event: SubAgentEvent; runKind: 'spawn_agent' }
-  | { type: 'subagent:end'; agentId: string; agentType: string; ok: boolean; elapsedMs: number; runKind: 'fast_context' | 'spawn_agent' }
+  | { type: 'subagent:start'; agentId: string; agentType: string; label: string; objective: string }
+  | { type: 'subagent:progress'; agentId: string; agentType: string; label: string; event: SubAgentEvent }
+  | { type: 'subagent:end'; agentId: string; agentType: string; ok: boolean; elapsedMs: number }
   | { type: 'cache:diagnostic'; result: { broken: boolean; reason: string; tokenDrop: number; likelyTtlExpiry: boolean } }
   | { type: 'cache:modules'; modules: PromptModuleSnapshot[] }
 
@@ -373,51 +369,6 @@ function hasCompleteToolPayloads(calls: Array<{ name: string; argumentsJson: str
   })
 }
 
-type FastContextBackgroundStatus = 'started' | 'running' | 'busy' | 'unavailable'
-
-interface FastContextBackgroundStart {
-  status: FastContextBackgroundStatus
-  objective: string
-  strategy: FastContextStrategy
-  promise: Promise<FastContextScanResult | null> | null
-  taskId?: string
-}
-
-interface PendingFastContextPack {
-  content: string
-  objective: string
-  generation: number
-  ownerAgentRunId: number | null
-  isError?: boolean
-}
-
-export function isFastContextPackCurrent(
-  pack: Pick<PendingFastContextPack, 'generation' | 'ownerAgentRunId'>,
-  generation: number,
-  currentAgentRunId: number,
-): boolean {
-  return pack.generation === generation && pack.ownerAgentRunId === currentAgentRunId
-}
-
-type FastContextRunMode = 'agent' | 'standalone'
-type FastContextRunPhase = 'running' | 'delivering'
-
-interface ActiveFastContextRun {
-  id: string
-  generation: number
-  startedAt: number
-  objective: string
-  workspacePath: string
-  strategy: FastContextStrategy
-  mode: FastContextRunMode
-  phase: FastContextRunPhase
-  ownerAgentRunId: number | null
-  controller: AbortController
-  promise: Promise<FastContextScanResult | null>
-  delivery: PendingFastContextPack | null
-  completionEmitted: boolean
-}
-
 export class AgentEngine {
   private session: AgentSession
   private taskManager: TaskManager
@@ -433,9 +384,6 @@ export class AgentEngine {
   private readonly interactiveRequests: ApprovalCoordinator<EngineInteractiveRequest, string>
   private toolCallTaskMap: Map<string, string> = new Map()
   private fileBeforeSnapshots: Map<string, string | null> = new Map()
-  private fastContextRun: ActiveFastContextRun | null = null
-  private fastContextGeneration = 0
-  private agentRunGeneration = 0
   // Registry of background PTY sessions the agent has spawned via
   // run_command(run_in_background=true). Tracks the command + start time so
   // list_terminals / read_terminal can label them. Foreground commands use
@@ -444,12 +392,11 @@ export class AgentEngine {
   private turnStrategyPlanner: TurnStrategyPlanner = new TurnStrategyPlanner()
   private currentTurnStrategy: TurnStrategy | null = null
   /**
-   * Workspace skeleton — a STABLE per-workspace primer fed to Fast Context
-   * (and other subagents) ahead of any objective.
+   * Workspace skeleton — a stable per-workspace primer for subagents.
    * The skeleton is intentionally objective-agnostic:
    * top-level directory tree only, computed once per workspace, kept
    * deterministic so V4's cache prefix detector recognizes the same
-   * unit across every Fast Context call. Once persisted, every later
+   * unit across every subagent call. Once persisted, every later
    * invocation pays 1/10 input price for the skeleton portion.
    *
    * Cache is keyed by absolute workspace path. Invalidated when the
@@ -489,7 +436,6 @@ export class AgentEngine {
   private currentRunSuccessfulReadFiles: Set<string> = new Set()
   private currentRunSearches: Set<string> = new Set()
   private currentRunSuccessfulSearches: Set<string> = new Set()
-  private currentRunExplorePacks: Set<string> = new Set()
   private toolExecutionLedger = new ToolExecutionLedger()
   private conclusionGuardAttempts: number = 0
   private disabledToolNames: Set<string> = new Set()
@@ -597,7 +543,6 @@ export class AgentEngine {
   destroy(): void {
     this.unsubscribeTaskManager?.()
     this.abortController?.abort()
-    this.cancelFastContextRun('Agent engine destroyed', false)
     this.interactiveRequests.cancelAll('deny')
     this.abortController = null
     this.currentStreamId = null
@@ -659,231 +604,8 @@ export class AgentEngine {
     }
   }
 
-  async runFastContextObjective(objective: string, strategy: FastContextStrategy = 'autonomous-race'): Promise<FastContextScanResult | null> {
-    return this.runStandaloneFastContextObjective(objective, strategy)
-  }
-
-  private startFastContextBackground(
-    objective: string,
-    strategy: FastContextStrategy = 'autonomous-race',
-    workspacePath = this.config.workspacePath,
-  ): FastContextBackgroundStart {
-    return this.startFastContextRun(objective, strategy, 'agent', workspacePath)
-  }
-
-  private startFastContextRun(
-    objective: string,
-    strategy: FastContextStrategy,
-    mode: FastContextRunMode,
-    workspacePath = this.config.workspacePath,
-  ): FastContextBackgroundStart {
-    const nextObjective = objective.trim()
-    if (!nextObjective || !workspacePath) {
-      return { status: 'unavailable', objective: nextObjective, strategy, promise: null }
-    }
-    const activeRun = this.fastContextRun
-    if (activeRun) {
-      return {
-        status: activeRun.objective === nextObjective && activeRun.mode === mode && activeRun.workspacePath === workspacePath ? 'running' : 'busy',
-        objective: activeRun.objective,
-        strategy: activeRun.strategy,
-        promise: activeRun.promise,
-        taskId: activeRun.id,
-      }
-    }
-
-    const controller = new AbortController()
-    const generation = ++this.fastContextGeneration
-    const ownerAgentRunId = mode === 'agent' ? this.agentRunGeneration : null
-    const startedAt = Date.now()
-    const started = this.subAgentTaskManager.startTask<FastContextScanResult | null>({
-      kind: 'fast_context',
-      agentType: 'fast_context',
-      label: 'FastContext',
-      objective: nextObjective,
-      workspacePath,
-      ownerSessionId: this.config.conversationId,
-      deliveryMode: mode === 'agent' ? 'push' : 'pull',
-      parentAgentRunId: ownerAgentRunId ?? undefined,
-      controller,
-      timeoutMs: getFastContextProfile(strategy).taskTimeoutMs,
-      run: ({ signal, recordEvent, taskId }) => this.runFastContextScan(nextObjective, {
-        signal,
-        runId: taskId,
-        agentId: taskId,
-        strategy,
-        workspacePath,
-        recordEvent: event => recordEvent(event),
-      }),
-      isSuccess: result => result !== null,
-      getError: () => 'FastContext scan did not complete',
-    })
-    let run!: ActiveFastContextRun
-    const promise = started.promise.then(result => {
-      this.settleFastContextRun(run, result)
-      return result
-    }, error => {
-      this.failFastContextRun(run, error)
-      throw error
-    })
-    run = {
-      id: started.task.id,
-      generation,
-      startedAt,
-      objective: nextObjective,
-      workspacePath,
-      strategy,
-      mode,
-      phase: 'running',
-      ownerAgentRunId,
-      controller,
-      promise,
-      delivery: null,
-      completionEmitted: false,
-    }
-    this.fastContextRun = run
-    void promise.catch(() => {})
-    return { status: 'started', objective: nextObjective, strategy, promise, taskId: started.task.id }
-  }
-
-  private settleFastContextRun(run: ActiveFastContextRun, result: FastContextScanResult | null): void {
-    if (this.fastContextRun !== run) return
-    if (!result) {
-      const message = run.controller.signal.aborted ? 'FastContext cancelled' : 'FastContext scan did not complete'
-      this.finishFastContextFailure(run, message, run.controller.signal.aborted ? 'cancelled' : 'error')
-      return
-    }
-
-    const canDeliver = run.mode === 'agent'
-      && run.ownerAgentRunId === this.agentRunGeneration
-      && result.filesScanned > 0
-      && result.hits.length > 0
-      && result.evidencePack.trim().length > 0
-    if (canDeliver) {
-      run.phase = 'delivering'
-      run.delivery = {
-        content: result.evidencePack,
-        objective: run.objective,
-        generation: run.generation,
-        ownerAgentRunId: run.ownerAgentRunId,
-      }
-    } else {
-      this.fastContextRun = null
-    }
-    this.emitFastContextComplete(run, result)
-  }
-
-  private failFastContextRun(run: ActiveFastContextRun, error: unknown): void {
-    if (this.fastContextRun !== run) return
-    const message = error instanceof Error ? error.message : String(error)
-    this.finishFastContextFailure(run, message, run.controller.signal.aborted ? 'cancelled' : 'error')
-  }
-
-  private finishFastContextFailure(
-    run: ActiveFastContextRun,
-    message: string,
-    phase: 'cancelled' | 'error',
-  ): void {
-    const canDeliverFailure = phase === 'error'
-      && run.mode === 'agent'
-      && run.ownerAgentRunId === this.agentRunGeneration
-    if (canDeliverFailure) {
-      run.phase = 'delivering'
-      run.delivery = {
-        content: `FastContext failed: ${message}\nContinue with targeted search and read tools from the main agent. Do not assume retrieval completed.`,
-        objective: run.objective,
-        generation: run.generation,
-        ownerAgentRunId: run.ownerAgentRunId,
-        isError: true,
-      }
-    } else if (this.fastContextRun === run) {
-      this.fastContextRun = null
-    }
-    this.emit({
-      type: 'fast_context:event',
-      runId: run.id,
-      event: { type: 'phase', phase, insight: `${phase === 'cancelled' ? 'FastContext cancelled' : 'FastContext stopped'}: ${message.slice(0, 120)}` },
-    })
-    this.emitFastContextComplete(run, this.createFastContextFailureResult(run))
-  }
-
-  private createFastContextFailureResult(run: ActiveFastContextRun): FastContextScanResult {
-    return {
-      engine: FAST_CONTEXT_ENGINE_ID,
-      objective: run.objective,
-      strategy: run.strategy,
-      evidencePack: '',
-      filesScanned: 0,
-      hits: [],
-      elapsedMs: Date.now() - run.startedAt,
-      truncated: true,
-    }
-  }
-
-  private emitFastContextComplete(run: ActiveFastContextRun, result: FastContextScanResult): void {
-    if (run.completionEmitted) return
-    run.completionEmitted = true
-    this.emit({ type: 'fast_context:complete', runId: run.id, result })
-  }
-
-  private cancelFastContextRun(reason: string, emit = true): void {
-    const run = this.fastContextRun
-    if (!run) return
-    this.fastContextRun = null
-    if (run.phase === 'delivering') return
-    if (emit) {
-      this.emit({
-        type: 'fast_context:event',
-        runId: run.id,
-        event: { type: 'phase', phase: 'cancelled', insight: reason },
-      })
-      this.emitFastContextComplete(run, this.createFastContextFailureResult(run))
-    }
-    void this.subAgentTaskManager.stopTask(run.id, reason).catch(() => {
-      run.controller.abort()
-    })
-  }
-
-  private async waitForCurrentFastContext(run = this.fastContextRun): Promise<void> {
-    if (!run || run.phase !== 'running') return
-    const promise = run.promise
-    const signal = this.abortController?.signal
-    if (!signal) {
-      await promise.then(() => undefined, () => undefined)
-      return
-    }
-    if (signal.aborted) return
-
-    let handleAbort: (() => void) | null = null
-    const aborted = new Promise<void>(resolve => {
-      handleAbort = () => resolve()
-      signal.addEventListener('abort', handleAbort, { once: true })
-    })
-    try {
-      await Promise.race([promise.then(() => undefined, () => undefined), aborted])
-    } finally {
-      if (handleAbort) signal.removeEventListener('abort', handleAbort)
-    }
-  }
-
   isRunning(): boolean {
     return Boolean(this.currentRunPromise)
-  }
-
-  isFastContextRunning(): boolean {
-    return this.fastContextRun?.phase === 'running'
-  }
-
-  async runStandaloneFastContextObjective(objective: string, strategy: FastContextStrategy = 'autonomous-race'): Promise<FastContextScanResult | null> {
-    const nextObjective = objective.trim()
-    if (!nextObjective) return null
-    if (this.currentRunPromise) {
-      throw new Error('FastContext cannot run as a background command while the main agent is running.')
-    }
-    const started = this.startFastContextRun(nextObjective, strategy, 'standalone')
-    if (started.status === 'unavailable') return null
-    if (started.status === 'busy') throw new Error(`FastContext is already running for: ${started.objective}`)
-    return started.promise
   }
 
   setContextPolicy(mode: ContextPolicyMode): void {
@@ -1201,7 +923,6 @@ export class AgentEngine {
     this.currentRunSuccessfulReadFiles.clear()
     this.currentRunSearches.clear()
     this.currentRunSuccessfulSearches.clear()
-    this.currentRunExplorePacks.clear()
     this.toolExecutionLedger.beginRun()
     this.conclusionGuardAttempts = 0
     this.compressionPreparedTurnCount = 0
@@ -1545,7 +1266,6 @@ export class AgentEngine {
     this.steeringOpen = false
     this.rejectPendingSteeringMessages('Current run was interrupted before guidance was committed')
     this.abortController?.abort()
-    this.cancelFastContextRun('FastContext cancelled with the current run')
     // Per-conv stream abort: only cancel THIS engine's HTTP stream in the
     // main process, not every active stream across all conversations.
     if (this.currentStreamId !== null) {
@@ -1680,11 +1400,6 @@ export class AgentEngine {
     if (this.currentRunPromise) {
       throw new Error('AgentEngine.run() called while a previous run is still in flight')
     }
-    if (this.fastContextRun?.mode === 'standalone' && this.fastContextRun.phase === 'running') {
-      throw new Error('AgentEngine.run() called while a standalone FastContext scan is still in flight')
-    }
-    if (this.fastContextRun) this.cancelFastContextRun('Discarding FastContext state from a completed agent run', false)
-    const agentRunId = ++this.agentRunGeneration
     const runPromise = (async () => {
     await this.initializeGit()
     this.abortController = new AbortController()
@@ -1697,7 +1412,6 @@ export class AgentEngine {
     this.currentRunSuccessfulReadFiles.clear()
     this.currentRunSearches.clear()
     this.currentRunSuccessfulSearches.clear()
-    this.currentRunExplorePacks.clear()
     this.toolExecutionLedger.beginRun()
     this.conclusionGuardAttempts = 0
     this.contextLimitRetryInProgress = false
@@ -1728,8 +1442,6 @@ export class AgentEngine {
         newTurns.push(userTurn)
       }
 
-      const waitedFastContextTaskIds = new Set<string>()
-
       while (true) {
         if (this.abortController?.signal.aborted) {
           break
@@ -1749,21 +1461,6 @@ export class AgentEngine {
         if (!assistantTurn.toolCalls || assistantTurn.toolCalls.length === 0) {
 
           if (this.consumeSteeringMessages(newTurns)) continue
-
-          const activeFastContext = this.fastContextRun
-          if (activeFastContext?.ownerAgentRunId === agentRunId) {
-            if (activeFastContext.phase === 'delivering') continue
-            if (!waitedFastContextTaskIds.has(activeFastContext.id)) {
-              waitedFastContextTaskIds.add(activeFastContext.id)
-              this.setRunState('tool_running', {
-                detail: 'Waiting for FastContext evidence',
-                activeTool: 'explore_code',
-              })
-              await this.waitForCurrentFastContext(activeFastContext)
-              if (this.abortController?.signal.aborted) break
-              if (this.fastContextRun?.phase === 'delivering') continue
-            }
-          }
 
           break
         }
@@ -1845,9 +1542,6 @@ export class AgentEngine {
     this.currentRunPromise = runPromise
     // Always release the slot once the run settles, even on rejection.
     void runPromise.catch(() => { /* surfaced via emit + caller try/catch */ }).finally(() => {
-      if (this.fastContextRun?.ownerAgentRunId === agentRunId) {
-        this.cancelFastContextRun('FastContext owner run ended before delivery')
-      }
       if (this.currentRunPromise === runPromise) {
         this.currentRunPromise = null
       }
@@ -2242,127 +1936,6 @@ Before retrying:
     }
   }
 
-  private async runFastContextScan(objective: string, options: {
-    signal?: AbortSignal
-    runId: string
-    strategy?: FastContextStrategy
-    agentId?: string
-    workspacePath?: string
-    recordEvent?: (event: unknown) => void
-  }): Promise<FastContextScanResult | null> {
-    const isCurrent = () => this.fastContextRun?.id === options.runId
-    const emitIfCurrent = (event: AgentEventType) => {
-      if (isCurrent()) this.emit(event)
-    }
-    const aggregate = { files: 0, absorbed: 0, hits: 0, latest: '' }
-    const onEvent = (event: FastContextScanEvent) => {
-      options.recordEvent?.(event)
-      if (event.type === 'file') {
-        if (event.status === 'discovered') aggregate.files += 1
-        if (event.status === 'absorbed') aggregate.absorbed += 1
-        aggregate.latest = event.path
-        return
-      }
-      if (event.type === 'hit') {
-        aggregate.hits += 1
-        aggregate.latest = event.hit.path
-        return
-      }
-      if (event.type === 'wave_metrics') {
-        emitIfCurrent({ type: 'fast_context:event', runId: options.runId, event })
-        emitIfCurrent({ type: 'fast_context:event', runId: options.runId, event: {
-          type: 'progress',
-          files: aggregate.files,
-          absorbed: aggregate.absorbed,
-          hits: aggregate.hits,
-          latest: aggregate.latest,
-          insight: `turn ${event.turn}: ${aggregate.absorbed} evidence range(s)`,
-        } })
-        return
-      }
-      emitIfCurrent({ type: 'fast_context:event', runId: options.runId, event })
-    }
-
-    // FastContext is intentionally a subagent-only path. Ordinary model
-    // turns stay steady and targeted; this mode is the explicit fast lane.
-    const startedAt = Date.now()
-    const strategy = options.strategy || 'autonomous-race'
-    const workspacePath = options.workspacePath || this.config.workspacePath
-    const profile = getFastContextProfile(strategy)
-    const agentId = options.agentId || `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
-    try {
-      if (!workspacePath) throw new Error('FastContext requires an open workspace')
-      if (options.signal?.aborted) throw new Error('FastContext cancelled before start')
-      const fastContextConfig = this.stateProvider.getFastContextConfig?.() ?? this.stateProvider.getActiveConfig()
-      const fastContextModel = this.stateProvider.getFastContextModel?.() ?? this.stateProvider.getActiveModel()
-      const workspaceSkeleton = await this.maybeBuildWorkspaceSkeleton(workspacePath)
-
-      emitIfCurrent({
-        type: 'subagent:start',
-        agentId,
-        agentType: 'fast_context',
-        label: 'FastContext',
-        objective,
-        runKind: 'fast_context',
-      })
-      onEvent({ type: 'insight', text: `Running ${FAST_CONTEXT_ENGINE_ID} with ${fastContextModel?.id || 'the configured model'}`, tone: 'info' })
-      const result = await runFastContextSubagent({
-        workspacePath,
-        objective,
-        toolExecutor: this.toolExecutor,
-        apiKey: fastContextConfig?.apiKey || '',
-        baseUrl: fastContextConfig?.baseUrl || 'https://api.deepseek.com',
-        provider: fastContextConfig?.provider,
-        customHeaders: fastContextConfig?.customHeaders,
-        reasoning: fastContextConfig?.reasoning,
-        modelCapabilities: fastContextConfig?.modelCapabilities,
-        model: fastContextModel?.id || fastContextConfig?.defaultModel,
-        codemap: workspaceSkeleton,
-        abortSignal: options.signal,
-        strategy,
-        requestTimeoutMs: profile.requestTimeoutMs,
-        onTrace: event => options.recordEvent?.({ type: 'fast_context_trace', event }),
-        onEvent,
-      })
-      emitIfCurrent({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: true, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
-      return result
-    } catch (error) {
-      emitIfCurrent({ type: 'subagent:end', agentId, agentType: 'fast_context', ok: false, elapsedMs: Date.now() - startedAt, runKind: 'fast_context' })
-      throw error
-    }
-  }
-
-  private attachFastContextResult(pack: PendingFastContextPack): void {
-    const toolCallId = `fast-context-${Date.now().toString(36)}`
-    const timestamp = Date.now()
-    const toolCall: ToolCall = {
-      id: toolCallId,
-      name: 'fast_context_result',
-      arguments: { objective: pack.objective },
-    }
-    this.session.turns.push({
-      id: generateTurnId(),
-      role: 'assistant',
-      content: '',
-      timestamp,
-      toolCalls: [toolCall],
-      metadata: { internal: true, internalKind: 'fast_context' },
-    })
-    this.session.turns.push({
-      id: generateTurnId(),
-      role: 'tool_result',
-      content: '',
-      timestamp: timestamp + 1,
-      toolResults: [{
-        toolCallId,
-        name: 'fast_context_result',
-        output: pack.content,
-        isError: pack.isError === true,
-      }],
-      metadata: { internal: true, internalKind: 'fast_context' },
-    })
-  }
-
   private async callModel(): Promise<AgentTurn> {
     const activeConfig = this.stateProvider.getActiveConfig()
     const activeModel = this.stateProvider.getActiveModel()
@@ -2383,21 +1956,6 @@ Before retrying:
     }
     // Long-conversation persona drift reminder — empty string when below threshold.
     const voiceReminderContext: string | null = null
-    const pendingFastContextRun = this.fastContextRun
-    const pendingFastContextPack = pendingFastContextRun?.phase === 'delivering'
-      ? pendingFastContextRun.delivery
-      : null
-    const fastContextPackForTurn = pendingFastContextRun
-      && pendingFastContextPack
-      && isFastContextPackCurrent(pendingFastContextPack, pendingFastContextRun.generation, this.agentRunGeneration)
-      ? pendingFastContextPack
-      : null
-    if (fastContextPackForTurn) {
-      this.attachFastContextResult(fastContextPackForTurn)
-      if (this.fastContextRun === pendingFastContextRun) this.fastContextRun = null
-    } else if (pendingFastContextRun?.phase === 'delivering') {
-      this.fastContextRun = null
-    }
     const runtimeContextCandidate = [
       this.config.workspacePath
         ? this.wrapRuntimeContextSection('current_workspace', [
@@ -4067,7 +3625,7 @@ Before retrying:
   /**
    * Build a STABLE workspace skeleton primer for subagent calls.
    *
-   * Used by FastContext and project-defined agents to seed a deterministic
+   * Used by project-defined agents to seed a deterministic
    * cache prefix unit that DeepSeek V4 can persist (see SubAgentInvocation.codemap).
    *
    * Stability is the whole point — this primer must be IDENTICAL across
@@ -4258,11 +3816,10 @@ Before retrying:
 
   private buildEvidenceGuardHint(): string | null {
     // If the model already performed any read operations (read_file,
-    // list_directory, search_*, get_codemap, explore_code), it has gathered evidence.
+    // list_directory, search_*, get_codemap), it has gathered evidence.
     // Don't force a retry — trust the model's judgment on when to conclude.
     if (this.currentRunReadFiles.size > 0) return null
     if (this.currentRunSuccessfulSearches.size > 0) return null
-    if (this.currentRunExplorePacks.size > 0) return null
     if (this.currentRunToolNames.some(n => n === 'list_directory' || n === 'get_codemap')) return null
     return this.buildEvidencePolicyContext(this.currentTurnStrategy, 'retry')
   }
@@ -4296,10 +3853,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       const query = (args.query || args.pattern || '') as string
       this.currentRunSearches.add(`${name}:${query}`)
     }
-    if (name === 'explore_code') {
-      const objective = (args.objective || '') as string
-      this.currentRunSearches.add(`${name}:${objective}`)
-    }
   }
 
   private recordSuccessfulToolUsage(name: string, args: Record<string, unknown>, output: string): void {
@@ -4323,13 +3876,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       if (/^(No matches found|No matching files found|No codemap found)$/i.test(output.trim())) return
       const query = (args.query || args.pattern || '') as string
       this.currentRunSuccessfulSearches.add(`${name}:${query}`)
-    }
-    if (name === 'explore_code') {
-      if (/FastContext background scan (?:started|is already)/i.test(output)) return
-      if (/no concrete candidates found|did not return high-signal files/i.test(output)) return
-      const objective = (args.objective || '') as string
-      this.currentRunExplorePacks.add(objective || 'explore_code')
-      this.currentRunSuccessfulSearches.add(`${name}:${objective}`)
     }
   }
 
@@ -4540,7 +4086,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private isReadAfterWriteSensitiveToolCall(toolCall: ToolCall): boolean {
-    return ['read_file', 'read_file_full', 'list_directory', 'search_files', 'search_content', 'search_symbols', 'get_codemap', 'explore_code', 'web_search'].includes(toolCall.name)
+    return ['read_file', 'read_file_full', 'list_directory', 'search_files', 'search_content', 'search_symbols', 'get_codemap', 'web_search'].includes(toolCall.name)
   }
 
   private partitionToolCalls(toolCalls: ToolCall[]): Array<{ isConcurrencySafe: boolean; toolCalls: ToolCall[] }> {
@@ -4862,7 +4408,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   }
 
   private emitSubAgentProgress(agentId: string, agentType: string, label: string, event: SubAgentEvent): void {
-    this.emit({ type: 'subagent:progress', agentId, agentType, label, event, runKind: 'spawn_agent' })
+    this.emit({ type: 'subagent:progress', agentId, agentType, label, event })
   }
 
   private formatSubAgentTask(task: SubAgentTaskSnapshot): string {
@@ -4878,10 +4424,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     if (runtime.error) lines.push(`Error: ${runtime.error}`)
     if (task.transcriptPath) lines.push(`Transcript: ${task.transcriptPath}`)
 
-    if (task.result && task.kind === 'fast_context') {
-      const result = task.result as Partial<FastContextScanResult>
-      lines.push('', result.evidencePack?.trim() || `FastContext scanned ${result.filesScanned || 0} file(s).`)
-    } else if (task.result) {
+    if (task.result) {
       const result = task.result as {
         ok?: boolean
         turns?: number
@@ -5199,28 +4742,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const data = response.data
         if (!data?.results?.length) return `No web results found for "${query}"`
         return this.formatWebSearchResults(data.query, data.provider, data.results)
-      }
-
-      case 'explore_code': {
-        if (!basePath) return `Error: no workspace selected`
-        const objective = String(args.objective || '').trim()
-        if (!objective) return `Error: objective is required`
-        const strategy = normalizeFastContextStrategy(args.strategy)
-        const context = typeof args.context === 'string' && args.context.trim()
-          ? `\n\nParent context:\n${args.context.trim()}`
-          : ''
-        const scanObjective = `${objective}${context}`
-        const requestedPath = typeof args.path === 'string' ? args.path.trim() : ''
-        const scopedWorkspace = requestedPath ? this.resolvePath(basePath, requestedPath) : basePath
-        const background = this.startFastContextBackground(scanObjective, strategy, scopedWorkspace)
-        if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
-        if (background.status === 'busy') {
-          return `FastContext is already working on: ${background.objective}\nContinue only non-overlapping work; do not poll it, repeat broad retrieval, or call explore_code again.`
-        }
-        if (background.status === 'running') {
-          return 'FastContext is already running for this objective. Continue only non-overlapping work; evidence will be injected automatically. Do not poll it.'
-        }
-        return `FastContext background scan started. Agent ID: ${background.taskId}. Scope: ${this.toWorkspaceRelative(basePath, scopedWorkspace)}. Continue only non-overlapping work; ranked evidence will be injected automatically. Do not poll it while running. If it ends failed or the user asks for diagnostics, inspect its persisted transcript once with read_agent.`
       }
 
       case 'list_memories': {
@@ -5796,11 +5317,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!agentId) return 'Error: agent_id is required'
         const task = this.subAgentTaskManager.getTask(agentId)
         if (!task) return `Error: unknown agent_id "${agentId}".`
-        if (task.deliveryMode === 'push') {
-          if (task.runtimeTask.status === 'running' || task.runtimeTask.status === 'starting') {
-            return `FastContext ${agentId} is still running. Its result will be injected automatically; continue non-overlapping work and do not poll it.`
-          }
-        }
         const transcript = this.subAgentTaskManager.readTranscript(agentId, {
           offset: typeof args.offset === 'number' ? args.offset : undefined,
           limit: typeof args.limit === 'number' ? args.limit : undefined,
@@ -5826,13 +5342,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const agentId = String(args.agent_id || '').trim()
         if (!agentId) return 'Error: agent_id is required'
         try {
-          if (this.fastContextRun?.id === agentId) {
-            const promise = this.fastContextRun.promise
-            this.cancelFastContextRun('FastContext cancelled by parent agent')
-            await promise.catch(() => null)
-            const stopped = this.subAgentTaskManager.getTask(agentId)?.runtimeTask.status || 'stopped'
-            return `Subagent ${agentId} is ${stopped}.`
-          }
           const task = await this.subAgentTaskManager.stopTask(agentId)
           return `Subagent ${agentId} is ${task.status}.`
         } catch (error) {
@@ -5848,21 +5357,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!objective) return 'Error: objective is required'
         const def = getSubAgentDefinition(agentType)
         if (!def) return `Error: unknown agent_type "${agentType}". Available: ${getAvailableAgentTypes().join(', ')}.`
-        if (def.id === 'fast_context') {
-          if (!this.config.workspacePath) return 'Error: no workspace path set'
-          const fastObjective = extraContext
-            ? `${objective}\n\nAdditional context from parent agent:\n${extraContext}`
-            : objective
-          const background = this.startFastContextBackground(fastObjective, 'autonomous-race')
-          if (background.status === 'unavailable') return 'Error: FastContext requires an open workspace.'
-          if (background.status === 'busy') {
-            return `FastContext is already running on: ${background.objective}. Continue useful non-overlapping work; do not call read_agent or list_agents for it.`
-          }
-          if (background.status === 'running') {
-          return 'FastContext is already running for this objective. Continue useful non-overlapping work; do not poll it while active.'
-        }
-          return `FastContext started in the background. Agent ID: ${background.taskId}. Continue useful non-overlapping work; its ranked evidence will be injected automatically. Use read_agent only after it reaches a terminal state and diagnostics are needed.`
-        }
         if (!this.config.workspacePath) {
           return 'Error: no workspace open; cannot spawn subagent.'
         }
@@ -5875,8 +5369,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           objective,
           workspacePath: this.config.workspacePath,
           ownerSessionId: this.config.conversationId,
-          deliveryMode: 'pull',
-          parentAgentRunId: this.agentRunGeneration,
           run: async ({ signal, recordEvent, taskId }) => {
             const onSubEvent = (event: SubAgentEvent) => {
               recordEvent(event)
@@ -5909,7 +5401,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           agentType: def.id,
           label: def.label,
           objective,
-          runKind: 'spawn_agent',
         })
         void started.promise.then(
           result => this.emit({
@@ -5918,7 +5409,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
             agentType: def.id,
             ok: result.ok,
             elapsedMs: Date.now() - startedAt,
-            runKind: 'spawn_agent',
           }),
           () => this.emit({
             type: 'subagent:end',
@@ -5926,7 +5416,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
             agentType: def.id,
             ok: false,
             elapsedMs: Date.now() - startedAt,
-            runKind: 'spawn_agent',
           }),
         )
         return `Subagent ${def.label} started in the background. Agent ID: ${started.task.id}. Use read_agent to inspect progress/results, list_agents to list tasks, or cancel_agent to stop it.`

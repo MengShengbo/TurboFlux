@@ -33,7 +33,6 @@ describe('SubAgentTaskManager', () => {
       await started.promise
 
       const snapshot = manager.getTask(started.task.id)
-      expect(snapshot).toMatchObject({ deliveryMode: 'pull' })
       expect(snapshot?.runtimeTask).toMatchObject({ status: 'completed', ownerSessionId: 'conversation-1' })
       expect(snapshot?.result).toMatchObject({ ok: true, finalText: 'Runtime inspected' })
       expect(readFileSync(snapshot!.transcriptPath, 'utf8')).toContain('Runtime inspected')
@@ -169,25 +168,22 @@ describe('SubAgentTaskManager', () => {
 
     try {
       const started = manager.startTask({
-        kind: 'fast_context',
-        agentType: 'fast_context',
-        label: 'FastContext',
+        kind: 'agent',
+        agentType: 'reviewer',
+        label: 'Reviewer',
         objective: 'Never finish',
         workspacePath,
-        deliveryMode: 'push',
-        parentAgentRunId: 7,
         timeoutMs: 20,
         run: ({ signal }) => new Promise(() => {
           signal.addEventListener('abort', () => { aborted = true }, { once: true })
         }),
       })
 
-      await expect(started.promise).rejects.toThrow('FastContext timed out after 20ms')
-      expect(manager.getTask(started.task.id)).toMatchObject({ deliveryMode: 'push', parentAgentRunId: 7 })
+      await expect(started.promise).rejects.toThrow('Reviewer timed out after 20ms')
       expect(aborted).toBe(true)
       expect(manager.getTask(started.task.id)?.runtimeTask).toMatchObject({
         status: 'failed',
-        error: 'FastContext timed out after 20ms',
+        error: 'Reviewer timed out after 20ms',
       })
     } finally {
       manager.destroy()
@@ -213,9 +209,9 @@ describe('SubAgentTaskManager', () => {
       await completed.promise
 
       const unfinished = firstManager.startTask({
-        kind: 'fast_context',
-        agentType: 'fast_context',
-        label: 'FastContext',
+        kind: 'agent',
+        agentType: 'reviewer',
+        label: 'Reviewer',
         objective: 'Still running at restart',
         workspacePath,
         run: () => new Promise(() => {}),

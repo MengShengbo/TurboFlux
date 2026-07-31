@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, extractResponsesReasoningEventDelta, extractResponsesReasoningSummary, isFastContextPackCurrent, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, extractResponsesReasoningEventDelta, extractResponsesReasoningSummary, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -39,16 +39,6 @@ describe('appendRuntimeContextToLatestUserMessage', () => {
       { type: 'text', text: 'continue' },
       { type: 'text', text: '<runtime_context>internal</runtime_context>' },
     ])
-  })
-})
-
-describe('FastContext pack lifecycle', () => {
-  it('binds delivery to the owning agent run instead of the latest user message', () => {
-    const pack = { generation: 7, ownerAgentRunId: 2 }
-
-    expect(isFastContextPackCurrent(pack, 7, 2)).toBe(true)
-    expect(isFastContextPackCurrent(pack, 8, 2)).toBe(false)
-    expect(isFastContextPackCurrent(pack, 7, 3)).toBe(false)
   })
 })
 
@@ -638,113 +628,6 @@ describe('AgentEngine filesystem tool output', () => {
       expect(first.output).toContain('const value = 1')
       expect(second.output).toContain('reused')
       expect(readFile).toHaveBeenCalledTimes(1)
-    } finally {
-      engine.destroy()
-    }
-  })
-})
-
-describe('AgentEngine FastContext scheduling', () => {
-  it('returns explore_code immediately while FastContext continues in the background', async () => {
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      const rejectAborted = () => {
-        const error = new Error('aborted')
-        error.name = 'AbortError'
-        reject(error)
-      }
-      if (init?.signal?.aborted) rejectAborted()
-      else init?.signal?.addEventListener('abort', rejectAborted, { once: true })
-    })) as unknown as typeof fetch
-
-    const workspace = process.cwd()
-    const stateProvider = new DefaultAgentStateProvider({
-      provider: 'custom',
-      apiKey: 'test',
-      baseUrl: 'http://example.test',
-      model: 'test-model',
-      contextWindow: 100_000,
-      maxTokens: 4096,
-    }, workspace)
-    const executor = {
-      listTree: async () => ({
-        success: true,
-        data: { name: 'repo', type: 'folder', children: [{ name: 'src', type: 'folder', children: [] }] },
-      }),
-    } as unknown as ToolExecutor
-    const engine = new AgentEngine({
-      mode: 'vibe',
-      approvalPolicy: 'full',
-      temperature: 0,
-      maxTokens: 4096,
-      maxTurns: 2,
-      workspacePath: workspace,
-    }, executor, stateProvider)
-    const executeSingleTool = (engine as unknown as {
-      executeSingleTool: (toolCall: ToolCall) => Promise<ToolResult>
-    }).executeSingleTool.bind(engine)
-    const events: AgentEventType[] = []
-    const unsubscribe = engine.subscribe(event => events.push(event))
-
-    try {
-      const result = await executeSingleTool({
-        id: 'explore-1',
-        name: 'explore_code',
-        arguments: { objective: 'map the CLI entry point and execution flow', path: 'src' },
-      })
-
-      expect(result.isError).toBe(false)
-      expect(result.output).toContain('background scan started')
-      expect(result.output).toContain('Scope: src')
-      expect(engine.isFastContextRunning()).toBe(true)
-      const activeRun = (engine as unknown as { fastContextRun: { id: string } | null }).fastContextRun
-      expect((engine as any).subAgentTaskManager
-        .getTask(activeRun!.id)?.workspacePath.replace(/\\/g, '/')).toMatch(/\/src$/)
-
-      engine.abort()
-      await new Promise(resolve => setTimeout(resolve, 0))
-      expect(engine.isFastContextRunning()).toBe(false)
-      expect(events.filter(event => event.type === 'fast_context:complete')).toHaveLength(1)
-      expect(events.some(event => event.type === 'fast_context:event' && event.event.type === 'phase' && event.event.phase === 'cancelled')).toBe(true)
-    } finally {
-      unsubscribe()
-      engine.destroy()
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('delivers FastContext failures back to the owning main agent', async () => {
-    const workspace = process.cwd()
-    const stateProvider = new DefaultAgentStateProvider({
-      provider: 'custom',
-      apiKey: 'test',
-      baseUrl: 'http://example.test',
-      model: 'test-model',
-      contextWindow: 100_000,
-      maxTokens: 4096,
-    }, workspace)
-    const engine = new AgentEngine({
-      mode: 'vibe',
-      approvalPolicy: 'full',
-      workspacePath: workspace,
-    }, {} as ToolExecutor, stateProvider)
-    ;(engine as any).agentRunGeneration = 7
-    vi.spyOn(engine as any, 'runFastContextScan').mockRejectedValue(new Error('gateway unavailable'))
-
-    try {
-      const started = (engine as any).startFastContextRun('locate the runtime owner', 'autonomous-race', 'agent')
-      await started.promise.catch(() => null)
-
-      const run = (engine as any).fastContextRun
-      expect(run).toMatchObject({ phase: 'delivering', ownerAgentRunId: 7 })
-      expect(run.delivery).toMatchObject({ isError: true, content: expect.stringContaining('gateway unavailable') })
-
-      ;(engine as any).attachFastContextResult(run.delivery)
-      expect(engine.getSession().turns.at(-1)?.toolResults?.[0]).toMatchObject({
-        name: 'fast_context_result',
-        isError: true,
-        output: expect.stringContaining('Continue with targeted search'),
-      })
     } finally {
       engine.destroy()
     }

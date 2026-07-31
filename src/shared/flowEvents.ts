@@ -35,9 +35,6 @@ export type FlowEventPayload =
   | { type: 'session.mode_changed'; mode: AgentMode }
   | { type: 'usage.updated'; usage: TokenUsage }
   | { type: 'task.active_changed'; task: FlowActiveTask | null }
-  | { type: 'fast_context.started'; runId: string }
-  | { type: 'fast_context.progressed'; runId: string; phase?: string; files?: number; hits?: number }
-  | { type: 'fast_context.completed'; runId: string; files: number; hits: number }
   | { type: 'tool.draft_changed'; name: string; partialJson: string }
   | { type: 'tool.draft_cleared' }
   | { type: 'input.draft_changed'; text: string; attachmentIds: string[] }

@@ -72,14 +72,11 @@ export class SingleShotProgressReporter {
       case 'model:protocol':
         if (event.phase === 'fallback') this.write(`[${this.t('single.protocolFallback')}] ${event.message || event.url}\n`)
         break
-      case 'fast_context:event':
-        if (event.event.type === 'phase') this.write(`[FastContext] ${event.event.phase}\n`)
-        break
       case 'subagent:start':
-        if (event.runKind === 'spawn_agent') this.write(`[${this.t('single.agent')}] ${this.t('single.agentStarted', { agent: event.label })}\n`)
+        this.write(`[${this.t('single.agent')}] ${this.t('single.agentStarted', { agent: event.label })}\n`)
         break
       case 'subagent:end':
-        if (event.runKind === 'spawn_agent') this.write(`[${this.t('single.agent')}] ${this.t('single.agentFinished', { agent: event.agentType, status: this.t(event.ok ? 'single.completed' : 'single.failed'), elapsed: formatElapsed(event.elapsedMs) })}\n`)
+        this.write(`[${this.t('single.agent')}] ${this.t('single.agentFinished', { agent: event.agentType, status: this.t(event.ok ? 'single.completed' : 'single.failed'), elapsed: formatElapsed(event.elapsedMs) })}\n`)
         break
       case 'notification':
         if (event.level === 'warning' || event.level === 'error') {

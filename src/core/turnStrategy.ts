@@ -43,7 +43,6 @@ function hasRecentEvidence(turns: AgentTurn[]): boolean {
     name === 'read_file'
     || name === 'list_directory'
     || name === 'get_codemap'
-    || name === 'explore_code'
     || name.startsWith('search_')
   )
 }

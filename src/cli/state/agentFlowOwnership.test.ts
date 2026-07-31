@@ -7,11 +7,10 @@ describe('Agent Flow ownership boundary', () => {
     const app = readFileSync(join(process.cwd(), 'src', 'cli', 'components', 'App.tsx'), 'utf8')
 
     expect(app).not.toMatch(/useState[^\n]*(?:isRunning|runState|queuedPrompts|pendingSteeringPrompts)/)
-    expect(app).not.toMatch(/useState[^\n]*(?:currentMode|tokenUsage|activeTask|fcActive|streamingToolDraft)/)
+    expect(app).not.toMatch(/useState[^\n]*(?:currentMode|tokenUsage|activeTask|streamingToolDraft)/)
     expect(app).toContain('selectIsForegroundBusy(activeFlowState)')
     expect(app).toContain('selectQueuedInputs(activeFlowState)')
     expect(app).toContain('selectAgentRunState(activeFlowState)')
     expect(app).toContain('selectActiveTask(activeFlowState)')
-    expect(app).toContain('selectFastContextActive(activeFlowState)')
   })
 })

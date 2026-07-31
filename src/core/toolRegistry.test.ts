@@ -60,7 +60,5 @@ describe('tool mode boundaries', () => {
     expect(planTools.some(tool => tool.name === 'read_agent')).toBe(true)
     expect(planTools.some(tool => tool.name === 'cancel_agent')).toBe(false)
     expect(validateToolArgs('read_agent', { agent_id: 'runtime_agent_1', offset: 0, limit: 25 })).toEqual({ valid: true })
-    expect(validateToolArgs('explore_code', { objective: 'map retrieval', path: 'src/core' })).toEqual({ valid: true })
-    expect(validateToolArgs('explore_code', { objective: 'map retrieval' }).valid).toBe(false)
   })
 })

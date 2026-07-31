@@ -53,10 +53,6 @@ export function selectActiveTask(state: ThreadFlowState): FlowActiveTask | null 
   return state.activeTask
 }
 
-export function selectFastContextActive(state: ThreadFlowState): boolean {
-  return state.fastContext.status === 'running'
-}
-
 export function selectToolDraft(state: ThreadFlowState): FlowToolDraftState | null {
   return state.toolDraft
 }

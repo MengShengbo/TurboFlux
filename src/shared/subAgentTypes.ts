@@ -1,4 +1,4 @@
-// Generic SubAgent types shared by FastContext and project-defined agents.
+// Generic types shared by project-defined subagents.
 
 /**
  * Subagent driver tag.
@@ -31,10 +31,8 @@ export type SubAgentDriver = 'main-model' | 'deepseek-flash' | 'deepseek-reasone
  * returns 400. The runner handles this transparently.
  */
 export type SubAgentThinking = 'disabled' | 'high' | 'max'
-export type SubAgentDeliveryMode = 'push' | 'pull'
-
 export interface SubAgentDefinition {
-  /** Stable id used by spawn_agent and event metadata, e.g. 'fast_context'. */
+  /** Stable id used by spawn_agent and event metadata. */
   id: string
   /** Human-readable label for UI / logs. */
   label: string
@@ -54,8 +52,7 @@ export interface SubAgentDefinition {
   temperature?: number
   /**
    * Reasoning effort. Defaults to 'disabled' if omitted — matches the
-   * previous behavior where FastContext never asked for thinking and keeps
-   * cost predictable. Project-defined agents may override it explicitly.
+   * the low-cost retrieval default. Project-defined agents may override it.
    */
   thinking?: SubAgentThinking
 }
@@ -83,8 +80,6 @@ export type SubAgentEvent =
       protocol: string
       offeredTools: string[]
       returnedTools: string[]
-      finalizationOnly: boolean
-      retrievalPhase: 'scope_discovery' | 'evidence_retrieval' | 'finalization'
     }
   | {
       type: 'turn_complete'
@@ -112,8 +107,8 @@ export interface SubAgentInvocation {
    *
    * Why: DeepSeek V4's prompt cache persists at request boundaries. By
    * inserting a stable workspace primer as a synthetic [user → assistant: 'READY']
-   * pair right after the system prompt, every subsequent Fast Context
-   * call within the same workspace hits the cache and pays 1/10 input
+   * pair right after the system prompt, every subsequent subagent call
+   * within the same workspace can reuse the stable cache prefix
    * price for the primer. The model also gets a free "map" so its first
    * grep is informed instead of guessed.
    *

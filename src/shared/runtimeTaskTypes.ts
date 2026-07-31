@@ -1,4 +1,4 @@
-export type RuntimeTaskKind = 'shell' | 'terminal' | 'agent' | 'fast_context' | 'mcp' | 'workflow' | 'remote'
+export type RuntimeTaskKind = 'shell' | 'terminal' | 'agent' | 'mcp' | 'workflow' | 'remote'
 
 export type RuntimeTaskStatus = 'starting' | 'running' | 'stopping' | 'completed' | 'failed' | 'stopped' | 'interrupted' | 'orphaned'
 

@@ -28,7 +28,6 @@ export interface TurboFluxConfig {
   reasoning?: NativeReasoningConfig
   apiConfigs?: TurboFluxApiConfigProfile[]
   activeApiConfigId?: string
-  fastContextModel?: FastContextModelConfig
 }
 
 export interface ModelPreset {
@@ -80,13 +79,6 @@ export interface TurboFluxApiConfigProfile {
   createdAt: number
   updatedAt: number
 }
-
-export interface FastContextModelConfig {
-  mode: 'follow-main' | 'api-config'
-  apiConfigId?: string
-}
-
-const EMPTY_FAST_CONTEXT_MODEL: FastContextModelConfig = { mode: 'follow-main' }
 
 export interface ProviderPreset {
   id: string
@@ -242,7 +234,6 @@ const DEFAULT_CONFIG: TurboFluxConfig = {
   reasoning: undefined,
   apiConfigs: [],
   activeApiConfigId: undefined,
-  fastContextModel: EMPTY_FAST_CONTEXT_MODEL,
 }
 
 export function providerForModel(model: string, fallback: TurboFluxProvider = 'custom'): TurboFluxProvider {
@@ -321,7 +312,6 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
   }
 
   const selected = nextProfiles.find(profile => profile.id === activeApiConfigId)
-  const fastContextModel = normalizeFastContextModelConfig((raw as any).fastContextModel, nextProfiles)
   return {
     provider: selected?.provider ?? provider,
     apiKey: selected?.apiKey ?? apiKey,
@@ -338,7 +328,6 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
     reasoning: selected?.reasoning ?? normalizeNativeReasoningConfig(model, raw.reasoning, provider, raw.modelCapabilities),
     apiConfigs: nextProfiles,
     activeApiConfigId,
-    fastContextModel,
   }
 }
 
@@ -391,16 +380,11 @@ function normalizeApiConfigProfiles(value: unknown): TurboFluxApiConfigProfile[]
   return profiles
 }
 
-function normalizeFastContextModelConfig(_value: unknown, _profiles: TurboFluxApiConfigProfile[]): FastContextModelConfig {
-  return { mode: 'follow-main' }
-}
-
-function emptyConfigWithProfiles(fastContextModel: FastContextModelConfig = EMPTY_FAST_CONTEXT_MODEL): TurboFluxConfig {
+function emptyConfigWithProfiles(): TurboFluxConfig {
   return {
     ...DEFAULT_CONFIG,
     apiConfigs: [],
     activeApiConfigId: undefined,
-    fastContextModel,
   }
 }
 
@@ -455,7 +439,6 @@ function syncActiveProfile(config: TurboFluxConfig, touchUpdatedAt = true): Turb
       reasoning: undefined,
       apiConfigs: [],
       activeApiConfigId: undefined,
-      fastContextModel: EMPTY_FAST_CONTEXT_MODEL,
     }
   }
   const activeId = config.activeApiConfigId || normalizedProfiles[0]?.id || 'main'
@@ -483,7 +466,6 @@ function syncActiveProfile(config: TurboFluxConfig, touchUpdatedAt = true): Turb
     ...config,
     apiConfigs: profiles,
     activeApiConfigId: activeId,
-    fastContextModel: normalizeFastContextModelConfig(config.fastContextModel, profiles),
   }, activeProfile)
 }
 
@@ -720,7 +702,6 @@ export function configFromProviderPreset(preset: ProviderPreset, apiKey: string,
     reasoning: normalizeNativeReasoningConfig(spec?.id ?? selectedModel, undefined, preset.provider),
     apiConfigs: [],
     activeApiConfigId: 'main',
-    fastContextModel: { mode: 'follow-main' },
   })
 }
 
@@ -742,7 +723,7 @@ export function saveApiConfigProfile(config: TurboFluxConfig, profile: TurboFlux
     activeApiConfigId: makeActive ? profile.id : normalized.activeApiConfigId,
   }
   const selected = profiles.find(item => item.id === next.activeApiConfigId)
-  return activeFieldsFromProfile({ ...next, fastContextModel: normalizeFastContextModelConfig(next.fastContextModel, profiles) }, selected)
+  return activeFieldsFromProfile(next, selected)
 }
 
 export function createApiConfigProfile(input: Partial<TurboFluxApiConfigProfile> & Partial<TurboFluxConfig>): TurboFluxApiConfigProfile {
@@ -769,21 +750,6 @@ export function deleteApiConfigProfile(config: TurboFluxConfig, apiConfigId: str
     ...normalized,
     apiConfigs: profiles,
     activeApiConfigId: nextActiveId,
-    fastContextModel: normalized.fastContextModel?.apiConfigId === apiConfigId
-      ? { mode: 'follow-main' as const }
-      : normalized.fastContextModel,
   }
-  return activeFieldsFromProfile({ ...next, fastContextModel: normalizeFastContextModelConfig(next.fastContextModel, profiles) }, profiles.find(p => p.id === nextActiveId))
-}
-
-export function setFastContextModelConfig(config: TurboFluxConfig, _fastContextModel: FastContextModelConfig): TurboFluxConfig {
-  const normalized = normalizeConfig(config)
-  return {
-    ...normalized,
-    fastContextModel: { mode: 'follow-main' },
-  }
-}
-
-export function getFastContextApiConfig(_config: TurboFluxConfig): TurboFluxApiConfigProfile | undefined {
-  return undefined
+  return activeFieldsFromProfile(next, profiles.find(profile => profile.id === nextActiveId))
 }

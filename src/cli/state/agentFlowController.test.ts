@@ -84,7 +84,7 @@ describe('AgentFlowController', () => {
     })
   })
 
-  it('owns mode, usage, task, FastContext, and tool draft state', () => {
+  it('owns mode, usage, task, and tool draft state', () => {
     const bridge = new AgentFlowController('thread-1')
     bridge.startRun('build feature')
     bridge.handle({ type: 'mode:change', from: 'vibe', to: 'plan' })
@@ -106,18 +106,11 @@ describe('AgentFlowController', () => {
       toolName: 'write_file',
       partialJson: '{"path":"src/app.ts"',
     })
-    bridge.handle({
-      type: 'fast_context:event',
-      runId: 'fc-1',
-      event: { type: 'progress', files: 12, absorbed: 8, hits: 3 },
-    })
-
     const state = bridge.store.getThread('thread-1')!
     expect(state.mode).toBe('plan')
     expect(state.tokenUsage).toMatchObject({ input: 120, output: 30, source: 'provider' })
     expect(state.activeTask).toMatchObject({ taskId: 'task-1', progress: 40 })
     expect(state.toolDraft).toMatchObject({ id: 'tool-1', name: 'write_file' })
-    expect(state.fastContext).toMatchObject({ runId: 'fc-1', status: 'running', files: 12, hits: 3 })
     expect(state.violations).toEqual([])
   })
 
@@ -162,7 +155,6 @@ describe('AgentFlowController', () => {
       agentType: 'reviewer',
       label: 'Reviewing changes',
       objective: 'Review the patch',
-      runKind: 'spawn_agent',
     })
     bridge.handle({
       type: 'terminal:sessions',
@@ -183,7 +175,7 @@ describe('AgentFlowController', () => {
 
     expect(Object.values(bridge.store.getThread('thread-1')!.runtimes).filter(item => item.status === 'running')).toHaveLength(2)
 
-    bridge.handle({ type: 'subagent:end', agentId: 'agent-1', agentType: 'reviewer', ok: true, elapsedMs: 10, runKind: 'spawn_agent' })
+    bridge.handle({ type: 'subagent:end', agentId: 'agent-1', agentType: 'reviewer', ok: true, elapsedMs: 10 })
     bridge.handle({
       type: 'runtime-task:finished',
       task: {

@@ -86,7 +86,7 @@ Claude Code 的普通后台 Bash 任务仍依赖当前 CLI 进程，但具备独
 
 ## 建议的 RuntimeTaskManager
 
-状态：已于 2026-07-18 建立进程内 `RuntimeTaskManager`，前台 Shell、后台 Terminal、FastContext 和普通子代理已接入统一的创建、运行、停止与终态管理；命令日志和子代理 transcript 已落盘，重启时会恢复历史任务并将未完成任务标记为 `interrupted`，真实跨进程续跑仍需 Runtime Daemon。
+状态：已于 2026-07-18 建立进程内 `RuntimeTaskManager`，前台 Shell、后台 Terminal 和普通子代理已接入统一的创建、运行、停止与终态管理；命令日志和子代理 transcript 已落盘，重启时会恢复历史任务并将未完成任务标记为 `interrupted`，真实跨进程续跑仍需 Runtime Daemon。
 
 统一任务模型至少包含：
 
@@ -103,7 +103,6 @@ interactive, restartPolicy, metadata
 - `shell`
 - `terminal`
 - `agent`
-- `fast_context`
 - `mcp`
 - `workflow`
 - `remote`
@@ -121,9 +120,9 @@ Runtime 需要提供：
 
 ### 第一阶段：进程内统一 Runtime
 
-进展：前台 Shell、后台 Terminal、FastContext 与普通子代理已接入统一任务状态和追加式日志，终态会发布 `runtime-task:finished`，Agent 可通过 `write_terminal` 写入 stdin，并通过 `list_agents`、`read_agent`、`cancel_agent` 管理后台子代理。日志轮转和日志缺口提示仍未完成。
+进展：前台 Shell、后台 Terminal 与普通子代理已接入统一任务状态和追加式日志，终态会发布 `runtime-task:finished`，Agent 可通过 `write_terminal` 写入 stdin，并通过 `list_agents`、`read_agent`、`cancel_agent` 管理后台子代理。日志轮转和日志缺口提示仍未完成。
 
-1. 将 Shell、Terminal、FastContext 和普通子代理接入统一任务状态。
+1. 将 Shell、Terminal 和普通子代理接入统一任务状态。
 2. 输出采用 append-only 文件，读取使用 byte offset。
 3. 修复命令超时、退出码、stdout/stderr 和完成通知。
 4. 增加日志上限、轮转和缺口提示。
@@ -165,10 +164,9 @@ TurboFlux 已具备 context segments、reservoir、Git 原生文件恢复、手�
 
 以下能力应保留并继续强化，不需要照搬 Claude Code：
 
-- FastContext 可以与主 Agent 并行工作，并只向主上下文注入紧凑证据。
 - context segments 与 reservoir 已形成自己的上下文恢复方式。
 - 高风险编辑恢复统一使用 Git 原生 restore/revert，并保留提交审计链。
-- 图片粘贴、多模型供应商和 FastContext 分档检索具备产品辨识度。
+- 图片粘贴、多模型供应商和直接代码检索具备产品辨识度。
 - 自定义 TUI 已能承载 Work、Task、终端和 Agent 活动信息。
 
 ## 实施顺序

@@ -88,7 +88,7 @@ flowchart LR
 | [`src/cli/state/flowReducer.ts`](../src/cli/state/flowReducer.ts) | run/input/approval/tool/stream/runtime/notification 状态机 | 重复事件幂等、terminal 不逆转、违规可观测 |
 | [`src/cli/state/flowStore.ts`](../src/cli/state/flowStore.ts) | 每线程 state 与 active thread snapshot | thread 隔离与稳定订阅 |
 | [`src/cli/state/flowSelectors.ts`](../src/cli/state/flowSelectors.ts) | busy、needs-action、queue、primary activity | UI 不需重新猜测 domain phase |
-| [`src/cli/state/agentFlowController.ts`](../src/cli/state/agentFlowController.ts) | AgentEvent 归一化、run/queue/usage/task/FastContext/tool draft 协调 | FlowStore 成为 Agent 执行状态唯一事实源，React 不再保留平行 owner |
+| [`src/cli/state/agentFlowController.ts`](../src/cli/state/agentFlowController.ts) | AgentEvent 归一化、run/queue/usage/task/tool draft 协调 | FlowStore 成为 Agent 执行状态唯一事实源，React 不再保留平行 owner |
 
 ### 5.2 审批、输入与安全
 

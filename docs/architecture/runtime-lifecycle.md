@@ -44,7 +44,7 @@ App 在提交后根据运行状态分流：空闲时执行 slash command 或启�
 
 Engine 的 `AgentRunState` 细粒度阶段包含 idle、thinking、tool_running、awaiting_approval、awaiting_input、paused、aborting、recoverable_error、completed 等。Flow reducer 将它投影为 idle、starting、active、stopping、terminal，并保留原始 agentState 给 UI。
 
-`AgentEngine.run()` 同时只允许一个 foreground promise；每次 run 清理 run grants、steering、工具 ledger、证据集合和 workspace memory cache，先初始化 Git，再准备 context，循环执行 model → tool calls → tool results，直到无工具调用、等待 FastContext 完成或 abort。
+`AgentEngine.run()` 同时只允许一个 foreground promise；每次 run 清理 run grants、steering、工具 ledger 和 workspace memory cache，先初始化 Git，再准备 context，循环执行 model → tool calls → tool results，直到无工具调用或 abort。
 
 ## Streaming
 
@@ -67,7 +67,7 @@ Engine 对每个 tool call 依次执行：模式限制 → disabled 工具 → r
 
 ## 后台终端与 Runtime Task
 
-`run_command(run_in_background=true)`、PTY session、shell、subagent 和 FastContext 通过 `RuntimeTaskManager` 表达。TUI 使用 `terminal:sessions` 和 `runtime-task:finished` 更新 footer、sidebar、system message 和通知 inbox；`/ps` 与 `/stop` 直接查询/控制 RuntimeTaskManager。
+`run_command(run_in_background=true)`、PTY session、shell 和 subagent 通过 `RuntimeTaskManager` 表达。TUI 使用 `terminal:sessions` 和 `runtime-task:finished` 更新 footer、sidebar、system message 和通知 inbox；`/ps` 与 `/stop` 直接查询/控制 RuntimeTaskManager。
 
 Runtime Journal 记录 task event 和 runtime metadata。恢复后的任务如果无法重新控制，会标记 `orphaned`、`recovered: true`、`controlAvailable: false`，UI 允许查看但不假装可停止。
 
@@ -86,4 +86,4 @@ ConversationManager：
 
 ## 关闭顺序
 
-App effect cleanup 清除 scheduler/timer、FastContext buffer、通知与 attention；随后 Runtime destroy 断开 MCP、停止任务、关闭 PTY、解绑 session/task 监听并销毁 Engine；ConversationManager flush journal 后关闭 writer。新增资源必须加入同一清理链路并有测试。
+App effect cleanup 清除 scheduler/timer、通知与 attention；随后 Runtime destroy 断开 MCP、停止任务、关闭 PTY、解绑 session/task 监听并销毁 Engine；ConversationManager flush journal 后关闭 writer。新增资源必须加入同一清理链路并有测试。

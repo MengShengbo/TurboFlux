@@ -165,20 +165,6 @@ const tools: EnhancedToolDef[] = [
     isConcurrencySafe: true,
   },
   {
-    name: 'explore_code',
-    description: `Start a background architecture map with FastContext Race. The delegated path is the enforced retrieval root. Turn 1 performs bounded scope discovery without file reads; later turns read evidence and rank the edit frontier. The grounded result is injected automatically at a safe turn boundary. Continue only non-overlapping work while it runs; do not poll it, duplicate broad retrieval, or call explore_code repeatedly. After a terminal failure, read_agent can inspect its persisted transcript once for diagnosis. For one exact symbol/string/path, prefer a targeted search followed by read_file.`,
-    category: 'read',
-    parameters: [
-      { name: 'objective', type: 'string', description: 'Concrete thing to locate or understand. Include visible UI text, behavior, suspected feature area, symbol names, and what answer should prove.', required: true },
-      { name: 'path', type: 'string', description: 'Explicit directory scope relative to the active workspace. Pass the smallest known project or subsystem directory; use "." only for a genuinely workspace-wide objective.', required: true },
-      { name: 'context', type: 'string', description: 'Optional prior findings, paths already checked, or constraints. Do not ask the user for a path before using this when the path can be discovered.', required: false },
-      { name: 'strategy', type: 'string', description: 'Compatibility field. FastContext uses the Race controller.', required: false, enum: ['autonomous-race'], default: 'autonomous-race' },
-    ],
-    isReadOnly: true,
-    isDestructive: false,
-    isConcurrencySafe: true,
-  },
-  {
     name: 'web_search',
     description: 'Search the public web for current or explicitly external information. Returns compact results with title, URL, snippet, provider, and query. Do not use it as a substitute for source code missing from the active workspace when the user asks about this repository or current project; report the workspace mismatch unless the user requested a remote copy.',
     category: 'read',
@@ -586,7 +572,6 @@ const tools: EnhancedToolDef[] = [
     description: `Launch a specialized subagent to handle a focused task autonomously.
 
 Available types:
-- fast_context: Fast architecture-level code map for normal unfamiliar features, bugs, workflows, or changes that may cross modules.
 - custom agents: Project-specific agents loaded from .turboflux/agents/.
 
 When NOT to use spawn_agent:
@@ -595,11 +580,11 @@ When NOT to use spawn_agent:
 - For a known string pattern in a known area, use search_content.
 - For a tiny known lookup where one targeted search is enough, stay with targeted read/search tools.
 
-Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results for ordinary subagents, list_agents to discover tasks, and cancel_agent to stop one. FastContext is push-driven and must not be polled while active; read_agent is available for one-shot postmortem inspection after it stops or fails.
+Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results, list_agents to discover tasks, and cancel_agent to stop one.
 Launch multiple agents concurrently for independent topics and provide a highly specific objective.`,
     category: 'read',
     parameters: [
-      { name: 'agent_type', type: 'string', description: 'Which subagent to spawn. Includes fast_context and custom agents from .turboflux/agents/.', required: true },
+      { name: 'agent_type', type: 'string', description: 'Which project-defined agent from .turboflux/agents/ to spawn.', required: true },
       { name: 'objective', type: 'string', description: 'Concrete question or task for the subagent. Be specific — include the area of the codebase, the feature, or the change to review.', required: true },
       { name: 'context', type: 'string', description: 'Optional extra context that helps the subagent (related files, prior findings, constraints).', required: false },
     ],
@@ -619,7 +604,7 @@ Launch multiple agents concurrently for independent topics and provide a highly 
   },
   {
     name: 'read_agent',
-    description: 'Read a background subagent status, final result, and a page of its persisted transcript. For FastContext, do not poll while active; use this after a terminal failure or explicit diagnostic request to inspect the existing runtime transcript.',
+    description: 'Read a background subagent status, final result, and a page of its persisted transcript.',
     category: 'read',
     parameters: [
       { name: 'agent_id', type: 'string', description: 'Agent ID returned by spawn_agent or list_agents.', required: true },
