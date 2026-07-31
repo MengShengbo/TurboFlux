@@ -2,6 +2,7 @@ import React from 'react'
 import chalk from 'chalk'
 import { renderToString } from 'ink'
 import stripAnsi from 'strip-ansi'
+import stringWidth from 'string-width'
 import { describe, expect, it } from 'vitest'
 import {
   PromptInput,
@@ -143,6 +144,34 @@ describe('prompt appearance', () => {
     )
 
     expect(stripAnsi(output).split('\n')[2]).toContain('> hello')
+  })
+
+  it('keeps the right border in the same display column as input grows', () => {
+    const values = ['', 'a', 'abcdef', '中文输入', '🚀'.repeat(8), 'a'.repeat(40)]
+
+    for (const appearance of ['default', 'landing'] as const) {
+      for (const value of values) {
+        const output = renderToString(
+          React.createElement(
+            ThemeProvider,
+            { transparentBackground: true },
+            React.createElement(PromptInput, {
+              value,
+              onChange: () => {},
+              onSubmit: () => {},
+              width: 30,
+              placeholder: '',
+              appearance,
+            }),
+          ),
+          { columns: 40 },
+        )
+        const editorLine = stripAnsi(output).split('\n')[2] ?? ''
+
+        expect(stringWidth(editorLine)).toBe(30)
+        expect(editorLine.endsWith('│')).toBe(true)
+      }
+    }
   })
 
   it('keeps long input framed while showing the cursor-side tail', () => {

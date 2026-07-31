@@ -459,7 +459,15 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   )
 
   return (
-    <Box flexDirection="column" marginTop={0}>
+    <Box
+      width={frameWidth}
+      minWidth={frameWidth}
+      maxWidth={frameWidth}
+      flexDirection="column"
+      flexShrink={0}
+      marginTop={0}
+      overflow="hidden"
+    >
       {showCompletions && (
         <Box flexDirection="column" marginBottom={0} paddingLeft={2}>
           {visibleCompletions.map((cmd, visibleIndex) => {
@@ -480,13 +488,23 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       {appearance === 'landing' ? (
         <Box
           width={frameWidth}
+          minWidth={frameWidth}
+          maxWidth={frameWidth}
           flexDirection="column"
+          flexShrink={0}
           borderStyle="single"
           borderColor={promptChrome.borderColor}
           overflow="hidden"
         >
           <Text color={promptChrome.backgroundColor}>{landingPanelFill}</Text>
-          <Box width={landingInnerWidth} flexDirection="row" overflow="hidden">
+          <Box
+            width={landingInnerWidth}
+            minWidth={landingInnerWidth}
+            maxWidth={landingInnerWidth}
+            flexDirection="row"
+            flexShrink={0}
+            overflow="hidden"
+          >
             <Text color={promptChrome.backgroundColor}>{panelFillCharacter}</Text>
             <Text bold color={theme.brandShimmer} backgroundColor={promptChrome.backgroundColor}>{'> '}</Text>
             {editorText}
@@ -497,13 +515,23 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       ) : (
         <Box
           width={frameWidth}
+          minWidth={frameWidth}
+          maxWidth={frameWidth}
           flexDirection="column"
+          flexShrink={0}
           borderStyle="single"
           borderColor={promptChrome.borderColor}
           overflow="hidden"
         >
           <Text color={promptChrome.backgroundColor}>{defaultPanelFill}</Text>
-          <Box width={defaultInnerWidth} flexDirection="row" overflow="hidden">
+          <Box
+            width={defaultInnerWidth}
+            minWidth={defaultInnerWidth}
+            maxWidth={defaultInnerWidth}
+            flexDirection="row"
+            flexShrink={0}
+            overflow="hidden"
+          >
             <Text color={promptChrome.backgroundColor}>{panelFillCharacter}</Text>
             <Text bold color={theme.brandShimmer} backgroundColor={promptChrome.backgroundColor}>{'> '}</Text>
             {editorText}
