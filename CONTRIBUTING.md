@@ -2,6 +2,18 @@
 
 感谢参与 TurboFlux。工程文档入口位于 [`docs/README.md`](docs/README.md)，系统边界先从[系统总览](docs/architecture/system-overview.md)阅读。
 
+## 外部贡献邀请
+
+TurboFlux 采用受邀贡献流程，以便维护者先确认问题边界、实现方向和评审资源：
+
+- 仓库所有者、成员和协作者可以直接创建 Pull Request。
+- 外部贡献者请先通过 Issue 与维护者讨论，不要直接提交 Pull Request。
+- 维护者确认适合外部贡献后，会为 Issue 添加 `contribution-invited` 标签，并将 Issue 指派给受邀贡献者。
+- Pull Request 描述必须使用 `Closes #<Issue 编号>` 关联该仓库中仍处于开放状态的受邀 Issue。
+- 邀请仅适用于被指派 Issue 约定的范围，不自动延伸到其他改动。
+
+未满足以上条件的外部 Pull Request 会由自动化工作流说明原因并关闭。获得邀请后，可以更新原 Pull Request 的描述并重新打开，无需重复提交。
+
 ## 开发环境
 
 - Node.js 20 或更高版本。
