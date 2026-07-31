@@ -62,6 +62,41 @@ describe('MCP tool bridge', () => {
     expect(validateMcpToolArgs(schema, { names: ['ok', 'go'], count: 2 })).toEqual({ valid: true })
   })
 
+  it('enforces JSON Schema oneOf, allOf, and local $ref constraints', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        target: {
+          oneOf: [
+            { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+            { type: 'object', properties: { url: { type: 'string' } }, required: ['url'], additionalProperties: false },
+          ],
+        },
+        action: {
+          allOf: [
+            { $ref: '#/$defs/actionBase' },
+            { pattern: '^read|write$' },
+          ],
+        },
+      },
+      required: ['target', 'action'],
+      additionalProperties: false,
+      $defs: {
+        actionBase: { type: 'string', minLength: 4 },
+      },
+    }
+
+    expect(validateMcpToolArgs(schema, { target: { path: 'a.ts' }, action: 'read' })).toEqual({ valid: true })
+    expect(validateMcpToolArgs(schema, { target: { path: 'a.ts', url: 'https://example.test' }, action: 'read' })).toMatchObject({ valid: false })
+    expect(validateMcpToolArgs(schema, { target: { path: 'a.ts' }, action: 'run' })).toMatchObject({ valid: false })
+    expect(validateMcpToolArgs(schema, { target: { path: 'a.ts' }, action: 'x' })).toMatchObject({ valid: false })
+    expect(validateMcpToolArgs({
+      type: 'object',
+      properties: { value: { oneOf: [{ type: 'string' }, { minLength: 1 }] } },
+      required: ['value'],
+    }, { value: 'both-match' })).toMatchObject({ valid: false })
+  })
+
   it('dispatches namespaced tools to the selected MCP server', async () => {
     const callTool = vi.fn(async () => ({ content: 'done', isError: false }))
     const client = { callTool } as unknown as McpClient

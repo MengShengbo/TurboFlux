@@ -444,10 +444,9 @@ describe('AgentEngine command output', () => {
     }
   })
 
-  it('shows stdout and stderr for failed commands', async () => {
+  it('returns non-zero exits as command results instead of tool errors', async () => {
     const { engine, executeSingleTool } = createHarness({
-      success: false,
-      error: 'Command exited with code 2',
+      success: true,
       data: { stdout: 'partial output', stderr: 'build failed', exitCode: 2 },
     })
     try {
@@ -457,8 +456,49 @@ describe('AgentEngine command output', () => {
         arguments: { command: 'build' },
       })
 
+      expect(result.output).toContain('Process exited with code 2')
       expect(result.output).toContain('stdout:\npartial output')
       expect(result.output).toContain('stderr:\nbuild failed')
+      expect(result.isError).toBe(false)
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('keeps an empty query-style exit code 1 model-visible', async () => {
+    const { engine, executeSingleTool } = createHarness({
+      success: true,
+      data: { stdout: '', stderr: '', exitCode: 1 },
+    })
+    try {
+      const result = await executeSingleTool({
+        id: 'command-query-miss-1',
+        name: 'run_command',
+        arguments: { command: 'git config --get missing.key' },
+      })
+
+      expect(result.output).toBe('Process exited with code 1\nNo output')
+      expect(result.isError).toBe(false)
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('keeps executor failures as tool errors', async () => {
+    const { engine, executeSingleTool } = createHarness({
+      success: false,
+      error: 'spawn failed',
+      data: { stdout: '', stderr: 'spawn failed', exitCode: 1 },
+    })
+    try {
+      const result = await executeSingleTool({
+        id: 'command-execution-error-1',
+        name: 'run_command',
+        arguments: { command: 'missing-command' },
+      })
+
+      expect(result.output).toMatch(/^Error \(code 1\): spawn failed/)
+      expect(result.isError).toBe(true)
     } finally {
       engine.destroy()
     }

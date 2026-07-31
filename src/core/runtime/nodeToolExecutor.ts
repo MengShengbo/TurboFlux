@@ -934,7 +934,13 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, approved?: boolean): Promise<Result<CommandOutput>> {
+  async runCommand(
+    command: string,
+    cwd: string,
+    env?: Record<string, string>,
+    timeout?: number,
+    approved?: boolean,
+  ): Promise<Result<CommandOutput>> {
     let safeCwd: string
     try {
       const validation = this.validateCommandSync(command, cwd)
@@ -1016,7 +1022,12 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  private collectProcess(proc: ChildProcessWithoutNullStreams, timeout: number, runtimeTaskId?: string, logPath?: string): Promise<Result<CommandOutput>> {
+  private collectProcess(
+    proc: ChildProcessWithoutNullStreams,
+    timeout: number,
+    runtimeTaskId?: string,
+    logPath?: string,
+  ): Promise<Result<CommandOutput>> {
     return new Promise(resolve => {
       let stdout = ''
       let stderr = ''
@@ -1083,10 +1094,10 @@ export class NodeToolExecutor implements ToolExecutor {
       }
       const onClose = (code: number | null) => {
         const exitCode = code ?? 1
-        const success = exitCode === 0 && !timedOut
+        const success = code !== null && !timedOut
         const error = timedOut
           ? `Command timed out after ${timeout}ms`
-          : success ? undefined : `Command exited with code ${exitCode}`
+          : code === null ? 'Command terminated without an exit code' : undefined
         void finish({ success, error, data: { stdout, stderr, exitCode, timedOut, truncated } })
       }
 
@@ -1173,7 +1184,7 @@ export class NodeToolExecutor implements ToolExecutor {
         ...(logError ? { logError } : {}),
       },
     }
-    if (result.success) {
+    if (result.success && (output?.exitCode ?? 0) === 0) {
       this.runtimeTaskManager.completeTask(taskId, patch)
       return
     }

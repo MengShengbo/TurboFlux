@@ -11,9 +11,9 @@ interface CommandPattern {
 }
 
 const DENY_COMMAND_PATTERNS: CommandPattern[] = [
-  { pattern: /\brm\s+(?:(?:--[a-z-]+|-[a-z]+)\s+)*\/(?:\*|\s*(?:$|[;&|]))/i, verdict: 'deny', reason: 'Destructive: removes filesystem root' },
-  { pattern: /\b(?:del|rmdir|rd)\s+(?:(?:\/[a-z]+|-[a-z]+)\s+)*[A-Z]:\\(?:\*\s*)?(?:$|[;&|])/i, verdict: 'deny', reason: 'Destructive: recursively deletes drive root' },
-  { pattern: /\bRemove-Item\b(?=[^\r\n;&|]*-(?:Recurse|r)\b)[^\r\n;&|]*(?:[A-Z]:\\(?:\*)?|\/(?:\*)?)(?:\s|$)/i, verdict: 'deny', reason: 'Destructive: recursively deletes filesystem root' },
+  { pattern: /\brm\s+(?:(?:--|--[a-z-]+|-[a-z]+)\s+)*(?:"\/"|'\/'|\/)(?:\*|(?=\s|$|[;&|]))/i, verdict: 'deny', reason: 'Destructive: removes filesystem root' },
+  { pattern: /\b(?:del|rmdir|rd)\s+(?:(?:\/[a-z]+|-[a-z]+)\s+)*(?:"[A-Z]:\\(?:\*)?"|'[A-Z]:\\(?:\*)?'|[A-Z]:\\(?:\*)?)(?:\s|$|[;&|])/i, verdict: 'deny', reason: 'Destructive: recursively deletes drive root' },
+  { pattern: /\bRemove-Item\b(?=[^\r\n;&|]*-(?:Recurse|r)\b)[^\r\n;&|]*(?:"[A-Z]:\\(?:\*)?"|'[A-Z]:\\(?:\*)?'|[A-Z]:\\(?:\*)?|"\/(?:\*)?"|'\/(?:\*)?'|\/(?:\*)?)(?:\s|$|[;&|])/i, verdict: 'deny', reason: 'Destructive: recursively deletes filesystem root' },
   { pattern: /\bformat\s+[A-Z]:/i, verdict: 'deny', reason: 'Destructive: formats entire drive' },
   { pattern: /\bmkfs\b/, verdict: 'deny', reason: 'Destructive: creates filesystem (erases partition)' },
   { pattern: /\bdd\s+if=.*\s+of=\/dev\/[sh]d/, verdict: 'deny', reason: 'Destructive: raw disk write' },

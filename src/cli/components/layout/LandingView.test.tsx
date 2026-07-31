@@ -1,4 +1,5 @@
 import React from 'react'
+import chalk from 'chalk'
 import { Box, Text, renderToString } from 'ink'
 import { describe, expect, it } from 'vitest'
 import { ThemeProvider } from '../../theme/index'
@@ -8,6 +9,36 @@ import '../../commands/index'
 import { I18nProvider } from '../../i18n/index'
 
 describe('LandingView', () => {
+  it('emits no structural background color in transparent mode', () => {
+    const previousLevel = chalk.level
+    chalk.level = 3
+    try {
+      const renderLanding = (transparentBackground: boolean) => renderToString(
+        <ThemeProvider transparentBackground={transparentBackground}>
+          <Box width={80} height={24}>
+            <LandingView
+              frameWidth={60}
+              workspacePath="C:/workspace/turboflux"
+              mood="idle"
+              hasApiKey
+              logoReveal={1}
+              showVersion
+              showWorkspace
+              showPrompt
+              prompt={<Text>{'> '}</Text>}
+            />
+          </Box>
+        </ThemeProvider>,
+        { columns: 80 },
+      )
+
+      expect(renderLanding(true)).not.toContain('\u001b[48;')
+      expect(renderLanding(false)).toContain('\u001b[48;')
+    } finally {
+      chalk.level = previousLevel
+    }
+  })
+
   it('centers the brand and prompt without rendering session chrome', () => {
     const output = renderToString(
       <ThemeProvider>
@@ -38,12 +69,12 @@ describe('LandingView', () => {
     expect(promptRow).toBeGreaterThan(brandRow)
     expect(output).toContain('我们该构建什么？')
     expect(output).toContain('工作区 C:/workspace/turboflux')
-    expect(output).toContain('Flow v2 已就绪 · 输入可恢复 · /flow status')
+    expect(output).not.toContain('Flow v2')
     expect(output).not.toContain('STATUS')
     expect(lines.every(line => line.length <= 120)).toBe(true)
   })
 
-  it('makes the fallback state visible without changing the layout', () => {
+  it('does not expose internal Flow rollout status', () => {
     const output = renderToString(
       <ThemeProvider>
         <I18nProvider locale="en">
@@ -57,7 +88,6 @@ describe('LandingView', () => {
               showVersion
               showWorkspace
               showPrompt
-              flowEnabled={false}
               prompt={<Text>{'> '}</Text>}
             />
           </Box>
@@ -66,7 +96,8 @@ describe('LandingView', () => {
       { columns: 100 },
     )
 
-    expect(output).toContain('Flow core active · compact UI · /flow status')
+    expect(output).not.toContain('Flow v2')
+    expect(output).not.toContain('Flow core')
     expect(output.split('\n')).toHaveLength(30)
   })
 

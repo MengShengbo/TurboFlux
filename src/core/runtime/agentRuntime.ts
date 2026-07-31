@@ -1,4 +1,10 @@
-import type { AgentConfig, AgentMode, ApprovalPolicy, CapabilityProfile } from '../../shared/agentTypes'
+import {
+  resolveCapabilityProfileForApproval,
+  type AgentConfig,
+  type AgentMode,
+  type ApprovalPolicy,
+  type CapabilityProfile,
+} from '../../shared/agentTypes'
 import { join } from 'node:path'
 import { AgentEngine } from '../agentEngine'
 import { McpClient } from '../mcp/client'
@@ -51,10 +57,15 @@ function getDefaultShell(): string {
 }
 
 function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
+  const approvalPolicy = options.approvalPolicy || options.config.approvalPolicy || 'ask'
+  const capabilityProfile = resolveCapabilityProfileForApproval(
+    approvalPolicy,
+    options.capabilityProfile || options.config.capabilityProfile,
+  )
   return {
     mode: options.mode || 'vibe',
-    approvalPolicy: options.approvalPolicy || options.config.approvalPolicy || 'ask',
-    capabilityProfile: options.capabilityProfile || options.config.capabilityProfile || 'workspace-write',
+    approvalPolicy,
+    capabilityProfile,
     gitEnabled: options.config.gitEnabled !== false,
     temperature: 0.7,
     workspacePath: options.workspacePath,
@@ -70,8 +81,13 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
 
 export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRuntime {
   const conversationId = options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`
+  const engineConfig = toEngineConfig(options)
   const sessionRegistry = new SessionRegistry(conversationId)
-  const stateProvider = new DefaultAgentStateProvider(options.config, options.workspacePath, { conversationId })
+  const stateProvider = new DefaultAgentStateProvider({
+    ...options.config,
+    approvalPolicy: engineConfig.approvalPolicy,
+    capabilityProfile: engineConfig.capabilityProfile,
+  }, options.workspacePath, { conversationId })
   const runtimeTaskManager = new RuntimeTaskManager({
     defaultOwnerSessionId: conversationId,
     journalPath: join(options.workspacePath, '.turboflux', 'runtime', 'journal.jsonl'),
@@ -83,11 +99,11 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
   })
   const toolExecutor = new NodeToolExecutor(options.workspacePath, {
     runtimeTaskManager,
-    capabilityProfile: options.capabilityProfile || options.config.capabilityProfile || 'workspace-write',
+    capabilityProfile: engineConfig.capabilityProfile,
   })
   const engine = new AgentEngine(
     {
-      ...toEngineConfig(options),
+      ...engineConfig,
       conversationId,
     },
     toolExecutor,
@@ -141,10 +157,16 @@ export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRun
   }
 
   const applyConfiguration: AgentRuntime['applyConfiguration'] = (config, updateOptions = {}) => {
-    stateProvider.updateConfig(config)
-    toolExecutor.setCapabilityProfile(updateOptions.capabilityProfile ?? config.capabilityProfile ?? 'workspace-write')
+    const approvalPolicy = updateOptions.approvalPolicy ?? config.approvalPolicy ?? 'ask'
+    const capabilityProfile = resolveCapabilityProfileForApproval(
+      approvalPolicy,
+      updateOptions.capabilityProfile ?? config.capabilityProfile,
+    )
+    stateProvider.updateConfig({ ...config, approvalPolicy, capabilityProfile })
+    toolExecutor.setCapabilityProfile(capabilityProfile)
     engine.updateRuntimeConfiguration({
-      approvalPolicy: updateOptions.approvalPolicy ?? config.approvalPolicy,
+      approvalPolicy,
+      capabilityProfile,
       gitEnabled: config.gitEnabled !== false,
       contextWindow: config.contextWindow,
       maxTokens: config.maxTokens,

@@ -38,7 +38,9 @@ turboflux config show
 turboflux setup show
 ```
 
-检查 `TURBOFLUX_CONFIG_DIR`、`TURBOFLUX_API_KEY` 和 CLI override 是否覆盖了文件配置。普通配置在 `config.json`，密钥在 `credentials.json`；查看日志或截图前先去除密钥。
+检查 `TURBOFLUX_CONFIG_DIR`、`TURBOFLUX_API_KEY` 和 CLI override 是否覆盖了文件配置。普通配置在 `config.json`，密钥在 `credentials.json`；`TURBOFLUX_API_KEY` 只覆盖当前进程，不会因保存其他配置而持久化。查看日志或截图前先去除密钥。
+
+如果 JSON 损坏，TurboFlux 会先保留为同目录的 `.corrupt-*.bak`，再恢复默认配置；确认备份内容后再删除。
 
 用隔离配置复现可区分“用户数据问题”和“代码问题”：
 

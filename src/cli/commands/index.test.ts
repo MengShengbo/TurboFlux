@@ -114,6 +114,30 @@ describe('background terminal commands', () => {
     expect(stopped.text).toBe('Stopping 1 background terminal...')
     await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce())
   })
+
+  it('keeps asynchronous command activity pending until terminals stop', async () => {
+    let release: (() => void) | undefined
+    const stop = vi.fn(() => new Promise<void>(resolve => { release = resolve }))
+    const manager = new RuntimeTaskManager()
+    const task = manager.createTask({
+      kind: 'terminal',
+      status: 'running',
+      command: 'npm run watch',
+      startedAt: Date.now(),
+      metadata: { sessionId: 'term-async' },
+    }, { stop })
+    const pending = commandRegistry.executeAsync('/stop term-async', fullContext({ runtimeTaskManager: manager }))
+    let settled = false
+    void pending.finally(() => { settled = true })
+
+    await Promise.resolve()
+    expect(stop).toHaveBeenCalledOnce()
+    expect(settled).toBe(false)
+
+    release?.()
+    await expect(pending).resolves.toMatchObject({ type: 'text' })
+    expect(manager.getTask(task.id)?.status).toBe('stopped')
+  })
 })
 
 describe('/model', () => {
@@ -326,5 +350,80 @@ describe('native effort and approval commands', () => {
 
     expect(result.text).toContain('Approve low risk')
     expect(nextConfig?.approvalPolicy).toBe('agent')
+  })
+
+  it('enables complete runtime access for full approval', () => {
+    let nextConfig: CommandContext['config'] | null = null
+    const ctx = fullContext({
+      setConfig: config => { nextConfig = config },
+    })
+
+    const result = commandRegistry.execute('/approval full', ctx)
+
+    expect(result.text).toContain('Full access')
+    expect(nextConfig).toMatchObject({
+      approvalPolicy: 'full',
+      capabilityProfile: 'danger-full-access',
+    })
+  })
+})
+
+describe('global command progress lifecycle', () => {
+  it('marks waiting and mutating commands without animating read-only status commands', () => {
+    expect(commandRegistry.getProgress('/resume')).toMatchObject({ name: 'resume' })
+    expect(commandRegistry.getProgress('/conversations')).toMatchObject({ name: 'list' })
+    expect(commandRegistry.getProgress('/flow retry')).toMatchObject({ name: 'flow' })
+    expect(commandRegistry.getProgress('/git refresh')).toMatchObject({ name: 'git' })
+    expect(commandRegistry.getProgress('/flow status')).toBeNull()
+    expect(commandRegistry.getProgress('/context')).toBeNull()
+  })
+
+  it('uses asynchronous conversation listing for interactive command execution', async () => {
+    const list = vi.fn(() => { throw new Error('sync list should not run') })
+    const listAsync = vi.fn(async () => [{
+      id: 'async-list',
+      title: 'Async list',
+      workspacePath: process.cwd(),
+      createdAt: 1,
+      updatedAt: 2,
+      mode: 'vibe' as const,
+      model: 'test-model',
+      provider: 'custom' as const,
+      turnCount: 2,
+    }])
+    const ctx = fullContext({
+      conversationManager: {
+        list,
+        listAsync,
+        getCurrentId: () => 'other',
+      } as unknown as CommandContext['conversationManager'],
+    })
+
+    const result = await commandRegistry.executeAsync('/list', ctx)
+
+    expect(result.text).toContain('Async list')
+    expect(listAsync).toHaveBeenCalledOnce()
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it('keeps compact activity pending until compaction completes', async () => {
+    let release: (() => void) | undefined
+    const compactContext = vi.fn(() => new Promise<void>(resolve => { release = resolve }))
+    const pending = commandRegistry.executeAsync('/compact', fullContext({
+      engine: {
+        compactContext,
+        getContextUsage: () => ({ source: 'unknown' }),
+        isRunning: () => false,
+      } as CommandContext['engine'],
+    }))
+    let settled = false
+    void pending.finally(() => { settled = true })
+
+    await Promise.resolve()
+    expect(compactContext).toHaveBeenCalledOnce()
+    expect(settled).toBe(false)
+
+    release?.()
+    await expect(pending).resolves.toMatchObject({ type: 'text' })
   })
 })

@@ -27,6 +27,7 @@ ui-ux-designer.md
 OrbitControls.js
 three.min.js
 *.png
+!turboflux-tui.png
 
 claude-code-reference/
 reference/

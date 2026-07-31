@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -113,5 +113,40 @@ describe('turboflux setup integration', () => {
 
     await expect(runSetup({ action: 'language', configLang: 'invalid', yes: true }))
       .rejects.toThrow(/无效的界面语言/)
+  })
+
+  it('configures full approval as complete runtime access', async () => {
+    const { runSetup } = await import('./setup.js')
+    const { loadConfig } = await import('../core/config.js')
+
+    await runSetup({ action: 'approval', approvalPolicy: 'full', yes: true })
+
+    const config = await loadConfig()
+    expect(config).toMatchObject({
+      approvalPolicy: 'full',
+      capabilityProfile: 'danger-full-access',
+    })
+  })
+
+  it('resets global configuration while retaining unrelated local data', async () => {
+    const { runSetup } = await import('./setup.js')
+    const { loadConfig } = await import('../core/config.js')
+    const { loadProfile, saveProfile } = await import('../core/profile.js')
+    await runSetup({ action: 'api', provider: 'openai', apiKey: 'sk-reset-me', yes: true })
+    saveProfile({ interfaceLanguage: 'en', enabledPersonaIds: ['architect'], defaultPersonaId: 'architect' })
+    const settingsPath = join(configDirectory, 'settings.json')
+    writeFileSync(settingsPath, '{"mcpServers":{}}', 'utf-8')
+
+    await runSetup({ action: 'reset', yes: true })
+
+    const config = await loadConfig()
+    const profile = loadProfile()
+    const credentials = readFileSync(join(configDirectory, 'credentials.json'), 'utf-8')
+    expect(config.apiConfigs).toEqual([])
+    expect(config.apiKey).toBe('')
+    expect(credentials).not.toContain('sk-reset-me')
+    expect(profile.interfaceLanguage).toBe('zh-CN')
+    expect(profile.defaultPersonaId).toBe('engineer-professional')
+    expect(existsSync(settingsPath)).toBe(true)
   })
 })

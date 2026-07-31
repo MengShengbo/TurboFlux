@@ -285,13 +285,13 @@ export const MODE_DESCRIPTIONS: Record<AgentMode, string> = {
 export const APPROVAL_POLICY_LABELS: Record<ApprovalPolicy, string> = {
   ask: 'Request approval',
   agent: 'Approve low risk',
-  full: 'Skip approvals',
+  full: 'Full access',
 }
 
 export const APPROVAL_POLICY_DESCRIPTIONS: Record<ApprovalPolicy, string> = {
   ask: 'Ask before file changes, commands, MCP tools, and external actions.',
   agent: 'Continue with low-risk workspace actions and ask only when risk is detected.',
-  full: 'Skip approval prompts for allowed operations; explicit deny rules remain active.',
+  full: 'Run without approval prompts or workspace restrictions; explicit deny rules remain active.',
 }
 
 export const CAPABILITY_PROFILE_LABELS: Record<CapabilityProfile, string> = {
@@ -319,6 +319,15 @@ export function normalizeCapabilityProfile(
 ): CapabilityProfile {
   if (value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access') return value
   return fallback
+}
+
+export function resolveCapabilityProfileForApproval(
+  approvalPolicy: ApprovalPolicy,
+  capabilityProfile: unknown,
+  fallback: CapabilityProfile = 'workspace-write',
+): CapabilityProfile {
+  if (approvalPolicy === 'full') return 'danger-full-access'
+  return normalizeCapabilityProfile(capabilityProfile, fallback)
 }
 
 export function isTerminalStatus(status: TaskStatus): boolean {

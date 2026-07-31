@@ -5,7 +5,12 @@ import { pathToFileURL } from 'node:url'
 import { once } from 'node:events'
 import { ADMIN_HTML } from './adminPage'
 import { getSupportedModelSpec, SUPPORTED_MODEL_SPECS } from '../core/modelRegistry'
-import { writeFileAtomicSync } from '../core/fileIO'
+import {
+  quarantineCorruptFileSync,
+  recoverFilesAtomicSync,
+  withFileLockSync,
+  writeFilesAtomicSync,
+} from '../core/fileIO'
 import { configureNetworkProxy } from '../core/networkProxy'
 import { createTurboFluxRequestHeaders } from '../core/clientIdentity'
 
@@ -167,7 +172,8 @@ function readPersistedConfig(configPath: string): PersistedProxyConfig {
     const parsed = JSON.parse(raw) as PersistedProxyConfig
     return parsed && typeof parsed === 'object' ? parsed : {}
   } catch (error) {
-    addLog('warn', 'config', `Failed to read persisted config: ${error instanceof Error ? error.message : String(error)}`)
+    const backupPath = quarantineCorruptFileSync(configPath)
+    addLog('warn', 'config', `Preserved invalid persisted config at ${backupPath}: ${error instanceof Error ? error.message : String(error)}`)
     return {}
   }
 }
@@ -182,9 +188,19 @@ function readPersistedCredentials(configPath: string): PersistedProxyCredentials
   try {
     const parsed = JSON.parse(readFileSync(filePath, 'utf-8'))
     return parsed && typeof parsed === 'object' ? parsed as PersistedProxyCredentials : {}
-  } catch {
+  } catch (error) {
+    const backupPath = quarantineCorruptFileSync(filePath)
+    addLog('warn', 'config', `Preserved invalid persisted credentials at ${backupPath}: ${error instanceof Error ? error.message : String(error)}`)
     return {}
   }
+}
+
+function transactionPath(configPath: string): string {
+  return join(dirname(configPath), '.server-config-transaction.json')
+}
+
+function lockPath(configPath: string): string {
+  return join(dirname(configPath), '.server-config.lock')
 }
 
 function writePersistedConfig(config: ProxyConfig): void {
@@ -193,19 +209,35 @@ function writePersistedConfig(config: ProxyConfig): void {
     defaultModel: config.defaultModel,
     models: config.models,
     corsOrigin: config.corsOrigin,
-    updatedAt: new Date().toISOString(),
+    updatedAt: config.updatedAt ?? new Date().toISOString(),
   }
   const dir = dirname(config.configPath)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileAtomicSync(config.configPath, JSON.stringify(persisted, null, 2), 0o600)
-  writeFileAtomicSync(credentialsPath(config.configPath), JSON.stringify({
-    upstreamApiKey: config.upstreamApiKey,
-    authToken: config.authToken,
-  }, null, 2), 0o600)
+  withFileLockSync(lockPath(config.configPath), () => {
+    recoverFilesAtomicSync(transactionPath(config.configPath))
+    writeFilesAtomicSync([
+      {
+        filePath: config.configPath,
+        content: JSON.stringify(persisted, null, 2),
+        mode: 0o600,
+      },
+      {
+        filePath: credentialsPath(config.configPath),
+        content: JSON.stringify({
+          upstreamApiKey: config.upstreamApiKey,
+          authToken: config.authToken,
+        }, null, 2),
+        mode: 0o600,
+      },
+    ], transactionPath(config.configPath))
+  })
 }
 
 function loadConfig(): ProxyConfig {
   const configPath = getConfigPath()
+  const dir = dirname(configPath)
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  withFileLockSync(lockPath(configPath), () => recoverFilesAtomicSync(transactionPath(configPath)))
   const persisted = readPersistedConfig(configPath)
   const credentials = readPersistedCredentials(configPath)
   const requestedDefaultModel = persisted.defaultModel ?? env('TURBOFLUX_FREE_MODEL') ?? DEFAULT_MODEL
@@ -216,7 +248,7 @@ function loadConfig(): ProxyConfig {
       ?? DEFAULT_UPSTREAM_BASE_URL,
   )
 
-  return {
+  const config: ProxyConfig = {
     host: env('TURBOFLUX_SERVER_HOST') ?? DEFAULT_HOST,
     port: parsePort(env('TURBOFLUX_SERVER_PORT')),
     configPath,
@@ -228,6 +260,12 @@ function loadConfig(): ProxyConfig {
     corsOrigin: persisted.corsOrigin ?? env('TURBOFLUX_CORS_ORIGIN') ?? 'http://127.0.0.1',
     updatedAt: persisted.updatedAt,
   }
+  if (persisted.upstreamApiKey || persisted.authToken) {
+    config.updatedAt = new Date().toISOString()
+    writePersistedConfig(config)
+    addLog('info', 'config', 'Migrated legacy server credentials to server-credentials.json')
+  }
+  return config
 }
 
 function isLocalBindHost(host: string): boolean {
@@ -264,6 +302,10 @@ function publicConfig(config: ProxyConfig): Record<string, unknown> {
 }
 
 function updateConfigFromPatch(config: ProxyConfig, patch: AdminConfigPatch): ProxyConfig {
+  const nextConfig: ProxyConfig = {
+    ...config,
+    models: config.models.map(model => ({ ...model })),
+  }
   const upstreamBaseUrl = safeString(patch.upstreamBaseUrl)
   const defaultModel = safeString(patch.defaultModel)
   const corsOrigin = safeString(patch.corsOrigin)
@@ -276,26 +318,27 @@ function updateConfigFromPatch(config: ProxyConfig, patch: AdminConfigPatch): Pr
     } catch {
       throw new Error('Invalid upstream Base URL')
     }
-    config.upstreamBaseUrl = normalizeUpstreamBaseUrl(upstreamBaseUrl)
+    nextConfig.upstreamBaseUrl = normalizeUpstreamBaseUrl(upstreamBaseUrl)
   }
 
   if (defaultModel) {
     const spec = getSupportedModelSpec(defaultModel)
     if (!spec) throw new Error(`Unsupported model "${defaultModel}". Select one of: ${SUPPORTED_MODEL_SPECS.map(model => model.id).join(', ')}`)
-    config.defaultModel = spec.id
+    nextConfig.defaultModel = spec.id
   }
-  if (patch.models !== undefined) config.models = normalizeModels(patch.models, config.defaultModel)
-  else config.models = normalizeModels(config.models, config.defaultModel)
-  if (corsOrigin) config.corsOrigin = corsOrigin
-  if (patch.clearUpstreamApiKey === true) config.upstreamApiKey = undefined
-  else if (upstreamApiKey) config.upstreamApiKey = upstreamApiKey
-  if (patch.clearAuthToken === true) config.authToken = undefined
-  else if (authToken) config.authToken = authToken
+  if (patch.models !== undefined) nextConfig.models = normalizeModels(patch.models, nextConfig.defaultModel)
+  else nextConfig.models = normalizeModels(nextConfig.models, nextConfig.defaultModel)
+  if (corsOrigin) nextConfig.corsOrigin = corsOrigin
+  if (patch.clearUpstreamApiKey === true) nextConfig.upstreamApiKey = undefined
+  else if (upstreamApiKey) nextConfig.upstreamApiKey = upstreamApiKey
+  if (patch.clearAuthToken === true) nextConfig.authToken = undefined
+  else if (authToken) nextConfig.authToken = authToken
 
-  config.updatedAt = new Date().toISOString()
-  writePersistedConfig(config)
+  assertSafeExposure(nextConfig)
+  nextConfig.updatedAt = new Date().toISOString()
+  writePersistedConfig(nextConfig)
   addLog('info', 'config', 'API configuration saved')
-  return config
+  return nextConfig
 }
 
 function setCorsHeaders(res: ServerResponse, config: ProxyConfig): void {

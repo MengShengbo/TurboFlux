@@ -8,20 +8,66 @@ export function validateSchemaValue(
   value: unknown,
   path = '',
 ): SchemaValidationResult {
+  return validateSchemaValueInternal(schema, value, path, {
+    rootSchema: schema,
+    activeRefs: new Set(),
+  })
+}
+
+interface SchemaValidationContext {
+  rootSchema: Record<string, unknown>
+  activeRefs: Set<string>
+}
+
+function validateSchemaValueInternal(
+  schema: Record<string, unknown>,
+  value: unknown,
+  path: string,
+  context: SchemaValidationContext,
+): SchemaValidationResult {
   const location = path || 'arguments'
-  const alternatives = Array.isArray(schema.anyOf)
-    ? schema.anyOf
-    : Array.isArray(schema.oneOf)
-      ? schema.oneOf
-      : null
-  if (alternatives) {
-    const accepted = alternatives.some(candidate =>
+
+  if (typeof schema.$ref === 'string') {
+    const ref = schema.$ref
+    if (context.activeRefs.has(ref)) {
+      return { valid: false, error: `Invalid schema reference for ${location}: circular $ref ${ref}` }
+    }
+    const resolved = resolveLocalRef(context.rootSchema, ref)
+    if (!resolved) {
+      return { valid: false, error: `Invalid schema reference for ${location}: ${ref}` }
+    }
+    context.activeRefs.add(ref)
+    const result = validateSchemaValueInternal(resolved, value, path, context)
+    context.activeRefs.delete(ref)
+    if (!result.valid) return result
+  }
+
+  if (Array.isArray(schema.allOf)) {
+    for (const candidate of schema.allOf) {
+      if (!candidate || typeof candidate !== 'object') {
+        return { valid: false, error: `Invalid schema for ${location}: allOf entries must be objects` }
+      }
+      const result = validateSchemaValueInternal(candidate as Record<string, unknown>, value, path, context)
+      if (!result.valid) return result
+    }
+  }
+
+  if (Array.isArray(schema.anyOf)) {
+    const accepted = schema.anyOf.some(candidate =>
       candidate && typeof candidate === 'object'
-      && validateSchemaValue(candidate as Record<string, unknown>, value, path).valid
+      && validateSchemaValueInternal(candidate as Record<string, unknown>, value, path, context).valid
     )
-    return accepted
-      ? { valid: true }
-      : { valid: false, error: `Invalid value for ${location}: no schema alternative matched` }
+    if (!accepted) return { valid: false, error: `Invalid value for ${location}: no schema alternative matched` }
+  }
+
+  if (Array.isArray(schema.oneOf)) {
+    const matches = schema.oneOf.filter(candidate =>
+      candidate && typeof candidate === 'object'
+      && validateSchemaValueInternal(candidate as Record<string, unknown>, value, path, context).valid
+    ).length
+    if (matches !== 1) {
+      return { valid: false, error: `Invalid value for ${location}: expected exactly one schema alternative to match` }
+    }
   }
 
   if (Array.isArray(schema.enum) && !schema.enum.some(candidate => Object.is(candidate, value))) {
@@ -69,7 +115,7 @@ export function validateSchemaValue(
     }
     if (schema.items && typeof schema.items === 'object') {
       for (let index = 0; index < value.length; index += 1) {
-        const result = validateSchemaValue(schema.items as Record<string, unknown>, value[index], `${location}[${index}]`)
+        const result = validateSchemaValueInternal(schema.items as Record<string, unknown>, value[index], `${location}[${index}]`, context)
         if (!result.valid) return result
       }
     }
@@ -95,12 +141,28 @@ export function validateSchemaValue(
     }
     for (const [name, propertySchema] of Object.entries(properties)) {
       if (record[name] === undefined || !propertySchema || typeof propertySchema !== 'object') continue
-      const result = validateSchemaValue(propertySchema as Record<string, unknown>, record[name], path ? `${path}.${name}` : name)
+      const result = validateSchemaValueInternal(propertySchema as Record<string, unknown>, record[name], path ? `${path}.${name}` : name, context)
       if (!result.valid) return result
     }
   }
 
   return { valid: true }
+}
+
+function resolveLocalRef(rootSchema: Record<string, unknown>, ref: string): Record<string, unknown> | null {
+  if (!ref.startsWith('#/')) return null
+  const parts = ref
+    .slice(2)
+    .split('/')
+    .map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'))
+  let cursor: unknown = rootSchema
+  for (const part of parts) {
+    if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) || !(part in cursor)) return null
+    cursor = (cursor as Record<string, unknown>)[part]
+  }
+  return cursor && typeof cursor === 'object' && !Array.isArray(cursor)
+    ? cursor as Record<string, unknown>
+    : null
 }
 
 function schemaTypeMatches(type: string, value: unknown): boolean {

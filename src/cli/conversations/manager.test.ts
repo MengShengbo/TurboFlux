@@ -6,7 +6,7 @@ import type { AgentTurn } from '../../shared/agentTypes'
 import type { AgentEngine } from '../../core/agentEngine'
 import type { TurboFluxConfig } from '../../core/config'
 import { ConversationManager } from './manager'
-import { loadConversation } from './store'
+import { loadConversation, saveConversation } from './store'
 
 describe.sequential('ConversationManager journal integration', () => {
   let directory: string
@@ -160,5 +160,42 @@ describe.sequential('ConversationManager journal integration', () => {
       pendingSteering: [{ id: 'steer-1', text: 'change direction' }],
       pendingApprovals: [{ requestId: 'approval-1', toolName: 'write_file' }],
     })
+  })
+
+  it('lists, switches, and deletes saved conversations asynchronously', async () => {
+    const engine = {
+      getSession: () => ({ id: 'session-1', mode: 'vibe', turns: [], createdAt: 100 }),
+      getFullConversationTurns: () => [],
+      getContextSegments: () => [],
+      getContextReservoir: () => [],
+    } as unknown as AgentEngine
+    const manager = new ConversationManager(
+      engine,
+      { model: 'test-model', provider: 'custom' } as TurboFluxConfig,
+      process.cwd(),
+    )
+    saveConversation({
+      id: 'saved-async',
+      title: 'Saved async conversation',
+      workspacePath: process.cwd(),
+      createdAt: 100,
+      updatedAt: 200,
+      mode: 'vibe',
+      model: 'test-model',
+      provider: 'custom',
+      turnCount: 2,
+      turns: [
+        { id: 'user-1', role: 'user', content: 'hello', timestamp: 100 },
+        { id: 'assistant-1', role: 'assistant', content: 'hi', timestamp: 101 },
+      ],
+    })
+
+    await expect(manager.listAsync()).resolves.toEqual([
+      expect.objectContaining({ id: 'saved-async' }),
+    ])
+    await expect(manager.switchToAsync('saved-async')).resolves.toMatchObject({ id: 'saved-async' })
+    expect(manager.getCurrentId()).toBe('saved-async')
+    await expect(manager.deleteAsync('saved-async')).resolves.toBe(true)
+    manager.destroy()
   })
 })

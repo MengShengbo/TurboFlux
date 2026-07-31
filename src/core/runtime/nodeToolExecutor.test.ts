@@ -138,12 +138,13 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     expect(existsSync(target)).toBe(false)
   }))
 
-  it('reports non-zero process exits as failures', async () => withWorkspace(async ({ workspace }) => {
+  it('returns non-zero process exits as results while preserving task outcome', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace)
     const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(7)'], workspace)
     const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
 
-    expect(result.success).toBe(false)
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
     expect(result.data?.exitCode).toBe(7)
     expect(runtimeTask).toMatchObject({ status: 'failed', exitCode: 7, interactive: false })
   }))
@@ -152,7 +153,8 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
     const result = await executor.runCommand('node -e "process.exit(7)"', workspace, {}, 5000, true)
 
-    expect(result).toMatchObject({ success: false, data: { exitCode: 7 } })
+    expect(result).toMatchObject({ success: true, data: { exitCode: 7 } })
+    expect(result.error).toBeUndefined()
   }), 15_000)
 
   it('decodes shell output as UTF-8', async () => withWorkspace(async ({ workspace }) => {

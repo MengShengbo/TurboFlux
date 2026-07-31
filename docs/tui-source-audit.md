@@ -89,7 +89,7 @@ FlowController 只在进程内 dispatch 到 FlowStore。恢复时由 Conversatio
 
 `PromptInput` 是受控 React 输入框，但光标、history index、draft、双 Esc、completion selection 和 `TerminalInputStateMachine` 保存在组件/ref 中。输入状态机根据字符间隔、批量字符和显式 paste 判断是否把 Enter 转为换行，从而避免终端粘贴多行文本时误提交。
 
-已覆盖的 TUI 输入事实包括：Unicode/CJK/emoji 光标边界、图片 placeholder 原子导航和删除、命令补全、history draft 恢复、透明背景下 prompt 全单元绘制、Ctrl/Meta alternate submit。
+已覆盖的 TUI 输入事实包括：Unicode/CJK/emoji 光标边界、图片 placeholder 原子导航和删除、命令补全、history draft 恢复、透明背景下 prompt 不绘制填充色、Ctrl/Meta alternate submit。
 
 `App` 顶层还负责 Ctrl-C：运行中第一次中断 Engine；若响应尚未开始则恢复 prompt 和 prior turns；空闲时需要在 1.8 秒内再次 Ctrl-C 才退出。
 

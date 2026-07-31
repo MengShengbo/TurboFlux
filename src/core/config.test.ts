@@ -90,6 +90,20 @@ describe('setConfigValue', () => {
     expect(() => setConfigValue(baseConfig, 'capabilityProfile', 'unbounded')).toThrow(/capabilityProfile/)
   })
 
+  it('treats full approval as the complete-access preset', () => {
+    const full = setConfigValue(baseConfig, 'approvalPolicy', 'full')
+    const restricted = setConfigValue(full, 'capabilityProfile', 'workspace-write')
+
+    expect(full).toMatchObject({
+      approvalPolicy: 'full',
+      capabilityProfile: 'danger-full-access',
+    })
+    expect(restricted).toMatchObject({
+      approvalPolicy: 'agent',
+      capabilityProfile: 'workspace-write',
+    })
+  })
+
 })
 
 describe('provider presets', () => {

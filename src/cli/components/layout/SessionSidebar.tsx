@@ -105,62 +105,66 @@ export function SessionSidebar({
       paddingX={1}
       overflow="hidden"
     >
-      <Text color={theme.brand} bold>TurboFlux</Text>
-      <Text color={theme.inactive}>{cliTruncate(workspacePath, Math.max(12, width - 4), { position: 'middle' })}</Text>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
+        <Text color={theme.brand} bold>TurboFlux</Text>
+        <Text color={theme.inactive}>{cliTruncate(workspacePath, Math.max(12, width - 4), { position: 'middle' })}</Text>
 
-      <Section title={t('ui.sidebar.status')}>
-        <Box justifyContent="space-between">
-          <Text color={flowColor(flow.tone, theme)} bold>{cliTruncate(flow.label, Math.max(10, width - 12))}</Text>
-          {elapsed && <Text color={theme.info}>{elapsed}</Text>}
-        </Box>
-      </Section>
+        <Section title={t('ui.sidebar.status')}>
+          <Box justifyContent="space-between">
+            <Text color={flowColor(flow.tone, theme)} bold>{cliTruncate(flow.label, Math.max(10, width - 12))}</Text>
+            {elapsed && <Text color={theme.info}>{elapsed}</Text>}
+          </Box>
+        </Section>
 
-      <Section title={t('ui.sidebar.session')}>
-        <SidebarRow label={t('ui.sidebar.model')} value={model || t('ui.sidebar.notMounted')} width={width} color={theme.text} />
-        <SidebarRow label={t('ui.sidebar.profile')} value={`${mode.toUpperCase()} / ${reasoning || t('ui.sidebar.provider')}`} width={width} color={mode === 'vibe' ? theme.success : theme.info} />
-      </Section>
+        <Section title={t('ui.sidebar.session')}>
+          <SidebarRow label={t('ui.sidebar.model')} value={model || t('ui.sidebar.notMounted')} width={width} color={theme.text} />
+          <SidebarRow label={t('ui.sidebar.profile')} value={`${mode.toUpperCase()} / ${reasoning || t('ui.sidebar.provider')}`} width={width} color={mode === 'vibe' ? theme.success : theme.info} />
+        </Section>
 
-      <Section title={t('ui.sidebar.context')}>
-        <Text color={contextColor(contextRatio, theme)}>{progressBar(contextRatio, Math.max(8, width - 5))}</Text>
-        <SidebarRow
-          label={t('ui.sidebar.used')}
-          value={contextTotal > 0 ? `${formatTokens(contextTotal)} / ${formatTokens(safeContextWindow)}` : t('ui.sidebar.waiting')}
-          width={width}
-          color={contextTotal > 0 ? theme.text : theme.inactive}
-        />
-        {((tokenUsage.cached ?? 0) > 0 || (tokenUsage.output ?? 0) > 0) && (
+        <Section title={t('ui.sidebar.context')}>
+          <Text color={contextColor(contextRatio, theme)}>{progressBar(contextRatio, Math.max(8, width - 5))}</Text>
           <SidebarRow
-            label={t('ui.sidebar.io')}
-            value={t('ui.sidebar.cacheOut', { cache: formatTokens(tokenUsage.cached), output: formatTokens(tokenUsage.output) })}
+            label={t('ui.sidebar.used')}
+            value={contextTotal > 0 ? `${formatTokens(contextTotal)} / ${formatTokens(safeContextWindow)}` : t('ui.sidebar.waiting')}
             width={width}
-            color={theme.info}
+            color={contextTotal > 0 ? theme.text : theme.inactive}
           />
+          {((tokenUsage.cached ?? 0) > 0 || (tokenUsage.output ?? 0) > 0) && (
+            <SidebarRow
+              label={t('ui.sidebar.io')}
+              value={t('ui.sidebar.cacheOut', { cache: formatTokens(tokenUsage.cached), output: formatTokens(tokenUsage.output) })}
+              width={width}
+              color={theme.info}
+            />
+          )}
+        </Section>
+
+        {showRepo && (
+          <Section title={t('ui.sidebar.repo')}>
+            {gitState.phase !== 'ready' && <SidebarRow label={t('ui.sidebar.state')} value={gitState.phase} width={width} color={gitState.phase === 'error' ? theme.error : theme.warning} />}
+            {gitSnapshot && <SidebarRow label={t('ui.sidebar.branch')} value={`${gitSnapshot.branch}${gitSnapshot.head ? ` @ ${gitSnapshot.head.slice(0, 8)}` : ''}`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : theme.text} />}
+            {gitSnapshot && <SidebarRow label={t('ui.sidebar.changes')} value={`${gitSnapshot.stagedCount}S ${gitSnapshot.unstagedCount}M ${gitSnapshot.untrackedCount}U ${gitSnapshot.conflictedCount}C`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : gitSnapshot.clean ? theme.success : theme.warning} />}
+            {gitSnapshot && (gitSnapshot.ahead > 0 || gitSnapshot.behind > 0) && <SidebarRow label={t('ui.sidebar.tracking')} value={`+${gitSnapshot.ahead} / -${gitSnapshot.behind}`} width={width} color={theme.info} />}
+            {gitState.operation && <SidebarRow label={t('ui.sidebar.operation')} value={`${gitState.operation.name}: ${gitState.operation.status}`} width={width} color={gitState.operation.status === 'error' ? theme.error : gitState.operation.status === 'running' ? theme.warning : theme.success} />}
+            {gitState.error && <Text color={theme.error}>{cliTruncate(gitState.error, Math.max(12, width - 4), { position: 'end' })}</Text>}
+          </Section>
         )}
-      </Section>
 
-      {showRepo && (
-        <Section title={t('ui.sidebar.repo')}>
-          {gitState.phase !== 'ready' && <SidebarRow label={t('ui.sidebar.state')} value={gitState.phase} width={width} color={gitState.phase === 'error' ? theme.error : theme.warning} />}
-          {gitSnapshot && <SidebarRow label={t('ui.sidebar.branch')} value={`${gitSnapshot.branch}${gitSnapshot.head ? ` @ ${gitSnapshot.head.slice(0, 8)}` : ''}`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : theme.text} />}
-          {gitSnapshot && <SidebarRow label={t('ui.sidebar.changes')} value={`${gitSnapshot.stagedCount}S ${gitSnapshot.unstagedCount}M ${gitSnapshot.untrackedCount}U ${gitSnapshot.conflictedCount}C`} width={width} color={gitSnapshot.conflictedCount > 0 ? theme.error : gitSnapshot.clean ? theme.success : theme.warning} />}
-          {gitSnapshot && (gitSnapshot.ahead > 0 || gitSnapshot.behind > 0) && <SidebarRow label={t('ui.sidebar.tracking')} value={`+${gitSnapshot.ahead} / -${gitSnapshot.behind}`} width={width} color={theme.info} />}
-          {gitState.operation && <SidebarRow label={t('ui.sidebar.operation')} value={`${gitState.operation.name}: ${gitState.operation.status}`} width={width} color={gitState.operation.status === 'error' ? theme.error : gitState.operation.status === 'running' ? theme.warning : theme.success} />}
-          {gitState.error && <Text color={theme.error}>{cliTruncate(gitState.error, Math.max(12, width - 4), { position: 'end' })}</Text>}
-        </Section>
-      )}
+        {showRuntime && (
+          <Section title={t('ui.sidebar.runtime')}>
+            {mcpCount > 0 && <SidebarRow label="MCP" value={t('common.online', { count: mcpCount })} width={width} color={theme.success} />}
+            {activeTerminals > 0 && <SidebarRow label={t('ui.sidebar.terminal')} value={t('common.active', { count: activeTerminals })} width={width} color={theme.info} />}
+            {latestTerminal && <SidebarRow label={t('ui.sidebar.running')} value={formatElapsed(Date.now() - latestTerminal.createdAt)} width={width} color={theme.info} />}
+            {latestTerminal && <Text color={theme.text}>{cliTruncate(latestTerminal.command || latestTerminal.title, Math.max(12, width - 4), { position: 'middle' })}</Text>}
+            {latestTerminal && <Text color={theme.inactive}>{`${formatBytes(latestTerminal.outputBytes || 0)} · /ps · /stop`}</Text>}
+            {queuedCount > 0 && <SidebarRow label={t('ui.sidebar.queued')} value={String(queuedCount)} width={width} color={theme.warning} />}
+          </Section>
+        )}
+      </Box>
 
-      {showRuntime && (
-        <Section title={t('ui.sidebar.runtime')}>
-          {mcpCount > 0 && <SidebarRow label="MCP" value={t('common.online', { count: mcpCount })} width={width} color={theme.success} />}
-          {activeTerminals > 0 && <SidebarRow label={t('ui.sidebar.terminal')} value={t('common.active', { count: activeTerminals })} width={width} color={theme.info} />}
-          {latestTerminal && <SidebarRow label={t('ui.sidebar.running')} value={formatElapsed(Date.now() - latestTerminal.createdAt)} width={width} color={theme.info} />}
-          {latestTerminal && <Text color={theme.text}>{cliTruncate(latestTerminal.command || latestTerminal.title, Math.max(12, width - 4), { position: 'middle' })}</Text>}
-          {latestTerminal && <Text color={theme.inactive}>{`${formatBytes(latestTerminal.outputBytes || 0)} · /ps · /stop`}</Text>}
-          {queuedCount > 0 && <SidebarRow label={t('ui.sidebar.queued')} value={String(queuedCount)} width={width} color={theme.warning} />}
-        </Section>
-      )}
-
-      <Text color={isRunning ? theme.brandShimmer : theme.success}>{`● ${t(isRunning ? 'common.working' : 'common.ready')}`}</Text>
+      <Box flexShrink={0}>
+        <Text color={isRunning ? theme.brandShimmer : theme.success}>{`● ${t(isRunning ? 'common.working' : 'common.ready')}`}</Text>
+      </Box>
     </Box>
   )
 }

@@ -20,9 +20,9 @@ TurboFlux 处理本地源码、命令、Git、外部模型 API、MCP 和可选�
 | --- | --- |
 | `ask` | 文件变更、命令和外部动作通常请求确认 |
 | `agent` | 普通动作按规则自动推进，高风险或外部动作请求确认 |
-| `full` | 跳过一般 ask 规则，固定拒绝规则仍参与判断 |
+| `full` | 完全访问：跳过一般 ask 规则并强制启用 `danger-full-access`；固定拒绝规则仍参与判断 |
 
-`PermissionPipeline` 记录 decision ID，支持 run grant 和 session grant。文件写入工具可按组授权；MCP 工具、Git push、非隔离 commit、恢复操作和匹配到的危险命令拥有专门规则。
+`full` 是最高权限预设，不是单独的“跳过审批”开关。配置加载、setup、CLI 覆盖和会话内 `/approval full` 都会同步为 `danger-full-access`；主动切换到较低 capability 时会退出 `full`。`PermissionPipeline` 记录 decision ID，支持 run grant 和 session grant。文件写入工具可按组授权；MCP 工具、Git push、非隔离 commit、恢复操作和匹配到的危险命令拥有专门规则。
 
 ## 工具元数据
 
@@ -40,8 +40,9 @@ API Key 不写入普通配置文档：
 
 - `~/.turboflux/config.json` 保存去凭据后的模型和行为配置。
 - `~/.turboflux/credentials.json` 保存 API 凭据。
-- `TURBOFLUX_API_KEY` 可在进程级覆盖活动 API Key。
-- 代理服务把普通设置和 `server-credentials.json` 分离，并以原子写入更新。
+- `TURBOFLUX_API_KEY` 只在当前进程覆盖活动 API Key，不会因保存其他配置而写回凭据文件。
+- 代理服务把普通设置和 `server-credentials.json` 分离，并以可恢复的同目录事务更新；启动时会迁移旧 `server-config.json` 中的凭据字段。
+- 配置文件解析失败时会先改名为带时间戳的 `.corrupt-*.bak` 备份，再生成可用默认文件。
 
 日志、遥测、错误和测试夹具不得记录完整 API Key、Authorization header、用户提示词或文件内容。配置展示必须通过 `redactConfig()` 或服务端 `publicConfig()`。
 
@@ -62,7 +63,7 @@ MCP 服务只在启动参数显式选择时连接。非 full 审批策略下，M
 
 代理服务默认绑定 `127.0.0.1:8787`。绑定到非本地地址时必须配置 `TURBOFLUX_PROXY_AUTH_TOKEN`；管理 API、健康检查、模型列表和 `/v1/*` 都经过统一 token 检查。CORS 默认只允许 `http://127.0.0.1`。
 
-服务端普通配置位于工作区 `.turboflux/server-config.json`，密钥位于同目录 `server-credentials.json`。生产化部署还应在外层提供 TLS、进程隔离、日志轮转和密钥管理，这些不属于当前内置服务职责。
+服务端普通配置位于工作区 `.turboflux/server-config.json`，密钥位于同目录 `server-credentials.json`。旧版普通配置中的密钥会在服务启动时迁移。生产化部署还应在外层提供 TLS、进程隔离、日志轮转和密钥管理，这些不属于当前内置服务职责。
 
 ## 变更检查
 

@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback, type MutableR
 import { Box, Text, useInput, usePaste, type Key } from 'ink'
 import stringWidth from 'string-width'
 import cliTruncate from 'cli-truncate'
-import { useTheme } from '../../theme/index'
+import { resolveBackground, useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
 import { getSafeFrameWidth } from '../../terminalLayout'
@@ -36,11 +36,11 @@ interface PromptInputProps {
   historyRef?: MutableRefObject<string[]>
 }
 
-export function resolvePromptChrome(theme: Theme, appearance: PromptAppearance): { borderColor: string; backgroundColor?: string } {
-  if (appearance === 'landing') {
-    return { borderColor: theme.promptBorder, backgroundColor: theme.promptBackground }
+export function resolvePromptChrome(theme: Theme, _appearance: PromptAppearance): { borderColor: string; backgroundColor?: string } {
+  return {
+    borderColor: theme.transparentBackground ? theme.divider : theme.promptBorder,
+    backgroundColor: resolveBackground(theme, 'promptBackground'),
   }
-  return { borderColor: theme.promptBorder, backgroundColor: theme.promptBackground }
 }
 
 export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'meta'>): boolean {
@@ -426,11 +426,12 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
     : t('ui.prompt.default'))
   const frameWidth = Math.max(20, Math.min(width ?? getSafeFrameWidth(columns, 3), getSafeFrameWidth(columns, 3)))
   const promptChrome = resolvePromptChrome(theme, appearance)
+  const panelFillCharacter = promptChrome.backgroundColor ? '█' : ' '
   const landingInnerWidth = Math.max(1, frameWidth - 2)
-  const landingPanelFill = '█'.repeat(landingInnerWidth)
+  const landingPanelFill = panelFillCharacter.repeat(landingInnerWidth)
   const defaultInnerWidth = Math.max(1, frameWidth - 2)
-  const defaultPanelFill = '█'.repeat(defaultInnerWidth)
-  const editorViewportWidth = Math.max(1, (appearance === 'landing' ? landingInnerWidth : defaultInnerWidth) - 3)
+  const defaultPanelFill = panelFillCharacter.repeat(defaultInnerWidth)
+  const editorViewportWidth = Math.max(1, (appearance === 'landing' ? landingInnerWidth : defaultInnerWidth) - 4)
   const editorViewport = getPromptEditorViewport(value, cursorOffset, editorViewportWidth)
   const visiblePlaceholder = fitText(placeholder, editorViewportWidth)
   const completionLimit = appearance === 'landing' ? 3 : 6
@@ -442,8 +443,8 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   const editorWidth = value
     ? editorViewport.width
     : Math.max(1, stringWidth(visiblePlaceholder))
-  const landingMiddleFill = '█'.repeat(Math.max(0, landingInnerWidth - 3 - editorWidth))
-  const defaultMiddleFill = '█'.repeat(Math.max(0, defaultInnerWidth - 3 - editorWidth))
+  const landingMiddleFill = panelFillCharacter.repeat(Math.max(0, landingInnerWidth - 3 - editorWidth))
+  const defaultMiddleFill = panelFillCharacter.repeat(Math.max(0, defaultInnerWidth - 3 - editorWidth))
   const editorText = value ? (
     <Text backgroundColor={promptChrome.backgroundColor}>
       {editorViewport.beforeCursor}
@@ -484,14 +485,14 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
           borderColor={promptChrome.borderColor}
           overflow="hidden"
         >
-          <Text color="#000000">{landingPanelFill}</Text>
+          <Text color={promptChrome.backgroundColor}>{landingPanelFill}</Text>
           <Box width={landingInnerWidth} flexDirection="row" overflow="hidden">
-            <Text color="#000000">█</Text>
+            <Text color={promptChrome.backgroundColor}>{panelFillCharacter}</Text>
             <Text bold color={theme.brandShimmer} backgroundColor={promptChrome.backgroundColor}>{'> '}</Text>
             {editorText}
-            <Text color="#000000">{landingMiddleFill}</Text>
+            <Text color={promptChrome.backgroundColor}>{landingMiddleFill}</Text>
           </Box>
-          <Text color="#000000">{landingPanelFill}</Text>
+          <Text color={promptChrome.backgroundColor}>{landingPanelFill}</Text>
         </Box>
       ) : (
         <Box
@@ -501,14 +502,14 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
           borderColor={promptChrome.borderColor}
           overflow="hidden"
         >
-          <Text color="#000000">{defaultPanelFill}</Text>
+          <Text color={promptChrome.backgroundColor}>{defaultPanelFill}</Text>
           <Box width={defaultInnerWidth} flexDirection="row" overflow="hidden">
-            <Text color="#000000">█</Text>
+            <Text color={promptChrome.backgroundColor}>{panelFillCharacter}</Text>
             <Text bold color={theme.brandShimmer} backgroundColor={promptChrome.backgroundColor}>{'> '}</Text>
             {editorText}
-            <Text color="#000000">{defaultMiddleFill}</Text>
+            <Text color={promptChrome.backgroundColor}>{defaultMiddleFill}</Text>
           </Box>
-          <Text color="#000000">{defaultPanelFill}</Text>
+          <Text color={promptChrome.backgroundColor}>{defaultPanelFill}</Text>
         </Box>
       )}
     </Box>

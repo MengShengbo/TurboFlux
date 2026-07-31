@@ -1,4 +1,5 @@
 import React from 'react'
+import chalk from 'chalk'
 import { renderToString } from 'ink'
 import stripAnsi from 'strip-ansi'
 import { describe, expect, it } from 'vitest'
@@ -64,20 +65,20 @@ describe('image token navigation', () => {
 })
 
 describe('prompt appearance', () => {
-  it('keeps every prompt opaque under a transparent terminal theme', () => {
+  it('leaves prompt surfaces transparent while keeping a visible border', () => {
     const transparentTheme = { ...darkTheme, transparentBackground: true }
 
     expect(resolvePromptChrome(transparentTheme, 'default')).toEqual({
-      borderColor: darkTheme.promptBorder,
-      backgroundColor: '#000000',
+      borderColor: transparentTheme.divider,
+      backgroundColor: undefined,
     })
     expect(resolvePromptChrome(transparentTheme, 'landing')).toEqual({
-      borderColor: darkTheme.promptBorder,
-      backgroundColor: '#000000',
+      borderColor: transparentTheme.divider,
+      backgroundColor: undefined,
     })
   })
 
-  it('paints every landing prompt cell instead of leaving layout gaps', () => {
+  it('keeps landing prompt geometry without painting fill glyphs', () => {
     const output = renderToString(
       React.createElement(
         ThemeProvider,
@@ -97,10 +98,10 @@ describe('prompt appearance', () => {
 
     expect(lines).toHaveLength(5)
     expect(lines.every(line => line.length === 30)).toBe(true)
-    expect(lines[1]).toContain('█')
+    expect(lines[1]).not.toContain('█')
   })
 
-  it('paints every bordered prompt cell instead of relying on box background', () => {
+  it('keeps bordered prompt geometry without painting fill glyphs', () => {
     const output = renderToString(
       React.createElement(
         ThemeProvider,
@@ -120,7 +121,7 @@ describe('prompt appearance', () => {
 
     expect(lines).toHaveLength(5)
     expect(lines.every(line => line.length === 30)).toBe(true)
-    expect(lines[1]).toContain('█')
+    expect(lines[1]).not.toContain('█')
     expect(lines[2]).toContain('> ')
   })
 
@@ -145,24 +146,71 @@ describe('prompt appearance', () => {
   })
 
   it('keeps long input framed while showing the cursor-side tail', () => {
+    for (const appearance of ['default', 'landing'] as const) {
+      const output = renderToString(
+        React.createElement(
+          ThemeProvider,
+          { transparentBackground: true },
+          React.createElement(PromptInput, {
+            value: 'a'.repeat(40) + 'visible-tail',
+            onChange: () => {},
+            onSubmit: () => {},
+            width: 30,
+            appearance,
+          }),
+        ),
+        { columns: 40 },
+      )
+      const lines = stripAnsi(output).split('\n')
+
+      expect(lines.every(line => line.length === 30)).toBe(true)
+      expect(lines[2]).toContain('visible-tail')
+      expect(lines[2]).toMatch(/│$/)
+    }
+  })
+
+  it('keeps the prompt fill in opaque mode', () => {
     const output = renderToString(
       React.createElement(
         ThemeProvider,
-        { transparentBackground: true },
+        null,
         React.createElement(PromptInput, {
-          value: 'a'.repeat(40) + 'visible-tail',
+          value: '',
           onChange: () => {},
           onSubmit: () => {},
           width: 30,
-          appearance: 'default',
+          placeholder: '',
         }),
       ),
       { columns: 40 },
     )
-    const lines = stripAnsi(output).split('\n')
 
-    expect(lines.every(line => line.length === 30)).toBe(true)
-    expect(lines[2]).toContain('visible-tail')
+    expect(stripAnsi(output).split('\n')[1]).toContain('█')
+  })
+
+  it('emits background ANSI only in opaque mode', () => {
+    const previousLevel = chalk.level
+    chalk.level = 3
+    try {
+      const renderPrompt = (transparentBackground: boolean) => renderToString(
+        React.createElement(
+          ThemeProvider,
+          { transparentBackground },
+          React.createElement(PromptInput, {
+            value: 'hello',
+            onChange: () => {},
+            onSubmit: () => {},
+            width: 30,
+          }),
+        ),
+        { columns: 40 },
+      )
+
+      expect(renderPrompt(true)).not.toContain('\u001b[48;')
+      expect(renderPrompt(false)).toContain('\u001b[48;')
+    } finally {
+      chalk.level = previousLevel
+    }
   })
 
   it('bounds landing completions without hiding the prompt frame', () => {

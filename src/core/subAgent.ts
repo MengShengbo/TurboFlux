@@ -192,6 +192,7 @@ export interface RunSubAgentOptions {
   codemap?: string | null
   abortSignal?: AbortSignal
   requestTimeoutMs?: number
+  requestAttemptTimeoutMs?: number
   maxTransientAttempts?: number
   userPrompt?: string
   allowedTools?: string[]
@@ -377,6 +378,7 @@ async function fetchWithTransientRetry(
   init: RequestInit,
   parentSignal: AbortSignal | undefined,
   timeoutMs: number,
+  attemptTimeoutMs: number,
   onRetry: (attempt: number, delayMs: number, reason: string) => void,
   maxAttempts = 4,
 ): Promise<Response> {
@@ -390,10 +392,12 @@ async function fetchWithTransientRetry(
     }
 
     try {
-      const response = await fetchWithTimeout(url, init, parentSignal, remainingMs)
+      const response = await fetchWithTimeout(url, init, parentSignal, Math.min(remainingMs, attemptTimeoutMs))
       if (attempt < maxAttempts && TRANSIENT_HTTP_STATUSES.has(response.status)) {
         const requestedDelay = Math.max(retryAfterMs(response), TRANSIENT_RETRY_DELAYS_MS[attempt - 1] || 1_800)
-        const delayMs = Math.min(requestedDelay, Math.max(0, remainingMs - 1))
+        const remainingAfterResponseMs = timeoutMs - (Date.now() - startedAt)
+        const delayMs = Math.min(requestedDelay, Math.max(0, remainingAfterResponseMs - 1))
+        if (delayMs <= 0) return response
         onRetry(attempt + 1, delayMs, `API ${response.status}`)
         await response.body?.cancel().catch(() => undefined)
         await abortableDelay(delayMs, parentSignal)
@@ -402,9 +406,9 @@ async function fetchWithTransientRetry(
       return response
     } catch (error) {
       lastError = error
-      const isAbort = parentSignal?.aborted || (error instanceof Error && error.name === 'AbortError')
+      const isAbort = parentSignal?.aborted === true
       const isTimeout = error instanceof Error && /timed out after \d+ms/i.test(error.message)
-      if (attempt === maxAttempts || isAbort || isTimeout || !isTransientNetworkError(error)) throw error
+      if (attempt === maxAttempts || isAbort || (!isTimeout && !isTransientNetworkError(error))) throw error
 
       const elapsedMs = Date.now() - startedAt
       const delayMs = Math.min(TRANSIENT_RETRY_DELAYS_MS[attempt - 1] || 1_800, Math.max(0, timeoutMs - elapsedMs - 1))
@@ -498,6 +502,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     modelCapabilities,
   } = options
   const requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? 120_000)
+  const requestAttemptTimeoutMs = Math.max(1_000, Math.min(requestTimeoutMs, options.requestAttemptTimeoutMs ?? requestTimeoutMs))
   const startedAt = Date.now()
   const emit = (event: SubAgentEvent) => onEvent?.(event)
 
@@ -645,6 +650,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
     let turnInputTokens = 0
     let turnOutputTokens = 0
     let turnCacheReadTokens = 0
+    let turnReasoningTokens = 0
     emit({ type: 'turn_start', turn, maxTurns: turnLimit })
     let messageText = ''
     let responseToolCalls: ToolCallRequest[] = []
@@ -752,7 +758,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
             method: 'POST',
             headers,
             body: JSON.stringify(requestBody),
-          }, abortSignal, remainingRequestMs, (attempt, delayMs, reason) => {
+          }, abortSignal, remainingRequestMs, requestAttemptTimeoutMs, (attempt, delayMs, reason) => {
             emit({ type: 'model_retry', turn, attempt, delayMs, reason })
           }, options.maxTransientAttempts ?? 4)
           if (res.ok) break
@@ -821,6 +827,11 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           responseUsage.input_tokens_details?.cached_tokens
           ?? responseUsage.prompt_tokens_details?.cached_tokens
           ?? responseUsage.cache_read_input_tokens
+          ?? 0,
+        ) || 0
+        turnReasoningTokens = Number(
+          responseUsage.output_tokens_details?.reasoning_tokens
+          ?? responseUsage.completion_tokens_details?.reasoning_tokens
           ?? 0,
         ) || 0
         if (protocol === 'anthropic_messages') {
@@ -908,6 +919,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         inputTokens: turnInputTokens,
         outputTokens: turnOutputTokens,
         cacheReadTokens: turnCacheReadTokens,
+        reasoningTokens: turnReasoningTokens,
       })
       return {
         ok: false,
@@ -931,6 +943,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
         inputTokens: turnInputTokens,
         outputTokens: turnOutputTokens,
         cacheReadTokens: turnCacheReadTokens,
+        reasoningTokens: turnReasoningTokens,
       })
       return { ok: true, turns: turn, elapsedMs: Date.now() - startedAt, finalText: messageText, evidence: collectedEvidence }
     }
@@ -1036,6 +1049,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
       inputTokens: turnInputTokens,
       outputTokens: turnOutputTokens,
       cacheReadTokens: turnCacheReadTokens,
+      reasoningTokens: turnReasoningTokens,
     })
   }
 

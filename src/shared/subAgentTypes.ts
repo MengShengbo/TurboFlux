@@ -91,6 +91,7 @@ export type SubAgentEvent =
       inputTokens?: number
       outputTokens?: number
       cacheReadTokens?: number
+      reasoningTokens?: number
     }
   | { type: 'tool_call'; tool: string; args: unknown; turn: number }
   | { type: 'tool_result'; tool: string; ok: boolean; summary: string; turn: number; elapsedMs?: number; operations?: number; readOperations?: number }

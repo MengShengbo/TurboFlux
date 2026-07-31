@@ -34,6 +34,7 @@ import type { CommandContext } from '../commands/types'
 import { ConversationManager } from '../conversations/manager'
 import type { ConversationInteractionState } from '../conversations/types'
 import { AgentFlowController } from '../state/agentFlowController'
+import { GlobalCommandActivityController } from '../state/globalCommandActivity'
 import { ApprovalPresentationScheduler } from '../state/approvalPresentationScheduler'
 import { AdaptiveStreamScheduler } from '../state/adaptiveStreamScheduler'
 import {
@@ -295,6 +296,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [config, setConfig] = useState(initialConfig)
   const [profile, setProfile] = useState(loadProfile)
   const t = useMemo(() => createTranslator(profile.interfaceLanguage), [profile.interfaceLanguage])
+  const [globalCommandActivityController] = useState(() => new GlobalCommandActivityController())
+  const globalCommandActivity = useSyncExternalStore(
+    globalCommandActivityController.subscribe,
+    globalCommandActivityController.getSnapshot,
+    globalCommandActivityController.getSnapshot,
+  )
   const [messages, setMessages] = useState<Message[]>([])
   const [staticTranscriptRevision, setStaticTranscriptRevision] = useState(0)
   const [input, setInput] = useState('')
@@ -322,6 +329,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const modelDiscoveryRequestRef = useRef(0)
   const [lastActivity, setLastActivity] = useState<number>(Date.now())
   const [convListRevision, setConvListRevision] = useState(0)
+  const [conversationEntries, setConversationEntries] = useState<ConversationEntry[]>([])
   const [subAgentActivities, setSubAgentActivities] = useState<DeveloperSubAgentActivity[]>([])
   const [terminalSessions, setTerminalSessions] = useState<TerminalSessionInfo[]>([])
   const [, setChangeSummaries] = useState<ChangeSummary[]>([])
@@ -475,6 +483,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   )
   const primaryFlowActivity = flowUiEnabled && activeFlowState ? selectPrimaryActivity(activeFlowState) : undefined
   const flowIsRunning = isRunning
+  const developerFlowActive = flowIsRunning || globalCommandActivity !== null
   const flowQueueCount = activeFlowState ? selectQueueCount(activeFlowState) : 0
   const flowBackgroundCount = flowUiEnabled && activeFlowState ? selectRunningBackgroundCount(activeFlowState) : 0
   const flowInputReceipt = flowUiEnabled && activeFlowState
@@ -636,6 +645,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     terminalAttention.start()
     return () => terminalAttention.stop()
   }, [terminalAttention])
+
+  useEffect(() => () => {
+    globalCommandActivityController.destroy()
+  }, [globalCommandActivityController])
 
   useEffect(() => {
     if (notificationSnapshot.active) terminalAttention.notify(notificationSnapshot.active)
@@ -1151,8 +1164,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
   }, [engine, runtime, convManager, flowBridge, clearStreamFlushTimer, appendMessages, replaceMessages, setComposedInput, markActivity, showRunControlHint, genMsgId, noFlickerActive, t, dismissPendingAsk, schedulePendingAsk, notificationCoordinator, syncNotificationSnapshot, streamScheduler, terminalLatencyTracker, flowFeatures.streamScheduler])
 
-  const getConversationEntries = useCallback((): ConversationEntry[] => {
-    const convs = convManager.list()
+  const loadConversationEntries = useCallback(async (): Promise<ConversationEntry[]> => {
+    const convs = await convManager.listAsync()
     const currentId = convManager.getCurrentId()
     return convs.map(c => ({
       id: c.id,
@@ -1187,6 +1200,69 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       }], { forceLatest: true })
     }
   }, [appendMessages, flowBridge, genMsgId, t])
+
+  const reportGlobalCommandError = useCallback((command: string, error: unknown) => {
+    showRunControlHint(t('ui.app.commandFailed', {
+      command,
+      message: error instanceof Error ? error.message : String(error),
+    }))
+  }, [showRunControlHint, t])
+
+  const openConversationHistory = useCallback(async (): Promise<void> => {
+    try {
+      await globalCommandActivityController.run(
+        '/resume',
+        t('ui.app.loadingConversations'),
+        async () => {
+          setConversationEntries(await loadConversationEntries())
+          setConvListRevision(revision => revision + 1)
+          push('history')
+        },
+      )
+    } catch (error) {
+      reportGlobalCommandError('/resume', error)
+    }
+  }, [globalCommandActivityController, loadConversationEntries, push, reportGlobalCommandError, t])
+
+  const selectConversation = useCallback(async (id: string): Promise<void> => {
+    pop()
+    try {
+      await globalCommandActivityController.run(
+        '/resume',
+        t('ui.app.restoringConversation'),
+        async () => {
+          const conv = await convManager.switchToAsync(id)
+          if (!conv) throw new Error(t('ui.app.conversationUnavailable'))
+          restoreCliStateFromTurns(
+            conv.activeTurns ?? conv.turns,
+            '',
+            conv.contextSegments ?? [],
+            conv.contextReservoir ?? [],
+            conv.turns,
+          )
+          restoreInteractionState(conv.interactionState)
+        },
+      )
+    } catch (error) {
+      reportGlobalCommandError('/resume', error)
+    }
+  }, [convManager, globalCommandActivityController, pop, reportGlobalCommandError, restoreCliStateFromTurns, restoreInteractionState, t])
+
+  const deleteSavedConversation = useCallback(async (id: string): Promise<void> => {
+    try {
+      await globalCommandActivityController.run(
+        '/resume',
+        t('ui.app.deletingConversation'),
+        async () => {
+          if (!await convManager.deleteAsync(id)) throw new Error(t('ui.app.conversationUnavailable'))
+          setConversationEntries(await loadConversationEntries())
+          setConvListRevision(revision => revision + 1)
+        },
+      )
+    } catch (error) {
+      reportGlobalCommandError('/resume', error)
+    }
+  }, [convManager, globalCommandActivityController, loadConversationEntries, reportGlobalCommandError, t])
 
   useEffect(() => {
     if (singleShot) runPrompt(singleShot)
@@ -1509,6 +1585,32 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
   }, [isInteractive, singleShot])
 
+  const executeRegisteredCommand = useCallback(async (input: string, ctx: CommandContext): Promise<void> => {
+    const progress = commandRegistry.getProgress(input)
+    const command = `/${progress?.name ?? commandRegistry.parse(input)?.name ?? input.replace(/^\//, '')}`
+    try {
+      const execute = () => commandRegistry.executeAsync(input, ctx)
+      const result = progress
+        ? await globalCommandActivityController.run(command, t('ui.app.executingCommand'), execute)
+        : await execute()
+      flowBridge.updateUsage(engine.getContextUsage())
+      setGitState(engine.getGitState())
+      switch (result.type) {
+        case 'text':
+          appendMessages([{ id: genMsgId(), role: 'system', content: result.text! }])
+          break
+        case 'prompt':
+          void runPrompt(result.prompt!)
+          break
+        case 'jsx':
+        case 'none':
+          break
+      }
+    } catch (error) {
+      reportGlobalCommandError(command, error)
+    }
+  }, [appendMessages, engine, flowBridge, genMsgId, globalCommandActivityController, reportGlobalCommandError, runPrompt, t])
+
   const handleSubmit = useCallback((value: string) => {
     const trimmed = value.trim()
     if (!trimmed) return
@@ -1555,7 +1657,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         }
       }
       if (trimmed === '/resume') {
-        push('history')
+        void openConversationHistory()
         return
       }
       const ctx: CommandContext = {
@@ -1578,19 +1680,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         },
         t,
       }
-      const result = commandRegistry.execute(trimmed, ctx)
-      flowBridge.updateUsage(engine.getContextUsage())
-      setGitState(engine.getGitState())
-      switch (result.type) {
-        case 'text':
-          appendMessages([{ id: genMsgId(), role: 'system', content: result.text! }])
-          break
-        case 'prompt':
-          runPrompt(result.prompt!)
-          break
-        case 'none':
-          break
-      }
+      void executeRegisteredCommand(trimmed, ctx)
       return
     }
     const resolved = resolveImagePrompt(trimmed, workspacePath, { existingAttachments: pendingDraftAttachments, t })
@@ -1598,7 +1688,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
     }
     runPrompt(resolved.prompt, resolved.attachments)
-  }, [appendMessages, config, convManager, engine, exit, mcpClient, modelPresets, persistConfig, push, restoreCliStateFromTurns, runPrompt, runtime.runtimeTaskManager, skillRuntime, t, workspacePath, genMsgId, notificationCoordinator, clearResultInbox, terminalLatencyTracker, showRunControlHint, flowFeatures, flowBridge])
+  }, [appendMessages, config, convManager, engine, executeRegisteredCommand, exit, mcpClient, modelPresets, openConversationHistory, persistConfig, push, restoreCliStateFromTurns, runPrompt, runtime.runtimeTaskManager, skillRuntime, t, workspacePath, genMsgId, notificationCoordinator, clearResultInbox, terminalLatencyTracker, showRunControlHint, flowFeatures, flowBridge])
 
   const handleAlternateSubmit = useCallback((value: string) => {
     if (!flowBridge.isForegroundBusy() && !engine.isRunning()) {
@@ -1694,7 +1784,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
 
     if (key.ctrl && ch === 'h') {
-      push('history')
+      void openConversationHistory()
       return
     }
 
@@ -1809,25 +1899,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const historyOverlay = activeOverlay === 'history' ? (
     <ConversationHistory
       key={convListRevision}
-      conversations={getConversationEntries()}
-      onSelect={(id) => {
-        pop()
-        const conv = convManager.switchTo(id)
-        if (conv) {
-          restoreCliStateFromTurns(
-            conv.activeTurns ?? conv.turns,
-            '',
-            conv.contextSegments ?? [],
-            conv.contextReservoir ?? [],
-            conv.turns,
-          )
-          restoreInteractionState(conv.interactionState)
-        }
-      }}
-      onDelete={(id) => {
-        convManager.delete(id)
-        setConvListRevision(r => r + 1)
-      }}
+      conversations={conversationEntries}
+      onSelect={(id) => { void selectConversation(id) }}
+      onDelete={(id) => { void deleteSavedConversation(id) }}
       onCancel={() => pop()}
     />
   ) : null
@@ -1847,7 +1921,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       isRefreshing={modelDiscoveryStatus.isRefreshing}
       stale={modelDiscoveryStatus.stale}
       error={modelDiscoveryStatus.error}
-      onRefresh={() => { void loadModelPresets(config, true) }}
+      onRefresh={() => {
+        void globalCommandActivityController.run(
+          '/model',
+          t('ui.app.refreshingModels'),
+          () => loadModelPresets(config, true),
+        ).catch(error => reportGlobalCommandError('/model', error))
+      }}
       onSelect={(preset) => {
         pop()
         const newConfig = applyPreset(config, preset)
@@ -1890,7 +1970,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ) : null
 
   const overlayNode = historyOverlay ?? rewindOverlay ?? modelOverlay ?? effortOverlay
-  const showPrompt = !singleShot && activeOverlay === null && !cursorMode && !askModalVisible
+  const showPrompt = !singleShot && activeOverlay === null && !cursorMode && !askModalVisible && !globalCommandActivity
   const cursorPreviewMessage = cursorMode && !noFlickerActive && cursor ? messages[cursor.index] : undefined
   const cursorHint = cursorMode ? (
     <Box marginTop={1}>
@@ -1913,6 +1993,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     ? t('ui.flow.resultsReady', { count: notificationSnapshot.resultCount })
     : null
   const semanticFlowHint = flowInputHint ?? flowResultHint
+  const globalActivityNode = globalCommandActivity ? (
+    <Box paddingLeft={1} flexShrink={0}>
+      <Text color="cyan">{t('ui.app.commandActivity', {
+        detail: globalCommandActivity.detail,
+      })}</Text>
+    </Box>
+  ) : null
   const promptNode = showPrompt ? (
     <Box flexDirection="column">
       {(flowIsRunning || flowQueueCount > 0 || semanticFlowHint || interruptHint || exitHint || runControlHint || persistenceWarning) && (
@@ -2000,7 +2087,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const landingFrameWidth = resolveLandingFrameWidth(terminal.columns)
   const showLandingView = shouldShowLandingView({
     messageCount: messages.length,
-    isRunning,
+    isRunning: developerFlowActive,
     hasPendingAsk: Boolean(pendingAsk),
     cursorMode,
     hasOverlay: overlayNode !== null,
@@ -2021,7 +2108,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               showVersion={startupFrame.showVersion}
               showWorkspace={startupFrame.showWorkspace}
               showPrompt={startupFrame.showPrompt && showPrompt}
-              flowEnabled={flowUiEnabled}
               prompt={(
                 <PromptInput
                   value={input}
@@ -2042,7 +2128,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           ) : (
             <Box flexDirection="row" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden" backgroundColor={layoutBackground}>
               <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} minHeight={0} overflow="hidden">
-                <SessionPane running={isRunning} visible={false}>
+                <SessionPane running={developerFlowActive} visible={false}>
                   {overlayNode ?? (
                     <Box flexDirection="column" flexBasis={0} flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
                       {transcriptNode}
@@ -2052,7 +2138,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 </SessionPane>
                 <Box flexDirection="column" flexShrink={0} backgroundColor={layoutBackground} paddingX={1}>
                   {cursorHint}
-                  <AgentActivityLine active={flowIsRunning} persistent width={conversationFrameWidth} />
+                  {globalActivityNode}
+                  <AgentActivityLine active={developerFlowActive} persistent width={conversationFrameWidth} />
                   {promptNode}
                   {!cockpit.showSidebar && (
                     <StatusLine
@@ -2153,6 +2240,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {/* Input area */}
         {cursorHint}
         {cursorPreviewNode}
+        {globalActivityNode}
         {promptNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
         {/* Status line at bottom */}
@@ -2168,7 +2256,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           queueCount={flowQueueCount}
           resultCount={notificationSnapshot.resultCount}
         />
-        <AgentActivityLine active={flowIsRunning} />
+        <AgentActivityLine active={developerFlowActive} />
       </Box>
       </ThemeProvider>
     </I18nProvider>

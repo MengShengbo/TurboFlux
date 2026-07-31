@@ -49,6 +49,68 @@ describe('SubAgentTaskManager', () => {
     }
   })
 
+  it('redacts evidence bodies, bounds event bytes, and always persists terminal records', async () => {
+    const workspacePath = createWorkspace()
+    const runtimeTaskManager = new RuntimeTaskManager()
+    const manager = new SubAgentTaskManager({
+      workspacePath,
+      runtimeTaskManager,
+      maxTranscriptEventBytes: 1024,
+    })
+
+    try {
+      const started = manager.startTask({
+        kind: 'agent',
+        agentType: 'reviewer',
+        label: 'Reviewer',
+        objective: 'Bound the trace',
+        workspacePath,
+        run: async ({ recordEvent }) => {
+          recordEvent({
+            type: 'review_trace',
+            event: {
+              type: 'evidence',
+              evidence: {
+                path: 'src/secret.ts',
+                startLine: 1,
+                endLine: 2,
+                preview: 'export const secret',
+                content: 'SOURCE_BODY_MUST_NOT_PERSIST',
+                reason: 'file read',
+              },
+            },
+          })
+          for (let index = 0; index < 30; index += 1) {
+            recordEvent({ type: 'insight', text: `${index}:${'x'.repeat(300)}` })
+          }
+          return {
+            outcome: 'succeeded',
+            evidence: [{
+              path: 'src/secret.ts',
+              startLine: 1,
+              endLine: 2,
+              preview: 'export const secret',
+              content: 'SOURCE_BODY_MUST_NOT_PERSIST',
+              reason: 'file read',
+            }],
+          }
+        },
+      })
+
+      await started.promise
+      const transcript = readFileSync(manager.getTask(started.task.id)!.transcriptPath, 'utf8')
+      const records = manager.readTranscript(started.task.id, { offset: 0, limit: 200 }).records
+      expect(transcript).not.toContain('SOURCE_BODY_MUST_NOT_PERSIST')
+      expect(transcript).toContain('export const secret')
+      expect(records.filter(record => record.type === 'event').length).toBeLessThan(30)
+      expect(records.at(-2)).toMatchObject({ type: 'result', status: 'completed' })
+      expect(records.at(-1)).toMatchObject({ type: 'state', status: 'completed' })
+    } finally {
+      manager.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
   it('cancels a running task through the shared runtime controller', async () => {
     const workspacePath = createWorkspace()
     const runtimeTaskManager = new RuntimeTaskManager()

@@ -30,6 +30,7 @@ commandRegistry.register({
 commandRegistry.register({
   name: 'clear',
   descriptionKey: 'command.clear.description',
+  showsProgress: true,
   type: 'local',
   execute: (_args, ctx) => {
     try {
@@ -66,6 +67,7 @@ commandRegistry.register({
   name: 'config',
   descriptionKey: 'command.config.description',
   argumentHint: '[key] [value]',
+  showsProgress: args => args.trim().split(/\s+/).filter(Boolean).length >= 2,
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
@@ -103,6 +105,7 @@ commandRegistry.register({
   name: 'model',
   descriptionKey: 'command.model.description',
   argumentHint: '[add <model-id>|<model-id>]',
+  showsProgress: args => Boolean(args.trim()),
   type: 'local',
   execute: (args, ctx) => {
     if (!args) {
@@ -140,6 +143,7 @@ commandRegistry.register({
 commandRegistry.register({
   name: 'plan',
   descriptionKey: 'command.plan.description',
+  showsProgress: true,
   type: 'local',
   execute: (_args, ctx) => {
     ctx.engine.setMode('plan')
@@ -152,6 +156,7 @@ commandRegistry.register({
   name: 'vibe',
   descriptionKey: 'command.vibe.description',
   aliases: ['code'],
+  showsProgress: true,
   type: 'local',
   execute: (_args, ctx) => {
     ctx.engine.setMode('vibe')
@@ -164,6 +169,7 @@ commandRegistry.register({
   name: 'git',
   descriptionKey: 'command.git.description',
   argumentHint: '[on|off|refresh]',
+  showsProgress: args => Boolean(args.trim()),
   type: 'local',
   execute: (args, ctx) => {
     const sub = args.trim().toLowerCase()
@@ -194,6 +200,14 @@ commandRegistry.register({
       state.error ? ctx.t('common.error', { message: state.error }) : '',
     ].filter(Boolean)
     return lines.join('\n')
+  },
+  executeAsync: async (args, ctx) => {
+    if (args.trim().toLowerCase() === 'refresh') {
+      await ctx.engine.initializeGit(true)
+      return ctx.t('command.git.refreshing')
+    }
+    const result = commandRegistry.execute(`/git${args ? ` ${args}` : ''}`, ctx)
+    return result.text
   },
 })
 
@@ -248,6 +262,7 @@ commandRegistry.register({
   name: 'flow',
   descriptionKey: 'command.flow.description',
   argumentHint: '[status|retry|export [path]]',
+  showsProgress: args => /^(retry|export)(?:\s|$)/i.test(args.trim()),
   type: 'local',
   execute: (args, ctx) => {
     const manager = ctx.conversationManager
@@ -291,34 +306,24 @@ commandRegistry.register({
   name: 'stop',
   descriptionKey: 'command.stop.description',
   argumentHint: '[session-id|all]',
+  showsProgress: true,
   type: 'local',
-  execute: (args, ctx) => {
-    const manager = ctx.runtimeTaskManager
-    if (!manager) return ctx.t('command.stop.unavailable')
-    const requested = args.trim()
-    const active = manager.listTasks({ kind: 'terminal' }).filter(task =>
-      task.status === 'starting' || task.status === 'running' || task.status === 'stopping'
-    )
-    const targets = !requested || requested === 'all'
-      ? active
-      : active.filter(task => task.id === requested || task.metadata?.sessionId === requested)
-    if (targets.length === 0) return requested ? ctx.t('command.stop.noMatch', { session: requested }) : ctx.t('command.stop.none')
-    const readOnly = targets.filter(task => task.metadata?.recovered === true && task.metadata?.controlAvailable === false)
-    if (readOnly.length > 0) {
-      return ctx.t('command.stop.readOnly', { count: readOnly.length })
-    }
-    void Promise.all(targets.map(task => manager.stopTask(task.id, ctx.t('command.stop.reason')).catch(() => undefined)))
-    return ctx.t(targets.length === 1 ? 'command.stop.stoppingOne' : 'command.stop.stopping', { count: targets.length })
-  },
+  execute: (args, ctx) => executeStopCommand(args, ctx),
+  executeAsync: (args, ctx) => executeStopCommand(args, ctx, true),
 })
 
 // /compact
 commandRegistry.register({
   name: 'compact',
   descriptionKey: 'command.compact.description',
+  showsProgress: true,
   type: 'local',
   execute: (_args, ctx) => {
     ctx.engine.compactContext().catch(() => {})
+    return ctx.t('command.compact.triggered')
+  },
+  executeAsync: async (_args, ctx) => {
+    await ctx.engine.compactContext()
     return ctx.t('command.compact.triggered')
   },
 })
@@ -369,6 +374,7 @@ commandRegistry.register({
   name: 'effort',
   descriptionKey: 'command.effort.description',
   argumentHint: '[level]',
+  showsProgress: args => Boolean(args.trim()),
   type: 'local',
   execute: (args, ctx) => {
     const capability = getModelReasoningCapabilities(ctx.config.model, ctx.config.provider, ctx.config.modelCapabilities)
@@ -409,6 +415,7 @@ commandRegistry.register({
   name: 'approval',
   descriptionKey: 'command.approval.description',
   argumentHint: '[ask|agent|full]',
+  showsProgress: args => Boolean(args.trim()),
   type: 'local',
   execute: (args, ctx) => {
     const input = args.trim().toLowerCase()
@@ -429,6 +436,7 @@ commandRegistry.register({
   name: 'capability',
   descriptionKey: 'command.capability.description',
   argumentHint: '[read-only|workspace-write|danger-full-access]',
+  showsProgress: args => Boolean(args.trim()),
   type: 'local',
   execute: (args, ctx) => {
     const input = args.trim().toLowerCase()
@@ -450,6 +458,38 @@ function approvalLabel(policy: keyof typeof APPROVAL_POLICY_LABELS, ctx: Command
   if (policy === 'ask') return ctx.t('command.approval.ask')
   if (policy === 'agent') return ctx.t('command.approval.agent')
   return ctx.t('command.approval.full')
+}
+
+function executeStopCommand(args: string, ctx: CommandContext): string
+function executeStopCommand(args: string, ctx: CommandContext, wait: true): Promise<string>
+function executeStopCommand(args: string, ctx: CommandContext, wait = false): string | Promise<string> {
+  const manager = ctx.runtimeTaskManager
+  if (!manager) return wait ? Promise.resolve(ctx.t('command.stop.unavailable')) : ctx.t('command.stop.unavailable')
+  const requested = args.trim()
+  const active = manager.listTasks({ kind: 'terminal' }).filter(task =>
+    task.status === 'starting' || task.status === 'running' || task.status === 'stopping'
+  )
+  const targets = !requested || requested === 'all'
+    ? active
+    : active.filter(task => task.id === requested || task.metadata?.sessionId === requested)
+  const response = targets.length === 0
+    ? (requested ? ctx.t('command.stop.noMatch', { session: requested }) : ctx.t('command.stop.none'))
+    : targets.some(task => task.metadata?.recovered === true && task.metadata?.controlAvailable === false)
+      ? ctx.t('command.stop.readOnly', {
+          count: targets.filter(task => task.metadata?.recovered === true && task.metadata?.controlAvailable === false).length,
+        })
+      : null
+  if (response) return wait ? Promise.resolve(response) : response
+
+  const stopping = Promise.all(targets.map(task =>
+    manager.stopTask(task.id, ctx.t('command.stop.reason')).catch(() => undefined)
+  ))
+  const message = ctx.t(targets.length === 1 ? 'command.stop.stoppingOne' : 'command.stop.stopping', { count: targets.length })
+  if (!wait) {
+    void stopping
+    return message
+  }
+  return stopping.then(() => message)
 }
 
 function capabilityLabel(profile: CapabilityProfile): string {
@@ -528,6 +568,7 @@ commandRegistry.register({
 commandRegistry.register({
   name: 'new',
   descriptionKey: 'command.new.description',
+  showsProgress: true,
   type: 'local',
   execute: (_args, ctx) => {
     if (!ctx.conversationManager) return ctx.t('command.conversation.unavailable')
@@ -547,10 +588,22 @@ commandRegistry.register({
   name: 'list',
   descriptionKey: 'command.list.description',
   aliases: ['conversations'],
+  showsProgress: true,
   type: 'local',
   execute: (_args, ctx) => {
     if (!ctx.conversationManager) return ctx.t('command.conversation.unavailable')
     const convs = ctx.conversationManager.list()
+    if (convs.length === 0) return ctx.t('command.conversation.none')
+    const lines = convs.slice(0, 20).map((c, i) => {
+      const date = new Date(c.updatedAt).toLocaleString()
+      const current = c.id === ctx.conversationManager!.getCurrentId() ? ' *' : ''
+      return `  ${i + 1}. ${c.title} (${ctx.t('command.conversation.turns', { count: c.turnCount })}, ${date})${current}\n     ${ctx.t('command.conversation.id', { id: c.id })}`
+    })
+    return `${ctx.t('command.conversation.total', { count: convs.length })}\n${lines.join('\n')}`
+  },
+  executeAsync: async (_args, ctx) => {
+    if (!ctx.conversationManager) return ctx.t('command.conversation.unavailable')
+    const convs = await ctx.conversationManager.listAsync()
     if (convs.length === 0) return ctx.t('command.conversation.none')
     const lines = convs.slice(0, 20).map((c, i) => {
       const date = new Date(c.updatedAt).toLocaleString()
@@ -565,6 +618,7 @@ commandRegistry.register({
 commandRegistry.register({
   name: 'resume',
   descriptionKey: 'command.resume.description',
+  showsProgress: true,
   type: 'local',
   execute: () => {
     return ''
@@ -576,6 +630,7 @@ commandRegistry.register({
   name: 'init',
   descriptionKey: 'command.init.description',
   isHidden: true,
+  showsProgress: true,
   type: 'local',
   execute: (_args, ctx) => {
     const wsPath = ctx.workspacePath || process.cwd()

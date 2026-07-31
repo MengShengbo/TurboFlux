@@ -5,12 +5,24 @@ import { getSupportedModelSpec, normalizeNativeReasoningConfig, SUPPORTED_MODEL_
 import {
   normalizeApprovalPolicy,
   normalizeCapabilityProfile,
+  resolveCapabilityProfileForApproval,
   type ApprovalPolicy,
   type CapabilityProfile,
   type NativeReasoningConfig,
 } from '../shared/agentTypes'
-import { loadCredentialSnapshot, saveCredentialSnapshot } from './credentialStore'
-import { writeFileAtomicSync } from './fileIO'
+import {
+  getCredentialsFile,
+  loadCredentialSnapshot,
+  serializeCredentialSnapshot,
+  type CredentialSnapshot,
+} from './credentialStore'
+import {
+  quarantineCorruptFileSync,
+  recoverFilesAtomicSync,
+  withFileLockSync,
+  writeFileAtomicSync,
+  writeFilesAtomicSync,
+} from './fileIO'
 
 export interface TurboFluxConfig {
   provider: 'openai' | 'anthropic' | 'deepseek' | 'kimi' | 'glm' | 'openrouter' | 'custom'
@@ -92,6 +104,8 @@ export interface ProviderPreset {
 const CONFIG_DIR = process.env.TURBOFLUX_CONFIG_DIR || join(homedir(), '.turboflux')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const CONVERSATIONS_DIR = join(CONFIG_DIR, 'conversations')
+const CONFIG_TRANSACTION_FILE = join(CONFIG_DIR, '.config-transaction.json')
+const CONFIG_LOCK_FILE = join(CONFIG_DIR, '.config.lock')
 
 function hydrateCredentials(raw: Partial<TurboFluxConfig>): Partial<TurboFluxConfig> {
   const stored = loadCredentialSnapshot()
@@ -111,6 +125,17 @@ function hydrateCredentials(raw: Partial<TurboFluxConfig>): Partial<TurboFluxCon
     ...raw,
     apiKey: envApiKey || stored.apiKey || raw.apiKey || '',
     apiConfigs: profiles,
+  }
+}
+
+function legacyCredentialSnapshot(raw: Partial<TurboFluxConfig>): CredentialSnapshot {
+  return {
+    apiKey: typeof raw.apiKey === 'string' && raw.apiKey ? raw.apiKey : undefined,
+    apiConfigs: Object.fromEntries(
+      (Array.isArray(raw.apiConfigs) ? raw.apiConfigs : [])
+        .filter(profile => typeof profile?.id === 'string' && typeof profile.apiKey === 'string' && profile.apiKey)
+        .map(profile => [profile.id, profile.apiKey]),
+    ),
   }
 }
 
@@ -284,7 +309,11 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
   const contextWindow = positiveInteger(raw.contextWindow, DEFAULT_CONFIG.contextWindow)
   const maxTokens = positiveInteger(raw.maxTokens, DEFAULT_CONFIG.maxTokens)
   const approvalPolicy = normalizeApprovalPolicy(raw.approvalPolicy, DEFAULT_CONFIG.approvalPolicy)
-  const capabilityProfile = normalizeCapabilityProfile(raw.capabilityProfile, DEFAULT_CONFIG.capabilityProfile)
+  const capabilityProfile = resolveCapabilityProfileForApproval(
+    approvalPolicy,
+    raw.capabilityProfile,
+    DEFAULT_CONFIG.capabilityProfile,
+  )
   const profiles = normalizeApiConfigProfiles((raw as any).apiConfigs)
   let activeApiConfigId = typeof raw.activeApiConfigId === 'string' ? raw.activeApiConfigId : undefined
   const activeProfile = profiles.find(profile => profile.id === activeApiConfigId)
@@ -301,6 +330,9 @@ function normalizeConfig(raw: Partial<TurboFluxConfig>): TurboFluxConfig {
       model,
       contextWindow,
       maxTokens,
+      maxOutputTokens: raw.maxOutputTokens,
+      modelCapabilities: raw.modelCapabilities,
+      modelMetadataSources: raw.modelMetadataSources,
       reasoning: normalizeNativeReasoningConfig(model, raw.reasoning, provider, raw.modelCapabilities),
       createdAt: now,
       updatedAt: now,
@@ -444,6 +476,16 @@ function syncActiveProfile(config: TurboFluxConfig, touchUpdatedAt = true): Turb
   const activeId = config.activeApiConfigId || normalizedProfiles[0]?.id || 'main'
   const existing = normalizedProfiles.find(profile => profile.id === activeId)
   const now = Date.now()
+  const activeFieldsChanged = !existing || existing.provider !== config.provider
+    || existing.apiKey !== config.apiKey
+    || existing.baseUrl !== config.baseUrl.replace(/\/+$/, '')
+    || existing.model !== config.model.trim()
+    || existing.contextWindow !== config.contextWindow
+    || existing.maxTokens !== config.maxTokens
+    || existing.maxOutputTokens !== config.maxOutputTokens
+    || JSON.stringify(existing.modelCapabilities) !== JSON.stringify(config.modelCapabilities)
+    || JSON.stringify(existing.modelMetadataSources) !== JSON.stringify(config.modelMetadataSources)
+    || JSON.stringify(existing.reasoning) !== JSON.stringify(normalizeNativeReasoningConfig(config.model, config.reasoning, config.provider, config.modelCapabilities))
   const activeProfile = buildApiConfigProfile({
     ...(existing ?? {}),
     id: activeId,
@@ -459,7 +501,7 @@ function syncActiveProfile(config: TurboFluxConfig, touchUpdatedAt = true): Turb
     modelMetadataSources: config.modelMetadataSources,
     reasoning: config.reasoning,
     createdAt: existing?.createdAt || now,
-    updatedAt: touchUpdatedAt ? now : existing?.updatedAt || now,
+    updatedAt: touchUpdatedAt && activeFieldsChanged ? now : existing?.updatedAt || now,
   })
   const profiles = upsertApiConfigProfile(normalizedProfiles, activeProfile)
   return activeFieldsFromProfile({
@@ -502,12 +544,26 @@ export function setConfigValue(config: TurboFluxConfig, key: string, value: stri
       if (!['ask', 'agent', 'full', 'request', 'auto'].includes(value.toLowerCase())) {
         throw new Error('approvalPolicy must be ask, agent, or full')
       }
-      return { ...config, approvalPolicy: normalizeApprovalPolicy(value.toLowerCase(), config.approvalPolicy) }
+      {
+        const approvalPolicy = normalizeApprovalPolicy(value.toLowerCase(), config.approvalPolicy)
+        const capabilityProfile = approvalPolicy === 'full'
+          ? 'danger-full-access'
+          : config.approvalPolicy === 'full' && config.capabilityProfile === 'danger-full-access'
+            ? 'workspace-write'
+            : normalizeCapabilityProfile(config.capabilityProfile)
+        return { ...config, approvalPolicy, capabilityProfile }
+      }
     case 'capabilityProfile':
       if (!['read-only', 'workspace-write', 'danger-full-access'].includes(value.toLowerCase())) {
         throw new Error('capabilityProfile must be read-only, workspace-write, or danger-full-access')
       }
-      return { ...config, capabilityProfile: normalizeCapabilityProfile(value.toLowerCase(), config.capabilityProfile) }
+      {
+        const capabilityProfile = normalizeCapabilityProfile(value.toLowerCase(), config.capabilityProfile)
+        const approvalPolicy = config.approvalPolicy === 'full' && capabilityProfile !== 'danger-full-access'
+          ? 'agent'
+          : config.approvalPolicy
+        return { ...config, approvalPolicy, capabilityProfile }
+      }
     case 'gitEnabled': {
       const normalized = value.toLowerCase()
       if (!['true', 'false', 'on', 'off', 'enabled', 'disabled'].includes(normalized)) {
@@ -584,54 +640,96 @@ export function ensureDirectories(workspacePath?: string): void {
   }
 }
 
+function credentialSnapshotForSave(config: TurboFluxConfig, fallback: CredentialSnapshot = {}): CredentialSnapshot {
+  const stored = loadCredentialSnapshot()
+  const envApiKey = process.env.TURBOFLUX_API_KEY?.trim()
+  const activeId = config.activeApiConfigId
+  const persistentActiveKey = activeId
+    ? stored.apiConfigs?.[activeId] ?? fallback.apiConfigs?.[activeId] ?? stored.apiKey ?? fallback.apiKey
+    : stored.apiKey ?? fallback.apiKey
+  const apiConfigs = Object.fromEntries((config.apiConfigs || []).flatMap(profile => {
+    const key = envApiKey && profile.id === activeId && profile.apiKey === envApiKey
+      ? stored.apiConfigs?.[profile.id] ?? fallback.apiConfigs?.[profile.id] ?? persistentActiveKey
+      : profile.apiKey
+    return key ? [[profile.id, key]] : []
+  }))
+  const apiKey = envApiKey && config.apiKey === envApiKey
+    ? persistentActiveKey
+    : config.apiKey || undefined
+  return { apiKey, apiConfigs }
+}
+
+function persistConfig(config: TurboFluxConfig, fallbackCredentials?: CredentialSnapshot): TurboFluxConfig {
+  const normalized = syncActiveProfile(normalizeConfig(config))
+  const credentials = credentialSnapshotForSave(normalized, fallbackCredentials)
+  writeFilesAtomicSync([
+    {
+      filePath: getCredentialsFile(),
+      content: serializeCredentialSnapshot(credentials),
+      mode: 0o600,
+    },
+    {
+      filePath: CONFIG_FILE,
+      content: JSON.stringify(stripCredentials(normalized), null, 2),
+      mode: 0o600,
+    },
+  ], CONFIG_TRANSACTION_FILE)
+  return normalized
+}
+
 export async function loadConfig(): Promise<TurboFluxConfig> {
   ensureDirectories()
-
-  if (!existsSync(CONFIG_FILE)) {
-    const initial = applyKnownModelMetadata(normalizeConfig(hydrateCredentials(DEFAULT_CONFIG)), MODEL_PRESETS)
-    writeConfigDocument(initial)
-    return initial
-  }
-
-  try {
-    const raw = readFileSync(CONFIG_FILE, 'utf-8').replace(/^\uFEFF/, '')
-    const userConfig = JSON.parse(raw)
-    const merged = normalizeConfig(hydrateCredentials({ ...DEFAULT_CONFIG, ...userConfig }))
-    if (looksLikeLegacyLocalProxyDefault(userConfig)) {
-      const reset = emptyConfigWithProfiles()
-      writeConfigDocument(reset)
-      return reset
+  return withFileLockSync(CONFIG_LOCK_FILE, () => {
+    recoverFilesAtomicSync(CONFIG_TRANSACTION_FILE)
+    if (!existsSync(CONFIG_FILE)) {
+      const initial = applyKnownModelMetadata(normalizeConfig(hydrateCredentials(DEFAULT_CONFIG)), MODEL_PRESETS)
+      writeConfigDocument(initial)
+      return initial
     }
-    if (looksLikeLegacyBundledDefault(userConfig)) {
-      const migrated = emptyConfigWithProfiles()
-      writeConfigDocument(migrated)
-      return migrated
+
+    let userConfig: Partial<TurboFluxConfig>
+    try {
+      const raw = readFileSync(CONFIG_FILE, 'utf-8').replace(/^\uFEFF/, '')
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Configuration must be a JSON object')
+      userConfig = parsed as Partial<TurboFluxConfig>
+    } catch (error) {
+      const backupPath = quarantineCorruptFileSync(CONFIG_FILE)
+      console.warn(`TurboFlux preserved an invalid configuration file at ${backupPath}: ${error instanceof Error ? error.message : String(error)}`)
+      const recovered = applyKnownModelMetadata(normalizeConfig(hydrateCredentials(DEFAULT_CONFIG)), MODEL_PRESETS)
+      writeConfigDocument(recovered)
+      return recovered
+    }
+
+    const legacyCredentials = legacyCredentialSnapshot(userConfig)
+    const merged = normalizeConfig(hydrateCredentials({ ...DEFAULT_CONFIG, ...userConfig }))
+    if (looksLikeLegacyLocalProxyDefault(userConfig) || looksLikeLegacyBundledDefault(userConfig)) {
+      return persistConfig(emptyConfigWithProfiles())
     }
     const withBackendMetadata = applyKnownModelMetadata(merged, MODEL_PRESETS)
+    const hasLegacyCredentials = Boolean(userConfig.apiKey)
+      || (Array.isArray(userConfig.apiConfigs) && userConfig.apiConfigs.some(profile => Boolean(profile.apiKey)))
+    const needsFullAccessMigration = withBackendMetadata.approvalPolicy === 'full'
+      && userConfig.capabilityProfile !== 'danger-full-access'
     if (
       withBackendMetadata.contextWindow !== merged.contextWindow ||
       withBackendMetadata.maxTokens !== merged.maxTokens ||
-      withBackendMetadata.model !== merged.model
+      withBackendMetadata.model !== merged.model ||
+      hasLegacyCredentials ||
+      needsFullAccessMigration
     ) {
-      return saveConfig(withBackendMetadata)
-    } else if (userConfig.apiKey || userConfig.apiConfigs?.some((profile: TurboFluxApiConfigProfile) => profile.apiKey)) {
-      return saveConfig(withBackendMetadata)
+      return persistConfig(withBackendMetadata, legacyCredentials)
     }
     return syncActiveProfile(withBackendMetadata, false)
-  } catch {
-    return normalizeConfig(DEFAULT_CONFIG)
-  }
+  })
 }
 
 export function saveConfig(config: TurboFluxConfig): TurboFluxConfig {
   ensureDirectories()
-  const normalized = syncActiveProfile(normalizeConfig(config))
-  saveCredentialSnapshot({
-    apiKey: normalized.apiKey || undefined,
-    apiConfigs: Object.fromEntries((normalized.apiConfigs || []).filter(profile => profile.apiKey).map(profile => [profile.id, profile.apiKey])),
+  return withFileLockSync(CONFIG_LOCK_FILE, () => {
+    recoverFilesAtomicSync(CONFIG_TRANSACTION_FILE)
+    return persistConfig(config)
   })
-  writeConfigDocument(normalized)
-  return normalized
 }
 
 export function getConfigDir(): string {

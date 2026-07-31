@@ -3,6 +3,7 @@ import { Box, Text } from 'ink'
 import { Header } from '../header/Header'
 import type { MascotMood } from '../header/Mascot'
 import { useI18n } from '../../i18n/index'
+import { resolveBackground, useTheme } from '../../theme/index'
 
 interface LandingViewProps {
   frameWidth: number
@@ -14,7 +15,6 @@ interface LandingViewProps {
   showWorkspace: boolean
   showPrompt: boolean
   prompt: React.ReactNode
-  flowEnabled?: boolean
 }
 
 export function LandingView({
@@ -27,9 +27,10 @@ export function LandingView({
   showWorkspace,
   showPrompt,
   prompt,
-  flowEnabled = true,
 }: LandingViewProps) {
   const { t } = useI18n()
+  const theme = useTheme()
+  const landingBackground = resolveBackground(theme, 'background')
   return (
     <Box
       flexDirection="column"
@@ -38,7 +39,7 @@ export function LandingView({
       minHeight={0}
       alignItems="center"
       justifyContent="center"
-      backgroundColor="#050505"
+      backgroundColor={landingBackground}
     >
       <Header
         workspacePath={workspacePath}
@@ -50,14 +51,11 @@ export function LandingView({
         showWorkspace={showWorkspace}
         showConnector
       />
-      <Text color={flowEnabled ? "#76c7a1" : "#d6a85f"}>
-        {showWorkspace ? t(flowEnabled ? 'ui.landing.flowReady' : 'ui.landing.flowFallback') : ' '}
-      </Text>
       <Box width={frameWidth} flexDirection="column" alignItems="center" marginTop={2} flexShrink={0}>
         {showPrompt ? (
           <>
             <Text bold>{t('ui.landing.prompt')}</Text>
-            <Box marginTop={1} backgroundColor="#050505">{prompt}</Box>
+            <Box marginTop={1} backgroundColor={landingBackground}>{prompt}</Box>
           </>
         ) : null}
       </Box>

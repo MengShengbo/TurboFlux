@@ -1,6 +1,5 @@
 import {
   appendFileSync,
-  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -77,9 +76,28 @@ export interface SubAgentTaskManagerOptions {
   ownerSessionId?: string
   storageDir?: string | false
   now?: () => number
+  maxTranscriptEventBytes?: number
 }
 
 const TERMINAL_STATUSES = new Set<RuntimeTaskStatus>(['completed', 'failed', 'stopped', 'interrupted'])
+const DEFAULT_MAX_TRANSCRIPT_EVENT_BYTES = 512 * 1024
+
+function sanitizeTranscriptValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(item => sanitizeTranscriptValue(item))
+  if (!value || typeof value !== 'object') return value
+  const source = value as Record<string, unknown>
+  const isEvidence = typeof source.path === 'string'
+    && typeof source.startLine === 'number'
+    && typeof source.endLine === 'number'
+    && typeof source.reason === 'string'
+  return Object.fromEntries(Object.entries(source)
+    .filter(([key]) => !(isEvidence && key === 'content'))
+    .map(([key, item]) => [key, sanitizeTranscriptValue(item)]))
+}
+
+export function sanitizeSubAgentTranscriptRecord(record: SubAgentTranscriptRecord): SubAgentTranscriptRecord {
+  return sanitizeTranscriptValue(record) as SubAgentTranscriptRecord
+}
 
 function isRuntimeTaskStatus(value: unknown): value is RuntimeTaskStatus {
   return ['starting', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'].includes(String(value))
@@ -107,6 +125,8 @@ export class SubAgentTaskManager {
   private readonly descriptors = new Map<string, SubAgentTaskDescriptor>()
   private readonly results = new Map<string, unknown>()
   private readonly outputBytes = new Map<string, number>()
+  private readonly eventBytes = new Map<string, number>()
+  private readonly maxTranscriptEventBytes: number
   private readonly unsubscribeRuntimeTasks: () => void
   private sequence = 0
   private destroyed = false
@@ -118,6 +138,7 @@ export class SubAgentTaskManager {
       ? null
       : options.storageDir || path.join(options.workspacePath, '.turboflux', 'runtime-agents')
     this.now = options.now || Date.now
+    this.maxTranscriptEventBytes = Math.max(1024, Math.floor(options.maxTranscriptEventBytes || DEFAULT_MAX_TRANSCRIPT_EVENT_BYTES))
     if (this.storageDir) {
       mkdirSync(this.storageDir, { recursive: true })
       this.recoverTranscripts()
@@ -308,7 +329,8 @@ export class SubAgentTaskManager {
       .sort()
     for (const file of files) {
       const transcriptPath = path.join(this.storageDir, file)
-      const records = parseTranscript(readFileSync(transcriptPath, 'utf8'))
+      const transcriptContent = readFileSync(transcriptPath, 'utf8')
+      const records = parseTranscript(transcriptContent)
       const start = records.find((record): record is Extract<SubAgentTranscriptRecord, { type: 'start' }> => record.type === 'start')
       if (!start?.task?.id || this.runtimeTaskManager.getTask(start.task.id)) continue
       const descriptor: SubAgentTaskDescriptor = {
@@ -317,6 +339,9 @@ export class SubAgentTaskManager {
       }
       this.descriptors.set(descriptor.id, descriptor)
       this.outputBytes.set(descriptor.id, statSync(transcriptPath).size)
+      this.eventBytes.set(descriptor.id, records.reduce((total, record) => record.type === 'event'
+        ? total + Buffer.byteLength(`${JSON.stringify(record)}\n`)
+        : total, 0))
 
       let stateStatus: RuntimeTaskStatus | undefined
       let resultStatus: Extract<RuntimeTaskStatus, 'completed' | 'failed' | 'stopped'> | undefined
@@ -383,7 +408,7 @@ export class SubAgentTaskManager {
     if (!descriptor?.transcriptPath) return
     let line: string
     try {
-      line = `${JSON.stringify(record)}\n`
+      line = `${JSON.stringify(sanitizeSubAgentTranscriptRecord(record))}\n`
     } catch {
       line = `${JSON.stringify({
         version: 1,
@@ -392,8 +417,12 @@ export class SubAgentTaskManager {
         event: { type: 'serialization_error' },
       })}\n`
     }
+    if (record.type === 'event') {
+      const nextEventBytes = (this.eventBytes.get(taskId) || 0) + Buffer.byteLength(line)
+      if (nextEventBytes > this.maxTranscriptEventBytes) return
+      this.eventBytes.set(taskId, nextEventBytes)
+    }
     appendFileSync(descriptor.transcriptPath, line, { encoding: 'utf8', mode: 0o600 })
-    try { chmodSync(descriptor.transcriptPath, 0o600) } catch {}
     const bytes = (this.outputBytes.get(taskId) || 0) + Buffer.byteLength(line)
     this.outputBytes.set(taskId, bytes)
     if (this.runtimeTaskManager.getTask(taskId)) {

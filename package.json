@@ -6,6 +6,13 @@
   "bin": {
     "turboflux": "./bin/turboflux.mjs"
   },
+  "files": [
+    "bin/",
+    "dist/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
   "author": "TurboFlux",
   "license": "MIT",
   "type": "module",
@@ -14,6 +21,8 @@
     "dev:cli": "tsx watch src/cli/index.ts",
     "dev:once": "tsx src/cli/index.ts",
     "start": "tsx src/cli/index.ts",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "prepack": "npm run clean && npm run build",
     "build": "tsc",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
@@ -39,7 +48,7 @@
     "vitest": "^4.1.7"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "chalk": "^5.6.2",
     "cli-truncate": "^6.0.0",
     "commander": "^12.1.0",

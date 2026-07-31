@@ -1,4 +1,5 @@
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, unlinkSync } from 'fs'
+import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync, unlink as unlinkAsync } from 'node:fs/promises'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
 import type { AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
@@ -84,9 +85,20 @@ function ensureDir(): string {
   return directory
 }
 
+async function ensureDirAsync(): Promise<string> {
+  const directory = conversationsDir()
+  await mkdirAsync(directory, { recursive: true, mode: 0o700 })
+  return directory
+}
+
 function conversationPath(id: string, extension: 'json' | 'jsonl'): string {
   if (!CONVERSATION_ID_PATTERN.test(id)) throw new Error(`Invalid conversation id: ${id}`)
   return join(ensureDir(), `${id}.${extension}`)
+}
+
+async function conversationPathAsync(id: string, extension: 'json' | 'jsonl'): Promise<string> {
+  if (!CONVERSATION_ID_PATTERN.test(id)) throw new Error(`Invalid conversation id: ${id}`)
+  return join(await ensureDirAsync(), `${id}.${extension}`)
 }
 
 function cloneConversation(conversation: PersistedConversation): PersistedConversation {
@@ -108,18 +120,24 @@ function readLegacyConversation(id: string): PersistedConversation | null {
   }
 }
 
-function readJournal(id: string): { entries: ConversationJournalEntry[]; truncated: boolean } {
+async function readLegacyConversationAsync(id: string): Promise<PersistedConversation | null> {
   let filePath: string
   try {
-    filePath = conversationPath(id, 'jsonl')
+    filePath = await conversationPathAsync(id, 'json')
   } catch {
-    return { entries: [], truncated: false }
+    return null
   }
-  if (!existsSync(filePath)) return { entries: [], truncated: false }
+  try {
+    return JSON.parse(await readFileAsync(filePath, 'utf-8')) as PersistedConversation
+  } catch {
+    return null
+  }
+}
 
+function parseJournal(content: string): { entries: ConversationJournalEntry[]; truncated: boolean } {
   const entries: ConversationJournalEntry[] = []
   let truncated = false
-  const lines = readFileSync(filePath, 'utf-8').split(/\r?\n/)
+  const lines = content.split(/\r?\n/)
   for (const line of lines) {
     if (!line.trim()) continue
     try {
@@ -131,6 +149,52 @@ function readJournal(id: string): { entries: ConversationJournalEntry[]; truncat
     }
   }
   return { entries, truncated }
+}
+
+async function parseJournalAsync(content: string): Promise<{ entries: ConversationJournalEntry[]; truncated: boolean }> {
+  const entries: ConversationJournalEntry[] = []
+  let truncated = false
+  const lines = content.split(/\r?\n/)
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!
+    if (line.trim()) {
+      try {
+        const entry: unknown = JSON.parse(line)
+        if (!isJournalEntry(entry)) throw new Error('Invalid journal entry')
+        entries.push(entry)
+      } catch {
+        truncated = true
+      }
+    }
+    if (index > 0 && index % 250 === 0) await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  return { entries, truncated }
+}
+
+function readJournal(id: string): { entries: ConversationJournalEntry[]; truncated: boolean } {
+  let filePath: string
+  try {
+    filePath = conversationPath(id, 'jsonl')
+  } catch {
+    return { entries: [], truncated: false }
+  }
+  if (!existsSync(filePath)) return { entries: [], truncated: false }
+
+  return parseJournal(readFileSync(filePath, 'utf-8'))
+}
+
+async function readJournalAsync(id: string): Promise<{ entries: ConversationJournalEntry[]; truncated: boolean }> {
+  let filePath: string
+  try {
+    filePath = await conversationPathAsync(id, 'jsonl')
+  } catch {
+    return { entries: [], truncated: false }
+  }
+  try {
+    return parseJournalAsync(await readFileAsync(filePath, 'utf-8'))
+  } catch {
+    return { entries: [], truncated: false }
+  }
 }
 
 function createConversation(meta: ConversationMeta): PersistedConversation {
@@ -413,6 +477,15 @@ export function loadConversation(id: string): PersistedConversation | null {
   return replayConversation(id, legacy, journal.entries, journal.truncated)
 }
 
+export async function loadConversationAsync(id: string): Promise<PersistedConversation | null> {
+  const [legacy, journal] = await Promise.all([
+    readLegacyConversationAsync(id),
+    readJournalAsync(id),
+  ])
+  if (!legacy && journal.entries.length === 0) return null
+  return replayConversation(id, legacy, journal.entries, journal.truncated)
+}
+
 export function deleteConversation(id: string): boolean {
   let deleted = false
   for (const extension of ['json', 'jsonl'] as const) {
@@ -426,6 +499,26 @@ export function deleteConversation(id: string): boolean {
     unlinkSync(filePath)
     checkedJournalBoundaries.delete(filePath)
     deleted = true
+  }
+  return deleted
+}
+
+export async function deleteConversationAsync(id: string): Promise<boolean> {
+  let deleted = false
+  for (const extension of ['json', 'jsonl'] as const) {
+    let filePath: string
+    try {
+      filePath = await conversationPathAsync(id, extension)
+    } catch {
+      return false
+    }
+    try {
+      await unlinkAsync(filePath)
+      checkedJournalBoundaries.delete(filePath)
+      deleted = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
   }
   return deleted
 }
@@ -445,6 +538,32 @@ export function listConversations(workspacePath?: string): ConversationMeta[] {
 
   for (const id of ids) {
     const conv = loadConversation(id)
+    if (!conv) continue
+    if (workspacePath && !sameWorkspacePath(conv.workspacePath, workspacePath)) continue
+    metas.push({
+      id: conv.id,
+      title: conv.title,
+      workspacePath: conv.workspacePath,
+      createdAt: conv.createdAt,
+      updatedAt: conv.updatedAt,
+      mode: conv.mode,
+      model: conv.model,
+      provider: conv.provider,
+      turnCount: conv.turnCount || conv.turns.length,
+    })
+  }
+
+  return metas.sort((left, right) => right.updatedAt - left.updatedAt)
+}
+
+export async function listConversationsAsync(workspacePath?: string): Promise<ConversationMeta[]> {
+  const files = (await readdirAsync(await ensureDirAsync()))
+    .filter(file => file.endsWith('.json') || file.endsWith('.jsonl'))
+  const ids = [...new Set(files.map(file => file.replace(/\.(json|jsonl)$/, '')))]
+  const metas: ConversationMeta[] = []
+
+  for (const id of ids) {
+    const conv = await loadConversationAsync(id)
     if (!conv) continue
     if (workspacePath && !sameWorkspacePath(conv.workspacePath, workspacePath)) continue
     metas.push({

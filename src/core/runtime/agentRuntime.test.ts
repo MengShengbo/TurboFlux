@@ -6,8 +6,9 @@ import { DEFAULT_PROFILE } from '../profile'
 import { createAgentRuntime } from './agentRuntime'
 
 describe('createAgentRuntime runtime tasks', () => {
-  it('does not turn full approval into unrestricted filesystem access', async () => {
+  it('turns full approval into unrestricted filesystem access', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
+    const outside = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-outside-'))
     const runtime = createAgentRuntime({
       workspacePath: workspace,
       workspaceName: 'runtime-test',
@@ -24,9 +25,13 @@ describe('createAgentRuntime runtime tasks', () => {
     })
 
     try {
+      expect(runtime.toolExecutor.getCapabilityProfile()).toBe('danger-full-access')
+      await expect(runtime.toolExecutor.writeFile(join(outside, 'allowed.txt'), 'full access'))
+        .resolves.toMatchObject({ success: true })
     } finally {
       await runtime.destroy()
       rmSync(workspace, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
     }
   })
 
@@ -143,6 +148,7 @@ describe('createAgentRuntime runtime tasks', () => {
         maxTokens: 8192,
       }))
       expect(runtime.engine.getApprovalPolicy()).toBe('full')
+      expect(runtime.toolExecutor.getCapabilityProfile()).toBe('danger-full-access')
       expect(runtime.engine.getGitState().enabled).toBe(true)
     } finally {
       await runtime.destroy()

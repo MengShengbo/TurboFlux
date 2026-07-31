@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { ensureDirectories, getConfigDir } from './config'
-import { writeFileAtomicSync } from './fileIO'
+import { quarantineCorruptFileSync, withFileLockSync, writeFileAtomicSync } from './fileIO'
 
 export type TurboFluxInterfaceLanguage = 'zh-CN' | 'en'
 export type TurboFluxAiOutputLanguage = 'follow-user' | 'zh-CN' | 'en' | 'ja' | 'ko' | 'custom'
@@ -262,6 +262,10 @@ export function getProfileFile(): string {
   return join(getConfigDir(), PROFILE_FILE_NAME)
 }
 
+function getProfileLockFile(): string {
+  return join(getConfigDir(), '.profile.lock')
+}
+
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
@@ -329,20 +333,26 @@ export function loadProfile(): TurboFluxProfile {
   try {
     const raw = JSON.parse(readFileSync(file, 'utf-8').replace(/^\uFEFF/, ''))
     return normalizeProfile(raw)
-  } catch {
-    return normalizeProfile(DEFAULT_PROFILE)
+  } catch (error) {
+    const backupPath = quarantineCorruptFileSync(file)
+    console.warn(`TurboFlux preserved an invalid profile file at ${backupPath}: ${error instanceof Error ? error.message : String(error)}`)
+    const recovered = normalizeProfile({ ...DEFAULT_PROFILE, updatedAt: new Date().toISOString() })
+    writeFileAtomicSync(file, JSON.stringify(recovered, null, 2), 0o600)
+    return recovered
   }
 }
 
 export function saveProfile(profile: Partial<TurboFluxProfile>): TurboFluxProfile {
   ensureDirectories()
-  const next = normalizeProfile({
-    ...loadProfile(),
-    ...profile,
-    updatedAt: new Date().toISOString(),
+  return withFileLockSync(getProfileLockFile(), () => {
+    const next = normalizeProfile({
+      ...loadProfile(),
+      ...profile,
+      updatedAt: new Date().toISOString(),
+    })
+    writeFileAtomicSync(getProfileFile(), JSON.stringify(next, null, 2), 0o600)
+    return next
   })
-  writeFileAtomicSync(getProfileFile(), JSON.stringify(next, null, 2), 0o600)
-  return next
 }
 
 export function resetProfile(): TurboFluxProfile {

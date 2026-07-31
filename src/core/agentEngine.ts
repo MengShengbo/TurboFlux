@@ -577,7 +577,7 @@ export class AgentEngine {
   }
 
   updateRuntimeConfiguration(update: Partial<Pick<AgentConfig,
-    'approvalPolicy' | 'gitEnabled' | 'contextWindow' | 'maxTokens' | 'profileSystemPrompt'
+    'approvalPolicy' | 'capabilityProfile' | 'gitEnabled' | 'contextWindow' | 'maxTokens' | 'profileSystemPrompt'
   >>): void {
     if (update.approvalPolicy !== undefined && update.approvalPolicy !== this.config.approvalPolicy) {
       this.setApprovalPolicy(update.approvalPolicy)
@@ -585,6 +585,7 @@ export class AgentEngine {
     if (update.gitEnabled !== undefined && update.gitEnabled !== this.gitState.enabled) {
       this.setGitEnabled(update.gitEnabled)
     }
+    if (update.capabilityProfile !== undefined) this.config.capabilityProfile = update.capabilityProfile
     if (update.contextWindow !== undefined) this.config.contextWindow = update.contextWindow
     if (update.maxTokens !== undefined) this.config.maxTokens = update.maxTokens
     if (update.profileSystemPrompt !== undefined && update.profileSystemPrompt !== this.config.profileSystemPrompt) {
@@ -740,15 +741,7 @@ export class AgentEngine {
   }
 
   getTokenUsage(): { input: number; output: number } {
-    const turns = this.session.turns
-    let input = 0, output = 0
-    for (const turn of turns) {
-      if (turn.metadata?.tokens) {
-        input += turn.metadata.tokens.input || 0
-        output += turn.metadata.tokens.output || 0
-      }
-    }
-    return { input, output }
+    return { ...this.session.totalTokens }
   }
 
   getContextUsage(): TokenUsage {
@@ -4959,7 +4952,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           if (!result.success) {
             return `Error (${statusDetails})${result.error ? `: ${result.error}` : ''}\n${formattedOutput}`
           }
-          return `Command executed successfully (${statusDetails}):\n${formattedOutput}`
+          const exitStatus = typeof commandOutput?.exitCode === 'number'
+            ? `Process exited with code ${commandOutput.exitCode}`
+            : 'Process finished without an exit code'
+          return `${exitStatus}\n${formattedOutput}`
         } catch (e) {
           return `Error executing command: ${e instanceof Error ? e.message : String(e)}`
         }

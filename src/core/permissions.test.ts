@@ -284,8 +284,13 @@ describe('PermissionPipeline', () => {
 
     it.each([
       'rm -r -f /',
+      'rm -rf "/"',
+      'rm -rf -- /',
       'Remove-Item C:\\ -Recurse -Force',
+      'Remove-Item "C:\\" -Recurse -Force',
+      'Remove-Item "/" -Recurse -Force',
       'rd /s /q C:\\',
+      'rd /s /q "C:\\"',
     ])('full policy blocks root deletion variant: %s', command => {
       const pipeline = new PermissionPipeline('full')
       expect(pipeline.check('run_command', { command }).verdict).toBe('deny')

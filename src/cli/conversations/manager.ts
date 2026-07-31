@@ -8,7 +8,16 @@ import type {
   ConversationQueuedInput,
   PersistedConversation,
 } from './types'
-import { saveConversation, loadConversation, listConversations, deleteConversation, sameWorkspacePath } from './store'
+import {
+  deleteConversation,
+  deleteConversationAsync,
+  listConversations,
+  listConversationsAsync,
+  loadConversation,
+  loadConversationAsync,
+  sameWorkspacePath,
+  saveConversation,
+} from './store'
 import { ConversationJournalWriter, type ConversationJournalWriterStats, type JournalDurability } from './journalWriter'
 import { SessionRegistry } from '../../core/runtime/sessionRegistry'
 import { writeConversationRecoveryBundle } from './recoveryExport'
@@ -214,19 +223,24 @@ export class ConversationManager {
     return listConversations(this.workspacePath)
   }
 
+  listAsync(): Promise<ConversationMeta[]> {
+    return listConversationsAsync(this.workspacePath)
+  }
+
   switchTo(id: string): PersistedConversation | null {
     if (!this.isPersistenceHealthy()) return null
     this.persist(true)
     if (!this.isPersistenceHealthy()) return null
     const conv = loadConversation(id)
-    if (!conv) return null
-    if (!sameWorkspacePath(conv.workspacePath, this.workspacePath)) return null
-    this.sessionRegistry.activate(id)
-    this.interactionState = conv.interactionState
-      ? JSON.parse(JSON.stringify(conv.interactionState)) as ConversationInteractionState
-      : createEmptyInteractionState()
-    this.lastPersistedSnapshot = JSON.stringify(conv)
-    return conv
+    return conv ? this.activateConversation(conv) : null
+  }
+
+  async switchToAsync(id: string): Promise<PersistedConversation | null> {
+    if (!this.isPersistenceHealthy()) return null
+    this.persist(true)
+    if (!this.isPersistenceHealthy()) return null
+    const conv = await loadConversationAsync(id)
+    return conv ? this.activateConversation(conv) : null
   }
 
   delete(id: string): boolean {
@@ -236,10 +250,23 @@ export class ConversationManager {
     return deleteConversation(id)
   }
 
+  async deleteAsync(id: string): Promise<boolean> {
+    if (!this.isPersistenceHealthy()) return false
+    const conv = await loadConversationAsync(id)
+    if (!conv || !sameWorkspacePath(conv.workspacePath, this.workspacePath)) return false
+    return deleteConversationAsync(id)
+  }
+
   resumeLast(): PersistedConversation | null {
     const all = listConversations(this.workspacePath)
     if (all.length === 0) return null
     return this.switchTo(all[0].id)
+  }
+
+  async resumeLastAsync(): Promise<PersistedConversation | null> {
+    const all = await listConversationsAsync(this.workspacePath)
+    if (all.length === 0) return null
+    return this.switchToAsync(all[0].id)
   }
 
   destroy(): void {
@@ -365,6 +392,16 @@ export class ConversationManager {
       contextReservoir: this.engine.getContextReservoir(),
       interactionState: JSON.parse(JSON.stringify(this.interactionState)) as ConversationInteractionState,
     }
+  }
+
+  private activateConversation(conv: PersistedConversation): PersistedConversation | null {
+    if (!sameWorkspacePath(conv.workspacePath, this.workspacePath)) return null
+    this.sessionRegistry.activate(conv.id)
+    this.interactionState = conv.interactionState
+      ? JSON.parse(JSON.stringify(conv.interactionState)) as ConversationInteractionState
+      : createEmptyInteractionState()
+    this.lastPersistedSnapshot = JSON.stringify(conv)
+    return conv
   }
 
   private buildMeta(): ConversationMeta {

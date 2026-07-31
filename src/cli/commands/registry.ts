@@ -33,6 +33,17 @@ class CommandRegistry {
     return { name: trimmed.slice(0, spaceIdx), args: trimmed.slice(spaceIdx + 1).trim() }
   }
 
+  getProgress(input: string): { name: string; args: string } | null {
+    const parsed = this.parse(input)
+    if (!parsed) return null
+    const command = this.get(parsed.name)
+    if (!command) return null
+    const enabled = typeof command.showsProgress === 'function'
+      ? command.showsProgress(parsed.args)
+      : command.showsProgress === true
+    return enabled ? { name: command.name, args: parsed.args } : null
+  }
+
   execute(input: string, ctx: CommandContext): CommandResult {
     const commandContext = typeof ctx.t === 'function' ? ctx : { ...ctx, t: DEFAULT_TRANSLATOR }
     const parsed = this.parse(input)
@@ -58,6 +69,21 @@ class CommandRegistry {
         return { type: 'prompt', prompt }
       }
     }
+  }
+
+  async executeAsync(input: string, ctx: CommandContext): Promise<CommandResult> {
+    const commandContext = typeof ctx.t === 'function' ? ctx : { ...ctx, t: DEFAULT_TRANSLATOR }
+    const parsed = this.parse(input)
+    if (!parsed) return { type: 'none' }
+
+    const command = this.get(parsed.name)
+    if (!command) {
+      return { type: 'text', text: commandContext.t('command.unknown', { command: parsed.name }) }
+    }
+    if (command.type !== 'local' || !command.executeAsync) return this.execute(input, commandContext)
+
+    const result = await command.executeAsync(parsed.args, commandContext)
+    return result ? { type: 'text', text: result } : { type: 'none' }
   }
 
   getCompletions(partial: string): Command[] {

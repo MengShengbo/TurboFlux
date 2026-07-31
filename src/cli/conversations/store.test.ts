@@ -7,9 +7,12 @@ import type { ConversationMeta, PersistedConversation } from './types'
 import {
   appendConversationJournal,
   deleteConversation,
+  deleteConversationAsync,
   getConversationsDir,
   listConversations,
+  listConversationsAsync,
   loadConversation,
+  loadConversationAsync,
   sameWorkspacePath,
   saveConversation,
 } from './store'
@@ -85,6 +88,25 @@ describe.sequential('conversation journal store', () => {
     expect(loadConversation('snapshot-1')?.turns.map(item => item.content)).toEqual(['first', 'second'])
     expect(deleteConversation('snapshot-1')).toBe(true)
     expect(loadConversation('snapshot-1')).toBeNull()
+  })
+
+  it('loads, lists, and deletes conversations through asynchronous storage', async () => {
+    const conversation: PersistedConversation = {
+      ...meta('async-1'),
+      turnCount: 2,
+      turns: [
+        turn('user-1', 'user', 'async hello', 100),
+        turn('assistant-1', 'assistant', 'async reply', 101),
+      ],
+    }
+    saveConversation(conversation)
+
+    await expect(loadConversationAsync('async-1')).resolves.toMatchObject({ id: 'async-1', turnCount: 2 })
+    await expect(listConversationsAsync(process.cwd())).resolves.toEqual([
+      expect.objectContaining({ id: 'async-1', turnCount: 2 }),
+    ])
+    await expect(deleteConversationAsync('async-1')).resolves.toBe(true)
+    await expect(loadConversationAsync('async-1')).resolves.toBeNull()
   })
 
   it('atomically compacts a completed journal to one current snapshot', () => {

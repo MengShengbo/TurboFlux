@@ -2,6 +2,38 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { McpServerConfig, McpToolInfo } from './types'
 
+const INHERITED_ENV_ALLOWLIST = new Set([
+  'PATH',
+  'PATHEXT',
+  'SYSTEMROOT',
+  'WINDIR',
+  'COMSPEC',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TERM',
+  'COLORTERM',
+  'NO_COLOR',
+  'FORCE_COLOR',
+])
+
+export function buildMcpEnvironment(
+  config: McpServerConfig,
+  sourceEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const environment: Record<string, string> = {}
+  for (const [name, value] of Object.entries(sourceEnv)) {
+    if (typeof value === 'string' && INHERITED_ENV_ALLOWLIST.has(name.toUpperCase())) {
+      environment[name] = value
+    }
+  }
+  return { ...environment, ...(config.env || {}) }
+}
+
 export interface McpConnection {
   name: string
   client: Client
@@ -15,10 +47,7 @@ export class McpClient {
   private connections: Map<string, McpConnection> = new Map()
 
   private buildEnvironment(config: McpServerConfig): Record<string, string> {
-    const environment = Object.fromEntries(
-      Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
-    )
-    return { ...environment, ...(config.env || {}) }
+    return buildMcpEnvironment(config)
   }
 
   async connect(name: string, config: McpServerConfig): Promise<McpConnection> {

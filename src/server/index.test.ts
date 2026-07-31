@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
@@ -9,6 +9,7 @@ import { createTurboFluxServer } from './index'
 
 const servers: Server[] = []
 const tempDirs: string[] = []
+const originalServerConfig = process.env.TURBOFLUX_SERVER_CONFIG
 
 function testConfig(overrides: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'turboflux-server-'))
@@ -52,6 +53,8 @@ afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true })
   }
+  if (originalServerConfig === undefined) delete process.env.TURBOFLUX_SERVER_CONFIG
+  else process.env.TURBOFLUX_SERVER_CONFIG = originalServerConfig
 })
 
 describe('TurboFlux backend server', () => {
@@ -98,6 +101,30 @@ describe('TurboFlux backend server', () => {
     expect(readFileSync(join(config.configPath, '..', 'server-credentials.json'), 'utf-8')).toContain('sk-new-secret')
   })
 
+  it('migrates legacy plaintext server credentials during startup', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'turboflux-server-legacy-'))
+    tempDirs.push(directory)
+    const configPath = join(directory, 'server-config.json')
+    writeFileSync(configPath, JSON.stringify({
+      upstreamBaseUrl: 'https://example.com/v1',
+      upstreamApiKey: 'sk-legacy-server',
+      authToken: 'legacy-admin-token',
+      defaultModel: 'gpt-5.5',
+      corsOrigin: 'http://127.0.0.1',
+    }), 'utf-8')
+    process.env.TURBOFLUX_SERVER_CONFIG = configPath
+
+    const server = createTurboFluxServer()
+    server.close()
+
+    const persisted = readFileSync(configPath, 'utf-8')
+    const credentials = readFileSync(join(directory, 'server-credentials.json'), 'utf-8')
+    expect(persisted).not.toContain('sk-legacy-server')
+    expect(persisted).not.toContain('legacy-admin-token')
+    expect(credentials).toContain('sk-legacy-server')
+    expect(credentials).toContain('legacy-admin-token')
+  })
+
   it('serves placeholder users and in-process logs for the admin console', async () => {
     const baseUrl = await listen(createTurboFluxServer(testConfig()))
 
@@ -134,6 +161,31 @@ describe('TurboFlux backend server', () => {
       authToken: 'safe-token',
     }))
     server.close()
+  })
+
+  it('rejects clearing proxy auth while bound outside localhost and keeps the old token active', async () => {
+    const baseUrl = await listen(createTurboFluxServer(testConfig({
+      host: '0.0.0.0',
+      authToken: 'safe-token',
+    })))
+
+    const clear = await fetch(`${baseUrl}/admin/api/config`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-TurboFlux-Token': 'safe-token',
+      },
+      body: JSON.stringify({ clearAuthToken: true }),
+    })
+
+    expect(clear.status).toBe(500)
+    const unauthorizedHealth = await fetch(`${baseUrl}/health`)
+    expect(unauthorizedHealth.status).toBe(401)
+
+    const authorizedHealth = await fetch(`${baseUrl}/health`, {
+      headers: { 'X-TurboFlux-Token': 'safe-token' },
+    })
+    expect(authorizedHealth.status).toBe(200)
   })
 
   it('omits deprecated temperature for Claude-compatible upstream requests', async () => {

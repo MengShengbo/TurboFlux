@@ -1,5 +1,6 @@
 import React from 'react'
-import { renderToString } from 'ink'
+import { Box, renderToString } from 'ink'
+import stripAnsi from 'strip-ansi'
 import { describe, expect, it } from 'vitest'
 import { ThemeProvider } from '../../theme/index'
 import { SessionSidebar } from './SessionSidebar'
@@ -73,5 +74,41 @@ describe('SessionSidebar', () => {
     expect(output.split('\n').every(line => line.length <= 28)).toBe(true)
     expect(output).not.toContain('RUNTIME')
     expect(output).not.toContain('REPO')
+  })
+
+  it('keeps the status marker anchored at the bottom when content is clipped', () => {
+    const output = renderToString(
+      <ThemeProvider>
+        <Box height={18}>
+          <SessionSidebar
+            width={30}
+            workspacePath="C:/workspace/turboflux"
+            model="gpt-5.5"
+            mode="vibe"
+            reasoning="high"
+            contextWindow={200_000}
+            tokenUsage={{ source: 'provider', input: 40_000, output: 512, cached: 30_000 }}
+            isRunning
+            runState={{ phase: 'tool_running', startedAt: Date.now() - 1200, updatedAt: Date.now() }}
+            tools={[{ id: 'tool-1', name: 'read_file', status: 'running', args: '{}' }]}
+            draft={null}
+            subagents={[]}
+            queuedCount={2}
+            terminals={[{ id: 'terminal-1', title: 'Tests', command: 'npm test', status: 'running', createdAt: Date.now() - 1200, outputBytes: 1024 }]}
+            mcpCount={2}
+            task={null}
+            objective="Fix the terminal workspace layout"
+            gitState={{ enabled: true, phase: 'detecting', snapshot: null, updatedAt: 1 }}
+          />
+        </Box>
+      </ThemeProvider>,
+      { columns: 140 },
+    )
+    const lines = stripAnsi(output).split('\n')
+
+    expect(lines).toHaveLength(18)
+    const statusLine = lines.at(-1) ?? ''
+    expect(statusLine).toContain('● working')
+    expect(statusLine.indexOf('●')).toBeLessThanOrEqual(2)
   })
 })

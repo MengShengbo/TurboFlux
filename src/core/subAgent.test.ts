@@ -188,6 +188,72 @@ describe('runSubAgent', () => {
     }
   })
 
+  it('retries an attempt timeout while the overall request deadline remains', async () => {
+    const originalFetch = globalThis.fetch
+    const events: SubAgentEvent[] = []
+    vi.useFakeTimers()
+    let requestCount = 0
+    globalThis.fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const error = new Error('aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }, { once: true })
+        })
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        choices: [{ message: { content: 'finished after retry' } }],
+      }), { status: 200 }))
+    }) as unknown as typeof fetch
+
+    const executor = {
+      readFile: async () => ({ success: true, data: '' }),
+      searchFiles: async () => ({ success: true, data: { matches: [] } }),
+      searchContent: async () => ({ success: true, data: [] }),
+      searchCodeSymbols: async () => ({ success: true, data: [] }),
+      getCodeMap: async () => ({ success: true, data: { map: [] } }),
+    } as unknown as ToolExecutor
+
+    try {
+      const resultPromise = runSubAgent({
+        definition: {
+          id: 'attempt-timeout-test',
+          label: 'Attempt timeout test',
+          description: 'test',
+          driver: 'main-model',
+          systemPrompt: 'test',
+          maxTurns: 1,
+          maxParallel: 1,
+        },
+        objective: 'inspect the project',
+        workspacePath: 'C:/repo',
+        toolExecutor: executor,
+        apiKey: 'test',
+        baseUrl: 'http://attempt-timeout.test',
+        model: 'test-model',
+        requestTimeoutMs: 3_000,
+        requestAttemptTimeoutMs: 1_000,
+        maxTransientAttempts: 2,
+        onEvent: event => events.push(event),
+      })
+
+      await vi.advanceTimersByTimeAsync(1_300)
+      await expect(resultPromise).resolves.toMatchObject({ ok: true, finalText: 'finished after retry' })
+      expect(requestCount).toBe(2)
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'model_retry',
+        attempt: 2,
+        reason: expect.stringContaining('timed out after 1000ms'),
+      }))
+    } finally {
+      globalThis.fetch = originalFetch
+      vi.useRealTimers()
+    }
+  })
+
   it('shares one request deadline across protocol fallback attempts', async () => {
     const originalFetch = globalThis.fetch
     vi.useFakeTimers()

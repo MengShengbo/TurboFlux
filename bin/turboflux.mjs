@@ -5,11 +5,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
-const entry = join(root, 'src', 'cli', 'index.ts')
+const entry = join(root, 'dist', 'cli', 'index.js')
 const require = createRequire(import.meta.url)
 const tsxLoader = pathToFileURL(require.resolve('tsx')).href
 
-// Use node with tsx --import to run TypeScript directly.
+// Use tsx's resolver so extensionless ESM emitted by tsc can run under Node.
 const { spawnSync } = await import('node:child_process')
 const systemCaArgs = process.allowedNodeEnvironmentFlags.has('--use-system-ca') ? ['--use-system-ca'] : []
 const args = [...systemCaArgs, '--import', tsxLoader, entry, ...process.argv.slice(2)]

@@ -42,11 +42,13 @@ export interface CommandMeta {
   aliases?: string[]
   argumentHint?: string
   isHidden?: boolean
+  showsProgress?: boolean | ((args: string) => boolean)
 }
 
 export interface LocalCommand extends CommandMeta {
   type: 'local'
   execute: (args: string, ctx: CommandContext) => string | void
+  executeAsync?: (args: string, ctx: CommandContext) => Promise<string | void>
 }
 
 export interface LocalJSXCommand extends CommandMeta {

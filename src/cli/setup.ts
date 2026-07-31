@@ -13,6 +13,7 @@ import {
   loadConfig,
   saveApiConfigProfile,
   saveConfig,
+  setConfigValue,
   switchActiveApiConfig,
   type ProviderPreset,
   type TurboFluxApiConfigProfile,
@@ -850,7 +851,7 @@ async function configureApprovalPolicy(options: SetupOptions = {}): Promise<Turb
     })), config.approvalPolicy)
   }
 
-  const next = { ...config, approvalPolicy }
+  const next = setConfigValue(config, 'approvalPolicy', approvalPolicy)
   saveConfig(next)
   console.log(chalk.green(setupText('setup.approval.saved', { policy: approvalPolicyLabel(approvalPolicy, createTranslator(profile.interfaceLanguage)) }, profile)))
   return next

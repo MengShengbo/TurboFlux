@@ -7,12 +7,14 @@ import { runSetup } from './setup'
 import {
   normalizeApprovalPolicy,
   normalizeCapabilityProfile,
+  resolveCapabilityProfileForApproval,
   type ApprovalPolicy,
   type CapabilityProfile,
 } from '../shared/agentTypes'
 import { configureNetworkProxy } from '../core/networkProxy'
 import { loadProfile } from '../core/profile'
 import { createTranslator } from './i18n/index'
+import { resolveTransparentBackground } from './platform/terminalTransparency'
 
 configureNetworkProxy()
 
@@ -58,6 +60,12 @@ program
     const capabilityProfile: CapabilityProfile | undefined = rawCapabilityProfile
       ? normalizeCapabilityProfile(rawCapabilityProfile)
       : undefined
+    if (approvalPolicy) config.approvalPolicy = approvalPolicy
+    if (capabilityProfile) config.capabilityProfile = capabilityProfile
+    config.capabilityProfile = resolveCapabilityProfileForApproval(
+      config.approvalPolicy,
+      config.capabilityProfile,
+    )
     const mcpServers = typeof opts.mcp === 'string'
       ? opts.mcp.split(',').map((name: string) => name.trim()).filter(Boolean)
       : undefined
@@ -71,9 +79,10 @@ program
       capabilityProfile,
       mcpServers,
       startupAnimation: opts.animation !== false,
-      transparentBackground: opts.opaque
-        ? false
-        : Boolean(opts.transparent || /^(1|true|yes|on)$/i.test(String(process.env.TURBOFLUX_TRANSPARENT || ''))),
+      transparentBackground: resolveTransparentBackground({
+        opaque: Boolean(opts.opaque),
+        transparent: Boolean(opts.transparent),
+      }),
     })
   })
 
