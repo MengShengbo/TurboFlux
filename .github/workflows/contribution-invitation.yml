@@ -119,6 +119,7 @@ jobs:
               { owner, repo, issue_number: pullNumber, per_page: 100 },
             );
             const existingComment = comments.find((comment) =>
+              comment.user?.login === 'github-actions[bot]' &&
               comment.body?.includes(commentMarker),
             );
 
