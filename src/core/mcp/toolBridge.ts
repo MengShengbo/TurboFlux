@@ -9,7 +9,7 @@ export function mcpToolToAgentTool(tool: McpToolInfo): AgentTool {
   const isDestructive = isReadOnly ? false : tool.annotations?.destructiveHint !== false
   return {
     name: tool.name,
-    description: `[MCP:${tool.serverName}] ${tool.description}`,
+    description: `[MCP:${tool.serverName}] ${tool.description}${tool.instructions ? `\nServer guidance: ${tool.instructions.slice(0, 512)}` : ''}`,
     category: isReadOnly ? 'read' : 'execute',
     parameters: params,
     isReadOnly,
@@ -78,9 +78,12 @@ export async function executeMcpTool(
   mcpClient: McpClient,
   toolName: string,
   args: Record<string, unknown>,
+  options?: { signal?: AbortSignal },
 ): Promise<{ output: string; isError: boolean }> {
   const parsed = parseMcpToolName(toolName)
   if (!parsed) return { output: `Invalid MCP tool name: ${toolName}`, isError: true }
-  const result = await mcpClient.callTool(parsed.serverName, parsed.originalName, args)
+  const result = options
+    ? await mcpClient.callTool(parsed.serverName, parsed.originalName, args, options)
+    : await mcpClient.callTool(parsed.serverName, parsed.originalName, args)
   return { output: result.content, isError: result.isError }
 }

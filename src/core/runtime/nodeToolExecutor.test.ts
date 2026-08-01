@@ -138,6 +138,46 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     expect(existsSync(target)).toBe(false)
   }))
 
+  it('runs read-only processes without requiring workspace writes', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'read-only' })
+
+    const result = await executor.readOnlyProcess!(process.execPath, ['-e', 'process.stdout.write("ok")'], workspace)
+    const runtimeTask = executor.getRuntimeTaskManager().listTasks({ kind: 'shell' })[0]
+
+    expect(result).toMatchObject({ success: true, data: { stdout: 'ok', exitCode: 0 } })
+    expect(runtimeTask).toMatchObject({ status: 'completed', logPath: undefined })
+  }))
+
+  it('forwards memory metadata and surfaces memory failures', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace)
+    const service = (executor as unknown as { memoryService: { remember: ReturnType<typeof vi.fn>; forget: ReturnType<typeof vi.fn> } }).memoryService
+    const remember = vi.spyOn(service, 'remember').mockResolvedValue({ success: true, id: 'memory-1', deduplicated: false })
+    const stored = await executor.memoryRemember({
+      workspacePath: workspace,
+      text: 'Use the typed runtime boundary.',
+      kind: 'strategy',
+      scope: 'workspace_private',
+      tags: ['runtime', 'types'],
+      confidence: 'asserted',
+    })
+
+    expect(stored).toEqual({ success: true, data: { id: 'memory-1', deduplicated: false } })
+    expect(remember).toHaveBeenCalledWith(expect.objectContaining({
+      tags: ['runtime', 'types'],
+      confidence: 'asserted',
+    }))
+
+    const forget = vi.spyOn(service, 'forget').mockResolvedValue({ success: true })
+    await executor.memoryForget({ workspacePath: workspace, id: 'memory-1', reason: 'obsolete' })
+    expect(forget).toHaveBeenCalledWith(expect.objectContaining({ id: 'memory-1', reason: 'obsolete' }))
+
+    remember.mockRejectedValueOnce(new Error('memory backend unavailable'))
+    await expect(executor.memoryRemember({ workspacePath: workspace, text: 'retry' })).resolves.toMatchObject({
+      success: false,
+      error: 'memory backend unavailable',
+    })
+  }))
+
   it('returns non-zero process exits as results while preserving task outcome', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace)
     const result = await executor.runProcess(process.execPath, ['-e', 'process.exit(7)'], workspace)
@@ -148,6 +188,25 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     expect(result.data?.exitCode).toBe(7)
     expect(runtimeTask).toMatchObject({ status: 'failed', exitCode: 7, interactive: false })
   }))
+
+  it('terminates a foreground process when its abort signal fires', async () => withWorkspace(async ({ workspace }) => {
+    const executor = new NodeToolExecutor(workspace)
+    const controller = new AbortController()
+    const pending = executor.runProcess(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 30_000)'],
+      workspace,
+      undefined,
+      30_000,
+      controller.signal,
+    )
+    setTimeout(() => controller.abort(), 25)
+
+    await expect(pending).resolves.toMatchObject({
+      success: false,
+      data: { aborted: true },
+    })
+  }), 15_000)
 
   it('preserves exact shell command exit codes', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })

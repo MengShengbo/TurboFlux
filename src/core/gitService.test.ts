@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { ToolExecutor } from '../tools/executor'
 import {
+  fetchGitSnapshot,
   fetchGitShow,
   gitCommitPaths,
   gitRestorePaths,
@@ -13,6 +14,7 @@ import {
   parseGitLog,
   parseGitStatusPorcelainV2,
 } from './gitService'
+import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 
 function executorWithProcessMock(handler?: (args: string[], env: Record<string, string>) => { success: boolean; stdout?: string; stderr?: string; exitCode?: number }) {
   const runProcess = vi.fn(async (_command: string, args: string[], _cwd: string, env: Record<string, string>) => {
@@ -92,6 +94,21 @@ describe('Git status parsing', () => {
     expect(commits).toHaveLength(2)
     expect(commits[0]).toMatchObject({ hash: 'abc', shortHash: 'a1b2c3', subject: 'feat: one' })
   })
+})
+
+describe('Git runtime access', () => {
+  it('reads repository state through a read-only capability profile', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'turboflux-git-readonly-'))
+    try {
+      await execFileAsync('git', ['init'], { cwd: workspace })
+      const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'read-only' })
+      const snapshot = await fetchGitSnapshot(workspace, executor)
+
+      expect(snapshot).toMatchObject({ clean: true, stagedCount: 0, unstagedCount: 0 })
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  }, 15_000)
 })
 
 describe('Git safety boundaries', () => {

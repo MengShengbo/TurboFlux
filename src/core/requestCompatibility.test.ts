@@ -5,6 +5,7 @@ import {
   isReasoningEffortValueError,
   removeAnthropicCompatibleRequestParam,
   removeOpenAICompatibleRequestParam,
+  setOpenAIChatMaxTokens,
 } from './requestCompatibility'
 
 describe('request compatibility', () => {
@@ -59,5 +60,13 @@ describe('request compatibility', () => {
     expect(isReasoningEffortValueError('effort must be one of low, medium, high')).toBe(true)
     expect(downgradeReasoningEffort(body)).toEqual({ from: 'max', to: 'xhigh' })
     expect(body).toEqual({ reasoning: { effort: 'xhigh' } })
+  })
+
+  it('uses Kimi completion token limits and falls back to legacy max_tokens', () => {
+    const body: Record<string, unknown> = {}
+    expect(setOpenAIChatMaxTokens(body, 8192, 'kimi', 'kimi-k3')).toBe('max_completion_tokens')
+    expect(body).toEqual({ max_completion_tokens: 8192 })
+    expect(removeOpenAICompatibleRequestParam(body, 'max_completion_tokens')).toBe(true)
+    expect(body).toEqual({ max_tokens: 8192 })
   })
 })

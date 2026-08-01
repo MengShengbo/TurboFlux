@@ -92,13 +92,16 @@ async function runGit(
   workspacePath: string,
   args: string[],
   executor: ToolExecutor,
-  options: { timeout?: number; env?: Record<string, string> } = {},
+  options: { timeout?: number; env?: Record<string, string>; access?: 'read' | 'write' } = {},
 ): Promise<GitCommandResult> {
-  if (!executor.runProcess) {
+  const runProcess = options.access === 'read' && executor.readOnlyProcess
+    ? executor.readOnlyProcess.bind(executor)
+    : executor.runProcess?.bind(executor)
+  if (!runProcess) {
     return { ok: false, stdout: '', stderr: '', exitCode: 1, error: 'Safe process execution is unavailable' }
   }
   try {
-    const result = await executor.runProcess('git', args, workspacePath, options.env || {}, options.timeout || 10_000)
+    const result = await runProcess('git', args, workspacePath, options.env || {}, options.timeout || 10_000)
     return {
       ok: result.success && result.data?.exitCode === 0,
       stdout: result.data?.stdout || '',
@@ -277,14 +280,14 @@ function validateCommitMessage(message: string): string {
 }
 
 export async function detectGitRepo(workspacePath: string, executor: ToolExecutor): Promise<boolean> {
-  const result = await runGit(workspacePath, ['rev-parse', '--is-inside-work-tree'], executor, { timeout: 3_000 })
+  const result = await runGit(workspacePath, ['rev-parse', '--is-inside-work-tree'], executor, { timeout: 3_000, access: 'read' })
   return result.ok && result.stdout.trim() === 'true'
 }
 
 export async function fetchGitSnapshot(workspacePath: string, executor: ToolExecutor): Promise<GitSnapshot | null> {
   const [status, log] = await Promise.all([
-    runGit(workspacePath, ['status', '--porcelain=v2', '--branch', '-z'], executor, { timeout: 5_000 }),
-    runGit(workspacePath, ['log', '-z', '-5', '--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s'], executor, { timeout: 5_000 }),
+    runGit(workspacePath, ['status', '--porcelain=v2', '--branch', '-z'], executor, { timeout: 5_000, access: 'read' }),
+    runGit(workspacePath, ['log', '-z', '-5', '--format=%H%x1f%h%x1f%an%x1f%aI%x1f%s'], executor, { timeout: 5_000, access: 'read' }),
   ])
   if (!status.ok) return null
   return { ...parseGitStatusPorcelainV2(status.stdout), recentCommits: log.ok ? parseGitLog(log.stdout) : [] }
@@ -335,8 +338,8 @@ export async function fetchGitDiff(
     ]
     if (scope === 'all') {
       const [staged, working] = await Promise.all([
-        runGit(workspacePath, makeArgs(true), executor),
-        runGit(workspacePath, makeArgs(false), executor),
+        runGit(workspacePath, makeArgs(true), executor, { access: 'read' }),
+        runGit(workspacePath, makeArgs(false), executor, { access: 'read' }),
       ])
       if (!staged.ok) return { ok: false, error: commandError(staged, 'Unable to read staged diff') }
       if (!working.ok) return { ok: false, error: commandError(working, 'Unable to read working diff') }
@@ -346,7 +349,7 @@ export async function fetchGitDiff(
       ].filter(Boolean)
       return { ok: true, output: truncateOutput(sections.join('\n\n') || 'No tracked changes.') }
     }
-    const result = await runGit(workspacePath, makeArgs(scope === 'staged'), executor)
+    const result = await runGit(workspacePath, makeArgs(scope === 'staged'), executor, { access: 'read' })
     return result.ok
       ? { ok: true, output: truncateOutput(result.stdout.trimEnd() || 'No tracked changes.') }
       : { ok: false, error: commandError(result, 'Unable to read Git diff') }
@@ -367,7 +370,7 @@ export async function fetchGitLog(
     const result = await runGit(workspacePath, [
       'log', `-${count}`, '--date=iso-strict', '--format=%h%x09%aI%x09%an%x09%s',
       ...(path ? ['--', path] : []),
-    ], executor)
+    ], executor, { access: 'read' })
     return result.ok
       ? { ok: true, output: truncateOutput(result.stdout.trimEnd() || 'No commits found.') }
       : { ok: false, error: commandError(result, 'Unable to read Git log') }
@@ -388,7 +391,7 @@ export async function fetchGitShow(
     const result = await runGit(workspacePath, [
       'show', '--no-ext-diff', '--no-color', '--format=fuller', safeRevision,
       ...(path ? ['--', path] : []),
-    ], executor)
+    ], executor, { access: 'read' })
     return result.ok
       ? { ok: true, output: truncateOutput(result.stdout.trimEnd() || 'No output.') }
       : { ok: false, error: commandError(result, 'Unable to show Git revision') }

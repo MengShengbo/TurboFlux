@@ -1,26 +1,32 @@
-# 架构决策记录
+# Architecture decision records
 
-ADR 记录跨模块且需要长期遵守的工程约束。它回答“为什么选择这个方向、会带来什么后果”，不替代实现文档或任务计划。
+Architecture decision records (ADRs) capture cross-module constraints that must
+remain understandable over time. They explain why a direction was chosen and
+what consequences follow; they do not replace implementation documentation or
+task plans.
 
-## 状态
+## Status values
 
-- `proposed`：讨论中。
-- `accepted`：当前实现应遵守。
-- `superseded`：已被另一 ADR 替代，保留历史。
-- `deprecated`：约束不再适用。
+- `proposed`: under discussion.
+- `accepted`: the current implementation must follow it.
+- `superseded`: replaced by another ADR but retained for history.
+- `deprecated`: no longer applicable.
 
-## 索引
+## Index
 
-| ADR | 标题 | 状态 |
+| ADR | Title | Status |
 | --- | --- | --- |
-| [0001](0001-runtime-composition-root.md) | 以 Agent Runtime 作为核心组合根 | accepted |
+| [0001](0001-runtime-composition-root.md) | Agent Runtime as the composition root | accepted |
 
-## 新增流程
+## Adding an ADR
 
-1. 复制 [`0000-template.md`](0000-template.md)。
-2. 使用下一个四位编号和短横线文件名。
-3. 说明上下文、决策、替代方案、后果和验证方式。
-4. 在实现 PR 前或同时评审。
-5. 更新本索引和受影响的架构文档。
+1. Copy [`0000-template.md`](0000-template.md).
+2. Use the next four-digit number and a short kebab-case filename.
+3. Describe context, decision, alternatives, consequences, implementation, and verification.
+4. Review it before or with the implementation pull request.
+5. Update this index and affected architecture pages.
 
-适合 ADR 的主题包括：持久化 schema、跨层事件协议、状态所有权、进程模型、公开 API、能力/审批边界和兼容性策略。局部重命名、普通 Bug 修复和可逆实现细节通常不需要 ADR。
+Use an ADR for persistence schemas, cross-layer event contracts, state ownership,
+process boundaries, public APIs, capability/approval boundaries, or provider
+compatibility. Local renames, ordinary bug fixes, and reversible details do not
+need an ADR.

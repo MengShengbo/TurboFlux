@@ -21,7 +21,7 @@ import type {
 } from '../../tools/executor'
 import type { TreeNode } from '../../shared/types'
 import type { CodeMapNode, CodeSearchHit } from '../../shared/codeIndexTypes'
-import type { MemoryKind, MemoryScope } from '../../shared/memoryTypes'
+import type { MemoryConfidence, MemoryKind, MemoryScope, MemorySnapshot } from '../../shared/memoryTypes'
 import type { TerminalOutputChunk, TerminalSessionInfo, TerminalStartCommandResult } from '../../shared/terminalTypes'
 import type { CapabilityProfile } from '../../shared/agentTypes'
 import { MemoryService } from '../../tools/memory/service'
@@ -33,6 +33,8 @@ import { CapabilityBoundary, type FilesystemAccess } from './capabilityBoundary'
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
+const MAX_STREAM_DIAGNOSTIC_CHARS = 64 * 1024
+const MAX_STREAM_BUFFER_CHARS = 1 * 1024 * 1024
 
 export interface NodeToolExecutorOptions {
   runtimeTaskManager?: RuntimeTaskManager
@@ -125,7 +127,7 @@ export class NodeToolExecutor implements ToolExecutor {
       const content = readFileSync(safePath, 'utf-8')
       return { success: true, data: content }
     } catch (e) {
-      return { success: false, error: String(e) }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
@@ -192,7 +194,7 @@ export class NodeToolExecutor implements ToolExecutor {
         },
       }
     } catch (e) {
-      return { success: false, error: String(e) }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     } finally {
       reader?.close()
       stream?.destroy()
@@ -881,11 +883,11 @@ export class NodeToolExecutor implements ToolExecutor {
       }))
       return { success: true, data: { items } }
     } catch (e) {
-      return { success: true, data: { items: [] } }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
-  async memoryRemember(data: { content?: string; text?: string; kind: MemoryKind; scope: MemoryScope; workspacePath: string; conversationId?: string }): Promise<Result<{ id: string; deduplicated?: boolean }>> {
+  async memoryRemember(data: { content?: string; text?: string; kind?: MemoryKind; scope?: MemoryScope; tags?: string[]; confidence?: MemoryConfidence; workspacePath: string; conversationId?: string; messageId?: string }): Promise<Result<{ id: string; deduplicated?: boolean }>> {
     try {
       const safeWorkspacePath = this.resolvePath(data.workspacePath, 'write')
       const result = await this.memoryService.remember({
@@ -893,34 +895,38 @@ export class NodeToolExecutor implements ToolExecutor {
         text: data.content ?? data.text ?? '',
         kind: data.kind,
         scope: data.scope,
+        tags: data.tags,
+        confidence: data.confidence,
         conversationId: data.conversationId,
+        messageId: data.messageId,
       })
       if (!result.success) return { success: false, error: result.error }
       return { success: true, data: { id: result.id || '', deduplicated: result.deduplicated } }
     } catch (e) {
-      return { success: false, error: String(e) }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
-  async memoryForget(data: { id: string; workspacePath: string }): Promise<Result<void>> {
+  async memoryForget(data: { id: string; workspacePath: string; reason?: string }): Promise<Result<void>> {
     try {
       const safeWorkspacePath = this.resolvePath(data.workspacePath, 'write')
-      const result = await this.memoryService.forget({ workspacePath: safeWorkspacePath, id: data.id })
+      const result = await this.memoryService.forget({ workspacePath: safeWorkspacePath, id: data.id, reason: data.reason })
       if (!result.success) return { success: false, error: result.error }
       return { success: true }
     } catch (e) {
-      return { success: false, error: String(e) }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
-  async memoryList(workspacePath: string): Promise<Result<{ items: Array<{ id: string; content: string; kind: string }> }>> {
+  async memoryList(workspacePath: string): Promise<Result<{ snapshot: MemorySnapshot; items: Array<{ id: string; content: string; kind: string }> }>> {
     try {
       const safeWorkspacePath = this.resolvePath(workspacePath)
+      const snapshot = await this.memoryService.getSnapshot(safeWorkspacePath)
       const memories = await this.memoryService.query({ workspacePath: safeWorkspacePath, limit: 100 })
       const items = memories.map(m => ({ id: m.id, content: m.text, kind: m.kind }))
-      return { success: true, data: { items } }
+      return { success: true, data: { snapshot, items } }
     } catch (e) {
-      return { success: true, data: { items: [] } }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
@@ -929,8 +935,8 @@ export class NodeToolExecutor implements ToolExecutor {
       const safeWorkspacePath = this.resolvePath(params.workspacePath)
       const result = await this.memoryService.getRelevantInjection(safeWorkspacePath, params.query)
       return { success: true, data: { text: result.text, tokens: result.tokens } }
-    } catch {
-      return { success: true, data: { text: '', tokens: 0 } }
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
@@ -940,6 +946,7 @@ export class NodeToolExecutor implements ToolExecutor {
     env?: Record<string, string>,
     timeout?: number,
     approved?: boolean,
+    signal?: AbortSignal,
   ): Promise<Result<CommandOutput>> {
     let safeCwd: string
     try {
@@ -955,7 +962,7 @@ export class NodeToolExecutor implements ToolExecutor {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
-    return this.executeCommand(command, safeCwd, env, timeout)
+    return this.executeCommand(command, safeCwd, env, timeout, signal)
   }
 
   private async executeCommand(
@@ -963,6 +970,7 @@ export class NodeToolExecutor implements ToolExecutor {
     safeCwd: string,
     env: Record<string, string> | undefined,
     timeout: number | undefined,
+    signal?: AbortSignal,
   ): Promise<Result<CommandOutput>> {
     const { shell, shellArgs } = getShellCommand(command)
     const runtimeTask = this.runtimeTaskManager.createTask({
@@ -983,7 +991,7 @@ export class NodeToolExecutor implements ToolExecutor {
         stop: () => this.stopProcessAndWait(proc),
       })
       this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
-      return this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
+      return this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath, signal)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.runtimeTaskManager.failTask(runtimeTask.id, message, { logPath, outputBytes: 0 })
@@ -991,11 +999,15 @@ export class NodeToolExecutor implements ToolExecutor {
     }
   }
 
-  async runProcess(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number): Promise<Result<CommandOutput>> {
+  async readOnlyProcess(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number, signal?: AbortSignal): Promise<Result<CommandOutput>> {
+    return this.runProcess(command, args, cwd, env, timeout, signal, 'read')
+  }
+
+  async runProcess(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number, signal?: AbortSignal, access: FilesystemAccess = 'write'): Promise<Result<CommandOutput>> {
     let runtimeTaskId: string | undefined
     let logPath: string | undefined
     try {
-      const safeCwd = this.resolvePath(cwd, 'write')
+      const safeCwd = this.resolvePath(cwd, access)
       const runtimeTask = this.runtimeTaskManager.createTask({
         kind: 'shell',
         command: [command, ...args].join(' '),
@@ -1004,7 +1016,9 @@ export class NodeToolExecutor implements ToolExecutor {
         metadata: { executable: command, args: [...args] },
       })
       runtimeTaskId = runtimeTask.id
-      logPath = this.createRuntimeTaskLog(runtimeTask.id)
+      logPath = access === 'read' && this.getCapabilityProfile() === 'read-only'
+        ? undefined
+        : this.createRuntimeTaskLog(runtimeTask.id)
       const proc = spawn(command, args, {
         cwd: safeCwd,
         env: this.buildChildEnvironment(env),
@@ -1014,7 +1028,7 @@ export class NodeToolExecutor implements ToolExecutor {
         stop: () => this.stopProcessAndWait(proc),
       })
       this.runtimeTaskManager.markRunning(runtimeTask.id, { pid: proc.pid, logPath, outputBytes: 0, outputOffset: 0 })
-      return await this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath)
+      return await this.collectProcess(proc, timeout || 30000, runtimeTask.id, logPath, signal)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (runtimeTaskId) this.runtimeTaskManager.failTask(runtimeTaskId, message, { logPath, outputBytes: 0 })
@@ -1027,12 +1041,14 @@ export class NodeToolExecutor implements ToolExecutor {
     timeout: number,
     runtimeTaskId?: string,
     logPath?: string,
+    signal?: AbortSignal,
   ): Promise<Result<CommandOutput>> {
     return new Promise(resolve => {
       let stdout = ''
       let stderr = ''
       let truncated = false
       let timedOut = false
+      let aborted = false
       let settled = false
       let outputBytes = 0
       let logError: string | undefined
@@ -1065,6 +1081,7 @@ export class NodeToolExecutor implements ToolExecutor {
         proc.stderr.off('data', onStderr)
         proc.off('error', onError)
         proc.off('close', onClose)
+        signal?.removeEventListener('abort', onAbort)
         await logWriter?.close()
         const finalizedResult: Result<CommandOutput> = result.data
           ? { ...result, data: { ...result.data, logPath, outputBytes } }
@@ -1090,22 +1107,51 @@ export class NodeToolExecutor implements ToolExecutor {
       }
       const onError = (error: Error) => {
         recordOutput('stderr', error.message)
-        void finish({ success: false, error: error.message, data: { stdout, stderr, exitCode: 1, timedOut, truncated } })
+        void finish({ success: false, error: aborted ? 'Command aborted' : error.message, data: { stdout, stderr, exitCode: 1, timedOut, aborted, truncated } })
       }
       const onClose = (code: number | null) => {
         const exitCode = code ?? 1
-        const success = code !== null && !timedOut
-        const error = timedOut
+        const success = code !== null && !timedOut && !aborted
+        const error = aborted
+          ? 'Command aborted'
+          : timedOut
           ? `Command timed out after ${timeout}ms`
           : code === null ? 'Command terminated without an exit code' : undefined
-        void finish({ success, error, data: { stdout, stderr, exitCode, timedOut, truncated } })
+        void finish({ success, error, data: { stdout, stderr, exitCode, timedOut, aborted, truncated } })
+      }
+      const onAbort = () => {
+        if (settled || aborted) return
+        aborted = true
+        try {
+          this.terminateProcessTree(proc)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          void finish({
+            success: false,
+            error: `Command aborted; process termination failed: ${message}`,
+            data: { stdout, stderr, exitCode: 1, timedOut, aborted, truncated },
+          })
+          return
+        }
+        if (!terminationGraceTimer) {
+          terminationGraceTimer = setTimeout(() => {
+            void finish({
+              success: false,
+              error: 'Command aborted; process did not exit within the termination grace period',
+              data: { stdout, stderr, exitCode: 1, timedOut, aborted, truncated },
+            })
+          }, COMMAND_TERMINATION_GRACE_MS)
+        }
       }
 
       proc.stdout.on('data', onStdout)
       proc.stderr.on('data', onStderr)
       proc.on('error', onError)
       proc.on('close', onClose)
+      if (signal?.aborted) onAbort()
+      else signal?.addEventListener('abort', onAbort, { once: true })
       timeoutTimer = setTimeout(() => {
+        if (settled || aborted) return
         timedOut = true
         try {
           this.terminateProcessTree(proc)
@@ -1792,7 +1838,15 @@ export class NodeToolExecutor implements ToolExecutor {
         let emittedAnyLine = false
         let receivedAnyBytes = false
         let buffer = ''
-        let fullResponse = ''
+        const diagnosticChunks: string[] = []
+        let diagnosticChars = 0
+        const recordDiagnostic = (line: string): void => {
+          if (diagnosticChars >= MAX_STREAM_DIAGNOSTIC_CHARS) return
+          const remaining = MAX_STREAM_DIAGNOSTIC_CHARS - diagnosticChars
+          const bounded = line.slice(0, remaining)
+          diagnosticChunks.push(bounded)
+          diagnosticChars += bounded.length
+        }
         try {
           const response = await fetch(url, {
             method: 'POST',
@@ -1819,22 +1873,28 @@ export class NodeToolExecutor implements ToolExecutor {
             if (done) break
             if (value.byteLength > 0) receivedAnyBytes = true
             buffer += decoder.decode(value, { stream: true })
+            if (buffer.length > MAX_STREAM_BUFFER_CHARS) {
+              const lastNewline = buffer.lastIndexOf('\n')
+              buffer = lastNewline >= 0 && lastNewline <= MAX_STREAM_BUFFER_CHARS
+                ? buffer.slice(0, lastNewline + 1)
+                : ''
+            }
             const lines = buffer.split('\n')
             buffer = lines.pop() || ''
             for (const line of lines) {
               if (line.trim()) {
                 emittedAnyLine = true
                 onLine(line)
-                fullResponse += line + '\n'
+                recordDiagnostic(`${line}\n`)
               }
             }
           }
           if (buffer.trim()) {
             emittedAnyLine = true
             onLine(buffer)
-            fullResponse += buffer
+            recordDiagnostic(buffer)
           }
-          return { success: true, data: fullResponse }
+          return { success: true }
         } catch (error) {
           if (request.controller.signal.aborted || this.isAbortError(error)) {
             return {
@@ -1847,14 +1907,18 @@ export class NodeToolExecutor implements ToolExecutor {
           if (buffer.trim()) {
             emittedAnyLine = true
             onLine(buffer)
-            fullResponse += buffer
+            recordDiagnostic(buffer)
             buffer = ''
           }
           if (!emittedAnyLine && !receivedAnyBytes && attempt < STREAM_RETRY_DELAYS_MS.length) {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
             continue
           }
-          return { success: false, error: this.formatNetworkError(url, error), data: fullResponse }
+          return {
+            success: false,
+            error: this.formatNetworkError(url, error),
+            ...(diagnosticChunks.length > 0 ? { data: diagnosticChunks.join('') } : {}),
+          }
         }
       }
       return { success: false, error: 'Stream request failed' }

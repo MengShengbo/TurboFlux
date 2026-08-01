@@ -107,6 +107,27 @@ describe('flowReducer', () => {
     })
   })
 
+  it('keeps the active task visible across run phase updates', () => {
+    const { create } = harness()
+    let state = createThreadFlowState('session-1', 'thread-1')
+    state = reduceFlowEvent(state, create('run.started', { objective: 'Build feature' }, { runId: 'run-1' }))
+    state = reduceFlowEvent(state, create('task.active_changed', {
+      task: {
+        taskId: 'task-1',
+        title: 'Build feature',
+        priority: 'major',
+        progress: 25,
+        toolCalls: [],
+        startedAt: 110,
+      },
+    }, { runId: 'run-1' }))
+    state = reduceFlowEvent(state, create('run.state_changed', {
+      state: { phase: 'thinking', detail: 'Planning the next step', updatedAt: 120 },
+    }, { runId: 'run-1' }))
+
+    expect(state.activeTask).toMatchObject({ taskId: 'task-1', progress: 25 })
+  })
+
   it('keeps approval requests in FIFO order and settles exactly once', () => {
     const { create } = harness()
     let state = createThreadFlowState('session-1', 'thread-1')

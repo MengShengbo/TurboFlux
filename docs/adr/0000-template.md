@@ -1,46 +1,46 @@
-# ADR-NNNN：标题
+# ADR-NNNN: Title
 
-- 状态：proposed
-- 日期：YYYY-MM-DD
-- 决策者：维护团队
-- 关联：issue/PR/文档链接
+- Status: proposed
+- Date: YYYY-MM-DD
+- Decision makers: TurboFlux maintainers
+- Related: issue, pull request, or documentation link
 
-## 上下文
+## Context
 
-描述需要解决的问题、现有约束、已知证据和不在范围内的内容。
+Describe the problem, constraints, evidence, and out-of-scope concerns.
 
-## 决策
+## Decision
 
-用可验证的语言描述选择的方案和必须遵守的边界。
+Describe the selected approach and its enforceable boundaries in verifiable language.
 
-## 替代方案
+## Alternatives
 
-列出认真考虑过的方案，以及没有选择它们的原因。
+List the serious alternatives and why they were not selected.
 
-## 后果
+## Consequences
 
-### 正向
+### Benefits
 
-- 收益。
+- List the expected benefits.
 
-### 代价
+### Costs
 
-- 复杂度、迁移或维护成本。
+- List complexity, migration, and maintenance costs.
 
-### 风险与缓解
+### Risks and mitigations
 
-- 风险和对应检测/回滚方式。
+- List each risk and its test, detection, or rollback path.
 
-## 实施
+## Implementation
 
-- 受影响模块。
-- 迁移顺序。
-- 兼容策略。
+- List affected modules.
+- State the migration order.
+- State the compatibility strategy.
 
-## 验证
+## Verification
 
-- 测试、指标、运行证据和完成判据。
+- List tests, metrics, runtime evidence, and completion criteria.
 
-## 后续
+## Follow-up
 
-- 需要继续完成但不阻塞本决策的工作。
+- List work that remains useful but does not block this decision.

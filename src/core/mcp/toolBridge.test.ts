@@ -35,6 +35,12 @@ describe('MCP tool bridge', () => {
     expect(unknown.isDestructive).toBe(true)
   })
 
+  it('keeps bounded server guidance visible in the mapped contract', () => {
+    const mapped = mcpToolToAgentTool({ ...nestedTool, instructions: 'Use the replace operation only after reading the current document.' })
+
+    expect(mapped.description).toContain('Server guidance: Use the replace operation')
+  })
+
   it('validates nested required fields, types, and unexpected arguments', () => {
     expect(validateMcpToolArgs(nestedTool.inputSchema, {})).toMatchObject({ valid: false })
     expect(validateMcpToolArgs(nestedTool.inputSchema, { edit: {}, surprise: true })).toMatchObject({ valid: false, error: 'Unexpected parameter: surprise' })

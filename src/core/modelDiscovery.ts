@@ -130,7 +130,7 @@ function mergeCapabilities(primary: ModelCapabilities, fallback: ModelCapabiliti
     outputModalities: mergeLists(primary.outputModalities, fallback.outputModalities),
     supportedParameters: mergeLists(primary.supportedParameters, fallback.supportedParameters),
     supportedEndpoints: mergeLists(primary.supportedEndpoints, fallback.supportedEndpoints),
-    reasoningEfforts: mergeLists(primary.reasoningEfforts, fallback.reasoningEfforts) as ReasoningEffort[] | undefined,
+    reasoningEfforts: (primary.reasoningEfforts?.length ? primary.reasoningEfforts : fallback.reasoningEfforts) as ReasoningEffort[] | undefined,
   }
 }
 

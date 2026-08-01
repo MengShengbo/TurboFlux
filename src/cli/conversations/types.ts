@@ -33,9 +33,15 @@ export interface ConversationQueuedInput {
   attachments?: AgentAttachment[]
 }
 
+export interface ConversationPendingPaste {
+  placeholder: string
+  text: string
+}
+
 export interface ConversationDraftState {
   text: string
   attachments?: AgentAttachment[]
+  pendingPastes?: ConversationPendingPaste[]
 }
 
 export interface ConversationPendingSteering {

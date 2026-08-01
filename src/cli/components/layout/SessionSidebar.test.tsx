@@ -17,16 +17,9 @@ describe('SessionSidebar', () => {
           reasoning="high"
           contextWindow={200_000}
           tokenUsage={{ source: 'provider', input: 40_000, output: 512, cached: 30_000 }}
-          isRunning
-          runState={{ phase: 'tool_running', startedAt: Date.now() - 1200, updatedAt: Date.now() }}
-          tools={[{ id: 'tool-1', name: 'read_file', status: 'running', args: JSON.stringify({ path: 'src/App.tsx' }) }]}
-          draft={null}
-          subagents={[]}
           queuedCount={0}
           terminals={[]}
           mcpCount={2}
-          task={null}
-          objective="Fix the terminal workspace layout"
           gitState={{ enabled: true, phase: 'detecting', snapshot: null, updatedAt: 1 }}
         />
       </ThemeProvider>,
@@ -34,12 +27,10 @@ describe('SessionSidebar', () => {
     )
 
     expect(output).toContain('TurboFlux')
-    expect(output).toContain('STATUS')
     expect(output).toContain('SESSION')
     expect(output).toContain('CONTEXT')
     expect(output).toContain('REPO')
     expect(output).toContain('RUNTIME')
-    expect(output).toContain('EXPLORING')
     expect(output).toContain('gpt-5.5')
     expect(output).toContain('40.0k / 200.0k')
     expect(output).not.toContain('WORK')
@@ -56,15 +47,9 @@ describe('SessionSidebar', () => {
           mode="plan"
           contextWindow={200_000}
           tokenUsage={{ source: 'unknown' }}
-          isRunning={false}
-          runState={{ phase: 'idle', updatedAt: 1 }}
-          tools={[]}
-          draft={null}
-          subagents={[]}
           queuedCount={0}
           terminals={[]}
           mcpCount={0}
-          task={null}
           gitState={{ enabled: true, phase: 'unavailable', snapshot: null, updatedAt: 1 }}
         />
       </ThemeProvider>,
@@ -76,7 +61,7 @@ describe('SessionSidebar', () => {
     expect(output).not.toContain('REPO')
   })
 
-  it('keeps the status marker anchored at the bottom when content is clipped', () => {
+  it('removes the generic ready and working marker when content is clipped', () => {
     const output = renderToString(
       <ThemeProvider>
         <Box height={18}>
@@ -88,16 +73,9 @@ describe('SessionSidebar', () => {
             reasoning="high"
             contextWindow={200_000}
             tokenUsage={{ source: 'provider', input: 40_000, output: 512, cached: 30_000 }}
-            isRunning
-            runState={{ phase: 'tool_running', startedAt: Date.now() - 1200, updatedAt: Date.now() }}
-            tools={[{ id: 'tool-1', name: 'read_file', status: 'running', args: '{}' }]}
-            draft={null}
-            subagents={[]}
             queuedCount={2}
             terminals={[{ id: 'terminal-1', title: 'Tests', command: 'npm test', status: 'running', createdAt: Date.now() - 1200, outputBytes: 1024 }]}
             mcpCount={2}
-            task={null}
-            objective="Fix the terminal workspace layout"
             gitState={{ enabled: true, phase: 'detecting', snapshot: null, updatedAt: 1 }}
           />
         </Box>
@@ -107,8 +85,7 @@ describe('SessionSidebar', () => {
     const lines = stripAnsi(output).split('\n')
 
     expect(lines).toHaveLength(18)
-    const statusLine = lines.at(-1) ?? ''
-    expect(statusLine).toContain('● working')
-    expect(statusLine.indexOf('●')).toBeLessThanOrEqual(2)
+    expect(output).not.toContain('● working')
+    expect(output).not.toContain('● ready')
   })
 })

@@ -39,8 +39,8 @@ const NEVER_CROSS_PROTOCOL_STATUSES = new Set([401, 403, 408, 409, 425, 429])
 const PROTOCOL_MISMATCH_DETAIL = new RegExp([
   '(?:unknown|unsupported|unrecognized|invalid|missing|required|expected|must provide|does not support|not found)',
   '.{0,100}',
-  '(?:endpoint|route|path|url|schema|payload|request format|model|messages|instructions|input|max_tokens|anthropic-version|x-api-key|authorization|content-type|tool_choice|tools|stream|thinking|output_config|cache_control)',
-  '|(?:endpoint|route|path|url|schema|payload|request format|model|messages|instructions|input|max_tokens|anthropic-version|x-api-key|authorization|content-type|thinking|output_config|cache_control)',
+  '(?:endpoint|route|path|url|schema|payload|request format|model|messages|instructions|input|max_tokens|max_completion_tokens|max_output_tokens|anthropic-version|x-api-key|authorization|content-type|tool_choice|tools|stream|thinking|output_config|cache_control|prompt_cache_key)',
+  '|(?:endpoint|route|path|url|schema|payload|request format|model|messages|instructions|input|max_tokens|max_completion_tokens|max_output_tokens|anthropic-version|x-api-key|authorization|content-type|thinking|output_config|cache_control|prompt_cache_key)',
   '.{0,100}',
   '(?:unknown|unsupported|unrecognized|invalid|missing|required|expected|not found)',
 ].join(''), 'i')
@@ -71,13 +71,35 @@ export function protocolPath(protocol: ModelProtocol): string {
   return PROTOCOL_PATHS[protocol]
 }
 
-export function buildModelProtocolUrl(baseUrl: string, protocol: ModelProtocol): string {
+export function buildModelProtocolUrl(
+  baseUrl: string,
+  protocol: ModelProtocol,
+  provider?: APIConfig['provider'] | string,
+): string {
+  if (protocol === 'anthropic_messages' && provider === 'deepseek') {
+    return `${deepSeekAnthropicBaseUrl(baseUrl)}${protocolPath(protocol)}`
+  }
   return `${normalizeBaseUrl(baseUrl)}${protocolPath(protocol)}`
+}
+
+function deepSeekAnthropicBaseUrl(baseUrl: string): string {
+  const normalized = normalizeBaseUrl(baseUrl)
+    .replace(/\/v\d+$/i, '')
+    .replace(/\/anthropic$/i, '')
+  return `${normalized}/anthropic/v1`
 }
 
 export function planModelProtocols(provider: APIConfig['provider'], model: string): ModelProtocol[] {
   if (provider === 'anthropic' || looksLikeClaudeModel(model)) {
     return ['anthropic_messages', 'openai_chat', 'openai_responses']
+  }
+  if (provider === 'deepseek' || looksLikeDeepSeekModel(model)) {
+    if (looksLikeDeepSeekProModel(model)) {
+      return ['openai_chat', 'anthropic_messages']
+    }
+    if (looksLikeDeepSeekFlashModel(model)) {
+      return ['openai_chat', 'openai_responses', 'anthropic_messages']
+    }
   }
   if (provider === 'openai' || looksLikeResponsesPreferredModel(model)) {
     return ['openai_responses', 'openai_chat', 'anthropic_messages']
@@ -91,6 +113,22 @@ export function looksLikeClaudeModel(model: string): boolean {
 
 export function looksLikeResponsesPreferredModel(model: string): boolean {
   return /(?:^|[/_.:-])(?:gpt-5(?:$|[/_.:-])|o[1-9](?:$|[/_.:-])|codex(?:$|[/_.:-]))/i.test(model.trim())
+}
+
+export function looksLikeDeepSeekModel(model: string): boolean {
+  return /(?:^|[/_.:-])deepseek(?:$|[/_.:-])/i.test(model.trim())
+}
+
+export function looksLikeDeepSeekProModel(model: string): boolean {
+  return /(?:^|[/_.:-])deepseek(?:[-_.:]?(?:v4[-_.:]?)?(?:pro|reasoner))(?:$|[/_.:-])/i.test(model.trim())
+}
+
+export function looksLikeDeepSeekFlashModel(model: string): boolean {
+  return /(?:^|[/_.:-])deepseek(?:[-_.:]?(?:v4[-_.:]?)?(?:flash|chat))(?:$|[/_.:-])/i.test(model.trim())
+}
+
+export function looksLikeKimiModel(model: string): boolean {
+  return /(?:^|[/_.:-])(?:kimi|moonshot)(?:$|[/_.:-])/i.test(model.trim())
 }
 
 export function shouldFallbackProtocol(error: ModelProtocolRequestError): boolean {

@@ -158,6 +158,37 @@ describe('SubAgentTaskManager', () => {
     }
   })
 
+  it('stops every active child task when the parent run is cancelled', async () => {
+    const workspacePath = createWorkspace()
+    const runtimeTaskManager = new RuntimeTaskManager()
+    const manager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager })
+
+    try {
+      const startWaitingTask = (agentType: string) => manager.startTask({
+        kind: 'agent' as const,
+        agentType,
+        label: agentType,
+        objective: `Wait for ${agentType}`,
+        workspacePath,
+        run: ({ signal }) => new Promise<{ ok: boolean }>(resolve => {
+          signal.addEventListener('abort', () => resolve({ ok: false }), { once: true })
+        }),
+        isSuccess: result => result.ok,
+      })
+      const first = startWaitingTask('one')
+      const second = startWaitingTask('two')
+
+      await manager.stopAll('parent cancelled')
+      await Promise.all([first.promise, second.promise])
+
+      expect(manager.getTask(first.task.id)?.runtimeTask.status).toBe('stopped')
+      expect(manager.getTask(second.task.id)?.runtimeTask.status).toBe('stopped')
+    } finally {
+      manager.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
   it('keeps a stopped task stopped when its runner resolves successfully after abort', async () => {
     const workspacePath = createWorkspace()
     const runtimeTaskManager = new RuntimeTaskManager()

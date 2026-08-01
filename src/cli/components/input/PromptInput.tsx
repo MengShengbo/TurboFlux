@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback, type MutableR
 import { Box, Text, useInput, usePaste, type Key } from 'ink'
 import stringWidth from 'string-width'
 import cliTruncate from 'cli-truncate'
+import stripAnsi from 'strip-ansi'
 import { resolveBackground, useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
 import { commandRegistry } from '../../commands/registry'
@@ -22,11 +23,11 @@ interface PasteTextResult {
 interface PromptInputProps {
   value: string
   onChange: (value: string) => void
-  onSubmit: (value: string) => void
+  onSubmit: (value: string) => string | void
   onAlternateSubmit?: (value: string) => void
   onDoubleEsc?: () => void
   onPasteImage?: () => boolean
-  onPasteText?: (pastedText: string, nextValue: string) => PasteTextResult | null
+  onPasteText?: (pastedText: string, nextValue: string, insertionStart: number) => PasteTextResult | null
   onUserActivity?: () => void
   onInputMutation?: () => void
   mode?: string
@@ -35,6 +36,9 @@ interface PromptInputProps {
   appearance?: PromptAppearance
   historyRef?: MutableRefObject<string[]>
 }
+
+const MAX_PROMPT_HISTORY_ENTRIES = 200
+const MAX_PROMPT_HISTORY_CHARS = 1 * 1024 * 1024
 
 export function resolvePromptChrome(theme: Theme, _appearance: PromptAppearance): { borderColor: string; backgroundColor?: string } {
   return {
@@ -51,7 +55,7 @@ export function isImagePasteShortcut(input: string, key: Pick<Key, 'ctrl' | 'met
 }
 
 export function sanitizePromptInputChunk(input: string): string {
-  return stripTerminalFocusSequences(input)
+  return stripTerminalFocusSequences(stripAnsi(input)).replace(/\r\n?/g, '\n')
 }
 
 function clampCursor(offset: number, value: string): number {
@@ -61,15 +65,23 @@ function clampCursor(offset: number, value: string): number {
 export function previousTextOffset(value: string, offset: number): number {
   const normalized = clampCursor(offset, value)
   if (normalized === 0) return 0
-  const previous = Array.from(value.slice(0, normalized)).at(-1)
-  return Math.max(0, normalized - (previous?.length ?? 1))
+  const previousCodeUnit = value.charCodeAt(normalized - 1)
+  const isLowSurrogate = previousCodeUnit >= 0xDC00 && previousCodeUnit <= 0xDFFF
+  const precedingCodeUnit = normalized >= 2 ? value.charCodeAt(normalized - 2) : 0
+  const hasSurrogatePair = isLowSurrogate && precedingCodeUnit >= 0xD800 && precedingCodeUnit <= 0xDBFF
+  return Math.max(0, normalized - (hasSurrogatePair ? 2 : 1))
 }
 
 export function nextTextOffset(value: string, offset: number): number {
   const normalized = clampCursor(offset, value)
   if (normalized >= value.length) return value.length
-  const next = Array.from(value.slice(normalized))[0]
-  return Math.min(value.length, normalized + (next?.length ?? 1))
+  const nextCodeUnit = value.charCodeAt(normalized)
+  const followingCodeUnit = normalized + 1 < value.length ? value.charCodeAt(normalized + 1) : 0
+  const hasSurrogatePair = nextCodeUnit >= 0xD800
+    && nextCodeUnit <= 0xDBFF
+    && followingCodeUnit >= 0xDC00
+    && followingCodeUnit <= 0xDFFF
+  return Math.min(value.length, normalized + (hasSurrogatePair ? 2 : 1))
 }
 
 export interface PromptHistoryNavigation {
@@ -116,25 +128,33 @@ export interface PromptEditorViewport {
 export function getPromptEditorViewport(value: string, cursorOffset: number, maxWidth: number): PromptEditorViewport {
   const offset = clampCursor(cursorOffset, value)
   const availableWidth = Math.max(1, Math.floor(maxWidth))
-  const cursorChar = Array.from(value.slice(offset))[0] ?? ' '
-  const cursorEnd = offset < value.length ? offset + cursorChar.length : offset
+  const cursorEnd = nextTextOffset(value, offset)
+  const cursorChar = formatPromptEditorCharacter(offset < value.length ? value.slice(offset, cursorEnd) : ' ')
   const cursorWidth = Math.max(1, stringWidth(cursorChar))
   let remainingWidth = Math.max(0, availableWidth - cursorWidth)
   let beforeCursor = ''
 
-  for (const char of Array.from(value.slice(0, offset)).reverse()) {
+  let beforeOffset = offset
+  while (beforeOffset > 0) {
+    const characterStart = previousTextOffset(value, beforeOffset)
+    const char = formatPromptEditorCharacter(value.slice(characterStart, beforeOffset))
     const width = stringWidth(char)
     if (width > remainingWidth) break
     beforeCursor = char + beforeCursor
     remainingWidth -= width
+    beforeOffset = characterStart
   }
 
   let afterCursor = ''
-  for (const char of Array.from(value.slice(cursorEnd))) {
+  let afterOffset = cursorEnd
+  while (afterOffset < value.length) {
+    const characterEnd = nextTextOffset(value, afterOffset)
+    const char = formatPromptEditorCharacter(value.slice(afterOffset, characterEnd))
     const width = stringWidth(char)
     if (width > remainingWidth) break
     afterCursor += char
     remainingWidth -= width
+    afterOffset = characterEnd
   }
 
   return {
@@ -143,6 +163,13 @@ export function getPromptEditorViewport(value: string, cursorOffset: number, max
     afterCursor,
     width: stringWidth(beforeCursor) + cursorWidth + stringWidth(afterCursor),
   }
+}
+
+function formatPromptEditorCharacter(character: string): string {
+  if (character === '\n' || character === '\r') return '↵'
+  if (character === '\t') return '→'
+  if (character.length === 1 && character.codePointAt(0)! < 0x20) return '·'
+  return character || ' '
 }
 
 function fitText(value: string, maxWidth: number): string {
@@ -167,6 +194,62 @@ export function getImageTokenAfter(value: string, offset: number): { start: numb
   const suffix = value.slice(offset)
   const match = suffix.match(/^\[Image\s*#\s*\d+]/i)
   return match ? { start: offset, end: offset + match[0].length } : null
+}
+
+const PASTED_CONTENT_TOKEN_PATTERN = /\[Pasted Content \d+ chars(?: #\d+)?\]/g
+
+function getPastedContentToken(value: string, offset: number, direction: 'before' | 'after'): { start: number; end: number } | null {
+  const normalized = clampCursor(offset, value)
+  const pattern = new RegExp(PASTED_CONTENT_TOKEN_PATTERN.source, 'g')
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(value))) {
+    const start = match.index
+    const end = start + match[0].length
+    if (direction === 'before' && normalized > start && normalized <= end) return { start, end }
+    if (direction === 'after' && normalized >= start && normalized < end) return { start, end }
+  }
+  return null
+}
+
+export function getPastedContentTokenBefore(value: string, offset: number): { start: number; end: number } | null {
+  return getPastedContentToken(value, offset, 'before')
+}
+
+export function getPastedContentTokenAfter(value: string, offset: number): { start: number; end: number } | null {
+  return getPastedContentToken(value, offset, 'after')
+}
+
+export function getPastedContentTokenRangeBeforeDelete(value: string, offset: number): { start: number; end: number } | null {
+  const token = getPastedContentTokenBefore(value, offset)
+  if (token) return token
+  const prefix = value.slice(0, offset)
+  const match = prefix.match(new RegExp(`(\\s*)(${PASTED_CONTENT_TOKEN_PATTERN.source})(\\s*)$`))
+  if (match?.index === undefined) return null
+  const rawStart = match.index
+  const leading = match[1] ?? ''
+  const trailing = match[3] ?? ''
+  const tokenStart = rawStart + leading.length
+  const hasTextAfterCursor = /\S/.test(value.slice(offset))
+  const start = trailing.length > 0 && hasTextAfterCursor
+    ? tokenStart
+    : tokenStart > 0 && value[tokenStart - 1] === ' '
+      ? tokenStart - 1
+      : rawStart
+  return { start, end: offset }
+}
+
+export function getPastedContentTokenRangeAfterDelete(value: string, offset: number): { start: number; end: number } | null {
+  const token = getPastedContentTokenAfter(value, offset)
+  if (token) return token
+  const suffix = value.slice(offset)
+  const match = suffix.match(new RegExp(`^(\\s*)(${PASTED_CONTENT_TOKEN_PATTERN.source})(\\s*)`, 'i'))
+  if (!match) return null
+  const leading = match[1] ?? ''
+  const trailing = match[3] ?? ''
+  const tokenEnd = offset + match[0].length - trailing.length
+  const fullEnd = offset + match[0].length
+  if (leading.length > 0) return { start: offset, end: tokenEnd }
+  return { start: offset, end: fullEnd }
 }
 
 export function getImageTokenRangeBeforeDelete(value: string, offset: number): { start: number; end: number } | null {
@@ -247,24 +330,32 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
   }, [cursorOffset, replaceValue, value])
 
   const insertPastedText = useCallback((text: string) => {
-    if (!text) return
-    const nextValue = value.slice(0, cursorOffset) + text + value.slice(cursorOffset)
-    const transformed = onPasteText?.(text, nextValue)
+    const normalizedText = sanitizePromptInputChunk(text)
+    if (!normalizedText) return
+    const nextValue = value.slice(0, cursorOffset) + normalizedText + value.slice(cursorOffset)
+    const transformed = onPasteText?.(normalizedText, nextValue, cursorOffset)
     if (transformed) {
       replaceValue(transformed.value, transformed.cursorOffset ?? transformed.value.length)
       return
     }
-    replaceValue(nextValue, cursorOffset + text.length)
+    replaceValue(nextValue, cursorOffset + normalizedText.length)
   }, [cursorOffset, onPasteText, replaceValue, value])
 
   const handleSubmit = useCallback((val: string) => {
-    if (val.trim()) {
-      historyRef.current.push(val)
+    terminalInputStateRef.current.reset()
+    const submittedValue = onSubmit(val)
+    const historyValue = typeof submittedValue === 'string' ? submittedValue : val
+    if (historyValue.trim()) {
+      historyRef.current.push(historyValue)
+      while (historyRef.current.length > MAX_PROMPT_HISTORY_ENTRIES) historyRef.current.shift()
+      let historyChars = historyRef.current.reduce((total, item) => total + item.length, 0)
+      while (historyChars > MAX_PROMPT_HISTORY_CHARS && historyRef.current.length > 1) {
+        const removed = historyRef.current.shift() || ''
+        historyChars -= removed.length
+      }
       historyIdxRef.current = -1
       historyDraftRef.current = ''
     }
-    terminalInputStateRef.current.reset()
-    onSubmit(val)
   }, [onSubmit])
 
   usePaste((text) => {
@@ -365,13 +456,17 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
 
     if (key.leftArrow) {
       terminalInputStateRef.current.noteModifiedOrNavigationInput()
-      setCursorOffset(offset => getImageTokenBefore(value, offset)?.start ?? previousTextOffset(value, offset))
+      setCursorOffset(offset => getImageTokenBefore(value, offset)?.start
+        ?? getPastedContentTokenBefore(value, offset)?.start
+        ?? previousTextOffset(value, offset))
       return
     }
 
     if (key.rightArrow) {
       terminalInputStateRef.current.noteModifiedOrNavigationInput()
-      setCursorOffset(offset => getImageTokenAfter(value, offset)?.end ?? nextTextOffset(value, offset))
+      setCursorOffset(offset => getImageTokenAfter(value, offset)?.end
+        ?? getPastedContentTokenAfter(value, offset)?.end
+        ?? nextTextOffset(value, offset))
       return
     }
 
@@ -391,8 +486,10 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       terminalInputStateRef.current.noteModifiedOrNavigationInput()
       if (cursorOffset > 0) {
         const token = getImageTokenRangeBeforeDelete(value, cursorOffset)
-        if (token) {
-          replaceValue(value.slice(0, token.start) + value.slice(token.end), token.start)
+        const pastedToken = getPastedContentTokenRangeBeforeDelete(value, cursorOffset)
+        if (token || pastedToken) {
+          const range = token ?? pastedToken!
+          replaceValue(value.slice(0, range.start) + value.slice(range.end), range.start)
         } else {
           const previousOffset = previousTextOffset(value, cursorOffset)
           replaceValue(value.slice(0, previousOffset) + value.slice(cursorOffset), previousOffset)
@@ -405,8 +502,10 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       terminalInputStateRef.current.noteModifiedOrNavigationInput()
       if (cursorOffset < value.length) {
         const token = getImageTokenRangeAfterDelete(value, cursorOffset)
-        if (token) {
-          replaceValue(value.slice(0, token.start) + value.slice(token.end), token.start)
+        const pastedToken = getPastedContentTokenRangeAfterDelete(value, cursorOffset)
+        if (token || pastedToken) {
+          const range = token ?? pastedToken!
+          replaceValue(value.slice(0, range.start) + value.slice(range.end), range.start)
         } else {
           replaceValue(value.slice(0, cursorOffset) + value.slice(nextTextOffset(value, cursorOffset)), cursorOffset)
         }
@@ -419,7 +518,8 @@ export function PromptInput({ value, onChange, onSubmit, onAlternateSubmit, onDo
       return
     }
     terminalInputStateRef.current.notePlainText(inputChunk)
-    insertText(inputChunk)
+    if (inputChunk.length > 1 || inputChunk.includes('\n')) insertPastedText(inputChunk)
+    else insertText(inputChunk)
   }, { isActive: isInteractive })
 
   const placeholder = requestedPlaceholder ?? (mode === 'plan' ? t('ui.prompt.plan')

@@ -15,6 +15,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function isPendingPaste(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.placeholder === 'string'
+    && typeof value.text === 'string'
+}
+
 function isJournalEntry(value: unknown): value is ConversationJournalEntry {
   if (!isRecord(value) || (value.version !== 1 && value.version !== 2) || typeof value.type !== 'string' || !Number.isFinite(value.timestamp)) return false
 
@@ -57,7 +63,11 @@ function isJournalEntry(value: unknown): value is ConversationJournalEntry {
     case 'queue_state':
       return value.version === 2 && Array.isArray(value.inputs)
     case 'draft_state':
-      return value.version === 2 && isRecord(value.draft) && typeof value.draft.text === 'string'
+      return value.version === 2
+        && isRecord(value.draft)
+        && typeof value.draft.text === 'string'
+        && (value.draft.pendingPastes === undefined
+          || (Array.isArray(value.draft.pendingPastes) && value.draft.pendingPastes.every(isPendingPaste)))
     case 'input_state':
       return value.version === 2
         && typeof value.inputId === 'string'
@@ -216,6 +226,9 @@ function createInteractionState(conversation?: PersistedConversation | null): No
       attachments: conversation?.interactionState?.draft.attachments
         ? [...conversation.interactionState.draft.attachments]
         : undefined,
+      pendingPastes: conversation?.interactionState?.draft.pendingPastes
+        ? conversation.interactionState.draft.pendingPastes.map(pending => ({ ...pending }))
+        : undefined,
     },
     pendingSteering: [...(conversation?.interactionState?.pendingSteering || [])],
     pendingApprovals: [...(conversation?.interactionState?.pendingApprovals || [])],
@@ -324,7 +337,13 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
         interactionState.queuedInputs = entry.inputs.map(input => ({ ...input, attachments: input.attachments ? [...input.attachments] : undefined }))
         break
       case 'draft_state':
-        interactionState.draft = { ...entry.draft, attachments: entry.draft.attachments ? [...entry.draft.attachments] : undefined }
+        interactionState.draft = {
+          ...entry.draft,
+          attachments: entry.draft.attachments ? [...entry.draft.attachments] : undefined,
+          pendingPastes: entry.draft.pendingPastes
+            ? entry.draft.pendingPastes.map(pending => ({ ...pending }))
+            : undefined,
+        }
         break
       case 'input_state': {
         const index = interactionState.pendingSteering.findIndex(input => input.id === entry.inputId)

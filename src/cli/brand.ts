@@ -9,7 +9,7 @@ export const TURBOFLUX_WORDMARK_LINES = [
 ] as const
 
 export const TURBOFLUX_COMPACT_MARK = 'TurboFlux'
-export const TURBOFLUX_VERSION = '0.1.5'
+export const TURBOFLUX_VERSION = '1.0.0'
 
 export function centerText(text: string, width: number): string {
   const padding = Math.max(0, Math.floor((width - stringWidth(text)) / 2))

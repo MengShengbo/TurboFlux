@@ -358,6 +358,9 @@ export class ConversationManager {
     this.interactionState.draft = {
       ...draft,
       attachments: draft.attachments ? [...draft.attachments] : undefined,
+      pendingPastes: draft.pendingPastes
+        ? draft.pendingPastes.map(pending => ({ ...pending }))
+        : undefined,
     }
     try {
       this.ensureJournal()

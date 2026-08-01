@@ -180,6 +180,19 @@ const tools: EnhancedToolDef[] = [
     isConcurrencySafe: true,
   },
   {
+    name: 'tool_search',
+    description: 'Search deferred MCP tool metadata and load matching tool schemas for the next model turn. Use this before attempting an MCP tool that is not already visible.',
+    category: 'read',
+    parameters: [
+      { name: 'query', type: 'string', description: 'Intent or capability to search for, such as "issue tracker comments" or "browser screenshot".', required: true },
+      { name: 'limit', type: 'number', description: 'Maximum matching tools to load (default 8, maximum 20).', required: false, default: 8 },
+    ],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: true,
+    requiredMode: ['vibe', 'plan'],
+  },
+  {
     name: 'list_memories',
     description: 'List workspace long-term memories (rules, strategies, pitfalls).',
     category: 'read',
@@ -205,7 +218,7 @@ const tools: EnhancedToolDef[] = [
     ],
     isReadOnly: false,
     isDestructive: false,
-    isConcurrencySafe: true,
+    isConcurrencySafe: false,
   },
   {
     name: 'forget',
@@ -217,7 +230,7 @@ const tools: EnhancedToolDef[] = [
     ],
     isReadOnly: false,
     isDestructive: false,
-    isConcurrencySafe: true,
+    isConcurrencySafe: false,
   },
   {
     name: 'git_status',
@@ -553,7 +566,7 @@ const tools: EnhancedToolDef[] = [
     ],
     isReadOnly: true,
     isDestructive: false,
-    isConcurrencySafe: true,
+    isConcurrencySafe: false,
   },
   {
     name: 'notify_user',
@@ -566,6 +579,19 @@ const tools: EnhancedToolDef[] = [
     isReadOnly: true,
     isDestructive: false,
     isConcurrencySafe: true,
+  },
+  {
+    name: 'use_skill',
+    description: 'Select an enabled project skill for the current turn and record why it applies.',
+    category: 'manage',
+    parameters: [
+      { name: 'skill_id', type: 'string', description: 'Enabled skill identifier.', required: true },
+      { name: 'reason', type: 'string', description: 'Optional reason this skill applies.', required: false },
+    ],
+    isReadOnly: true,
+    isDestructive: false,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe', 'plan'],
   },
   {
     name: 'spawn_agent',
@@ -582,15 +608,16 @@ When NOT to use spawn_agent:
 
 Each invocation starts in the background and returns an agent ID immediately. Use read_agent to inspect progress/results, list_agents to discover tasks, and cancel_agent to stop one.
 Launch multiple agents concurrently for independent topics and provide a highly specific objective.`,
-    category: 'read',
+    category: 'manage',
     parameters: [
       { name: 'agent_type', type: 'string', description: 'Which project-defined agent from .turboflux/agents/ to spawn.', required: true },
       { name: 'objective', type: 'string', description: 'Concrete question or task for the subagent. Be specific — include the area of the codebase, the feature, or the change to review.', required: true },
       { name: 'context', type: 'string', description: 'Optional extra context that helps the subagent (related files, prior findings, constraints).', required: false },
     ],
-    isReadOnly: true,
+    isReadOnly: false,
     isDestructive: false,
-    isConcurrencySafe: true,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe'],
   },
   {
     name: 'list_agents',
@@ -703,7 +730,7 @@ export function toolsToAnthropicFormat(mode: AgentMode, options?: ToolFormatOpti
 
 function parameterSchema(parameter: ToolParameter, strict: boolean): Record<string, unknown> {
   const base: Record<string, unknown> = parameter.schema
-    ? { ...parameter.schema }
+    ? strict ? { ...parameter.schema } : relaxNullableRequiredFields(parameter.schema)
     : { type: parameter.type }
   if (parameter.enum) base.enum = parameter.enum
   if (parameter.default !== undefined) base.default = parameter.default
@@ -711,6 +738,67 @@ function parameterSchema(parameter: ToolParameter, strict: boolean): Record<stri
     return { anyOf: [base, { type: 'null' }], description: parameter.description }
   }
   return { ...base, description: parameter.description }
+}
+
+function relaxNullableRequiredFields(schema: Record<string, unknown>): Record<string, unknown> {
+  const normalized: Record<string, unknown> = { ...schema }
+
+  for (const keyword of ['anyOf', 'oneOf', 'allOf']) {
+    const candidates = schema[keyword]
+    if (Array.isArray(candidates)) {
+      normalized[keyword] = candidates.map(candidate => (
+        candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+          ? relaxNullableRequiredFields(candidate as Record<string, unknown>)
+          : candidate
+      ))
+    }
+  }
+
+  if (schema.items && typeof schema.items === 'object' && !Array.isArray(schema.items)) {
+    normalized.items = relaxNullableRequiredFields(schema.items as Record<string, unknown>)
+  }
+
+  if (schema.additionalProperties && typeof schema.additionalProperties === 'object' && !Array.isArray(schema.additionalProperties)) {
+    normalized.additionalProperties = relaxNullableRequiredFields(schema.additionalProperties as Record<string, unknown>)
+  }
+
+  if (schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)) {
+    const properties = schema.properties as Record<string, unknown>
+    normalized.properties = Object.fromEntries(Object.entries(properties).map(([name, property]) => [
+      name,
+      property && typeof property === 'object' && !Array.isArray(property)
+        ? relaxNullableRequiredFields(property as Record<string, unknown>)
+        : property,
+    ]))
+
+    if (Array.isArray(schema.required)) {
+      normalized.required = schema.required.filter(name => {
+        if (typeof name !== 'string') return true
+        const property = properties[name]
+        return !property || typeof property !== 'object' || Array.isArray(property)
+          || !schemaAcceptsNull(property as Record<string, unknown>)
+      })
+    }
+  }
+
+  return normalized
+}
+
+function schemaAcceptsNull(schema: Record<string, unknown>): boolean {
+  const declaredTypes = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : []
+  if (declaredTypes.includes('null')) return true
+
+  for (const keyword of ['anyOf', 'oneOf']) {
+    const candidates = schema[keyword]
+    if (Array.isArray(candidates) && candidates.some(candidate => (
+      candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      && schemaAcceptsNull(candidate as Record<string, unknown>)
+    ))) {
+      return true
+    }
+  }
+
+  return false
 }
 
 export function validateToolArgs(toolName: string, args: Record<string, unknown>): { valid: boolean; error?: string } {
@@ -731,7 +819,7 @@ export function validateToolArgs(toolName: string, args: Record<string, unknown>
     }
     if (provided) {
       const schema: Record<string, unknown> = param.schema
-        ? { ...param.schema }
+        ? relaxNullableRequiredFields(param.schema)
         : { type: param.type }
       if (param.enum) schema.enum = param.enum
       const validation = validateSchemaValue(schema, value, param.name)

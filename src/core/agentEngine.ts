@@ -41,6 +41,7 @@ import {
   isReasoningEffortValueError,
   removeAnthropicCompatibleRequestParam,
   removeOpenAICompatibleRequestParam,
+  setOpenAIChatMaxTokens,
   shouldOmitSamplingTemperature,
 } from './requestCompatibility'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
@@ -130,6 +131,49 @@ const MODEL_READ_MAX_LINES = 2_000
 const MODEL_READ_MAX_BYTES = 48 * 1024
 const MODEL_READ_FULL_MAX_BYTES = 80 * 1024
 const DEFAULT_TOOL_RESULT_MAX_CHARS = 20_000
+const MAX_STREAM_TEXT_CHARS = 8 * 1024 * 1024
+const MAX_STREAM_REASONING_CHARS = 8 * 1024 * 1024
+const MAX_STREAM_TOOL_ARGUMENT_CHARS = 1 * 1024 * 1024
+
+function isOutputLimitFinishReason(value: unknown): boolean {
+  return typeof value === 'string' && /^(?:length|max_tokens|max_output_tokens)$/i.test(value)
+}
+
+class BoundedStreamBuffer {
+  private readonly chunks: string[] = []
+  private length = 0
+  private truncated = false
+
+  constructor(private readonly maxChars: number) {}
+
+  append(value: string): string {
+    if (!value || this.length >= this.maxChars) {
+      if (value) this.truncated = true
+      return ''
+    }
+    const remaining = this.maxChars - this.length
+    const accepted = value.length > remaining ? value.slice(0, remaining) : value
+    if (accepted) {
+      this.chunks.push(accepted)
+      this.length += accepted.length
+    }
+    if (accepted.length < value.length) this.truncated = true
+    return accepted
+  }
+
+  toString(): string {
+    const value = this.chunks.join('')
+    return this.truncated
+      ? `${value}\n\n[stream output truncated after ${this.maxChars.toLocaleString()} characters]`
+      : value
+  }
+}
+
+function appendBoundedString(current: string, value: string, maxChars: number): string {
+  if (!value || current.length >= maxChars) return current
+  const remaining = maxChars - current.length
+  return current + value.slice(0, remaining)
+}
 
 function contentBlocks(message: Record<string, unknown>): Array<Record<string, unknown>> {
   if (Array.isArray(message.content)) {
@@ -382,6 +426,7 @@ export class AgentEngine {
   private unsubscribeTaskManager: (() => void) | null = null
   private contextManager: ContextManager = new ContextManager()
   private readonly interactiveRequests: ApprovalCoordinator<EngineInteractiveRequest, string>
+  private readonly resolvedAskUserResponses = new Map<string, string>()
   private toolCallTaskMap: Map<string, string> = new Map()
   private fileBeforeSnapshots: Map<string, string | null> = new Map()
   // Registry of background PTY sessions the agent has spawned via
@@ -451,9 +496,11 @@ export class AgentEngine {
   private stateProvider: AgentStateProvider
   private subAgentTaskManager: SubAgentTaskManager
   private mcpClient: McpClient | null = null
+  private deferredMcpToolNames = new Set<string>()
 
   setMcpClient(client: McpClient): void {
     this.mcpClient = client
+    this.deferredMcpToolNames.clear()
   }
 
   setEventRecorder(recorder: AgentEventRecorder | null): void {
@@ -544,6 +591,7 @@ export class AgentEngine {
     this.unsubscribeTaskManager?.()
     this.abortController?.abort()
     this.interactiveRequests.cancelAll('deny')
+    this.resolvedAskUserResponses.clear()
     this.abortController = null
     this.currentStreamId = null
     this.subAgentTaskManager.destroy()
@@ -1259,6 +1307,12 @@ export class AgentEngine {
     this.steeringOpen = false
     this.rejectPendingSteeringMessages('Current run was interrupted before guidance was committed')
     this.abortController?.abort()
+    void this.subAgentTaskManager.stopAll('Parent agent run cancelled')
+    for (const sessionId of this.agentBackgroundSessions.keys()) {
+      const stop = this.toolExecutor.ptyKill?.(sessionId)
+      if (stop) void stop.catch(() => {})
+    }
+    this.agentBackgroundSessions.clear()
     // Per-conv stream abort: only cancel THIS engine's HTTP stream in the
     // main process, not every active stream across all conversations.
     if (this.currentStreamId !== null) {
@@ -1273,6 +1327,7 @@ export class AgentEngine {
       this.pauseResolve = null
     }
     this.interactiveRequests.cancelAll('deny')
+    this.resolvedAskUserResponses.clear()
   }
 
   submitAskUserResponse(response: string, requestId?: string): boolean {
@@ -1325,7 +1380,7 @@ export class AgentEngine {
 
     const currentTurnCount = this.session.turns.length
     if (currentTurnCount === this.compressionPreparedTurnCount) return
-    if (this.shouldCompactFromProviderUsage()) {
+    if (this.shouldCompactFromProviderUsage() || this.shouldCompactFromLocalSize()) {
       await this.ensureContextWindow(true)
     }
     this.compressionPreparedTurnCount = this.session.turns.length
@@ -1355,6 +1410,15 @@ export class AgentEngine {
     if (providerTokens <= 0 || !Number.isFinite(providerTokens)) return false
     const settings = this.currentContextWindowSettings()
     return providerTokens >= autoCompactThreshold(settings.contextWindow, settings.maxOutputTokens, this.config.contextPolicy)
+  }
+
+  private shouldCompactFromLocalSize(): boolean {
+    const settings = this.currentContextWindowSettings()
+    const estimatedTokens = this.session.turns.reduce((total, turn) => {
+      if (total >= Number.MAX_SAFE_INTEGER) return total
+      return total + Math.ceil(this.countTurnChars(turn) / 4)
+    }, 0)
+    return estimatedTokens >= autoCompactThreshold(settings.contextWindow, settings.maxOutputTokens, this.config.contextPolicy)
   }
 
   private currentContextTokensWithTokenizerTail(): number {
@@ -1481,12 +1545,21 @@ export class AgentEngine {
         this.session.turns.push(resultTurn)
         newTurns.push(resultTurn)
 
-        const askUserCalls = assistantTurn.toolCalls!.filter(tc => tc.name === 'ask_user')
-        if (askUserCalls.length > 0) {
-          const responses: string[] = []
-          for (const askUserCall of askUserCalls) {
-            responses.push(await this.interactiveRequests.wait(askUserCall.id))
-          }
+          const askUserCalls = assistantTurn.toolCalls!.filter(tc => tc.name === 'ask_user')
+          if (askUserCalls.length > 0) {
+            const responses: string[] = []
+            for (const askUserCall of askUserCalls) {
+              const resolved = this.resolvedAskUserResponses.get(askUserCall.id)
+              if (resolved !== undefined) {
+                this.resolvedAskUserResponses.delete(askUserCall.id)
+                responses.push(resolved)
+              } else if (this.interactiveRequests.has(askUserCall.id)) {
+                responses.push(await this.interactiveRequests.wait(askUserCall.id))
+              } else {
+                const toolResult = toolResults.find(result => result.toolCallId === askUserCall.id)
+                responses.push(toolResult?.output.replace(/^\[User response\]\s*/, '') || 'deny')
+              }
+            }
           const responseTurn = this.createUserTurn(responses.join('\n\n'))
           this.session.turns.push(responseTurn)
           newTurns.push(responseTurn)
@@ -1663,7 +1736,7 @@ export class AgentEngine {
     const protocols = planModelProtocols(config.provider, config.defaultModel)
     const attempts: ModelProtocolAttempt[] = []
     for (const protocol of protocols) {
-      const url = buildModelProtocolUrl(config.baseUrl, protocol)
+      const url = buildModelProtocolUrl(config.baseUrl, protocol, config.provider)
       const headers = createTurboFluxRequestHeaders(protocol === 'anthropic_messages'
         ? {
             'Content-Type': 'application/json',
@@ -1706,6 +1779,10 @@ export class AgentEngine {
               max_tokens: 2_200,
               stream: false,
             }
+
+      if (protocol === 'openai_chat') {
+        setOpenAIChatMaxTokens(body, 2_200, config.provider, config.defaultModel)
+      }
 
       const result = await this.toolExecutor.sendMessage(url, headers, JSON.stringify(body), {
         signal: this.abortController?.signal,
@@ -1937,6 +2014,8 @@ Before retrying:
       return this.createMockTurn()
     }
 
+    this.autoClearStaleToolResults()
+
     const turnStrategy = this.turnStrategyPlanner.plan(this.session, this.config.mode)
     this.currentTurnStrategy = turnStrategy
     const currentUserTurn = [...this.session.turns].reverse().find(turn => turn.role === 'user')
@@ -1995,7 +2074,7 @@ Before retrying:
     try {
       for (let index = 0; index < protocolCandidates.length; index += 1) {
         const protocol = protocolCandidates[index]
-        const url = buildModelProtocolUrl(activeConfig.baseUrl, protocol)
+        const url = buildModelProtocolUrl(activeConfig.baseUrl, protocol, activeConfig.provider)
         this.emit({ type: 'model:protocol', phase: 'attempt', protocol, url })
         try {
           let turn: AgentTurn
@@ -2032,7 +2111,7 @@ Before retrying:
             type: 'model:protocol',
             phase: 'fallback',
             protocol: nextProtocol,
-            url: buildModelProtocolUrl(activeConfig.baseUrl, nextProtocol),
+            url: buildModelProtocolUrl(activeConfig.baseUrl, nextProtocol, activeConfig.provider),
             message: `${formatProtocolAttempt(attempt)}; retrying with ${protocolLabel(nextProtocol)}`,
           })
         }
@@ -2069,7 +2148,7 @@ Before retrying:
     startTime: number,
     turnStrategy?: TurnStrategy | null,
   ): Promise<AgentTurn> {
-    const url = buildModelProtocolUrl(config.baseUrl, 'anthropic_messages')
+    const url = buildModelProtocolUrl(config.baseUrl, 'anthropic_messages', config.provider)
     // Bug 3 fix: token-efficient-tools-2025-02-19 is a Claude 3.7 Sonnet
     // beta. Sonnet 3.5 / Sonnet 4 / Opus 4 / Haiku-3 reject the header on
     // some baseUrl proxies and the request 4xx's. Only opt in for models
@@ -2099,6 +2178,7 @@ Before retrying:
     // Inject MCP tools into Anthropic format
     if (this.mcpClient) {
       const mcpTools = getMcpAgentTools(this.mcpClient)
+        .filter(tool => this.deferredMcpToolNames.has(tool.name))
       for (const tool of mcpTools.sort((a, b) => a.name.localeCompare(b.name))) {
         if (this.config.mode === 'plan' && !tool.isReadOnly) continue
         anthropicTools.push({
@@ -2183,8 +2263,8 @@ Before retrying:
     this.emit({ type: 'stream:start' })
 
     // Accumulators for streaming assembly
-    let textContent = ''
-    let reasoningContent = ''
+    const textBuffer = new BoundedStreamBuffer(MAX_STREAM_TEXT_CHARS)
+    const reasoningBuffer = new BoundedStreamBuffer(MAX_STREAM_REASONING_CHARS)
     const rawReasoningBlocks: AnthropicThinkingBlock[] = []
     const contentBlockTypes = new Map<number, string>()
     const contentBlockReasoningIndex = new Map<number, number>()
@@ -2197,6 +2277,7 @@ Before retrying:
     let cacheReadTokens = 0
     let cacheCreationTokens = 0
     let sawTerminalEvent = false
+    let streamInterrupted = false
     let pendingSseEventType = ''
     // Mint the streamId BEFORE the request goes out so abort() (which
     // can fire from another tick the moment the user clicks "stop")
@@ -2228,15 +2309,19 @@ Before retrying:
           const delta = event.delta
           const reasoningText = this.extractStructuredReasoningDelta(delta, { allowTypedText: true })
           if (reasoningText) {
-            reasoningContent += reasoningText
+            const acceptedReasoning = reasoningBuffer.append(reasoningText)
             const blockIndex = typeof event.index === 'number' ? event.index : -1
             if (blockIndex >= 0 && contentBlockTypes.get(blockIndex) === 'thinking') {
               const rawIndex = contentBlockReasoningIndex.get(blockIndex)
               if (rawIndex !== undefined) {
-                rawReasoningBlocks[rawIndex].thinking = `${rawReasoningBlocks[rawIndex].thinking || ''}${reasoningText}`
+                rawReasoningBlocks[rawIndex].thinking = appendBoundedString(
+                  rawReasoningBlocks[rawIndex].thinking || '',
+                  acceptedReasoning,
+                  MAX_STREAM_REASONING_CHARS,
+                )
               }
             }
-            this.emit({ type: 'stream:thinking_delta', text: reasoningText })
+            if (acceptedReasoning) this.emit({ type: 'stream:thinking_delta', text: acceptedReasoning })
           } else if (delta?.type === 'signature_delta' && typeof delta.signature === 'string') {
             const blockIndex = typeof event.index === 'number' ? event.index : -1
             const rawIndex = blockIndex >= 0 ? contentBlockReasoningIndex.get(blockIndex) : undefined
@@ -2244,13 +2329,13 @@ Before retrying:
               rawReasoningBlocks[rawIndex].signature = delta.signature
             }
           } else if (delta?.type === 'text_delta' && delta.text) {
-            textContent += delta.text
-            this.emit({ type: 'stream:delta', text: delta.text })
+            const acceptedText = textBuffer.append(delta.text)
+            if (acceptedText) this.emit({ type: 'stream:delta', text: acceptedText })
           } else if (delta?.type === 'input_json_delta' && delta.partial_json) {
             const index = event.index
             const block = toolCallMap.get(`idx-${index}`)
             if (block) {
-              block.inputJson += delta.partial_json
+              block.inputJson = appendBoundedString(block.inputJson, delta.partial_json, MAX_STREAM_TOOL_ARGUMENT_CHARS)
               this.emit({
                 type: 'stream:tool_call_delta',
                 toolCallId: block.id,
@@ -2278,8 +2363,8 @@ Before retrying:
             rawReasoningBlocks.push({ type: 'redacted_thinking', data: contentBlock.data })
           }
           if (contentBlock?.type === 'text' && typeof contentBlock.text === 'string' && contentBlock.text) {
-            textContent += contentBlock.text
-            this.emit({ type: 'stream:delta', text: contentBlock.text })
+            const acceptedText = textBuffer.append(contentBlock.text)
+            if (acceptedText) this.emit({ type: 'stream:delta', text: acceptedText })
           }
           if (contentBlock?.type === 'tool_use') {
             const initialInput = contentBlock.input && typeof contentBlock.input === 'object' && Object.keys(contentBlock.input).length > 0
@@ -2294,7 +2379,10 @@ Before retrying:
         } else if (eventType === 'message_stop') {
           sawTerminalEvent = true
         } else if (eventType === 'message_delta') {
-          if (event.delta?.stop_reason) sawTerminalEvent = true
+          if (event.delta?.stop_reason) {
+            sawTerminalEvent = true
+            streamInterrupted = streamInterrupted || isOutputLimitFinishReason(event.delta.stop_reason)
+          }
           if (event.delta?.signature) {
             for (let index = rawReasoningBlocks.length - 1; index >= 0; index -= 1) {
               const block = rawReasoningBlocks[index]
@@ -2366,6 +2454,8 @@ Before retrying:
         signal: this.abortController?.signal,
       })
     }
+    let textContent = textBuffer.toString()
+    const reasoningContent = reasoningBuffer.toString()
     this.currentStreamId = null
 
     if (!result.success) {
@@ -2446,19 +2536,20 @@ Before retrying:
       this.emit({ type: 'cache:diagnostic', result: cacheDiagnosis })
     }
 
-    this.emit({ type: 'stream:end' })
+    this.emit(streamInterrupted ? { type: 'stream:end', interrupted: true } : { type: 'stream:end' })
 
     return this.createAssistantTurn(textContent, toolCalls, {
       model: model?.name,
       tokens,
       duration: Date.now() - startTime,
       mode: this.config.mode,
+      ...(streamInterrupted ? { interrupted: true } : {}),
       reasoningEnabled: reasoningRequest?.enabled,
       reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
       thinking: reasoningContent ? {
         content: reasoningContent,
         source: 'provider',
-        status: 'complete',
+        status: streamInterrupted ? 'interrupted' : 'complete',
         durationMs: Date.now() - startTime,
         tokenCount: Math.max(1, Math.ceil(reasoningContent.length / 4)),
         effort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
@@ -2486,6 +2577,7 @@ Before retrying:
 
     if (this.mcpClient) {
       const mcpTools = getMcpAgentTools(this.mcpClient)
+        .filter(tool => this.deferredMcpToolNames.has(tool.name))
       for (const tool of mcpTools.sort((a, b) => a.name.localeCompare(b.name))) {
         if (this.config.mode === 'plan' && !tool.isReadOnly) continue
         openaiTools.push({
@@ -2512,7 +2604,7 @@ Before retrying:
     startTime: number,
     turnStrategy?: TurnStrategy | null,
   ): Promise<AgentTurn> {
-    const url = buildModelProtocolUrl(config.baseUrl, 'openai_chat')
+    const url = buildModelProtocolUrl(config.baseUrl, 'openai_chat', config.provider)
     const headers: Record<string, string> = createTurboFluxRequestHeaders({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
@@ -2543,9 +2635,7 @@ Before retrying:
     if (!shouldOmitSamplingTemperature(config)) {
       body.temperature = this.config.temperature ?? config.temperature ?? 0.7
     }
-    if (maxTokens > 0) {
-      body.max_tokens = maxTokens
-    }
+    if (maxTokens > 0) setOpenAIChatMaxTokens(body, maxTokens, config.provider, config.defaultModel)
     const reasoningRequest = resolveNativeReasoningRequest(config.defaultModel, config.reasoning, config.provider, config.modelCapabilities)
     if (reasoningRequest?.thinking) body.thinking = reasoningRequest.thinking
     if (reasoningRequest?.reasoningEffort) body.reasoning_effort = reasoningRequest.reasoningEffort
@@ -2571,7 +2661,7 @@ Before retrying:
       // loop users see in chat.
       body.parallel_tool_calls = true
     }
-    if (config.provider === 'openai' || looksLikeResponsesPreferredModel(config.defaultModel)) {
+    if (config.provider === 'openai' || config.provider === 'kimi' || looksLikeResponsesPreferredModel(config.defaultModel) || /(?:^|[/_.:-])(?:kimi|moonshot)(?:$|[/_.:-])/i.test(config.defaultModel)) {
       body.prompt_cache_key = this.buildPromptCacheKey(config.defaultModel, openaiTools)
       if (/gpt-5\.5/i.test(config.defaultModel)) {
         body.prompt_cache_retention = '24h'
@@ -2590,6 +2680,7 @@ Before retrying:
       cacheControl: config.provider === 'openrouter' ? 'system+last-message' : 'auto-prefix',
       extraBodyParams: {
         max_tokens: body.max_tokens ?? null,
+        max_completion_tokens: body.max_completion_tokens ?? null,
         temperature: body.temperature ?? null,
         stream_options: body.stream_options,
         tool_choice: body.tool_choice ?? null,
@@ -2601,8 +2692,8 @@ Before retrying:
 
     this.emit({ type: 'stream:start' })
 
-    let textContent = ''
-    let reasoningContent = ''
+    const textBuffer = new BoundedStreamBuffer(MAX_STREAM_TEXT_CHARS)
+    const reasoningBuffer = new BoundedStreamBuffer(MAX_STREAM_REASONING_CHARS)
     const toolCallMap = new Map<number, { id: string; name: string; argumentsJson: string }>()
     let inputTokens = 0
     let outputTokens = 0
@@ -2618,6 +2709,7 @@ Before retrying:
     let cacheReadTokens = 0
     let cacheMissTokens: number | null = null
     let sawTerminalEvent = false
+    let streamInterrupted = false
     // Same pre-allocation pattern as the Anthropic path — the previous
     // `Date.now()` was a no-op for abort because preload re-rolled its
     // own id when sending the request. Now we own the id and forward it
@@ -2668,6 +2760,7 @@ Before retrying:
         if (!choice) return
         if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
           sawTerminalEvent = true
+          streamInterrupted = streamInterrupted || isOutputLimitFinishReason(choice.finish_reason)
         }
 
         const delta = choice.delta
@@ -2675,14 +2768,14 @@ Before retrying:
 
         const reasoningText = this.extractStructuredReasoningDelta(delta)
         if (reasoningText) {
-          reasoningContent += reasoningText
-          this.emit({ type: 'stream:thinking_delta', text: reasoningText })
+          const acceptedReasoning = reasoningBuffer.append(reasoningText)
+          if (acceptedReasoning) this.emit({ type: 'stream:thinking_delta', text: acceptedReasoning })
         }
 
         // Text content delta
         if (delta.content) {
-          textContent += delta.content
-          this.emit({ type: 'stream:delta', text: delta.content })
+          const acceptedText = textBuffer.append(delta.content)
+          if (acceptedText) this.emit({ type: 'stream:delta', text: acceptedText })
         }
 
         // Tool call deltas
@@ -2700,7 +2793,7 @@ Before retrying:
             if (tc.id) entry.id = tc.id
             if (tc.function?.name) entry.name = tc.function.name
             if (tc.function?.arguments) {
-              entry.argumentsJson += tc.function.arguments
+              entry.argumentsJson = appendBoundedString(entry.argumentsJson, tc.function.arguments, MAX_STREAM_TOOL_ARGUMENT_CHARS)
               this.emit({
                 type: 'stream:tool_call_delta',
                 toolCallId: entry.id,
@@ -2752,6 +2845,8 @@ Before retrying:
         signal: this.abortController?.signal,
       })
     }
+    let textContent = textBuffer.toString()
+    const reasoningContent = reasoningBuffer.toString()
     this.currentStreamId = null
 
     if (!result.success) {
@@ -2842,19 +2937,20 @@ Before retrying:
       this.emit({ type: 'cache:diagnostic', result: cacheDiagnosis })
     }
 
-    this.emit({ type: 'stream:end' })
+    this.emit(streamInterrupted ? { type: 'stream:end', interrupted: true } : { type: 'stream:end' })
 
     return this.createAssistantTurn(textContent, toolCalls, {
       model: model?.name,
       tokens,
       duration: Date.now() - startTime,
       mode: this.config.mode,
+      ...(streamInterrupted ? { interrupted: true } : {}),
       reasoningEnabled: reasoningRequest?.enabled,
       reasoningEffort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
       thinking: reasoningContent ? {
         content: reasoningContent,
         source: 'provider',
-        status: 'complete',
+        status: streamInterrupted ? 'interrupted' : 'complete',
         durationMs: Date.now() - startTime,
         tokenCount: reasoningTokens || Math.max(1, Math.ceil(reasoningContent.length / 4)),
         effort: reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort,
@@ -2877,7 +2973,7 @@ Before retrying:
     turnStrategy?: TurnStrategy | null,
   ): Promise<AgentTurn> {
     const protocol: ModelProtocol = 'openai_responses'
-    const url = buildModelProtocolUrl(config.baseUrl, protocol)
+    const url = buildModelProtocolUrl(config.baseUrl, protocol, config.provider)
     const headers: Record<string, string> = createTurboFluxRequestHeaders({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
@@ -2920,7 +3016,7 @@ Before retrying:
       body.tool_choice = 'auto'
       body.parallel_tool_calls = true
     }
-    if (config.provider === 'openai' || looksLikeResponsesPreferredModel(config.defaultModel)) {
+    if (config.provider === 'openai' || config.provider === 'kimi' || looksLikeResponsesPreferredModel(config.defaultModel) || /(?:^|[/_.:-])(?:kimi|moonshot)(?:$|[/_.:-])/i.test(config.defaultModel)) {
       body.prompt_cache_key = this.buildPromptCacheKey(config.defaultModel, responseTools)
       if (/gpt-5\.5/i.test(config.defaultModel)) body.prompt_cache_retention = '24h'
     }
@@ -3011,8 +3107,9 @@ Before retrying:
           : reasoningContent
             ? `\n\n${completedReasoning}`
             : completedReasoning
-        reasoningContent += delta
-        this.emit({ type: 'stream:thinking_delta', text: delta })
+        const accepted = delta.slice(0, Math.max(0, MAX_STREAM_REASONING_CHARS - reasoningContent.length))
+        reasoningContent += accepted
+        if (accepted) this.emit({ type: 'stream:thinking_delta', text: accepted })
       }
       for (const item of response.output) {
         if (!item || typeof item !== 'object') continue
@@ -3025,8 +3122,9 @@ Before retrying:
           ? item.content.filter((part: any) => part?.type === 'output_text' && typeof part.text === 'string').map((part: any) => part.text).join('')
           : ''
         if (completedText) {
-          textContent += completedText
-          this.emit({ type: 'stream:delta', text: completedText })
+          const accepted = completedText.slice(0, Math.max(0, MAX_STREAM_TEXT_CHARS - textContent.length))
+          textContent += accepted
+          if (accepted) this.emit({ type: 'stream:delta', text: accepted })
         }
       }
     }
@@ -3041,12 +3139,14 @@ Before retrying:
         const eventType = event.type
         const reasoningDelta = extractResponsesReasoningEventDelta(event)
         if (reasoningDelta) {
-          reasoningContent += reasoningDelta
-          this.emit({ type: 'stream:thinking_delta', text: reasoningDelta })
+          const accepted = reasoningDelta.slice(0, Math.max(0, MAX_STREAM_REASONING_CHARS - reasoningContent.length))
+          reasoningContent += accepted
+          if (accepted) this.emit({ type: 'stream:thinking_delta', text: accepted })
         } else if (eventType === 'response.output_text.delta' || eventType === 'response.refusal.delta') {
           if (typeof event.delta === 'string' && event.delta) {
-            textContent += event.delta
-            this.emit({ type: 'stream:delta', text: event.delta })
+            const accepted = event.delta.slice(0, Math.max(0, MAX_STREAM_TEXT_CHARS - textContent.length))
+            textContent += accepted
+            if (accepted) this.emit({ type: 'stream:delta', text: accepted })
           }
         } else if (eventType === 'response.output_item.added' || eventType === 'response.output_item.done') {
           if (event.item?.type === 'function_call') ensureToolCall(event.item, event.output_index)
@@ -3064,7 +3164,7 @@ Before retrying:
           if (eventType.endsWith('.done') && typeof event.arguments === 'string') {
             entry.argumentsJson = event.arguments
           } else if (typeof event.delta === 'string') {
-            entry.argumentsJson += event.delta
+            entry.argumentsJson = appendBoundedString(entry.argumentsJson, event.delta, MAX_STREAM_TOOL_ARGUMENT_CHARS)
           }
           this.emit({
             type: 'stream:tool_call_delta',
@@ -3777,8 +3877,9 @@ Before retrying:
           workspacePath: wsPath,
           query: latestUserMessage,
         })
-        if (resp?.success && typeof resp.text === 'string') {
-          this.workspaceMemoryText = resp.text.trim() || null
+        const injectedText = resp?.data?.text
+        if (resp?.success && typeof injectedText === 'string') {
+          this.workspaceMemoryText = injectedText.trim() || null
           this.workspaceMemoryWorkspace = wsPath
           this.workspaceMemoryBuiltAt = now
           return
@@ -4089,7 +4190,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     for (const tc of toolCalls) {
       const tool = this.resolveToolDefinition(tc.name)
       const isReadAfterWrite = hasSeenWrite && this.isReadAfterWriteSensitiveToolCall(tc)
-      const isSafe = (tool?.isConcurrencySafe ?? false) && !isReadAfterWrite
+      const declaredSafe = tool?.isConcurrencySafe === true
+      const concurrencyPredicate = (tool as EnhancedToolDef | undefined)?.isConcurrencySafeFor
+      const inputSafe = concurrencyPredicate ? concurrencyPredicate(tc.arguments) : declaredSafe
+      const isSafe = inputSafe && !isReadAfterWrite
 
       if (isSafe && batches.length > 0 && batches[batches.length - 1].isConcurrencySafe) {
         batches[batches.length - 1].toolCalls.push(tc)
@@ -4542,7 +4646,6 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const result = await this.toolExecutor.writeFile(filePath, args.content as string, {
           source: 'ai',
           label: 'AI write_file',
-          expectNotExists: true,
         })
         return result.success ? `File written: ${args.path}` : `Error: ${result.error}`
       }
@@ -4737,6 +4840,24 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         return this.formatWebSearchResults(data.query, data.provider, data.results)
       }
 
+      case 'tool_search': {
+        if (!this.mcpClient) return 'No MCP tools are connected.'
+        const query = String(args.query || '').trim()
+        if (!query) return 'Error: query is required'
+        const limit = typeof args.limit === 'number' ? args.limit : 8
+        const matches = this.mcpClient.searchTools(query, limit)
+        for (const match of matches) this.deferredMcpToolNames.add(match.name)
+        if (matches.length === 0) return `No MCP tools matched "${query}".`
+        return JSON.stringify({
+          tools: matches.map(tool => ({
+            name: tool.name,
+            server: tool.serverName,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+          })),
+        })
+      }
+
       case 'list_memories': {
         if (!basePath) return 'Error: no workspace selected'
         const limit = typeof args.limit === 'number' ? args.limit : undefined
@@ -4754,9 +4875,9 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         if (!response.success) return `Error: ${response.error || 'memory query failed'}`
         const items = response.data?.items || []
         if (items.length === 0) return 'No memories matched the filter.'
-        const lines = items.map((item: { kind: string; confidence: string | number; text: string; source: string; tags?: string[] }) => {
+        const lines = items.map((item: { id: string; kind: string; confidence: string | number; text: string; source: string; tags?: string[] }) => {
           const tagBits = item.tags?.length ? ` [${item.tags.slice(0, 3).join(', ')}]` : ''
-          return `- (${item.kind}, ${item.confidence}) ${item.text}\n  source: ${item.source}${tagBits}`
+          return `- ${item.id} (${item.kind}, ${item.confidence}) ${item.text}\n  source: ${item.source}${tagBits}`
         })
         return `Found ${items.length} memor${items.length === 1 ? 'y' : 'ies'}:\n${lines.join('\n')}`
       }
@@ -4937,7 +5058,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         // Foreground: exec-based path for one-shot commands
         const foregroundCommand = args.command as string
         try {
-          const result = await this.toolExecutor.runCommand(foregroundCommand, cwd, env, timeout, approved)
+          const result = await this.toolExecutor.runCommand(foregroundCommand, cwd, env, timeout, approved, this.abortController?.signal)
           const commandOutput = result.data
           const outputSections: string[] = []
           if (commandOutput?.stdout) outputSections.push(`stdout:\n${commandOutput.stdout}`)
@@ -4948,6 +5069,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           const statusDetails = [
             `code ${commandOutput?.exitCode ?? 'unknown'}`,
             commandOutput?.timedOut ? 'timed out' : '',
+            commandOutput?.aborted ? 'aborted' : '',
           ].filter(Boolean).join(', ')
           if (!result.success) {
             return `Error (${statusDetails})${result.error ? `: ${result.error}` : ''}\n${formattedOutput}`
@@ -5100,6 +5222,17 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
             }
           }
           if (failed.length > 0) {
+            this.emitTaskSystem({
+              status: 'error',
+              toolName: 'create_task',
+              expectedCount: 1,
+              createdCount: 1,
+              title: task.title,
+              startedAt: creationStartedAt,
+              updatedAt: Date.now(),
+              error: `Some dependencies could not be added: ${failed.join(', ')}`,
+            })
+            this.emit({ type: 'active:task', context: this.taskManager.getActiveTaskContext() })
             return JSON.stringify({ id: task.id, title: task.title, status: task.status, priority: task.priority, dependencies: task.dependencies, warning: `Some dependencies could not be added (tasks not found or would create cycle): ${failed.join(', ')}` })
           }
         }
@@ -5263,11 +5396,10 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       }
 
       case 'list_tasks': {
-        const tasks = args.parent_id
+        const tasks = (args.parent_id
           ? this.taskManager.getChildTasks(args.parent_id as string)
-          : args.status
-            ? this.taskManager.getTasksByStatus(args.status as TaskStatus)
-            : this.taskManager.getRootTasks()
+          : this.taskManager.getAllTasks())
+          .filter(task => !args.status || task.status === args.status)
         return JSON.stringify(tasks.map(t => ({
           id: t.id,
           title: t.title,
@@ -5279,7 +5411,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       }
 
       case 'ask_user': {
-        void this.interactiveRequests.request({
+        const response = await this.interactiveRequests.request({
           id: toolCallId,
           kind: 'input',
           event: {
@@ -5291,7 +5423,8 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
             command: args.command as string | undefined,
           },
         }, { signal: this.abortController?.signal, cancelDecision: 'deny' })
-        return `[Awaiting user response] ${args.question}`
+        this.resolvedAskUserResponses.set(toolCallId, response)
+        return `[User response] ${response}`
       }
 
       case 'notify_user': {
@@ -5418,14 +5551,20 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
       }
 
       case 'use_skill': {
-        const skillId = args.skill_id as string
+        const skillId = String(args.skill_id || '').trim()
         const reason = args.reason as string | undefined
-        return reason ? `Skill noted: ${skillId} (${reason})` : `Skill noted: ${skillId}`
+        if (!skillId) return 'Error: skill_id is required'
+        const skill = this.config.enabledSkills?.find(candidate => candidate.id === skillId || candidate.name === skillId || candidate.command === skillId)
+        if (!skill) return `Error: skill "${skillId}" is not enabled for this session`
+        return reason ? `Skill selected: ${skill.name || skill.id} (${reason})` : `Skill selected: ${skill.name || skill.id}`
       }
 
       default:
         if (this.mcpClient && isMcpTool(name)) {
-          const result = await executeMcpTool(this.mcpClient, name, args)
+          const signal = this.abortController?.signal
+          const result = signal
+            ? await executeMcpTool(this.mcpClient, name, args, { signal })
+            : await executeMcpTool(this.mcpClient, name, args)
           if (result.isError) throw new Error(result.output)
           return result.output
         }
@@ -5520,28 +5659,17 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
     toolCalls?: ToolCall[],
     metadata?: AgentTurn['metadata']
   ): AgentTurn {
-    let finalMetadata: AgentTurn['metadata'] = { ...metadata }
+    const finalMetadata: AgentTurn['metadata'] = { ...metadata }
     let turnId = generateTurnId()
     if (this.pendingAssistantMessageId) {
       turnId = this.pendingAssistantMessageId
       this.pendingAssistantMessageId = null
     }
 
-    let finalContent = content
-    const thinkingContent = finalMetadata.thinking?.content
-    if (!finalContent.trim() && thinkingContent?.trim() && (!toolCalls || toolCalls.length === 0)) {
-      finalContent = thinkingContent
-      finalMetadata = {
-        ...finalMetadata,
-        thinking: undefined,
-        rawReasoningPayload: undefined,
-      }
-    }
-
     return {
       id: turnId,
       role: 'assistant',
-      content: finalContent,
+      content,
       timestamp: Date.now(),
       toolCalls,
       metadata: finalMetadata,

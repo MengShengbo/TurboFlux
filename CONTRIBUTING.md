@@ -1,24 +1,23 @@
-# 贡献指南
+# Contributing
 
-感谢参与 TurboFlux。工程文档入口位于 [`docs/README.md`](docs/README.md)，系统边界先从[系统总览](docs/architecture/system-overview.md)阅读。
+Thanks for contributing to TurboFlux. Start with the [documentation index](docs/README.md)
+and the [system overview](docs/architecture/system-overview.md).
 
-## 外部贡献邀请
+## Contribution workflow
 
-TurboFlux 采用受邀贡献流程，以便维护者先确认问题边界、实现方向和评审资源：
+1. Open an issue before substantial changes so scope and acceptance criteria are clear.
+2. Create a focused branch from the latest main branch.
+3. Add or update tests with behavior changes.
+4. Update user, architecture, or operational documentation when the behavior changes.
+5. Run the quality gates before opening a pull request.
+6. Keep commits focused and easy to revert.
 
-- 仓库所有者、成员和协作者可以直接创建 Pull Request。
-- 外部贡献者请先通过 Issue 与维护者讨论，不要直接提交 Pull Request。
-- 维护者确认适合外部贡献后，会为 Issue 添加 `contribution-invited` 标签，并将 Issue 指派给受邀贡献者。
-- Pull Request 描述必须使用 `Closes #<Issue 编号>` 关联该仓库中仍处于开放状态的受邀 Issue。
-- 邀请仅适用于被指派 Issue 约定的范围，不自动延伸到其他改动。
+## Development environment
 
-未满足以上条件的外部 Pull Request 会由自动化工作流说明原因并关闭。获得邀请后，可以更新原 Pull Request 的描述并重新打开，无需重复提交。
-
-## 开发环境
-
-- Node.js 20 或更高版本。
-- 使用 `npm ci` 按锁文件安装依赖。
-- Windows、macOS 和 Linux 都是 CI 支持平台。
+- Node.js 20 or newer
+- npm with the checked-in `package-lock.json`
+- Git
+- A terminal that supports ANSI and Unicode output
 
 ```bash
 npm ci
@@ -27,54 +26,29 @@ npm test
 npm run build
 ```
 
-## 变更流程
-
-1. 从最新主分支创建主题分支。
-2. 先定位状态所有者和已有测试，再修改实现。
-3. 为行为变化补充相邻单元测试；跨层 Flow 行为同时补专项测试。
-4. 运行最小相关测试，再运行完整质量门禁。
-5. 更新受影响的配置、架构、运维或参考文档。
-6. 提交聚焦且可独立回滚的变更。
-
-## 质量门禁
-
-日常变更至少运行：
-
-```bash
-npm run type-check
-npm test
-npm run build
-```
-
-触及 TUI Flow、会话恢复、审批、后台任务或终端兼容时运行：
+For changes that affect the full terminal flow, also run:
 
 ```bash
 npm run ci:flow
 ```
 
-`ci:flow` 依次执行类型检查、完整测试、Flow 性能检查、TUI smoke 和构建。详细测试分层见[测试策略](docs/guides/testing.md)。
+## Design boundaries
 
-## 设计规则
+- Keep CLI and Ink UI code in `src/cli/`.
+- Keep shared contracts in `src/shared/` and `src/state/`.
+- Keep provider, runtime, tool, and persistence behavior in their existing layers.
+- Route file paths through the capability boundary and preserve approval checks.
+- Keep credentials, user prompts, conversation data, and generated artifacts out of commits.
 
-- `src/shared/` 只放跨层契约，不依赖 CLI 或 Node 实现。
-- `src/core/` 不直接拥有 Ink 渲染状态；UI 通过事件和运行时接口消费核心能力。
-- 新后台工作接入 `RuntimeTaskManager`，新会话身份变化接入 `SessionRegistry`。
-- 新文件系统或命令能力通过 `CapabilityBoundary`、工具元数据和审批链路表达。
-- 新持久化格式必须带版本、容忍尾部损坏，并提供迁移或兼容读取策略。
-- 新用户可见文本进入 i18n 消息表；新命令进入命令注册表。
+## Documentation and ADRs
 
-## 文档与 ADR
+Update the relevant document in the same change as a public behavior or configuration change.
+For a cross-module or long-lived architectural decision, copy
+`docs/adr/0000-template.md` and add a new ADR under `docs/adr/`.
 
-变更公开参数、环境变量、数据路径、模块责任、CI 或发布流程时，同一变更更新对应文档。引入跨模块且长期有效的约束时，从 [`docs/adr/0000-template.md`](docs/adr/0000-template.md)复制一份 ADR。
+## Pull requests
 
-## 提交建议
-
-使用清晰的意图前缀，例如 `feat:`、`fix:`、`refactor:`、`test:`、`docs:`、`chore:`。提交正文说明关键约束、验证命令和兼容性影响，不提交本地凭据、会话日志、遥测或生成产物。
-
-## 评审清单
-
-- 行为和错误路径有测试覆盖。
-- 写入、命令、网络和后台任务遵守能力与审批边界。
-- 事件、日志和配置 schema 的兼容性已处理。
-- 没有把密钥或用户内容写入遥测、日志或测试夹具。
-- 文档和版本来源保持同步。
+- Use a clear prefix such as `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, or `chore:`.
+- Describe the problem, implementation, verification commands, and compatibility impact.
+- Link the relevant issue with `Closes #<number>` when applicable.
+- Do not include credentials, private source, conversation logs, benchmark output, or generated media.

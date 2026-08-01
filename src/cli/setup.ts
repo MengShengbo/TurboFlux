@@ -28,7 +28,7 @@ import {
   normalizeApprovalPolicy,
   type ApprovalPolicy,
 } from '../shared/agentTypes'
-import { TURBOFLUX_WORDMARK_LINES } from './brand'
+import { TURBOFLUX_VERSION, TURBOFLUX_WORDMARK_LINES } from './brand'
 import { createTranslator, type MessageKey, type TranslationValues, type Translator } from './i18n/index'
 import { TURBOFLUX_ACCENTS } from './theme/palette'
 import {
@@ -174,7 +174,7 @@ function printBanner(profile = loadProfile()): void {
   console.log('')
   console.log(TURBOFLUX_WORDMARK_LINES.map(line => `  ${renderSetupLogoLine(line)}`).join('\n'))
   console.log('')
-  console.log(`  ${chalk.hex(TURBOFLUX_ACCENTS.neonGreen).bold('TurboFlux Setup')} ${chalk.hex(TURBOFLUX_ACCENTS.cyan)(`v0.1.5`)} ${chalk.gray(`- ${title}`)}`)
+  console.log(`  ${chalk.hex(TURBOFLUX_ACCENTS.neonGreen).bold('TurboFlux Setup')} ${chalk.hex(TURBOFLUX_ACCENTS.cyan)(`v${TURBOFLUX_VERSION}`)} ${chalk.gray(`- ${title}`)}`)
   console.log(`  ${chalk.gray(subtitle)}`)
   console.log(`  ${chalk.dim('─'.repeat(72))}`)
   console.log('')
@@ -336,6 +336,67 @@ async function promptCheckbox<T extends string>(message: string, choices: Prompt
 
 async function promptContinue(profile: TurboFluxProfile): Promise<boolean> {
   return promptConfirm(setupText('setup.returnToMenu', undefined, profile), true)
+}
+
+async function promptMenuChoice(message: string, valid: string[]): Promise<string> {
+  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
+    return promptChoice(message, valid)
+  }
+
+  const stdin = process.stdin
+  const wasRaw = stdin.isRaw
+  return new Promise(resolve => {
+    let value = ''
+    let settled = false
+
+    const cleanup = () => {
+      stdin.removeListener('data', onData)
+      stdin.setRawMode(Boolean(wasRaw))
+      stdin.resume()
+    }
+
+    const finish = (choice: string) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      process.stdout.write('\n')
+      resolve(choice)
+    }
+
+    const onData = (chunk: Buffer | string) => {
+      for (const character of chunk.toString('utf8')) {
+        const normalized = character.toLowerCase()
+        if (normalized === 'q') {
+          finish('q')
+          return
+        }
+        if (character === '\u0003') {
+          finish('q')
+          return
+        }
+        if (character === '\r' || character === '\n') {
+          if (valid.includes(value)) finish(value)
+          return
+        }
+        if (character === '\u007f') {
+          if (value) {
+            value = ''
+            process.stdout.write('\b \b')
+          }
+          continue
+        }
+        if (valid.includes(normalized)) {
+          value = normalized
+          process.stdout.write(character)
+        }
+      }
+    }
+
+    process.stdout.write(`${PROMPT_PREFIX} ${message}: `)
+    stdin.setRawMode(true)
+    stdin.resume()
+    stdin.on('data', onData)
+  })
 }
 
 function resolveProvider(value: string): ProviderPreset | undefined {
@@ -907,7 +968,7 @@ async function promptMainAction(profile: TurboFluxProfile): Promise<SetupAction>
   console.log(`  ${setupText('setup.menu.show', undefined, profile)}`)
   console.log(`  ${setupText('setup.menu.reset', undefined, profile)}`)
   console.log(`  ${setupText('setup.menu.exit', undefined, profile)}`)
-  const choice = await promptChoice(setupText('setup.menu.input', undefined, profile), ['1', '2', '3', '4', '5', '6', '7', '8', 'q'])
+  const choice = await promptMenuChoice(setupText('setup.menu.input', undefined, profile), ['1', '2', '3', '4', '5', '6', '7', '8', 'q'])
   switch (choice) {
     case '1': return 'init'
     case '2': return 'api'

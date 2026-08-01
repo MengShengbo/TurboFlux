@@ -1,37 +1,22 @@
 # Tool Implementations
 
-[根目录](../CLAUDE.md) > **tools/**
+`src/tools/` contains concrete tool executors, code-index utilities, and memory
+operations used by the core runtime.
 
-## 模块职责
+## Key files
 
-TurboFlux 的具体工具实现层。包含工具执行器、代码索引和记忆系统工具。
+| File | Responsibility |
+| --- | --- |
+| `src/tools/executor.ts` | Typed executor contracts, result envelopes, process and terminal APIs. |
+| `src/core/runtime/nodeToolExecutor.ts` | Node filesystem, process, memory, network, and terminal implementation. |
+| `src/tools/memory/` | Workspace memory service, loaders, persistence, and retrieval. |
 
-## 入口与导出
+## Boundaries
 
-| 文件 | 职责 |
-|------|------|
-| `src/tools/executor.ts` | 工具执行器 — 工具调用的具体执行逻辑 |
-| `src/tools/codeIndex.ts` | 代码索引工具 — 代码符号搜索与索引 |
-| `src/tools/memory.ts` | 记忆工具 — 长期记忆的读写 |
-
-## 对外接口
-
-每个文件导出的函数/类被 `src/core/toolOrchestrator.ts` 和 `src/core/toolDispatcher.ts` 调用。
-
-| 工具 | 文件 | 说明 |
-|------|------|------|
-| `executeTool` | `executor.ts` | 工具执行主入口 |
-| `searchCode` / `indexCode` | `codeIndex.ts` | 代码搜索与索引 |
-| `remember` / `recall` | `memory.ts` | 记忆系统读写 |
-
-## 关键依赖与配置
-
-- 依赖 `src/shared/` 中的类型定义
-- 被 `src/core/` 引擎层调用
-- 无外部 API 依赖（纯本地实现）
-
-## 变更记录
-
-| 日期 | 变更 | 类型 |
-|------|------|------|
-| — | 首次架构扫描与文档生成 | 基建 |
+- Reuse shared contracts from `src/shared/`.
+- Keep orchestration in `src/core/` and route execution through the runtime boundary.
+- Use capability and approval metadata for file, shell, network, Git, and MCP operations.
+- Keep outputs bounded and avoid persisting credentials or private user content.
+- Preserve the `Result<T>` data envelope; add fields to `data` instead of flat result properties.
+- Pass an `AbortSignal` through long-running process and network operations where available.
+- Use read-only process execution for repository inspection so read-only capability profiles remain usable.

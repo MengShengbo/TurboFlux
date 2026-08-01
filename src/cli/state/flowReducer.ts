@@ -304,7 +304,6 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
           : state.run.phase
       return {
         ...state,
-        activeTask: null,
         toolDraft: null,
         run: {
           ...state.run,

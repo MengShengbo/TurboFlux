@@ -11,6 +11,7 @@ TurboFlux supports three HTTP model protocols through one bounded compatibility 
 ## Candidate order
 
 - Anthropic configurations and model IDs containing `claude` try Messages, Chat Completions, then Responses.
+- DeepSeek V4 Pro tries Chat Completions then the DeepSeek Anthropic-compatible Messages route; it does not probe Responses. DeepSeek V4 Flash tries Chat, Responses, then Messages.
 - Other configurations try Chat Completions, Responses, then Messages.
 - A successful subagent protocol is retained for later turns so it does not probe again on every tool round-trip.
 
@@ -33,3 +34,4 @@ Every final request error lists the protocol, exact URL, HTTP status, and compac
 - [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 - [OpenAI Responses migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)
 - [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)
+- [TurboFlux provider/model compatibility matrix](provider-api-compatibility.md)

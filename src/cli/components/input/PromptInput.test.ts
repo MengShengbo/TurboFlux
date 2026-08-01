@@ -10,6 +10,10 @@ import {
   getImageTokenBefore,
   getImageTokenRangeAfterDelete,
   getImageTokenRangeBeforeDelete,
+  getPastedContentTokenAfter,
+  getPastedContentTokenBefore,
+  getPastedContentTokenRangeAfterDelete,
+  getPastedContentTokenRangeBeforeDelete,
   getPromptEditorViewport,
   isImagePasteShortcut,
   navigatePromptHistory,
@@ -44,6 +48,10 @@ describe('terminal focus reports', () => {
     expect(sanitizePromptInputChunk('[I')).toBe('')
     expect(sanitizePromptInputChunk('[O[Ihello')).toBe('hello')
   })
+
+  it('normalizes pasted terminal output without changing its line structure', () => {
+    expect(sanitizePromptInputChunk('\u001b[31mfirst\r\nsecond\u001b[0m')).toBe('first\nsecond')
+  })
 })
 
 describe('image token navigation', () => {
@@ -62,6 +70,25 @@ describe('image token navigation', () => {
     expect(getImageTokenRangeAfterDelete('see [Image #1] now', 3)).toEqual({ start: 3, end: 14 })
     expect(getImageTokenRangeBeforeDelete('see [Image #1] ', 'see [Image #1] '.length)).toEqual({ start: 3, end: 15 })
     expect(getImageTokenRangeAfterDelete('see [Image #1] ', 4)).toEqual({ start: 4, end: 15 })
+  })
+})
+
+describe('large paste token navigation', () => {
+  const value = 'before [Pasted Content 1200 chars] after'
+  const tokenStart = 'before '.length
+  const tokenEnd = tokenStart + '[Pasted Content 1200 chars]'.length
+
+  it('moves across a pasted content placeholder as one token', () => {
+    expect(getPastedContentTokenBefore(value, tokenEnd)).toEqual({ start: tokenStart, end: tokenEnd })
+    expect(getPastedContentTokenAfter(value, tokenStart)).toEqual({ start: tokenStart, end: tokenEnd })
+  })
+
+  it('deletes the complete pasted content placeholder', () => {
+    expect(getPastedContentTokenRangeBeforeDelete(value, tokenEnd)).toEqual({ start: tokenStart, end: tokenEnd })
+    expect(getPastedContentTokenRangeAfterDelete(value, tokenStart)).toEqual({ start: tokenStart, end: tokenEnd })
+    expect(getPastedContentTokenRangeBeforeDelete(`${value} tail`, tokenEnd + 1)).toEqual({ start: tokenStart, end: tokenEnd + 1 })
+    const afterDeleteValue = `head [Pasted Content 1200 chars] tail`
+    expect(getPastedContentTokenRangeAfterDelete(afterDeleteValue, 'head '.length)).toEqual({ start: 'head '.length, end: 'head '.length + tokenEnd - tokenStart })
   })
 })
 
@@ -196,6 +223,28 @@ describe('prompt appearance', () => {
       expect(lines[2]).toContain('visible-tail')
       expect(lines[2]).toMatch(/│$/)
     }
+  })
+
+  it('keeps multiline pasted input inside the single-row editor frame', () => {
+    const output = renderToString(
+      React.createElement(
+        ThemeProvider,
+        { transparentBackground: true },
+        React.createElement(PromptInput, {
+          value: 'first line\nsecond line\nthird line',
+          onChange: () => {},
+          onSubmit: () => {},
+          width: 30,
+        }),
+      ),
+      { columns: 40 },
+    )
+    const plainOutput = stripAnsi(output)
+    const lines = plainOutput.split('\n')
+
+    expect(lines).toHaveLength(5)
+    expect(lines.every(line => line.length === 30)).toBe(true)
+    expect(plainOutput).toContain('\u21b5')
   })
 
   it('keeps the prompt fill in opaque mode', () => {

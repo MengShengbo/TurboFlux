@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
-const DEFAULT_VERSION = '0.1.5'
+const DEFAULT_VERSION = '1.0.0'
 const DEFAULT_SURFACE = 'cli'
 
 let cachedVersion: string | undefined

@@ -18,6 +18,7 @@ describe('modelRegistry', () => {
     expect(ids).toContain('claude-fable-5')
     expect(ids).toContain('claude-mythos-5')
     expect(ids).toContain('claude-opus-4-8')
+    expect(ids).toContain('claude-opus-5')
     expect(ids).toContain('claude-sonnet-5')
     expect(ids).toContain('deepseek-v4-pro')
     expect(ids).toContain('kimi-k3')
@@ -44,6 +45,7 @@ describe('modelRegistry', () => {
   it('exposes provider-native effort ranges instead of TurboFlux modes', () => {
     expect(getModelReasoningCapabilities('gpt-5.6')?.efforts).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
     expect(getModelReasoningCapabilities('claude-opus-4-8')?.efforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(getModelReasoningCapabilities('claude-opus-5')?.efforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
     expect(getModelReasoningCapabilities('deepseek-v4-pro')?.efforts).toEqual(['high', 'max'])
     expect(getModelReasoningCapabilities('kimi-k3')?.supportsToggle).toBe(false)
   })
@@ -52,6 +54,10 @@ describe('modelRegistry', () => {
     expect(resolveNativeReasoningRequest('gpt-5.6', { effort: 'xhigh' })).toMatchObject({ reasoningEffort: 'xhigh' })
     expect(resolveNativeReasoningRequest('claude-opus-4-8', { effort: 'max' })).toMatchObject({
       thinking: { type: 'adaptive' },
+      outputConfig: { effort: 'max' },
+    })
+    expect(resolveNativeReasoningRequest('claude-opus-5', { effort: 'max' })).toMatchObject({
+      thinking: { type: 'disabled' },
       outputConfig: { effort: 'max' },
     })
     expect(resolveNativeReasoningRequest('deepseek-v4-pro', { effort: 'max' })).toMatchObject({

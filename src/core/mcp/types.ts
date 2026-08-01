@@ -3,6 +3,12 @@ export interface McpServerConfig {
   args?: string[]
   url?: string
   env?: Record<string, string>
+  cwd?: string
+  httpHeaders?: Record<string, string>
+  startupTimeoutMs?: number
+  toolTimeoutMs?: number
+  enabledTools?: string[]
+  disabledTools?: string[]
   enabled: boolean
 }
 
@@ -15,6 +21,7 @@ export interface McpToolInfo {
   description: string
   inputSchema: Record<string, unknown>
   serverName: string
+  instructions?: string
   annotations?: {
     readOnlyHint?: boolean
     destructiveHint?: boolean

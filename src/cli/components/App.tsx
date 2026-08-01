@@ -24,7 +24,6 @@ import { formatMarkdown, getMarkdownCacheStats } from './markdown/index'
 import type { AgentEventType } from '../../core/agentEngine'
 import type { GitIntegrationState } from '../../core/gitService'
 import { createAgentRuntime } from '../../core/runtime/agentRuntime'
-import type { ActiveTaskContext } from '../../core/taskManager'
 import { applyPreset, saveConfig, setConfigValue, type ModelPreset, type TurboFluxConfig } from '../../core/config'
 import { loadProfile } from '../../core/profile'
 import { discoverModelPresets, readCachedModelDiscovery } from '../../core/modelDiscovery'
@@ -33,6 +32,14 @@ import { commandRegistry } from '../commands/index'
 import type { CommandContext } from '../commands/types'
 import { ConversationManager } from '../conversations/manager'
 import type { ConversationInteractionState } from '../conversations/types'
+import type { ConversationPendingPaste } from '../conversations/types'
+import {
+  LARGE_PASTE_CHAR_THRESHOLD,
+  createPendingPastePlaceholder,
+  expandPendingPastes,
+  replacePastedText,
+  retainPendingPastes,
+} from './input/pasteState'
 import { AgentFlowController } from '../state/agentFlowController'
 import { GlobalCommandActivityController } from '../state/globalCommandActivity'
 import { ApprovalPresentationScheduler } from '../state/approvalPresentationScheduler'
@@ -72,6 +79,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize'
 import { getSafeViewportWidth } from '../terminalLayout'
 import { TerminalSessionsFooter } from './tools/TerminalSessionsFooter'
 import { AgentActivityLine } from './tools/AgentActivityLine'
+import { TaskFlowHud } from './tools/TaskFlowHud'
 import { QueuedPromptList } from './tools/QueuedPromptList'
 import { beginToolCall, settleToolCall } from './tools/toolLifecycleModel'
 import { resolveCockpitLayout } from './layout/CockpitRails'
@@ -94,7 +102,6 @@ import {
   estimateOutputTokensForDisplay,
   formatElapsed,
   formatTaskProgressLabel,
-  formatTaskToolName,
   formatTaskToolSummary,
   getEngineUserOrdinalForUiMessage,
   isProvisionalAssistantTurn,
@@ -146,6 +153,46 @@ interface AppProps {
 type StaticTranscriptItem =
   | { kind: 'header'; id: string }
   | { kind: 'message'; id: string; message: Message }
+
+const MAX_TRANSCRIPT_MESSAGES = 1_000
+const MAX_TRANSCRIPT_CHARS = 8 * 1024 * 1024
+
+function transcriptMessageChars(message: Message): number {
+  let chars = message.content.length + (message.thinking?.content.length ?? 0)
+  for (const change of message.changes ?? []) {
+    chars += (change.before?.length ?? 0) + (change.after?.length ?? 0)
+    chars += (change.preview?.length ?? 0) + (change.oldPreview?.length ?? 0)
+  }
+  return chars
+}
+
+function retainTranscriptTail(messages: Message[]): Message[] {
+  if (messages.length <= MAX_TRANSCRIPT_MESSAGES) {
+    let chars = 0
+    for (const message of messages) chars += transcriptMessageChars(message)
+    if (chars <= MAX_TRANSCRIPT_CHARS) return messages
+  }
+
+  let start = messages.length
+  let chars = 0
+  while (start > 0) {
+    const next = messages[start - 1]!
+    const nextChars = transcriptMessageChars(next)
+    if (start < messages.length && (start <= messages.length - MAX_TRANSCRIPT_MESSAGES || chars + nextChars > MAX_TRANSCRIPT_CHARS)) break
+    chars += nextChars
+    start -= 1
+  }
+
+  const retained = messages.slice(start)
+  return [
+    {
+      id: `transcript-trim-${retained[0]?.id || Date.now()}`,
+      role: 'system',
+      content: 'Older transcript entries were trimmed from the live UI buffer; the saved conversation remains available.',
+    },
+    ...retained,
+  ]
+}
 
 type PendingAsk = {
   id: string
@@ -209,30 +256,6 @@ function SubAgentProgressLine({ activities }: { activities: DeveloperSubAgentAct
   )
 }
 
-function TaskProgressLine({ task }: { task: ActiveTaskContext }) {
-  const { t } = useI18n()
-  const completed = task.toolCalls.filter(call =>
-    call.status === 'completed' || call.status === 'error' || call.status === 'cancelled'
-  ).length
-  const total = task.toolCalls.length
-  const errored = task.toolCalls.filter(call => call.status === 'error').length
-  const running = task.toolCalls.filter(call => call.status === 'running').length
-  const latest = [...task.toolCalls].reverse().find(call => call.status === 'running') ?? task.toolCalls[task.toolCalls.length - 1]
-  const toolSummary = formatTaskToolSummary(completed, total, running, errored, t)
-  const elapsed = formatElapsed(Date.now() - task.startedAt)
-  const progress = formatTaskProgressLabel(task.progress, t)
-  return (
-    <Box>
-      <Text dimColor>{t('ui.task.label')} </Text>
-      <Text>{task.title}</Text>
-      <Text dimColor>{` - ${toolSummary}`}</Text>
-      {latest && <Text dimColor>{` - ${formatTaskToolName(latest.toolName, t)}`}</Text>}
-      <Text dimColor>{` - ${elapsed}`}</Text>
-      {progress && <Text dimColor>{` - ${progress}`}</Text>}
-    </Box>
-  )
-}
-
 function CockpitRoot({ width, height, children }: { width: number; height: number; children: React.ReactNode }) {
   const theme = useTheme()
   return (
@@ -249,7 +272,7 @@ function CockpitRoot({ width, height, children }: { width: number; height: numbe
   )
 }
 
-function SessionPane({ running, visible, children }: { running: boolean; visible: boolean; children: React.ReactNode }) {
+function SessionPane({ children }: { children: React.ReactNode }) {
   const theme = useTheme()
   return (
     <Box
@@ -262,10 +285,6 @@ function SessionPane({ running, visible, children }: { running: boolean; visible
       backgroundColor={resolveBackground(theme, 'background')}
       overflow="hidden"
     >
-      {visible && <Box flexShrink={0} backgroundColor={resolveBackground(theme, 'panelRaised')} paddingX={1} justifyContent="space-between">
-        <Text color={theme.brand} bold>{visible ? 'SESSION' : ' '}</Text>
-        <Text color={running ? theme.brandShimmer : theme.success} bold>{visible ? running ? '● RUNNING' : '● READY' : ' '}</Text>
-      </Box>}
       <Box
         flexDirection="column"
         flexBasis={0}
@@ -374,6 +393,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const lastActivityPaintRef = useRef(0)
   const inputRef = useRef('')
   const draftAttachmentsRef = useRef<AgentAttachment[]>([])
+  const pendingPastesRef = useRef<ConversationPendingPaste[]>([])
   const pendingAskRef = useRef<PendingAsk | null>(null)
   const activePromptRef = useRef<{ prompt: string; messageId: string; responseStarted: boolean; attachments?: AgentAttachment[]; priorTurns: AgentTurn[] } | null>(null)
   const abortingRef = useRef(false)
@@ -506,7 +526,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, [convManager, queuedPrompts])
 
   useEffect(() => {
-    convManager.recordDraftState({ text: input, attachments: draftAttachments })
+    convManager.recordDraftState({ text: input, attachments: draftAttachments, pendingPastes: pendingPastesRef.current })
     flowBridge.draftChanged(input, draftAttachments.map(attachment => attachment.id))
   }, [convManager, flowBridge, input, draftAttachments])
 
@@ -671,13 +691,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const appendMessages = useCallback((nextMessages: Message[], options?: { forceLatest?: boolean }) => {
     if (nextMessages.length === 0) return
 
-    setMessages(msgs => [...msgs, ...nextMessages])
+    setMessages(msgs => retainTranscriptTail([...msgs, ...nextMessages]))
     if (noFlickerActive && options?.forceLatest === true) setScrollRowsFromBottom(0)
   }, [noFlickerActive])
 
   const replaceMessages = useCallback((nextMessages: React.SetStateAction<Message[]>) => {
     setStaticTranscriptRevision(revision => revision + 1)
-    setMessages(nextMessages)
+    setMessages(previous => retainTranscriptTail(
+      typeof nextMessages === 'function' ? nextMessages(previous) : nextMessages,
+    ))
   }, [])
 
   const restoreCliStateFromTurns = useCallback((
@@ -692,6 +714,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     engine.setContextReservoir(contextReservoir)
     replaceMessages(turnsToMessages(transcriptTurns))
     inputRef.current = nextInput
+    pendingPastesRef.current = []
     setInput(nextInput)
     draftAttachmentsRef.current = []
     setDraftAttachments([])
@@ -732,6 +755,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const setComposedInput = useCallback((nextValue: string | ((current: string) => string)) => {
     const rawValue = typeof nextValue === 'function' ? nextValue(inputRef.current) : nextValue
     const reconciled = reconcileDraftImagePrompt(rawValue, draftAttachmentsRef.current)
+    pendingPastesRef.current = retainPendingPastes(reconciled.prompt, pendingPastesRef.current)
     inputRef.current = reconciled.prompt
     draftAttachmentsRef.current = reconciled.attachments
     setDraftAttachments(reconciled.attachments)
@@ -1187,6 +1211,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     const draftText = state?.draft?.text ?? ''
     const draftStateAttachments = state?.draft?.attachments ?? []
     inputRef.current = draftText
+    pendingPastesRef.current = retainPendingPastes(draftText, state?.draft?.pendingPastes ?? [])
     setInput(draftText)
     draftAttachmentsRef.current = draftStateAttachments
     setDraftAttachments(draftStateAttachments)
@@ -1517,7 +1542,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     return attached
   }, [attachClipboardImage, terminalLatencyTracker])
 
-  const handlePasteText = useCallback((pastedText: string, nextValue: string) => {
+  const handlePasteText = useCallback((pastedText: string, nextValue: string, insertionStart: number) => {
+    if (Array.from(pastedText).length > LARGE_PASTE_CHAR_THRESHOLD) {
+      const placeholder = createPendingPastePlaceholder(pastedText, pendingPastesRef.current)
+      const replacedValue = replacePastedText(nextValue, pastedText, insertionStart, placeholder)
+      if (replacedValue !== nextValue) {
+        pendingPastesRef.current = [...pendingPastesRef.current, { placeholder, text: pastedText }]
+        return { value: replacedValue, cursorOffset: insertionStart + placeholder.length }
+      }
+    }
     if (!hasImageReference(pastedText)) return null
     const resolved = resolveImagePrompt(nextValue, workspacePath, { existingAttachments: draftAttachmentsRef.current, t })
     if (resolved.attachments.length === draftAttachmentsRef.current.length) return null
@@ -1612,16 +1645,18 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   }, [appendMessages, engine, flowBridge, genMsgId, globalCommandActivityController, reportGlobalCommandError, runPrompt, t])
 
   const handleSubmit = useCallback((value: string) => {
-    const trimmed = value.trim()
-    if (!trimmed) return
+    const submittedValue = expandPendingPastes(value, pendingPastesRef.current)
+    const trimmed = submittedValue.trim()
+    if (!trimmed) return submittedValue
     terminalLatencyTracker.noteSubmit()
     const isCommand = commandRegistry.isCommand(trimmed)
     const recoveryCommand = isPersistenceRecoveryCommand(trimmed)
     if (!convManager.isPersistenceHealthy() && !recoveryCommand) {
       showRunControlHint(t('ui.app.persistenceBlocked'))
-      return
+      return submittedValue
     }
     const pendingDraftAttachments = draftAttachmentsRef.current
+    pendingPastesRef.current = []
     inputRef.current = ''
     setInput('')
     draftAttachmentsRef.current = []
@@ -1629,23 +1664,23 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
     if (isCommand && (flowBridge.isForegroundBusy() || engine.isRunning()) && !recoveryCommand) {
       runPrompt(trimmed, pendingDraftAttachments)
-      return
+      return submittedValue
     }
 
     if (flowBridge.isForegroundBusy() || engine.isRunning()) {
       const steeringMessageId = genMsgId()
       if (pendingDraftAttachments.length === 0 && engine.submitSteeringMessage(trimmed, steeringMessageId)) {
         setLastActivity(Date.now())
-        return
+        return submittedValue
       }
       runPrompt(trimmed, pendingDraftAttachments)
-      return
+      return submittedValue
     }
 
     if (isCommand) {
       if (trimmed === '/model') {
         push('modelPicker')
-        return
+        return submittedValue
       }
       if (trimmed === '/effort') {
         const capability = getModelReasoningCapabilities(config.model, config.provider, config.modelCapabilities)
@@ -1653,12 +1688,12 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           && (capability.efforts.length > 0 || capability.supportsToggle || capability.control === 'budget')
         if (adjustable) {
           push('effortPicker')
-          return
+          return submittedValue
         }
       }
       if (trimmed === '/resume') {
         void openConversationHistory()
-        return
+        return submittedValue
       }
       const ctx: CommandContext = {
         engine,
@@ -1681,33 +1716,36 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         t,
       }
       void executeRegisteredCommand(trimmed, ctx)
-      return
+      return submittedValue
     }
     const resolved = resolveImagePrompt(trimmed, workspacePath, { existingAttachments: pendingDraftAttachments, t })
     for (const warning of resolved.warnings) {
       appendMessages([{ id: genMsgId(), role: 'system', content: warning }])
     }
     runPrompt(resolved.prompt, resolved.attachments)
+    return submittedValue
   }, [appendMessages, config, convManager, engine, executeRegisteredCommand, exit, mcpClient, modelPresets, openConversationHistory, persistConfig, push, restoreCliStateFromTurns, runPrompt, runtime.runtimeTaskManager, skillRuntime, t, workspacePath, genMsgId, notificationCoordinator, clearResultInbox, terminalLatencyTracker, showRunControlHint, flowFeatures, flowBridge])
 
   const handleAlternateSubmit = useCallback((value: string) => {
     if (!flowBridge.isForegroundBusy() && !engine.isRunning()) {
-      handleSubmit(value)
-      return
+      return handleSubmit(value)
     }
-    const trimmed = value.trim()
-    if (!trimmed) return
+    const submittedValue = expandPendingPastes(value, pendingPastesRef.current)
+    const trimmed = submittedValue.trim()
+    if (!trimmed) return submittedValue
     terminalLatencyTracker.noteSubmit()
     if (!convManager.isPersistenceHealthy()) {
       showRunControlHint(t('ui.app.persistenceBlocked'))
-      return
+      return submittedValue
     }
     const attachments = draftAttachmentsRef.current
+    pendingPastesRef.current = []
     inputRef.current = ''
     setInput('')
     draftAttachmentsRef.current = []
     setDraftAttachments([])
     runPrompt(trimmed, attachments)
+    return submittedValue
   }, [handleSubmit, runPrompt, terminalLatencyTracker, convManager, showRunControlHint, t, engine, flowBridge])
 
   useInput((ch, key) => {
@@ -1813,7 +1851,6 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const runningNode = (isRunning || subAgentActivities.length > 0 || queuedPrompts.length > 0) ? (
     <Box flexDirection="column" marginBottom={1}>
       {!noFlickerActive && <SubAgentProgressLine activities={subAgentActivities} />}
-      {!noFlickerActive && activeTask && <TaskProgressLine task={activeTask} />}
       <ActiveWorkPanel
         tools={currentTools}
         draft={streamingToolDraft}
@@ -2082,6 +2119,18 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     { kind: 'header', id: 'startup-header' },
     ...messages.map(message => ({ kind: 'message' as const, id: message.id, message })),
   ], [messages])
+  const taskFlowNode = (
+    <TaskFlowHud
+      task={isRunning ? activeTask : null}
+      objective={isRunning ? activeObjective?.prompt : null}
+      isRunning={isRunning}
+      runState={runState}
+      tools={currentTools}
+      draft={streamingToolDraft}
+      queuedCount={queuedPrompts.length}
+      width={conversationFrameWidth}
+    />
+  )
   const mcpCount = mcpClient.getAllConnections().filter(connection => connection.status === 'connected').length
   const activeTerminalCount = terminalSessions.filter(session => session.status === 'running' || session.status === 'starting').length
   const landingFrameWidth = resolveLandingFrameWidth(terminal.columns)
@@ -2128,7 +2177,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           ) : (
             <Box flexDirection="row" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden" backgroundColor={layoutBackground}>
               <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} minHeight={0} overflow="hidden">
-                <SessionPane running={developerFlowActive} visible={false}>
+                <SessionPane>
                   {overlayNode ?? (
                     <Box flexDirection="column" flexBasis={0} flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
                       {transcriptNode}
@@ -2141,6 +2190,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   {globalActivityNode}
                   <AgentActivityLine active={developerFlowActive} persistent width={conversationFrameWidth} />
                   {promptNode}
+                  {taskFlowNode}
                   {!cockpit.showSidebar && (
                     <StatusLine
                       config={config}
@@ -2169,18 +2219,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                   reasoning={reasoningLabel || undefined}
                   contextWindow={config.contextWindow}
                   tokenUsage={tokenUsage}
-                  isRunning={isRunning}
-                  runState={runState}
-                  tools={currentTools}
-                  draft={streamingToolDraft}
-                  streamText={streamTextForDisplay}
-                  thinkingText={streamThinkingText}
-                  subagents={subAgentActivities}
                   queuedCount={queuedPrompts.length}
                   terminals={terminalSessions}
                   mcpCount={mcpCount}
-                  task={activeTask}
-                  objective={activeObjective?.prompt}
                   gitState={gitState}
                 />
               )}
@@ -2242,6 +2283,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         {cursorPreviewNode}
         {globalActivityNode}
         {promptNode}
+        {taskFlowNode}
         <TerminalSessionsFooter sessions={terminalSessions} />
         {/* Status line at bottom */}
         <StatusLine

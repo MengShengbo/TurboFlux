@@ -13,6 +13,7 @@ import {
   isReasoningEffortValueError,
   removeAnthropicCompatibleRequestParam,
   removeOpenAICompatibleRequestParam,
+  setOpenAIChatMaxTokens,
 } from './requestCompatibility'
 import { loadAgentsFromDir, type LoadedAgent } from './agents/loader'
 import type { SkillRuntime } from './skills/runtime'
@@ -672,7 +673,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
 
       for (let protocolIndex = 0; protocolIndex < protocolCandidates.length; protocolIndex += 1) {
         const protocol: ModelProtocol = protocolCandidates[protocolIndex]
-        const url = buildModelProtocolUrl(baseUrl, protocol)
+        const url = buildModelProtocolUrl(baseUrl, protocol, provider)
         const activeSystemPrompt = definition.systemPrompt
         const activeMessages = messages.map(message => ({ ...message }))
         const requestMessages = activeMessages.map(message => ({ ...message })) as Array<Record<string, unknown>>
@@ -708,6 +709,9 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
                 max_tokens: definition.maxOutputTokens || 4096,
                 stream: false,
               }
+        if (protocol === 'openai_chat') {
+          setOpenAIChatMaxTokens(requestBody, definition.maxOutputTokens || 4096, provider, modelId)
+        }
         const reasoningRequest = resolveNativeReasoningRequest(modelId, effectiveReasoning, provider, modelCapabilities)
         const reasoningEffort = reasoningRequest?.reasoningEffort ?? reasoningRequest?.outputConfig?.effort
         if (protocol === 'anthropic_messages') {
@@ -727,7 +731,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
           delete requestBody.tool_choice
           delete requestBody.parallel_tool_calls
         }
-        if (protocol !== 'anthropic_messages' && (provider === 'openai' || looksLikeResponsesPreferredModel(modelId))) {
+        if (protocol !== 'anthropic_messages' && (provider === 'openai' || provider === 'kimi' || looksLikeResponsesPreferredModel(modelId) || /(?:^|[/_.:-])(?:kimi|moonshot)(?:$|[/_.:-])/i.test(modelId))) {
           requestBody.prompt_cache_key = subAgentPromptCacheKey({
             definition,
             model: modelId,
@@ -810,7 +814,7 @@ export async function runSubAgent(options: RunSubAgentOptions): Promise<SubAgent
               turn,
               attempt: protocolIndex + 2,
               delayMs: 0,
-              reason: `Protocol fallback: ${formatProtocolAttempt(attempt)} -> ${buildModelProtocolUrl(baseUrl, nextProtocol)}`,
+              reason: `Protocol fallback: ${formatProtocolAttempt(attempt)} -> ${buildModelProtocolUrl(baseUrl, nextProtocol, provider)}`,
             })
             continue
           }

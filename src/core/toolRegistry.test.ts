@@ -15,12 +15,14 @@ describe('tool mode boundaries', () => {
     const tools = toolsToOpenAIFormat('vibe', { strict: true }) as any[]
     const readFile = tools.find(tool => tool.function.name === 'read_file')
     const multiEdit = tools.find(tool => tool.function.name === 'multi_edit')
+    const createTasks = tools.find(tool => tool.function.name === 'create_tasks')
 
     expect(readFile.function.strict).toBe(true)
     expect(readFile.function.parameters.additionalProperties).toBe(false)
     expect(readFile.function.parameters.required).toContain('offset')
     expect(readFile.function.parameters.properties.offset.anyOf).toContainEqual({ type: 'null' })
     expect(multiEdit.function.parameters.properties.edits.items.additionalProperties).toBe(false)
+    expect(createTasks.function.parameters.properties.tasks.items.required).toContain('parent_id')
   })
 
   it('includes array item schemas for Anthropic and rejects extra arguments', () => {
@@ -44,6 +46,24 @@ describe('tool mode boundaries', () => {
     expect(validateToolArgs('git_revert', { revision: 'abc1234' })).toEqual({ valid: true })
   })
 
+  it('allows compatible providers to omit nullable nested fields', () => {
+    const tools = toolsToOpenAIFormat('vibe') as any[]
+    const createTasks = tools.find(tool => tool.function.name === 'create_tasks')
+    const taskItem = createTasks.function.parameters.properties.tasks.items
+
+    expect(taskItem.required).toEqual(['title', 'description', 'priority'])
+    expect(validateToolArgs('create_tasks', {
+      tasks: [{ title: 'Build project', description: 'Run the build', priority: 'major' }],
+    })).toEqual({ valid: true })
+    expect(validateToolArgs('create_tasks', {
+      tasks: [{ title: 'Build project', description: 'Run the build', priority: 'major', parent_id: 42 }],
+    })).toMatchObject({ valid: false, error: 'Invalid type for tasks[0].parent_id: expected string or null' })
+    expect(validateToolArgs('multi_edit', {
+      path: 'src/app.ts',
+      edits: [{ old_string: 'old', new_string: 'new' }],
+    })).toEqual({ valid: true })
+  })
+
   it('exposes validated terminal stdin writes only in vibe mode', () => {
     expect(getToolsForMode('vibe').some(tool => tool.name === 'write_terminal')).toBe(true)
     expect(getToolsForMode('plan').some(tool => tool.name === 'write_terminal')).toBe(false)
@@ -60,5 +80,15 @@ describe('tool mode boundaries', () => {
     expect(planTools.some(tool => tool.name === 'read_agent')).toBe(true)
     expect(planTools.some(tool => tool.name === 'cancel_agent')).toBe(false)
     expect(validateToolArgs('read_agent', { agent_id: 'runtime_agent_1', offset: 0, limit: 25 })).toEqual({ valid: true })
+  })
+
+  it('marks interactive and background lifecycle tools as serialized side effects', () => {
+    const vibeTools = getToolsForMode('vibe')
+    const askUser = vibeTools.find(tool => tool.name === 'ask_user')
+    const spawnAgent = vibeTools.find(tool => tool.name === 'spawn_agent')
+
+    expect(vibeTools.some(tool => tool.name === 'use_skill')).toBe(true)
+    expect(askUser).toMatchObject({ isConcurrencySafe: false })
+    expect(spawnAgent).toMatchObject({ isReadOnly: false, isConcurrencySafe: false })
   })
 })

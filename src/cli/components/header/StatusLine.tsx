@@ -27,15 +27,9 @@ interface StatusLineProps {
   width?: number
 }
 
-const MODE_LABELS: Record<AgentMode, string> = {
-  vibe: 'VIBE',
-  plan: 'PLAN',
-}
-
 export function StatusLine({
   config,
   tokenUsage,
-  mode = 'vibe',
   viewingHistory = false,
   gitState,
   mcpCount = 0,
@@ -82,28 +76,25 @@ export function StatusLine({
             ? `git:${gitState.phase}`
       : `git:${gitSnapshot.branch}${gitTracking ? ` ${gitTracking}` : ''}${gitSnapshot.conflictedCount > 0 ? ` !${gitSnapshot.conflictedCount}` : gitChangedCount > 0 ? ` · ${t('ui.status.gitChanged', { count: gitChangedCount })}` : ` ${t('ui.status.gitClean')}`}`
   const compactModelPart = columns < 82 ? cliTruncate(modelPart, 12, { position: 'end' }) : modelPart
-  const activityLabel = activity ? (() => {
+  const activityLabel = attentionLabel || (activity?.kind === 'action-required' ? (() => {
     switch (activity.code) {
-      case 'thinking': return t('ui.status.activity.thinking')
-      case 'working': return t('ui.status.activity.working')
-      case 'responding': return t('ui.status.activity.responding')
       case 'review-required': return t('ui.status.activity.reviewRequired')
       case 'input-required': return t('ui.status.activity.inputRequired')
-      case 'stopping': return t('ui.status.activity.stopping')
-      case 'interrupted': return t('ui.status.activity.interrupted')
-      case 'needs-attention': return t('ui.status.activity.needsAttention')
-      case 'history-unavailable': return t('ui.status.activity.historyUnavailable')
-      case 'ready': return t('ui.status.activity.ready')
+      default: return t('ui.status.activity.needsAttention')
     }
-  })() : attentionLabel
+  })() : activity?.kind === 'error'
+    ? t('ui.status.activity.needsAttention')
+    : activity?.kind === 'stopping'
+      ? t('ui.status.activity.stopping')
+      : undefined)
   const activityPart = activityLabel && activity?.detail
     ? t('ui.status.activity.detail', { activity: activityLabel, detail: cliTruncate(activity.detail, 24, { position: 'end' }) })
     : activityLabel
   const primaryParts = [
+    activityPart || '',
     resultCount > 0 ? t('ui.status.inbox', { count: resultCount }) : '',
     queueCount > 0 ? t('ui.status.queue', { count: queueCount }) : '',
     backgroundCount > 0 ? t('ui.status.background', { count: backgroundCount }) : '',
-    activityPart || '',
     compactModelPart,
     columns >= 82 && reasoningSetting ? `reason:${reasoningSetting}` : '',
     `approval:${config.approvalPolicy}`,
@@ -131,9 +122,7 @@ export function StatusLine({
     ...(columns >= 170 ? secondaryParts.filter(part => part !== gitPart) : []),
   ]
   const usageWidth = hasProviderUsage && total > 0 ? barWidth + 7 : 0
-  const textWidth = Math.max(12, frameWidth - 9 - usageWidth)
-  const statusText = cliTruncate(parts.join(' | '), textWidth, { position: 'middle' })
-  const phaseLabel = activity?.kind === 'action-required' || attentionLabel
+  const phaseLabel = attentionLabel || activity?.kind === 'action-required'
     ? t('ui.status.action')
     : activity?.kind === 'error'
       ? t('ui.status.alert')
@@ -141,16 +130,17 @@ export function StatusLine({
         ? t('ui.status.stop')
         : activity?.kind === 'streaming'
           ? t('ui.status.reply')
-          : activity?.kind === 'working'
-            ? t('ui.status.work')
-            : MODE_LABELS[mode]
-  const phaseColor = activity?.kind === 'action-required' || activity?.kind === 'stopping'
+          : ''
+  const phaseColor = attentionLabel || activity?.kind === 'action-required' || activity?.kind === 'stopping'
     ? theme.warning
     : activity?.kind === 'error'
       ? theme.error
       : activity?.kind === 'streaming'
         ? theme.info
-        : mode === 'vibe' ? theme.success : theme.info
+        : theme.inactive
+  const phaseWidth = phaseLabel ? 9 : 0
+  const textWidth = Math.max(12, frameWidth - 2 - phaseWidth - usageWidth)
+  const statusText = cliTruncate(parts.join(' | '), textWidth, { position: phaseLabel ? 'end' : 'middle' })
 
   return (
     <Box
@@ -161,10 +151,12 @@ export function StatusLine({
       justifyContent="space-between"
     >
       <Box flexDirection="row" flexGrow={1} minWidth={0}>
-        <Box flexDirection="row" flexShrink={0}>
-          <Text color={phaseColor} bold>{phaseLabel}</Text>
-          <Text color={theme.divider}> | </Text>
-        </Box>
+        {phaseLabel && (
+          <Box flexDirection="row" flexShrink={0}>
+            <Text color={phaseColor} bold>{phaseLabel}</Text>
+            <Text color={theme.divider}> | </Text>
+          </Box>
+        )}
         <Text color={theme.statusLine} wrap="truncate-end">{statusText}</Text>
         {hasProviderUsage && total > 0 && <Text> </Text>}
         {hasProviderUsage && total > 0 && <Text color={barColor}>{bar}</Text>}

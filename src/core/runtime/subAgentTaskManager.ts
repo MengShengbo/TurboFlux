@@ -311,6 +311,14 @@ export class SubAgentTaskManager {
     return this.runtimeTaskManager.stopTask(taskId, reason)
   }
 
+  async stopAll(reason = 'Parent agent cancelled'): Promise<void> {
+    await Promise.resolve()
+    const pending = Array.from(this.descriptors.keys())
+      .map(taskId => this.runtimeTaskManager.getTask(taskId))
+      .filter((task): task is RuntimeTask => task !== null && !TERMINAL_STATUSES.has(task.status))
+    await Promise.all(pending.map(task => this.runtimeTaskManager.stopTask(task.id, reason).catch(() => undefined)))
+  }
+
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true

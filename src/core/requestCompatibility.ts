@@ -11,6 +11,26 @@ export function shouldOmitSamplingTemperature(config: APIConfig): boolean {
   )?.omitTemperature === true
 }
 
+export function looksLikeKimiModel(model?: string): boolean {
+  return /(?:^|[/_.:-])(?:kimi|moonshot)(?:$|[/_.:-])/i.test(String(model || '').trim())
+}
+
+export function setOpenAIChatMaxTokens(
+  body: Record<string, unknown>,
+  maxTokens: number,
+  provider?: APIConfig['provider'] | string,
+  model?: string,
+): 'max_tokens' | 'max_completion_tokens' | null {
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) return null
+  const key = provider === 'kimi' || looksLikeKimiModel(model)
+    ? 'max_completion_tokens'
+    : 'max_tokens'
+  delete body.max_tokens
+  delete body.max_completion_tokens
+  body[key] = Math.floor(maxTokens)
+  return key
+}
+
 export function extractUnsupportedRequestParam(error?: string): string | null {
   if (!error) return null
   const quoted = error.match(/Unsupported parameter:\s*["'`]?([A-Za-z0-9_.-]+)["'`]?/i)
@@ -24,6 +44,7 @@ export function extractUnsupportedRequestParam(error?: string): string | null {
     'cache_control', 'anthropic-beta', 'output_config', 'thinking', 'reasoning_effort',
     'reasoning', 'summary', 'temperature', 'stream_options', 'parallel_tool_calls', 'tool_choice',
     'tools', 'prompt_cache_key', 'prompt_cache_retention', 'store', 'text.verbosity', 'verbosity', 'text',
+    'max_completion_tokens', 'max_output_tokens', 'max_tokens',
   ]
   return knownOptionalParams.find(param => error.toLowerCase().includes(param.toLowerCase())) || null
 }
@@ -73,6 +94,12 @@ export function removeOpenAICompatibleRequestParam(body: Record<string, unknown>
     'prompt_cache_key', 'prompt_cache_retention', 'store', 'text',
   ])
   if (!removable.has(rootParam)) return false
+  if (rootParam === 'max_completion_tokens' && Object.prototype.hasOwnProperty.call(body, rootParam)) {
+    const value = body[rootParam]
+    delete body[rootParam]
+    if (!Object.prototype.hasOwnProperty.call(body, 'max_tokens')) body.max_tokens = value
+    return true
+  }
   const aliases = new Set<string>([rootParam])
   if (rootParam === 'max_output_tokens' || rootParam === 'max_completion_tokens' || rootParam === 'max_tokens') {
     aliases.add('max_output_tokens')

@@ -75,6 +75,7 @@ export interface CommandOutput {
   stderr: string
   exitCode: number
   timedOut?: boolean
+  aborted?: boolean
   truncated?: boolean
   logPath?: string
   outputBytes?: number
@@ -119,8 +120,10 @@ export interface ToolExecutor {
   memoryGetRelevantInjection?(query: Record<string, any>): Promise<Result<any>>
 
   // Terminal operations
-  runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, approved?: boolean): Promise<Result<CommandOutput>>
-  runProcess?(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number): Promise<Result<CommandOutput>>
+  runCommand(command: string, cwd: string, env?: Record<string, string>, timeout?: number, approved?: boolean, signal?: AbortSignal): Promise<Result<CommandOutput>>
+  /** Execute a process while resolving its working directory through read access. */
+  readOnlyProcess?(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number, signal?: AbortSignal): Promise<Result<CommandOutput>>
+  runProcess?(command: string, args: string[], cwd: string, env?: Record<string, string>, timeout?: number, signal?: AbortSignal): Promise<Result<CommandOutput>>
   validateCommand?(command: string, cwd: string): Promise<Result<void>>
   startBackgroundCommand?(command: string, cwd: string, env?: Record<string, string>, approved?: boolean): Promise<Result<TerminalStartCommandResult>>
   ptyCreate?(options?: { shell?: string; cwd?: string; env?: Record<string, string> }): Promise<Result<{ sessionId: string; session?: TerminalSessionInfo }>>

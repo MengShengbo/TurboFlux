@@ -2,13 +2,9 @@ import React, { useEffect, useState } from 'react'
 import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
 import { resolveBackground, useTheme } from '../../theme/index'
-import type { ActiveTaskContext } from '../../../core/taskManager'
 import type { GitIntegrationState } from '../../../core/gitService'
-import type { AgentRunState, TokenUsage } from '../../../shared/agentTypes'
+import type { TokenUsage } from '../../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../../shared/terminalTypes'
-import type { ToolStatus } from '../tools/ToolCallTree'
-import type { StreamingToolDraft } from '../tools/ActiveWorkPanel'
-import { deriveDeveloperFlow, type DeveloperSubAgentActivity, type DeveloperFlowTone } from '../developerFlowModel'
 import { useI18n } from '../../i18n/index'
 
 interface SessionSidebarProps {
@@ -19,18 +15,9 @@ interface SessionSidebarProps {
   reasoning?: string
   contextWindow: number
   tokenUsage: TokenUsage
-  isRunning: boolean
-  runState: AgentRunState
-  tools: ToolStatus[]
-  draft: StreamingToolDraft | null
-  streamText?: string
-  thinkingText?: string
-  subagents: readonly DeveloperSubAgentActivity[]
   queuedCount: number
   terminals: TerminalSessionInfo[]
   mcpCount: number
-  task: ActiveTaskContext | null
-  objective?: string | null
   gitState: GitIntegrationState
 }
 
@@ -42,18 +29,9 @@ export function SessionSidebar({
   reasoning,
   contextWindow,
   tokenUsage,
-  isRunning,
-  runState,
-  tools,
-  draft,
-  streamText,
-  thinkingText,
-  subagents,
   queuedCount,
   terminals,
   mcpCount,
-  task,
-  objective,
   gitState,
 }: SessionSidebarProps) {
   const theme = useTheme()
@@ -62,34 +40,20 @@ export function SessionSidebar({
   const runningTerminals = terminals.filter(session => session.status === 'running' || session.status === 'starting')
   const activeTerminals = runningTerminals.length
   const latestTerminal = runningTerminals.at(-1)
-  const flow = deriveDeveloperFlow({
-    runState,
-    isRunning,
-    tools,
-    draft,
-    streamText,
-    thinkingText,
-    subagents,
-    terminals: activeTerminals,
-    queuedCount,
-    task,
-    objective,
-  }, t)
   const contextTotal = tokenUsage.source === 'provider' && typeof tokenUsage.input === 'number'
     ? tokenUsage.input
     : 0
   const safeContextWindow = Math.max(1, contextWindow || 200_000)
   const contextRatio = Math.min(1, contextTotal / safeContextWindow)
-  const elapsed = isRunning && runState.startedAt ? formatElapsed(Date.now() - runState.startedAt) : ''
   const gitSnapshot = gitState.snapshot
   const showRepo = Boolean(gitSnapshot || gitState.error || gitState.operation || ['detecting', 'syncing', 'error'].includes(gitState.phase))
   const showRuntime = mcpCount > 0 || activeTerminals > 0 || queuedCount > 0
 
   useEffect(() => {
-    if ((!isRunning || !runState.startedAt) && activeTerminals === 0) return
+    if (activeTerminals === 0) return
     const timer = setInterval(() => setTick(value => value + 1), 1000)
     return () => clearInterval(timer)
-  }, [activeTerminals, isRunning, runState.startedAt])
+  }, [activeTerminals])
 
   return (
     <Box
@@ -108,13 +72,6 @@ export function SessionSidebar({
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <Text color={theme.brand} bold>TurboFlux</Text>
         <Text color={theme.inactive}>{cliTruncate(workspacePath, Math.max(12, width - 4), { position: 'middle' })}</Text>
-
-        <Section title={t('ui.sidebar.status')}>
-          <Box justifyContent="space-between">
-            <Text color={flowColor(flow.tone, theme)} bold>{cliTruncate(flow.label, Math.max(10, width - 12))}</Text>
-            {elapsed && <Text color={theme.info}>{elapsed}</Text>}
-          </Box>
-        </Section>
 
         <Section title={t('ui.sidebar.session')}>
           <SidebarRow label={t('ui.sidebar.model')} value={model || t('ui.sidebar.notMounted')} width={width} color={theme.text} />
@@ -162,9 +119,6 @@ export function SessionSidebar({
         )}
       </Box>
 
-      <Box flexShrink={0}>
-        <Text color={isRunning ? theme.brandShimmer : theme.success}>{`● ${t(isRunning ? 'common.working' : 'common.ready')}`}</Text>
-      </Box>
     </Box>
   )
 }
@@ -188,14 +142,6 @@ function SidebarRow({ label, value, width, color }: { label: string; value: stri
       <Text color={color}>{cliTruncate(value, valueWidth, { position: 'middle' })}</Text>
     </Box>
   )
-}
-
-function flowColor(tone: DeveloperFlowTone, theme: ReturnType<typeof useTheme>): string {
-  if (tone === 'warning') return theme.warning
-  if (tone === 'error') return theme.error
-  if (tone === 'success') return theme.success
-  if (tone === 'idle') return theme.inactive
-  return theme.brandShimmer
 }
 
 function contextColor(ratio: number, theme: ReturnType<typeof useTheme>): string {

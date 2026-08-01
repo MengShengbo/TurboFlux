@@ -13,6 +13,7 @@ export type SupportedModelId =
   | 'claude-fable-5'
   | 'claude-mythos-5'
   | 'claude-mythos-preview'
+  | 'claude-opus-5'
   | 'claude-opus-4-8'
   | 'claude-sonnet-5'
   | 'claude-haiku-4-5-20251001'
@@ -117,6 +118,7 @@ export const SUPPORTED_MODEL_SPECS: SupportedModelSpec[] = [
   modelSpec('claude-fable-5', 'Claude Fable 5', 'anthropic', CLAUDE_LONG_CONTEXT, 128_000, 'Current highest-capability Claude API model.', 'Anthropic models overview, July 2026.', { supportsProviderTokenCount: true, supportsVision: true }),
   modelSpec('claude-mythos-5', 'Claude Mythos 5', 'anthropic', CLAUDE_LONG_CONTEXT, 128_000, 'Limited-availability Claude model for approved Project Glasswing customers.', 'Anthropic models overview, July 2026.', { supportsProviderTokenCount: true, supportsVision: true }),
   modelSpec('claude-mythos-preview', 'Claude Mythos Preview', 'anthropic', CLAUDE_LONG_CONTEXT, 128_000, 'Invitation-only defensive cybersecurity Claude model.', 'Anthropic models overview, July 2026.', { supportsProviderTokenCount: true, supportsVision: true }),
+  modelSpec('claude-opus-5', 'Claude Opus 5', 'anthropic', CLAUDE_LONG_CONTEXT, 128_000, 'Anthropic flagship for complex agentic coding and enterprise work.', 'Anthropic models overview and effort guide, July 2026.', { aliases: ['ClaudeOpus5'], supportsProviderTokenCount: true, supportsVision: true }),
   modelSpec('claude-opus-4-8', 'Claude Opus 4.8', 'anthropic', CLAUDE_LONG_CONTEXT, 128_000, 'Claude for agentic coding and enterprise work.', 'Anthropic models overview, July 2026.', { aliases: ['ClaudeOpus4.8'], supportsProviderTokenCount: true, supportsVision: true }),
   modelSpec('claude-sonnet-5', 'Claude Sonnet 5', 'anthropic', CLAUDE_LONG_CONTEXT, 128_000, 'Current balanced Claude model.', 'Anthropic models overview, July 2026.', { supportsProviderTokenCount: true, supportsVision: true }),
   modelSpec('claude-haiku-4-5-20251001', 'Claude Haiku 4.5', 'anthropic', 200_000, 64_000, 'Current low-latency Claude model.', 'Anthropic models overview, July 2026.', { aliases: ['claude-haiku-4-5'], supportsProviderTokenCount: true, supportsVision: true }),
@@ -127,7 +129,7 @@ export const SUPPORTED_MODEL_SPECS: SupportedModelSpec[] = [
   modelSpec('deepseek-v4-pro', 'DeepSeek V4 Pro', 'deepseek', DEEPSEEK_LONG_CONTEXT, 384_000, 'DeepSeek V4 high-capability route.', 'DeepSeek models and pricing.', { aliases: ['DeepSeekV4Pro', 'DeepSeek-V4-Pro'] }),
   modelSpec('deepseek-v4-flash', 'DeepSeek V4 Flash', 'deepseek', DEEPSEEK_LONG_CONTEXT, 384_000, 'DeepSeek V4 low-latency route.', 'DeepSeek models and pricing.', { aliases: ['DeepSeekV4Flash', 'DeepSeek-V4-Flash', 'deepseek-chat', 'deepseek-reasoner'] }),
 
-  modelSpec('kimi-k3', 'Kimi K3', 'kimi', KIMI_LONG_CONTEXT, 128_000, 'Current Kimi flagship thinking model.', 'Kimi API model and thinking guides.', { supportsVision: true }),
+  modelSpec('kimi-k3', 'Kimi K3', 'kimi', KIMI_LONG_CONTEXT, 1_048_576, 'Current Kimi flagship thinking model.', 'Kimi API model and thinking guides.', { supportsVision: true }),
   modelSpec('kimi-k2.7-code', 'Kimi K2.7 Code', 'kimi', KIMI_LONG_CONTEXT, 128_000, 'Kimi coding model with fixed preserved thinking.', 'Kimi API thinking guide.'),
   modelSpec('kimi-k2.7-code-highspeed', 'Kimi K2.7 Code Highspeed', 'kimi', KIMI_LONG_CONTEXT, 128_000, 'High-speed Kimi K2.7 Code route.', 'Kimi API thinking guide.'),
   modelSpec('kimi-k2.6', 'Kimi K2.6', 'kimi', KIMI_LONG_CONTEXT, 128_000, 'Kimi model with switchable preserved thinking.', 'Kimi API thinking guide.'),
@@ -202,7 +204,7 @@ function reconcileAdvertisedReasoning(
 ): ModelReasoningCapabilities | null {
   if (!discovered) return base
   if (discovered.reasoning === false) return null
-  if (base.control === 'fixed' || base.control === 'budget') return base
+  if (base.control === 'budget' || (base.control === 'fixed' && base.efforts.length === 0)) return base
   const advertised = discovered.reasoningEfforts?.filter(effort => REASONING_EFFORTS.includes(effort)) ?? []
   if (advertised.length === 0) return base
   const intersection = base.efforts.filter(effort => advertised.includes(effort))
@@ -230,7 +232,7 @@ export function getModelReasoningCapabilities(
       description: 'Adaptive thinking is always on; effort controls total response work.',
     }), discovered)
   }
-  if (/^claude-(?:opus-4-(?:8|7)|sonnet-5)/.test(key)) {
+  if (/^claude-(?:opus-5|opus-4-(?:8|7)|sonnet-5)/.test(key)) {
     return reconcileAdvertisedReasoning(capabilities('anthropic', 'adaptive-effort', ['low', 'medium', 'high', 'xhigh', 'max'], {
       defaultEffort: 'high',
       description: 'Adaptive thinking with native low through max effort.',
@@ -270,20 +272,27 @@ export function getModelReasoningCapabilities(
     }), discovered)
   }
 
-  if (/^deepseek-v4-(?:pro|flash)/.test(key) || providerKey === 'deepseek') {
+  if (/^deepseek-v4-flash/.test(key)) {
+    return reconcileAdvertisedReasoning(capabilities('deepseek', 'toggle-effort', ['low', 'high', 'max'], {
+      defaultEffort: 'high',
+      preservesReasoningContent: true,
+      description: 'Thinking toggle with low, high, and max native effort levels.',
+    }), discovered)
+  }
+  if (/^deepseek-v4-pro/.test(key) || providerKey === 'deepseek') {
     return reconcileAdvertisedReasoning(capabilities('deepseek', 'toggle-effort', ['high', 'max'], {
       defaultEffort: 'high',
       preservesReasoningContent: true,
-      description: 'Thinking toggle with effective high and max effort levels.',
+      description: 'Thinking toggle with high and max native effort levels.',
     }), discovered)
   }
 
   if (/^kimi-k3/.test(key)) {
-    return reconcileAdvertisedReasoning(capabilities('kimi', 'fixed', ['max'], {
+    return reconcileAdvertisedReasoning(capabilities('kimi', 'fixed', ['low', 'high', 'max'], {
       supportsToggle: false,
       defaultEffort: 'max',
       preservesReasoningContent: true,
-      description: 'Thinking is always on; Kimi K3 currently accepts max effort only.',
+      description: 'Thinking is always on; Kimi K3 accepts low, high, and max effort.',
     }), discovered)
   }
   if (/^kimi-k2\.7-code/.test(key)) {
@@ -381,7 +390,10 @@ export function resolveNativeReasoningRequest(
       : capability.efforts.includes('none') ? 'none' : undefined
     request.omitTemperature = request.reasoningEffort !== 'none'
   } else if (capability.control === 'adaptive-effort') {
-    request.thinking = request.enabled ? { type: 'adaptive' } : { type: 'disabled' }
+    const opusFiveHighEffort = capability.family === 'anthropic'
+      && /^claude-opus-5/.test(modelFamilyKey(model))
+      && (normalized.effort === 'xhigh' || normalized.effort === 'max')
+    request.thinking = request.enabled && !opusFiveHighEffort ? { type: 'adaptive' } : { type: 'disabled' }
     if (request.enabled && normalized.effort) request.outputConfig = { effort: normalized.effort }
   } else if (capability.control === 'budget') {
     request.thinking = request.enabled
@@ -392,6 +404,8 @@ export function resolveNativeReasoningRequest(
     if (request.enabled && normalized.effort) request.reasoningEffort = normalized.effort
   } else if (capability.control === 'toggle') {
     request.thinking = { type: request.enabled ? 'enabled' : 'disabled' }
+  } else if (capability.control === 'fixed' && capability.family === 'kimi' && capability.preservesReasoningContent) {
+    request.thinking = { type: 'enabled', keep: 'all' }
   } else if (capability.control === 'fixed' && normalized.effort) {
     request.reasoningEffort = normalized.effort
   }

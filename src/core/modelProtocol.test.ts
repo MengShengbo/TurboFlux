@@ -40,6 +40,22 @@ describe('model protocol planning', () => {
     expect(buildModelProtocolUrl('https://example.test', 'openai_responses'))
       .toBe('https://example.test/v1/responses')
   })
+
+  it('uses the DeepSeek Anthropic-compatible route and avoids unsupported Pro Responses', () => {
+    expect(buildModelProtocolUrl('https://api.deepseek.com', 'anthropic_messages', 'deepseek'))
+      .toBe('https://api.deepseek.com/anthropic/v1/messages')
+    expect(buildModelProtocolUrl('https://api.deepseek.com/v1', 'anthropic_messages', 'deepseek'))
+      .toBe('https://api.deepseek.com/anthropic/v1/messages')
+    expect(planModelProtocols('deepseek', 'deepseek-v4-pro')).toEqual([
+      'openai_chat',
+      'anthropic_messages',
+    ])
+    expect(planModelProtocols('deepseek', 'deepseek-v4-flash')).toEqual([
+      'openai_chat',
+      'openai_responses',
+      'anthropic_messages',
+    ])
+  })
 })
 
 describe('model protocol fallback safety', () => {

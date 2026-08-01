@@ -159,6 +159,12 @@ describe('AgentEngine MCP dispatch', () => {
         inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
         annotations: { readOnlyHint: false, destructiveHint: true },
       }],
+      searchTools: () => [{
+        name: 'files__replace',
+        serverName: 'files',
+        description: 'replace',
+        inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      }],
       callTool,
     } as unknown as McpClient)
     const executeSingleTool = (engine as unknown as {
@@ -169,6 +175,11 @@ describe('AgentEngine MCP dispatch', () => {
 
     expect(result).toMatchObject({ isError: false, output: 'mcp result' })
     expect(callTool).toHaveBeenCalledWith('files', 'replace', { path: 'a.ts' })
+
+    const dispatchTool = (engine as unknown as {
+      dispatchTool: (name: string, args: Record<string, unknown>, toolCallId: string) => Promise<string>
+    }).dispatchTool.bind(engine)
+    await expect(dispatchTool('tool_search', { query: 'replace' }, 'mcp-search-1')).resolves.toContain('files__replace')
     engine.destroy()
   })
 })
@@ -393,6 +404,88 @@ describe('AgentEngine aborted tool execution', () => {
         expect.objectContaining({ toolCallId: 'tc1', isError: true, errorKind: 'abort' }),
         expect.objectContaining({ toolCallId: 'tc2', isError: true, errorKind: 'abort' }),
       ])
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
+describe('AgentEngine tool scheduling and task contracts', () => {
+  function createEngine(): AgentEngine {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    return new AgentEngine({ mode: 'vibe', approvalPolicy: 'full', workspacePath: workspace }, {} as ToolExecutor, stateProvider)
+  }
+
+  it('uses dynamic concurrency metadata for command reads', () => {
+    const engine = createEngine()
+    const partitionToolCalls = (engine as unknown as {
+      partitionToolCalls: (calls: ToolCall[]) => Array<{ isConcurrencySafe: boolean; toolCalls: ToolCall[] }>
+    }).partitionToolCalls.bind(engine)
+
+    try {
+      const batches = partitionToolCalls([
+        { id: 'read-command', name: 'run_command', arguments: { command: 'git status --short' } },
+        { id: 'write-command', name: 'run_command', arguments: { command: 'npm run build' } },
+      ])
+
+      expect(batches.map(batch => batch.isConcurrencySafe)).toEqual([true, false])
+      expect(batches[0]?.toolCalls[0]?.id).toBe('read-command')
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('applies parent and status task filters together', async () => {
+    const engine = createEngine()
+    const dispatchTool = (engine as unknown as {
+      dispatchTool: (name: string, args: Record<string, unknown>, toolCallId: string) => Promise<string>
+    }).dispatchTool.bind(engine)
+
+    try {
+      const root = JSON.parse(await dispatchTool('create_task', {
+        title: 'Root', description: 'Root task', priority: 'major',
+      }, 'create-root')) as { id: string }
+      const child = JSON.parse(await dispatchTool('create_task', {
+        title: 'Child', description: 'Child task', priority: 'medium', parent_id: root.id,
+      }, 'create-child')) as { id: string }
+      await dispatchTool('update_task', { task_id: child.id, status: 'completed' }, 'complete-child')
+
+      const filtered = JSON.parse(await dispatchTool('list_tasks', {
+        parent_id: root.id,
+        status: 'completed',
+      }, 'list-filtered')) as Array<{ id: string }>
+      const all = JSON.parse(await dispatchTool('list_tasks', {}, 'list-all')) as Array<{ id: string }>
+
+      expect(filtered.map(task => task.id)).toEqual([child.id])
+      expect(all.map(task => task.id)).toEqual(expect.arrayContaining([root.id, child.id]))
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('blocks ask_user dispatch until a response is submitted', async () => {
+    const engine = createEngine()
+    const dispatchTool = (engine as unknown as {
+      dispatchTool: (name: string, args: Record<string, unknown>, toolCallId: string) => Promise<string>
+    }).dispatchTool.bind(engine)
+    let settled = false
+    const pending = dispatchTool('ask_user', { question: 'Continue?' }, 'ask-blocking')
+      .then(output => { settled = true; return output })
+
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(settled).toBe(false)
+      expect(engine.submitAskUserResponse('yes', 'ask-blocking')).toBe(true)
+      await expect(pending).resolves.toBe('[User response] yes')
+      expect(settled).toBe(true)
     } finally {
       engine.destroy()
     }
@@ -964,6 +1057,41 @@ describe('AgentEngine interrupted streams', () => {
     }
   })
 
+  it('keeps DeepSeek reasoning in thinking when interrupted before visible output', async () => {
+    const line = `data: ${JSON.stringify({
+      choices: [{
+        delta: { reasoning_content: '先检查请求参数，再组织答案。' },
+        finish_reason: null,
+      }],
+    })}`
+    const { engine, stateProvider, events } = createHarness('custom', line)
+    const internal = engine as unknown as {
+      callOpenAICompatibleAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callOpenAICompatibleAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        [{ role: 'system', content: 'system' }, { role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn.content).toBe('')
+      expect(turn.metadata?.interrupted).toBe(true)
+      expect(turn.metadata?.thinking?.content).toBe('先检查请求参数，再组织答案。')
+      expect(events).toContainEqual({ type: 'stream:thinking_delta', text: '先检查请求参数，再组织答案。' })
+      expect(events).not.toContainEqual({ type: 'stream:delta', text: '先检查请求参数，再组织答案。' })
+    } finally {
+      engine.destroy()
+    }
+  })
+
   it('accepts OpenAI-compatible text when the provider omits the terminal marker', async () => {
     const line = `data: ${JSON.stringify({
       choices: [{ delta: { content: 'Provider response without DONE.' }, finish_reason: null }],
@@ -1061,7 +1189,7 @@ describe('AgentEngine interrupted streams', () => {
     }
   })
 
-  it('promotes reasoning-only provider output to the visible answer', () => {
+  it('keeps reasoning-only provider output out of the visible answer', () => {
     const { engine } = createHarness('custom', undefined, false)
     const internal = engine as unknown as {
       createAssistantTurn: (content: string, toolCalls: undefined, metadata: Record<string, unknown>) => AgentTurn
@@ -1073,9 +1201,100 @@ describe('AgentEngine interrupted streams', () => {
         rawReasoningPayload: { provider: 'openai-compatible', blocks: [], reasoningContent: '这是模型返回的唯一可见回答。' },
       })
 
-      expect(turn.content).toBe('这是模型返回的唯一可见回答。')
-      expect(turn.metadata?.thinking).toBeUndefined()
-      expect(turn.metadata?.rawReasoningPayload).toBeUndefined()
+      expect(turn.content).toBe('')
+      expect(turn.metadata?.thinking?.content).toBe('这是模型返回的唯一可见回答。')
+      expect(turn.metadata?.rawReasoningPayload?.reasoningContent).toBe('这是模型返回的唯一可见回答。')
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('marks reasoning-only Chat completion stopped by the output limit as interrupted', async () => {
+    const lines = [
+      `data: ${JSON.stringify({
+        choices: [{ delta: { reasoning_content: '先规划实现，再调用写文件工具。' }, finish_reason: null }],
+      })}`,
+      `data: ${JSON.stringify({
+        choices: [{ delta: {}, finish_reason: 'length' }],
+        usage: { prompt_tokens: 12, completion_tokens: 4096 },
+      })}`,
+    ]
+    const { engine, stateProvider, events } = createHarness('custom', lines, false)
+    const internal = engine as unknown as {
+      callOpenAICompatibleAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callOpenAICompatibleAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        [{ role: 'system', content: 'system' }, { role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn).toMatchObject({
+        content: '',
+        metadata: {
+          interrupted: true,
+          thinking: { content: '先规划实现，再调用写文件工具。', status: 'interrupted' },
+          rawReasoningPayload: { reasoningContent: '先规划实现，再调用写文件工具。' },
+        },
+      })
+      expect(events).toContainEqual({ type: 'stream:end', interrupted: true })
+      expect(events).not.toContainEqual({ type: 'stream:delta', text: '先规划实现，再调用写文件工具。' })
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('keeps reasoning separate while preserving a following OpenAI tool call', async () => {
+    const lines = [
+      `data: ${JSON.stringify({
+        choices: [{ delta: { reasoning_content: '已完成规划，现在写入文件。' }, finish_reason: null }],
+      })}`,
+      `data: ${JSON.stringify({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call-write',
+              function: { name: 'write_file', arguments: JSON.stringify({ path: 'src/example.ts', content: 'export const ok = true' }) },
+            }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+      })}`,
+    ]
+    const { engine, stateProvider } = createHarness('custom', lines, false)
+    const internal = engine as unknown as {
+      callOpenAICompatibleAPI: (
+        config: ReturnType<DefaultAgentStateProvider['getActiveConfig']>,
+        model: ReturnType<DefaultAgentStateProvider['getActiveModel']>,
+        messages: Array<Record<string, unknown>>,
+        startTime: number,
+      ) => Promise<AgentTurn>
+    }
+
+    try {
+      const turn = await internal.callOpenAICompatibleAPI(
+        stateProvider.getActiveConfig(),
+        stateProvider.getActiveModel(),
+        [{ role: 'system', content: 'system' }, { role: 'user', content: 'hello' }],
+        Date.now(),
+      )
+
+      expect(turn.content).toBe('')
+      expect(turn.metadata?.thinking?.content).toBe('已完成规划，现在写入文件。')
+      expect(turn.toolCalls).toEqual([{
+        id: 'call-write',
+        name: 'write_file',
+        arguments: { path: 'src/example.ts', content: 'export const ok = true' },
+      }])
     } finally {
       engine.destroy()
     }

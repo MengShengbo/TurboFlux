@@ -1,20 +1,20 @@
-## 关联 Issue
+## Related issue
 
-<!-- 外部贡献者必须关联维护者邀请你的 Issue，例如：Closes #123。 -->
+<!-- Link the issue for this change, for example: Closes #123. -->
 
 Closes #
 
-## 变更摘要
+## Summary
 
-<!-- 说明问题、实现方式和有意保持不变的行为。 -->
+<!-- Describe the problem, implementation, and intentionally preserved behavior. -->
 
-## 验证
+## Verification
 
-<!-- 列出实际运行的测试命令和结果。 -->
+<!-- List the commands you ran and their results. -->
 
-## 检查清单
+## Checklist
 
-- [ ] 变更聚焦于关联 Issue 约定的范围。
-- [ ] 行为变化已补充或更新测试。
-- [ ] 相关配置、架构或用户文档已同步。
-- [ ] 未提交凭据、用户数据、会话日志或生成产物。
+- [ ] The change stays within the scope of the related issue.
+- [ ] Behavior changes have matching or updated tests.
+- [ ] Configuration, architecture, and user documentation are synchronized.
+- [ ] No credentials, user data, conversation logs, or generated artifacts are included.
