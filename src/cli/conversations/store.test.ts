@@ -90,6 +90,63 @@ describe.sequential('conversation journal store', () => {
     expect(loadConversation('snapshot-1')).toBeNull()
   })
 
+  it('repairs duplicate turn ids without losing the older turn', () => {
+    const olderUser = turn('msg-1', 'user', 'first prompt', 100)
+    const olderAssistant = turn('assistant-1', 'assistant', 'first answer', 101)
+    const newerUser = turn('msg-1', 'user', 'second prompt', 200)
+    const newerAssistant = turn('assistant-2', 'assistant', 'second answer', 201)
+    saveConversation({
+      ...meta('duplicate-turn-id'),
+      updatedAt: 201,
+      turnCount: 3,
+      turns: [newerUser, olderAssistant, newerAssistant],
+      activeTurns: [olderUser, olderAssistant, newerUser, newerAssistant],
+    })
+
+    const recovered = loadConversation('duplicate-turn-id')
+
+    expect(recovered?.turns.map(item => item.content)).toEqual([
+      'first prompt',
+      'first answer',
+      'second prompt',
+      'second answer',
+    ])
+    expect(new Set(recovered?.turns.map(item => item.id))).toHaveProperty('size', 4)
+    expect(recovered?.turns[0]?.id).toBe('msg-1')
+    expect(recovered?.turns[2]?.id).toMatch(/^msg-1~/)
+    expect(recovered?.activeTurns?.map(item => item.id)).toEqual(recovered?.turns.map(item => item.id))
+  })
+
+  it('starts a fresh journal generation after a colliding session id', () => {
+    saveConversation({
+      ...meta('colliding-session'),
+      createdAt: 100,
+      updatedAt: 200,
+      turnCount: 2,
+      turns: [
+        turn('old-user', 'user', 'old session prompt', 100),
+        turn('old-assistant', 'assistant', 'old session reply', 200),
+      ],
+    })
+    appendConversationJournal('colliding-session', {
+      version: 1,
+      type: 'meta',
+      timestamp: 400,
+      meta: { ...meta('colliding-session'), createdAt: 300, updatedAt: 400, title: 'Untitled' },
+    })
+    appendConversationJournal('colliding-session', {
+      version: 2,
+      type: 'draft_state',
+      timestamp: 401,
+      draft: { text: 'new session draft' },
+    })
+
+    const recovered = loadConversation('colliding-session')
+
+    expect(recovered).toMatchObject({ createdAt: 300, title: 'new session draft', turnCount: 0 })
+    expect(recovered?.turns).toEqual([])
+  })
+
   it('loads, lists, and deletes conversations through asynchronous storage', async () => {
     const conversation: PersistedConversation = {
       ...meta('async-1'),
@@ -107,6 +164,33 @@ describe.sequential('conversation journal store', () => {
     ])
     await expect(deleteConversationAsync('async-1')).resolves.toBe(true)
     await expect(loadConversationAsync('async-1')).resolves.toBeNull()
+  })
+
+  it('hides empty shell conversations and titles recoverable drafts', async () => {
+    appendConversationJournal('empty-shell', {
+      version: 1,
+      type: 'meta',
+      timestamp: 100,
+      meta: { ...meta('empty-shell'), title: 'Untitled' },
+    })
+    appendConversationJournal('empty-shell', { version: 2, type: 'queue_state', timestamp: 101, inputs: [] })
+    appendConversationJournal('empty-shell', { version: 2, type: 'draft_state', timestamp: 102, draft: { text: '' } })
+
+    expect(listConversations(process.cwd()).map(item => item.id)).not.toContain('empty-shell')
+    await expect(listConversationsAsync(process.cwd())).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'empty-shell' })]),
+    )
+
+    appendConversationJournal('empty-shell', {
+      version: 2,
+      type: 'draft_state',
+      timestamp: 103,
+      draft: { text: 'drafted conversation title' },
+    })
+
+    expect(listConversations(process.cwd())).toContainEqual(
+      expect.objectContaining({ id: 'empty-shell', title: 'drafted conversation title', turnCount: 0 }),
+    )
   })
 
   it('atomically compacts a completed journal to one current snapshot', () => {
@@ -131,6 +215,40 @@ describe.sequential('conversation journal store', () => {
     expect(lines).toHaveLength(1)
     expect(JSON.parse(lines[0]!)).toMatchObject({ type: 'snapshot', conversation: { turnCount: 2 } })
     expect(loadConversation('compact-1')?.turns.map(item => item.content)).toEqual(['first', 'second'])
+  })
+
+  it('drops obsolete entries and damage before the latest valid snapshot', async () => {
+    const older: PersistedConversation = {
+      ...meta('latest-snapshot'),
+      turnCount: 1,
+      turns: [turn('old-user', 'user', 'obsolete', 100)],
+    }
+    const latest: PersistedConversation = {
+      ...meta('latest-snapshot'),
+      updatedAt: 200,
+      turnCount: 1,
+      turns: [turn('new-user', 'user', 'current', 200)],
+    }
+    const journalPath = join(directory, 'latest-snapshot.jsonl')
+    writeFileSync(journalPath, [
+      JSON.stringify({ version: 1, type: 'snapshot', timestamp: 100, conversation: older }),
+      '{"version":1,"type":"turn"',
+      JSON.stringify({ version: 1, type: 'snapshot', timestamp: 200, conversation: latest }),
+      JSON.stringify({ version: 1, type: 'stream_start', timestamp: 201 }),
+      JSON.stringify({ version: 1, type: 'stream_delta', timestamp: 202, text: 'partial' }),
+      '',
+    ].join('\n'), 'utf8')
+
+    expect(loadConversation('latest-snapshot')).toMatchObject({
+      turns: [
+        expect.objectContaining({ content: 'current' }),
+        expect.objectContaining({ content: 'partial' }),
+      ],
+      recovery: { interrupted: true, truncatedJournal: false },
+    })
+    await expect(loadConversationAsync('latest-snapshot')).resolves.toMatchObject({
+      recovery: { interrupted: true, truncatedJournal: false },
+    })
   })
 
   it('recovers a partial assistant stream and ignores a damaged tail line', async () => {
@@ -189,6 +307,25 @@ describe.sequential('conversation journal store', () => {
         thinking: { content: 'checking architecture and tests', status: 'interrupted' },
       },
     })
+  })
+
+  it('replays a large delta burst without repeated whole-string concatenation', () => {
+    const journalPath = join(directory, 'chunked-replay.jsonl')
+    const entries: unknown[] = [
+      { version: 1, type: 'meta', timestamp: 100, meta: meta('chunked-replay') },
+      { version: 1, type: 'turn', timestamp: 101, turn: turn('user-1', 'user', 'recover burst', 101) },
+      { version: 1, type: 'stream_start', timestamp: 102 },
+    ]
+    for (let index = 0; index < 10_000; index += 1) {
+      entries.push({ version: 1, type: 'stream_delta', timestamp: 103 + index, text: 'x' })
+      entries.push({ version: 1, type: 'stream_thinking_delta', timestamp: 103 + index, text: 'y' })
+    }
+    writeFileSync(journalPath, `${entries.map(entry => JSON.stringify(entry)).join('\n')}\n`, 'utf8')
+
+    const recovered = loadConversation('chunked-replay')?.turns.at(-1)
+
+    expect(recovered?.content).toBe('x'.repeat(10_000))
+    expect(recovered?.metadata?.thinking?.content).toBe('y'.repeat(10_000))
   })
 
   it('closes unresolved tool calls with synthetic abort results', () => {

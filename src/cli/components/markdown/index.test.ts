@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { formatMarkdown, getMarkdownCacheStats, resetMarkdownCache } from './index'
+import { formatMarkdown, formatMarkdownForDisplay, getMarkdownCacheStats, resetMarkdownCache } from './index'
 
 describe('Markdown render cache', () => {
   beforeEach(() => resetMarkdownCache())
@@ -22,5 +22,11 @@ describe('Markdown render cache', () => {
     expect(stats.entries).toBeLessThanOrEqual(512)
     expect(stats.evictions).toBeGreaterThan(0)
     expect(stats.bytes).toBeLessThanOrEqual(4 * 1024 * 1024)
+  })
+
+  it('bounds markdown work for oversized live display text', () => {
+    const formatted = formatMarkdownForDisplay('x'.repeat(100), 16)
+    expect(formatted).toContain('display truncated after 16 characters')
+    expect(formatted).not.toContain('x'.repeat(17))
   })
 })

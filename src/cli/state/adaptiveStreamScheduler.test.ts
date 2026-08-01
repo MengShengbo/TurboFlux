@@ -28,7 +28,9 @@ describe('AdaptiveStreamScheduler', () => {
     const scheduler = new AdaptiveStreamScheduler(flush)
     for (let index = 0; index < 8; index += 1) scheduler.enqueue(1)
 
-    vi.advanceTimersByTime(8)
+    vi.advanceTimersByTime(47)
+    expect(flush).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
     expect(flush).toHaveBeenCalledWith(expect.objectContaining({ depth: 8, mode: 'catch-up' }))
   })
 
@@ -39,7 +41,7 @@ describe('AdaptiveStreamScheduler', () => {
     vi.advanceTimersByTime(10)
     scheduler.noteInput()
 
-    vi.advanceTimersByTime(15)
+    vi.advanceTimersByTime(31)
     expect(flush).not.toHaveBeenCalled()
     vi.advanceTimersByTime(1)
     expect(flush).toHaveBeenCalledWith(expect.objectContaining({ inputPriority: true }))

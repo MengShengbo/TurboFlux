@@ -156,6 +156,14 @@ export function MessageList({
             borderColor={isSelected ? theme.brand : undefined}
             paddingX={isSelected ? 1 : 0}
           >
+            {msg.progress && (msg.content || msg.thinking) ? (
+              <AssistantMessage
+                content={msg.content}
+                interrupted={msg.interrupted}
+                thinking={msg.thinking}
+                showThinking={showThinking}
+              />
+            ) : null}
             {msg.tools && msg.tools.length > 0 && (
               <ToolCallTree
                 tools={msg.tools}
@@ -186,10 +194,17 @@ export function MessageList({
                 ))}
               </Box>
             )}
-            {(msg.content || msg.thinking) && (msg.tools?.length || msg.changes?.length) ? (
+            {!msg.progress && (msg.content || msg.thinking) && (msg.tools?.length || msg.changes?.length) ? (
               <Text color={theme.inactive}>{t('ui.message.answer')}</Text>
             ) : null}
-            <AssistantMessage content={msg.content} interrupted={msg.interrupted} thinking={msg.thinking} showThinking={showThinking} />
+            {!msg.progress && (
+              <AssistantMessage
+                content={msg.content}
+                interrupted={msg.interrupted}
+                thinking={msg.thinking}
+                showThinking={showThinking}
+              />
+            )}
           </Box>
         )
       })}

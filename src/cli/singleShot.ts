@@ -8,6 +8,7 @@ import { commandRegistry } from './commands/index'
 import { ConversationManager } from './conversations/manager'
 import { loadProfile } from '../core/profile'
 import { createTranslator, type Translator } from './i18n/index'
+import { getProvisionalAssistantText } from './components/appHelpers'
 
 const DEFAULT_TRANSLATOR = createTranslator('en')
 
@@ -29,6 +30,7 @@ export class SingleShotProgressReporter {
   private readonly startedTools = new Map<string, number>()
   private lastPhase = ''
   private lastThinkingUpdate = 0
+  private lastProgressMessage = ''
 
   constructor(
     private readonly write: OutputWriter,
@@ -57,6 +59,14 @@ export class SingleShotProgressReporter {
         }
         break
       }
+      case 'turn:complete':
+        if (event.turn.role === 'assistant' && event.turn.toolCalls?.length) {
+          this.writeProgressMessage(stripTextToolCallMarkup(
+            getProvisionalAssistantText(event.turn),
+            { stripIncomplete: true },
+          ))
+        }
+        break
       case 'tool:call':
         this.startedTools.set(event.toolCall.id, this.now())
         this.write(`→ ${event.toolCall.name}${summarizeToolCall(event.toolCall, this.verbose)}\n`)
@@ -81,6 +91,8 @@ export class SingleShotProgressReporter {
       case 'notification':
         if (event.level === 'warning' || event.level === 'error') {
           this.write(`[${this.t(event.level === 'warning' ? 'single.warning' : 'single.error')}] ${singleLine(event.message, 240)}\n`)
+        } else {
+          this.writeProgressMessage(event.message)
         }
         break
       case 'ask:user':
@@ -90,6 +102,13 @@ export class SingleShotProgressReporter {
         this.write(`[${this.t('single.error')}] ${singleLine(event.error, 240)}\n`)
         break
     }
+  }
+
+  private writeProgressMessage(message: string): void {
+    const normalized = singleLine(message, 500)
+    if (!normalized || normalized === this.lastProgressMessage) return
+    this.lastProgressMessage = normalized
+    this.write(`${normalized}\n`)
   }
 }
 

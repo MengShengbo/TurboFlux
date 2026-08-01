@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import type { AgentEngine, AgentEventType } from '../../core/agentEngine'
 import type { TurboFluxConfig } from '../../core/config'
+import type { AgentTurn } from '../../shared/agentTypes'
 import type {
   ConversationDraftState,
   ConversationInteractionState,
@@ -37,6 +39,10 @@ export interface ConversationPersistenceHealth {
   pendingStreamingEntries: number
 }
 
+function conversationSnapshotHash(conversation: PersistedConversation): string {
+  return createHash('sha256').update(JSON.stringify(conversation)).digest('hex')
+}
+
 function createEmptyInteractionState(): ConversationInteractionState {
   return { queuedInputs: [], draft: { text: '' }, pendingSteering: [], pendingApprovals: [] }
 }
@@ -45,7 +51,7 @@ export class ConversationManager {
   private currentId: string
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private journalInitialized = false
-  private lastPersistedSnapshot = ''
+  private lastPersistedSnapshotHash = ''
   private persistenceError: Error | null = null
   private persistenceDegradedAt: number | null = null
   private readonly journalWriter: ConversationJournalWriter
@@ -73,7 +79,7 @@ export class ConversationManager {
       this.journalWriter.switchConversation(currentId)
       this.currentId = currentId
       this.journalInitialized = false
-      this.lastPersistedSnapshot = ''
+      this.lastPersistedSnapshotHash = ''
       this.interactionState = createEmptyInteractionState()
     })
   }
@@ -92,7 +98,7 @@ export class ConversationManager {
   }
 
   recordEvent(event: AgentEventType): void {
-    this.ensureJournal()
+    if (this.shouldInitializeJournalForEvent(event)) this.ensureJournal()
     const timestamp = Date.now()
     switch (event.type) {
       case 'turn:start':
@@ -180,9 +186,11 @@ export class ConversationManager {
         }, 'terminal')
         break
       case 'mode:change':
+        if (!this.hasPersistableConversationState()) break
         this.append({ version: 1, type: 'meta', timestamp, meta: this.buildMeta() }, 'critical')
         break
       case 'error':
+        if (!this.hasPersistableConversationState()) break
         this.append({ version: 1, type: 'stream_end', timestamp, interrupted: true }, 'terminal')
         break
       case 'session:complete':
@@ -192,11 +200,10 @@ export class ConversationManager {
   }
 
   persist(compact = false): void {
-    const fullTurns = this.engine.getFullConversationTurns()
-    if (fullTurns.length === 0) return
+    if (!this.hasPersistableConversationState()) return
     const conv = this.buildConversation()
-    const snapshot = JSON.stringify(conv)
-    if (snapshot === this.lastPersistedSnapshot) return
+    const snapshotHash = conversationSnapshotHash(conv)
+    if (!compact && snapshotHash === this.lastPersistedSnapshotHash) return
     try {
       this.ensureJournal()
       this.journalWriter.flush(true)
@@ -205,7 +212,7 @@ export class ConversationManager {
       } else {
         this.journalWriter.append({ version: 1, type: 'snapshot', timestamp: Date.now(), conversation: conv }, 'terminal')
       }
-      this.lastPersistedSnapshot = snapshot
+      this.lastPersistedSnapshotHash = snapshotHash
       this.reportPersistenceSuccess()
     } catch (error) {
       this.reportPersistenceFailure(error)
@@ -245,6 +252,7 @@ export class ConversationManager {
 
   delete(id: string): boolean {
     if (!this.isPersistenceHealthy()) return false
+    if (id === this.currentId) return false
     const conv = loadConversation(id)
     if (!conv || !sameWorkspacePath(conv.workspacePath, this.workspacePath)) return false
     return deleteConversation(id)
@@ -252,6 +260,7 @@ export class ConversationManager {
 
   async deleteAsync(id: string): Promise<boolean> {
     if (!this.isPersistenceHealthy()) return false
+    if (id === this.currentId) return false
     const conv = await loadConversationAsync(id)
     if (!conv || !sameWorkspacePath(conv.workspacePath, this.workspacePath)) return false
     return deleteConversationAsync(id)
@@ -310,7 +319,7 @@ export class ConversationManager {
     try {
       this.journalWriter.retry(probe)
       this.journalInitialized = true
-      this.lastPersistedSnapshot = ''
+      this.lastPersistedSnapshotHash = ''
       this.reportPersistenceSuccess()
       this.persist(true)
     } catch (error) {
@@ -341,6 +350,7 @@ export class ConversationManager {
       ...input,
       attachments: input.attachments ? [...input.attachments] : undefined,
     }))
+    if (!this.journalInitialized && !this.hasPersistableConversationState()) return true
     try {
       this.ensureJournal()
       return this.append({
@@ -362,6 +372,7 @@ export class ConversationManager {
         ? draft.pendingPastes.map(pending => ({ ...pending }))
         : undefined,
     }
+    if (!this.journalInitialized && !this.hasPersistableConversationState()) return true
     try {
       this.ensureJournal()
       return this.append({
@@ -378,10 +389,11 @@ export class ConversationManager {
   private buildConversation(): PersistedConversation {
     const session = this.engine.getSession()
     const fullTurns = this.engine.getFullConversationTurns()
-    const firstUserMsg = fullTurns.find(turn => turn.role === 'user')
+    const activeTurnsMatchFullConversation = session.turns.length === fullTurns.length
+      && session.turns.every((turn, index) => turn === fullTurns[index])
     return {
       id: this.currentId,
-      title: firstUserMsg ? firstUserMsg.content.slice(0, 60).replace(/\n/g, ' ') : 'Untitled',
+      title: this.buildTitle(fullTurns),
       workspacePath: this.workspacePath,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt ?? this.now(),
@@ -390,7 +402,7 @@ export class ConversationManager {
       provider: this.config.provider,
       turnCount: fullTurns.length,
       turns: fullTurns,
-      activeTurns: session.turns,
+      ...(activeTurnsMatchFullConversation ? {} : { activeTurns: session.turns }),
       contextSegments: this.engine.getContextSegments(),
       contextReservoir: this.engine.getContextReservoir(),
       interactionState: JSON.parse(JSON.stringify(this.interactionState)) as ConversationInteractionState,
@@ -403,17 +415,23 @@ export class ConversationManager {
     this.interactionState = conv.interactionState
       ? JSON.parse(JSON.stringify(conv.interactionState)) as ConversationInteractionState
       : createEmptyInteractionState()
-    this.lastPersistedSnapshot = JSON.stringify(conv)
+    this.engine.restoreFromTurns(conv.activeTurns ?? conv.turns)
+    this.engine.setContextSegments(conv.contextSegments ?? [])
+    this.engine.setContextReservoir(conv.contextReservoir ?? [])
+    const session = this.engine.getSession()
+    session.createdAt = conv.createdAt
+    session.updatedAt = conv.updatedAt
+    if (this.engine.getMode() !== conv.mode) this.engine.setMode(conv.mode)
+    this.lastPersistedSnapshotHash = conversationSnapshotHash(conv)
     return conv
   }
 
   private buildMeta(): ConversationMeta {
     const session = this.engine.getSession()
     const fullTurns = this.engine.getFullConversationTurns()
-    const firstUserMsg = fullTurns.find(turn => turn.role === 'user')
     return {
       id: this.currentId,
-      title: firstUserMsg ? firstUserMsg.content.slice(0, 60).replace(/\n/g, ' ') : 'Untitled',
+      title: this.buildTitle(fullTurns),
       workspacePath: this.workspacePath,
       createdAt: session.createdAt,
       updatedAt: Date.now(),
@@ -421,6 +439,51 @@ export class ConversationManager {
       model: this.config.model,
       provider: this.config.provider,
       turnCount: fullTurns.length,
+    }
+  }
+
+  private buildTitle(turns: AgentTurn[]): string {
+    const source = turns.find(turn => turn.role === 'user')?.content
+      || this.interactionState.queuedInputs[0]?.prompt
+      || this.interactionState.draft.text
+      || this.interactionState.pendingSteering[0]?.text
+      || ''
+    const title = source.trim().slice(0, 60).replace(/\n/g, ' ')
+    return title || 'Untitled'
+  }
+
+  private hasPersistableConversationState(): boolean {
+    const hasTurns = this.engine.getSession().turns.some(turn => turn.role !== 'system')
+      || this.engine.getContextReservoir().some(entry => entry.turns.length > 0)
+    if (hasTurns) return true
+    const draft = this.interactionState.draft
+    return this.interactionState.queuedInputs.length > 0
+      || Boolean(draft.text.trim())
+      || Boolean(draft.attachments?.length)
+      || Boolean(draft.pendingPastes?.length)
+      || this.interactionState.pendingSteering.length > 0
+      || this.interactionState.pendingApprovals.length > 0
+  }
+
+  private shouldInitializeJournalForEvent(event: AgentEventType): boolean {
+    switch (event.type) {
+      case 'turn:start':
+      case 'turn:complete':
+      case 'stream:start':
+      case 'stream:delta':
+      case 'stream:thinking_delta':
+      case 'stream:end':
+      case 'tool:call':
+      case 'tool:result':
+      case 'input:state':
+      case 'approval:state':
+      case 'context:segment_created':
+        return true
+      case 'mode:change':
+      case 'error':
+        return this.hasPersistableConversationState()
+      default:
+        return false
     }
   }
 

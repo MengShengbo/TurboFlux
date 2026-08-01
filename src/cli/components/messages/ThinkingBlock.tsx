@@ -35,6 +35,18 @@ export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity
     tokenCount > 0 ? t('common.tokens', { count: formatTokenCount(tokenCount) }) : '',
     trace.status === 'interrupted' ? t('ui.thinking.interrupted') : '',
   ].filter(Boolean).join(' · ')
+  if (!expanded) {
+    return (
+      <Box overflow="hidden">
+        {streaming ? (
+          <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
+        ) : (
+          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▸ ${summary}`}</Text>
+        )}
+      </Box>
+    )
+  }
+
   const displayContent = cliTruncate(
     trace.content.trim(),
     streaming ? 1200 : 6000,
@@ -45,18 +57,6 @@ export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity
     return (
       <Box>
         <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
-      </Box>
-    )
-  }
-
-  if (!expanded) {
-    return (
-      <Box overflow="hidden">
-        {streaming ? (
-          <SpinnerGlyph lastActivity={lastActivity ?? startedAt} label={summary} />
-        ) : (
-          <Text color={trace.status === 'interrupted' ? theme.warning : theme.inactive}>{`▸ ${summary}`}</Text>
-        )}
       </Box>
     )
   }
@@ -80,7 +80,7 @@ export function ThinkingBlock({ trace, expanded, streaming = false, lastActivity
 }
 
 function estimateThinkingTokens(content: string): number {
-  return content.trim() ? Math.max(1, Math.ceil(content.length / 4)) : 0
+  return content.length > 0 ? Math.max(1, Math.ceil(content.length / 4)) : 0
 }
 
 function formatTokenCount(value: number): string {

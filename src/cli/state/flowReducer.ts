@@ -9,6 +9,9 @@ import type {
 } from '../../shared/flowEvents'
 import type { AgentAttachment, AgentMode, AgentRunState, TokenUsage } from '../../shared/agentTypes'
 
+export const MAX_FLOW_STREAM_TEXT_CHARS = 16 * 1024
+export const MAX_FLOW_NOTIFICATION_ITEMS = 64
+
 export type FlowRunPhase = 'idle' | 'starting' | 'active' | 'stopping' | 'terminal'
 export type FlowInputStatus = 'submitted' | 'durable' | 'accepted' | 'queued' | 'rejected' | 'committed' | 'restored' | 'cancelled'
 export type FlowApprovalStatus = 'requested' | 'presented' | 'resolved' | 'cancelled'
@@ -196,6 +199,24 @@ function requireItemId(state: ThreadFlowState, event: AnyFlowEvent): [ThreadFlow
 
 function removeValue(values: string[], value: string): string[] {
   return values.filter(candidate => candidate !== value)
+}
+
+function appendBoundedStreamText(current: string, delta: string): string {
+  if (delta.length >= MAX_FLOW_STREAM_TEXT_CHARS) return delta.slice(-MAX_FLOW_STREAM_TEXT_CHARS)
+  const retained = MAX_FLOW_STREAM_TEXT_CHARS - delta.length
+  return `${current.slice(-retained)}${delta}`
+}
+
+function retainRecentNotifications(notifications: Record<string, FlowNotificationItem>): Record<string, FlowNotificationItem> {
+  const values = Object.values(notifications)
+  const persistent = values.filter(notification => ['action-required', 'error', 'result-ready'].includes(notification.category))
+  const transient = values
+    .filter(notification => !['action-required', 'error', 'result-ready'].includes(notification.category))
+    .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)
+    .slice(0, MAX_FLOW_NOTIFICATION_ITEMS)
+  const retained = [...persistent, ...transient]
+  if (retained.length === values.length) return notifications
+  return Object.fromEntries(retained.map(notification => [notification.id, notification]))
 }
 
 function updateInput(
@@ -401,7 +422,18 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
       return updateInput(state, event, 'rejected', event.payload.reason)
     case 'input.committed': {
       const updated = updateInput(state, event, 'committed')
-      return event.itemId ? { ...updated, inputQueue: removeValue(updated.inputQueue, event.itemId) } : updated
+      if (!event.itemId) return updated
+      const input = updated.inputs[event.itemId]
+      return {
+        ...updated,
+        inputs: input
+          ? {
+              ...updated.inputs,
+              [event.itemId]: { ...input, text: '', attachmentIds: [], attachments: [] },
+            }
+          : updated.inputs,
+        inputQueue: removeValue(updated.inputQueue, event.itemId),
+      }
     }
     case 'input.restored': {
       const updated = updateInput(state, event, 'restored', event.payload.reason)
@@ -559,7 +591,12 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
         ...state,
         streams: {
           ...state.streams,
-          [channel]: { ...stream, status: 'streaming', tail: stream.tail + event.payload.text, updatedAt: event.at },
+          [channel]: {
+            ...stream,
+            status: 'streaming',
+            tail: appendBoundedStreamText(stream.tail, event.payload.text),
+            updatedAt: event.at,
+          },
         },
       }
     }
@@ -570,7 +607,12 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
         ...state,
         streams: {
           ...state.streams,
-          [channel]: { ...stream, committed: stream.committed + event.payload.text, tail: '', updatedAt: event.at },
+          [channel]: {
+            ...stream,
+            committed: appendBoundedStreamText(stream.committed, event.payload.text),
+            tail: '',
+            updatedAt: event.at,
+          },
         },
       }
     }
@@ -625,21 +667,19 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
       let itemId: string | null
       ;[state, itemId] = requireItemId(state, event)
       if (!itemId) return state
-      return {
-        ...state,
-        notifications: {
-          ...state.notifications,
-          [itemId]: {
-            id: itemId,
-            priority: event.payload.priority,
-            category: event.payload.category,
-            message: event.payload.message,
-            acknowledged: false,
-            createdAt: event.at,
-            updatedAt: event.at,
-          },
+      const notifications = {
+        ...state.notifications,
+        [itemId]: {
+          id: itemId,
+          priority: event.payload.priority,
+          category: event.payload.category,
+          message: event.payload.message,
+          acknowledged: false,
+          createdAt: event.at,
+          updatedAt: event.at,
         },
       }
+      return { ...state, notifications: retainRecentNotifications(notifications) }
     }
     case 'notification.acknowledged': {
       let itemId: string | null

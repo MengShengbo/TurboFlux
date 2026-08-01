@@ -16,7 +16,7 @@ import { RuntimeTaskManager } from './runtimeTaskManager'
 import { SubAgentTaskManager } from './subAgentTaskManager'
 import { DefaultAgentStateProvider, type AgentRuntimeConfig } from './stateProvider'
 import { buildProfileSystemPromptSection, loadProfile, type TurboFluxProfile } from '../profile'
-import { SessionRegistry } from './sessionRegistry'
+import { createSessionId, SessionRegistry } from './sessionRegistry'
 
 export interface CreateAgentRuntimeOptions {
   workspacePath: string
@@ -56,7 +56,7 @@ function getDefaultShell(): string {
   return process.platform === 'win32' ? 'powershell' : 'bash'
 }
 
-function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
+function toEngineConfig(options: CreateAgentRuntimeOptions, conversationId: string): AgentConfig {
   const approvalPolicy = options.approvalPolicy || options.config.approvalPolicy || 'ask'
   const capabilityProfile = resolveCapabilityProfileForApproval(
     approvalPolicy,
@@ -71,7 +71,7 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
     workspacePath: options.workspacePath,
     workspaceName: options.workspaceName,
     profileSystemPrompt: buildProfileSystemPromptSection(options.profile ?? loadProfile()),
-    conversationId: options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`,
+    conversationId,
     contextWindow: options.config.contextWindow,
     contextPolicy: 'normal',
     maxTokens: options.config.maxTokens,
@@ -80,8 +80,8 @@ function toEngineConfig(options: CreateAgentRuntimeOptions): AgentConfig {
 }
 
 export function createAgentRuntime(options: CreateAgentRuntimeOptions): AgentRuntime {
-  const conversationId = options.conversationId || `${options.conversationPrefix || 'agent'}-${Date.now()}`
-  const engineConfig = toEngineConfig(options)
+  const conversationId = options.conversationId || createSessionId(options.conversationPrefix || 'agent')
+  const engineConfig = toEngineConfig(options, conversationId)
   const sessionRegistry = new SessionRegistry(conversationId)
   const stateProvider = new DefaultAgentStateProvider({
     ...options.config,

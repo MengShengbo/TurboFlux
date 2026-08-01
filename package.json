@@ -1,6 +1,6 @@
 {
   "name": "turboflux",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "TurboFlux TUI - a local terminal user interface for AI-assisted developer workflows",
   "main": "dist/cli/index.js",
   "bin": {
@@ -20,6 +20,8 @@
     "dev:cli": "tsx watch src/cli/index.ts",
     "dev:once": "tsx src/cli/index.ts",
     "start": "tsx src/cli/index.ts",
+    "link:tf": "node scripts/link-local-cli.mjs",
+    "unlink:tf": "node scripts/link-local-cli.mjs --remove",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "prepack": "npm run clean && npm run build",
     "build": "tsc",

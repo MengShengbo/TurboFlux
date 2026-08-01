@@ -68,6 +68,15 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('only when the user explicitly asks for a detailed explanation')
   })
 
+  it('requires persistent progress updates during multi-step execution', () => {
+    const prompt = buildSystemPrompt('vibe')
+
+    expect(prompt).toContain('progress updates are required')
+    expect(prompt).toContain('Do not stay silent until the final answer')
+    expect(prompt).toContain('more than three consecutive tool rounds')
+    expect(prompt).toContain('what changed or was learned and what happens next')
+  })
+
   it('does not let provisional tool commentary masquerade as evidence', () => {
     const prompt = buildSystemPrompt('vibe')
 

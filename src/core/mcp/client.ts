@@ -61,7 +61,7 @@ export class McpClient {
     if (this.connections.has(name)) await this.disconnect(name)
 
     const client = new Client(
-      { name: 'turboflux', version: '1.0.0' },
+      { name: 'turboflux', version: '1.0.1' },
       { capabilities: {} },
     )
     const conn: McpConnection = {

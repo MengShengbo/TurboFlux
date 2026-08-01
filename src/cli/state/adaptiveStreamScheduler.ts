@@ -62,8 +62,8 @@ export class AdaptiveStreamScheduler {
   ) {
     this.now = options.now ?? Date.now
     this.smoothDelayMs = Math.max(1, options.smoothDelayMs ?? 64)
-    this.catchUpDelayMs = Math.max(1, options.catchUpDelayMs ?? 8)
-    this.inputPriorityDelayMs = Math.max(1, options.inputPriorityDelayMs ?? 16)
+    this.catchUpDelayMs = Math.max(1, options.catchUpDelayMs ?? 48)
+    this.inputPriorityDelayMs = Math.max(1, options.inputPriorityDelayMs ?? 32)
     this.inputPriorityWindowMs = Math.max(0, options.inputPriorityWindowMs ?? 250)
   }
 

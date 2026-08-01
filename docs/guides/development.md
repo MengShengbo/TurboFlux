@@ -20,14 +20,19 @@ npm run build
 Run the CLI once or in watch mode:
 
 ```bash
-npm run dev:once -- .
+npm run build
+npm run link:tf
+tf .
 npm run dev:cli -- .
 ```
+
+Use `tf` for the local built `dist/` launcher. Use `turboflux` to test the
+published npm package.
 
 Run one task without opening the full prompt loop:
 
 ```bash
-npm run dev:once -- . --command "Inspect the current project and summarize risks"
+tf . --command "Inspect the current project and summarize risks"
 ```
 
 ## Useful commands
@@ -77,7 +82,7 @@ Use temporary project-local configuration during manual runs:
 ```powershell
 $env:TURBOFLUX_CONFIG_DIR = Join-Path $PWD '.tmp/turboflux-config'
 $env:TURBOFLUX_CONVERSATIONS_DIR = Join-Path $PWD '.tmp/turboflux-conversations'
-npm run dev:once -- .
+tf .
 ```
 
 Remove only the temporary directory after the process exits. Never use real

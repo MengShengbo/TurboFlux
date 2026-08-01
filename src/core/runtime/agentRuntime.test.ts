@@ -6,6 +6,32 @@ import { DEFAULT_PROFILE } from '../profile'
 import { createAgentRuntime } from './agentRuntime'
 
 describe('createAgentRuntime runtime tasks', () => {
+  it('uses one unique conversation identity across the engine and registry', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
+    const runtime = createAgentRuntime({
+      workspacePath: workspace,
+      workspaceName: 'runtime-test',
+      conversationPrefix: 'cli',
+      config: {
+        provider: 'custom',
+        apiKey: 'test',
+        baseUrl: 'http://example.test',
+        model: 'test-model',
+        contextWindow: 100_000,
+        maxTokens: 4096,
+      },
+    })
+
+    try {
+      expect(runtime.engine.getConversationId()).toBe(runtime.sessionRegistry.getCurrentId())
+      expect(runtime.engine.getSession().id).toBe(runtime.sessionRegistry.getCurrentId())
+      expect(runtime.sessionRegistry.getCurrentId()).toMatch(/^cli-\d+-[a-f0-9]{12}$/)
+    } finally {
+      await runtime.destroy()
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   it('turns full approval into unrestricted filesystem access', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-'))
     const outside = mkdtempSync(join(tmpdir(), 'turboflux-agent-runtime-outside-'))

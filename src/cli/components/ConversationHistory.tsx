@@ -22,12 +22,15 @@ interface ConversationHistoryProps {
 export function ConversationHistory({ conversations, onSelect, onDelete, onCancel }: ConversationHistoryProps) {
   const theme = useTheme()
   const { t, locale } = useI18n()
-  const actions = [t('ui.conversations.enter'), t('ui.conversations.delete')]
   const { rows } = useTerminalSize()
   const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [mode, setMode] = useState<'list' | 'action'>('list')
   const [actionIdx, setActionIdx] = useState(0)
+  const selectedConversation = conversations[selectedIdx]
+  const actions = selectedConversation?.isCurrent
+    ? [t('ui.conversations.enter')]
+    : [t('ui.conversations.enter'), t('ui.conversations.delete')]
 
   const maxVisible = Math.max(5, rows - 8)
   const viewStart = Math.max(0, Math.min(selectedIdx - Math.floor(maxVisible / 2), conversations.length - maxVisible))
@@ -45,7 +48,7 @@ export function ConversationHistory({ conversations, onSelect, onDelete, onCance
         if (!conv) return
         if (actionIdx === 0) {
           onSelect(conv.id)
-        } else {
+        } else if (!conv.isCurrent) {
           onDelete(conv.id)
         }
         return
@@ -83,7 +86,7 @@ export function ConversationHistory({ conversations, onSelect, onDelete, onCance
   }
 
   if (mode === 'action') {
-    const conv = conversations[selectedIdx]
+    const conv = selectedConversation
     return (
       <Box flexDirection="column" paddingX={1}>
         <Box marginBottom={1}>

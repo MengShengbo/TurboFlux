@@ -6,6 +6,89 @@ import type { ToolStatus } from './tools/ToolCallTree'
 import { createTranslator, type Translator } from '../i18n/index'
 
 const DEFAULT_TRANSLATOR = createTranslator('en')
+export const LIVE_REASONING_TAIL_CHARS = 16 * 1024
+export const LIVE_STREAM_TEXT_TAIL_CHARS = 24 * 1024
+export const MAX_STREAM_TEXT_BUFFER_CHARS = 8 * 1024 * 1024
+
+export class StreamTextAccumulator {
+  private readonly chunks: string[] = []
+  private totalChars = 0
+  private truncated = false
+
+  constructor(private readonly maxChars = MAX_STREAM_TEXT_BUFFER_CHARS) {}
+
+  append(delta: string): string {
+    if (!delta || this.totalChars >= this.maxChars) {
+      if (delta) this.truncated = true
+      return ''
+    }
+    const remaining = this.maxChars - this.totalChars
+    const accepted = delta.length > remaining ? delta.slice(0, remaining) : delta
+    if (accepted) {
+      this.chunks.push(accepted)
+      this.totalChars += accepted.length
+    }
+    if (accepted.length < delta.length) this.truncated = true
+    return accepted
+  }
+
+  get length(): number {
+    return this.totalChars
+  }
+
+  toString(): string {
+    const value = this.chunks.join('')
+    return this.truncated
+      ? `${value}\n\n[stream output truncated after ${this.maxChars.toLocaleString()} characters]`
+      : value
+  }
+
+  reset(): void {
+    this.chunks.length = 0
+    this.totalChars = 0
+    this.truncated = false
+  }
+}
+
+export function appendLiveStreamTail(
+  current: string,
+  delta: string,
+  maxChars = LIVE_STREAM_TEXT_TAIL_CHARS,
+): string {
+  const limit = Math.max(0, Math.floor(maxChars))
+  if (limit === 0) return ''
+  if (delta.length >= limit) return delta.slice(-limit)
+  const availableCurrentChars = limit - delta.length
+  const boundedCurrent = current.length > availableCurrentChars
+    ? current.slice(-availableCurrentChars)
+    : current
+  return boundedCurrent + delta
+}
+
+export function createMessageIdFactory(
+  namespace = `${Date.now().toString(36)}-${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+): () => string {
+  let sequence = 0
+  return () => {
+    sequence += 1
+    return `msg-${namespace}-${sequence}`
+  }
+}
+
+export function appendLiveReasoningTail(
+  current: string,
+  delta: string,
+  maxChars = LIVE_REASONING_TAIL_CHARS,
+): string {
+  const limit = Math.max(0, Math.floor(maxChars))
+  if (limit === 0) return ''
+  if (delta.length >= limit) return delta.slice(-limit)
+  const availableCurrentChars = limit - delta.length
+  const boundedCurrent = current.length > availableCurrentChars
+    ? current.slice(-availableCurrentChars)
+    : current
+  return boundedCurrent + delta
+}
 
 function isMessageRole(role: string): role is Message['role'] {
   return role === 'user' || role === 'assistant' || role === 'system'
@@ -122,10 +205,12 @@ export function turnsToMessages(turns: AgentTurn[]): Message[] {
       const summary = resultByToolCallId.get(toolCall.id)?.changeSummary
       return summary ? [summary] : []
     })
+    const progress = isProvisionalAssistantTurn(turn)
     return [{
       id: turn.id,
       role: turn.role,
-      content: isProvisionalAssistantTurn(turn) ? '' : turn.content,
+      content: progress ? getProvisionalAssistantText(turn) : turn.content,
+      progress,
       tools: tools && tools.length > 0 ? tools : undefined,
       changes: changes && changes.length > 0 ? changes : undefined,
       interrupted: turn.metadata?.interrupted === true,
@@ -141,6 +226,15 @@ export function turnsToMessages(turns: AgentTurn[]): Message[] {
 
 export function isProvisionalAssistantTurn(turn: AgentTurn): boolean {
   return turn.role === 'assistant' && Boolean(turn.toolCalls?.length)
+}
+
+export function getProvisionalAssistantText(turn: AgentTurn): string {
+  if (turn.content.trim()) return turn.content
+  return (turn.toolCalls || [])
+    .filter(toolCall => toolCall.name === 'notify_user')
+    .map(toolCall => toolCall.arguments.message)
+    .filter((message): message is string => typeof message === 'string' && Boolean(message.trim()))
+    .join('\n')
 }
 
 export function normalizeEnvFlag(value: string | undefined): string | undefined {

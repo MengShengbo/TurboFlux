@@ -72,6 +72,24 @@ describe('ToolExecutionLedger', () => {
     expect(execute).toHaveBeenCalledTimes(2)
   })
 
+  it('repeats the original validation error when reusing a failed read', async () => {
+    const ledger = new ToolExecutionLedger()
+    const execute = vi.fn(async (): Promise<ToolResult> => ({
+      toolCallId: 'first',
+      name: 'read_file',
+      output: 'Error: Unexpected parameter: file_path',
+      isError: true,
+      errorKind: 'validation',
+    }))
+
+    await ledger.execute(call('first', 'read_file', { file_path: 'a.ts' }), execute)
+    const repeated = await ledger.execute(call('second', 'read_file', { file_path: 'a.ts' }), execute)
+
+    expect(repeated.output).toContain('Original failure: Error: Unexpected parameter: file_path')
+    expect(repeated.output).toContain('Change the arguments before retrying')
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
   it('drops cached reads after a workspace mutation', async () => {
     const ledger = new ToolExecutionLedger()
     const execute = vi.fn(async () => result(call('read')))

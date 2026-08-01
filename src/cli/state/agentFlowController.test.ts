@@ -84,6 +84,18 @@ describe('AgentFlowController', () => {
     })
   })
 
+  it('samples each stream once instead of updating Flow state for every token', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.handle({ type: 'stream:start' })
+
+    const first = bridge.handle({ type: 'stream:delta', text: 'first' })
+    const second = bridge.handle({ type: 'stream:delta', text: 'second' })
+
+    expect(first.map(event => event.type)).toEqual(['stream.delta'])
+    expect(second).toEqual([])
+    expect(bridge.store.getThread('thread-1')?.streams.answer.tail).toBe('first')
+  })
+
   it('owns mode, usage, task, and tool draft state', () => {
     const bridge = new AgentFlowController('thread-1')
     bridge.startRun('build feature')
@@ -121,7 +133,7 @@ describe('AgentFlowController', () => {
     bridge.handle({ type: 'turn:start', turn: { id: 'queue-1', role: 'user', content: 'next', timestamp: 2 } })
 
     const state = bridge.store.getThread('thread-1')!
-    expect(state.inputs['queue-1']).toMatchObject({ intent: 'queued-turn', status: 'committed', text: 'next' })
+    expect(state.inputs['queue-1']).toMatchObject({ intent: 'queued-turn', status: 'committed', text: '', attachments: [] })
     expect(state.inputQueue).toEqual([])
     expect(state.violations).toEqual([])
   })

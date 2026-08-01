@@ -24,7 +24,7 @@ const program = new Command()
 program
   .name('turboflux')
   .description(t('cli.description'))
-  .version('1.0.0')
+  .version('1.0.1')
   .argument('[workspace]', t('cli.workspace'), '.')
   .option('--model-override <model>', t('cli.modelOverride'))
   .option('--provider-override <provider>', t('cli.providerOverride'))

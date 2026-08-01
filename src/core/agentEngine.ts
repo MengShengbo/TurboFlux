@@ -46,7 +46,7 @@ import {
   shouldOmitSamplingTemperature,
 } from './requestCompatibility'
 import { TurnStrategyPlanner, type TurnStrategy } from './turnStrategy'
-import { ToolExecutionLedger } from './toolExecutionLedger'
+import { ToolExecutionLedger, toolCallSignature } from './toolExecutionLedger'
 import { createDefaultPipeline, type PermissionPipeline } from './permissions'
 import type { TerminalSessionInfo } from '../shared/terminalTypes'
 import type { RuntimeTask } from '../shared/runtimeTaskTypes'
@@ -126,6 +126,39 @@ export function splitTurnsForCompaction(turns: AgentTurn[], keepRecent: number):
   }
 }
 
+export function countTurnContextChars(turn: AgentTurn): number {
+  let total = turn.content?.length ?? 0
+  total += turn.metadata?.runtimeContext?.length ?? 0
+
+  if (turn.toolCalls) {
+    for (const toolCall of turn.toolCalls) {
+      total += toolCall.name.length + 2
+      try {
+        total += JSON.stringify(toolCall.arguments).length
+      } catch {}
+    }
+  }
+  if (turn.toolResults) {
+    for (const toolResult of turn.toolResults) {
+      total += toolResult.output.length + 1
+    }
+  }
+
+  const rawReasoning = turn.metadata?.rawReasoningPayload
+  let rawReasoningChars = rawReasoning?.reasoningContent?.length ?? 0
+  if (rawReasoning?.blocks) {
+    for (const block of rawReasoning.blocks) {
+      rawReasoningChars += block.thinking?.length ?? 0
+      rawReasoningChars += block.signature?.length ?? 0
+      rawReasoningChars += block.data?.length ?? 0
+    }
+  }
+  total += rawReasoningChars > 0
+    ? rawReasoningChars
+    : (turn.metadata?.thinking?.content.length ?? 0)
+  return total
+}
+
 const CANCELLED_TOOL_RESULT_TEXT = 'Cancelled before the tool completed.'
 const DEFAULT_MODEL_READ_LINES = 2_000
 const MODEL_READ_MAX_LINES = 2_000
@@ -135,6 +168,7 @@ const DEFAULT_TOOL_RESULT_MAX_CHARS = 20_000
 const MAX_STREAM_TEXT_CHARS = 8 * 1024 * 1024
 const MAX_STREAM_REASONING_CHARS = 8 * 1024 * 1024
 const MAX_STREAM_TOOL_ARGUMENT_CHARS = 1 * 1024 * 1024
+const MAX_IDENTICAL_TOOL_FAILURES = 3
 
 function isOutputLimitFinishReason(value: unknown): boolean {
   return typeof value === 'string' && /^(?:length|max_tokens|max_output_tokens)$/i.test(value)
@@ -1491,6 +1525,7 @@ export class AgentEngine {
     const newTurns: AgentTurn[] = []
     let consecutiveToolErrors = 0
     const MAX_CONSECUTIVE_ERRORS = 1
+    const identicalToolFailures = new Map<string, number>()
 
     try {
       if (!canReuseLastUserTurn) {
@@ -1542,9 +1577,36 @@ export class AgentEngine {
         } else {
           consecutiveToolErrors = Math.max(0, consecutiveToolErrors - 1)
         }
+        let repeatedFailure: { toolCall: ToolCall; result: ToolResult; count: number } | null = null
+        for (const toolCall of assistantTurn.toolCalls) {
+          const result = toolResults.find(item => item.toolCallId === toolCall.id)
+          if (!result?.isError) continue
+          const deterministicFailure = result.errorKind === 'validation'
+            || /^\[reused: identical .* call already failed/i.test(result.output)
+          if (!deterministicFailure) continue
+          const signature = toolCallSignature(toolCall)
+          const count = (identicalToolFailures.get(signature) || 0) + 1
+          identicalToolFailures.set(signature, count)
+          if (count >= MAX_IDENTICAL_TOOL_FAILURES) repeatedFailure = { toolCall, result, count }
+        }
         const resultTurn = this.createToolResultTurn(toolResults)
         this.session.turns.push(resultTurn)
         newTurns.push(resultTurn)
+
+        if (repeatedFailure) {
+          const lastError = repeatedFailure.result.output
+            .replace(/\s+/g, ' ')
+            .slice(0, 300)
+          const stoppedTurn = this.createAssistantTurn(
+            `Stopped a repeated tool-call loop after ${repeatedFailure.count} identical failures of \`${repeatedFailure.toolCall.name}\`. Last error: ${lastError}`,
+            undefined,
+            { mode: this.config.mode, interrupted: true },
+          )
+          this.session.turns.push(stoppedTurn)
+          newTurns.push(stoppedTurn)
+          this.emit({ type: 'turn:complete', turn: stoppedTurn })
+          break
+        }
 
           const askUserCalls = assistantTurn.toolCalls!.filter(tc => tc.name === 'ask_user')
           if (askUserCalls.length > 0) {
@@ -1812,18 +1874,7 @@ export class AgentEngine {
   }
 
   private countTurnChars(turn: AgentTurn): number {
-    let text = turn.content || ''
-    if (turn.toolCalls) {
-      for (const tc of turn.toolCalls) {
-        text += ` ${tc.name} ${JSON.stringify(tc.arguments)}`
-      }
-    }
-    if (turn.toolResults) {
-      for (const tr of turn.toolResults) {
-        text += ` ${tr.output}`
-      }
-    }
-    return text.length
+    return countTurnContextChars(turn)
   }
 
   private collectPreservedFiles(turns: AgentTurn[]): Array<{ path: string; content: string }> {
@@ -4425,7 +4476,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   private classifyToolErrorKind(output: string): ToolResult['errorKind'] {
     if (/timed out|timeout/i.test(output)) return 'timeout'
     if (/permission|denied|blocked by .*policy|requires an explicit permission/i.test(output)) return 'permission'
-    if (/required|invalid|unknown tool|not available in .* mode|patch (?:must|contains|exceeds)|patch line|hunk|context is ambiguous/i.test(output)) return 'validation'
+    if (/required|invalid|unexpected parameter|unknown tool|not available in .* mode|patch (?:must|contains|exceeds)|patch line|hunk|context is ambiguous/i.test(output)) return 'validation'
     return 'execution'
   }
 

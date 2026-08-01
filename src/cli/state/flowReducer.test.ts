@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { FlowEventFactory, type FlowEventType, type FlowPayloadFor } from '../../shared/flowEvents'
-import { createThreadFlowState, reduceFlowEvent } from './flowReducer'
+import {
+  createThreadFlowState,
+  MAX_FLOW_NOTIFICATION_ITEMS,
+  MAX_FLOW_STREAM_TEXT_CHARS,
+  reduceFlowEvent,
+} from './flowReducer'
 import {
   FLOW_INPUT_RECEIPT_TTL_MS,
   selectCanSteer,
@@ -81,6 +86,58 @@ describe('flowReducer', () => {
 
     state = reduceFlowEvent(state, create('runtime.completed', { kind: 'subagent', outcome: 'completed' }, { itemId: 'agent-1' }))
     expect(selectRunningBackgroundCount(state)).toBe(1)
+  })
+
+  it('bounds retained stream text and drops committed input payload copies', () => {
+    const { create } = harness()
+    let state = createThreadFlowState('session-1', 'thread-1')
+    state = reduceFlowEvent(state, create('input.submitted', {
+      intent: 'turn',
+      text: 'x'.repeat(100_000),
+      attachmentIds: ['image-1'],
+      attachments: [{ id: 'image-1', type: 'image', path: 'large.png' }],
+    }, { itemId: 'input-1' }))
+    state = reduceFlowEvent(state, create('input.committed', {}, { itemId: 'input-1' }))
+    state = reduceFlowEvent(state, create('stream.started', { channel: 'thinking' }, { itemId: 'thinking-1' }))
+    state = reduceFlowEvent(state, create('stream.delta', {
+      channel: 'thinking',
+      text: 'y'.repeat(MAX_FLOW_STREAM_TEXT_CHARS + 500),
+    }, { itemId: 'thinking-1' }))
+
+    expect(state.inputs['input-1']).toMatchObject({ text: '', attachmentIds: [], attachments: [] })
+    expect(state.streams.thinking.tail).toHaveLength(MAX_FLOW_STREAM_TEXT_CHARS)
+  })
+
+  it('bounds retained Flow notifications', () => {
+    const { create } = harness()
+    let state = createThreadFlowState('session-1', 'thread-1')
+    for (let index = 0; index < MAX_FLOW_NOTIFICATION_ITEMS + 10; index += 1) {
+      state = reduceFlowEvent(state, create('notification.raised', {
+        priority: 20,
+        category: 'info',
+      }, { itemId: `notification-${index}` }))
+    }
+
+    expect(Object.keys(state.notifications)).toHaveLength(MAX_FLOW_NOTIFICATION_ITEMS)
+    expect(state.notifications['notification-0']).toBeUndefined()
+  })
+
+  it('keeps persistent Flow notifications while trimming transient ones', () => {
+    const { create } = harness()
+    let state = createThreadFlowState('session-1', 'thread-1')
+    state = reduceFlowEvent(state, create('notification.raised', {
+      priority: 100,
+      category: 'action-required',
+    }, { itemId: 'approval-1' }))
+    for (let index = 0; index < MAX_FLOW_NOTIFICATION_ITEMS + 10; index += 1) {
+      state = reduceFlowEvent(state, create('notification.raised', {
+        priority: 20,
+        category: 'info',
+      }, { itemId: `transient-${index}` }))
+    }
+
+    expect(state.notifications['approval-1']).toBeDefined()
+    expect(Object.keys(state.notifications)).toHaveLength(MAX_FLOW_NOTIFICATION_ITEMS + 1)
   })
 
   it('preserves detailed Agent run phase transitions', () => {

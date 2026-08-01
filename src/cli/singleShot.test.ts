@@ -43,4 +43,25 @@ describe('single-shot progress reporting', () => {
     expect(output.join('')).toContain('✗ git_commit · bad ')
     expect(output.join('').length).toBeLessThan(220)
   })
+
+  it('prints tool-loop commentary and deduplicates the matching notification', () => {
+    const output: string[] = []
+    const reporter = new SingleShotProgressReporter(text => output.push(text))
+    const message = 'Repository mapping is complete; next I am patching validation.'
+
+    reporter.handle({
+      type: 'turn:complete',
+      turn: {
+        id: 'assistant-progress',
+        role: 'assistant',
+        content: '',
+        timestamp: 1,
+        toolCalls: [{ id: 'notify-1', name: 'notify_user', arguments: { message } }],
+      },
+    })
+    reporter.handle({ type: 'notification', message, level: 'info' })
+
+    expect(output.join('')).toContain(message)
+    expect(output.filter(entry => entry.includes(message))).toHaveLength(1)
+  })
 })

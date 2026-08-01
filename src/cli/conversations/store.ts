@@ -3,7 +3,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync
 import { join, resolve } from 'path'
 import { homedir } from 'os'
 import type { AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
-import type { ConversationJournalEntry, ConversationMeta, PersistedConversation } from './types'
+import type { ConversationInteractionState, ConversationJournalEntry, ConversationMeta, PersistedConversation } from './types'
 import { writeFileAtomicSync } from '../../core/fileIO'
 import { RECOVERED_ASSISTANT_MESSAGE, RECOVERED_TOOL_RESULT_MESSAGE } from './recoveryMessages'
 
@@ -85,6 +85,25 @@ function isJournalEntry(value: unknown): value is ConversationJournalEntry {
   }
 }
 
+function retainJournalEntry(entries: ConversationJournalEntry[], entry: ConversationJournalEntry): boolean {
+  const resetTruncation = entry.type === 'snapshot'
+  if (resetTruncation) entries.length = 0
+  entries.push(entry)
+  return resetTruncation
+}
+
+function findLatestValidSnapshot(lines: string[]): { index: number; entry: Extract<ConversationJournalEntry, { type: 'snapshot' }> } | null {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!
+    if (!/"type"\s*:\s*"snapshot"/.test(line)) continue
+    try {
+      const entry: unknown = JSON.parse(line)
+      if (isJournalEntry(entry) && entry.type === 'snapshot') return { index, entry }
+    } catch {}
+  }
+  return null
+}
+
 function conversationsDir(): string {
   return process.env.TURBOFLUX_CONVERSATIONS_DIR || DEFAULT_CONVERSATIONS_DIR
 }
@@ -148,12 +167,19 @@ function parseJournal(content: string): { entries: ConversationJournalEntry[]; t
   const entries: ConversationJournalEntry[] = []
   let truncated = false
   const lines = content.split(/\r?\n/)
-  for (const line of lines) {
+  const latestSnapshot = findLatestValidSnapshot(lines)
+  let startIndex = 0
+  if (latestSnapshot) {
+    entries.push(latestSnapshot.entry)
+    startIndex = latestSnapshot.index + 1
+  }
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index]!
     if (!line.trim()) continue
     try {
       const entry: unknown = JSON.parse(line)
       if (!isJournalEntry(entry)) throw new Error('Invalid journal entry')
-      entries.push(entry)
+      if (retainJournalEntry(entries, entry)) truncated = false
     } catch {
       truncated = true
     }
@@ -165,18 +191,24 @@ async function parseJournalAsync(content: string): Promise<{ entries: Conversati
   const entries: ConversationJournalEntry[] = []
   let truncated = false
   const lines = content.split(/\r?\n/)
-  for (let index = 0; index < lines.length; index += 1) {
+  const latestSnapshot = findLatestValidSnapshot(lines)
+  let startIndex = 0
+  if (latestSnapshot) {
+    entries.push(latestSnapshot.entry)
+    startIndex = latestSnapshot.index + 1
+  }
+  for (let index = startIndex; index < lines.length; index += 1) {
     const line = lines[index]!
     if (line.trim()) {
       try {
         const entry: unknown = JSON.parse(line)
         if (!isJournalEntry(entry)) throw new Error('Invalid journal entry')
-        entries.push(entry)
+        if (retainJournalEntry(entries, entry)) truncated = false
       } catch {
         truncated = true
       }
     }
-    if (index > 0 && index % 250 === 0) await new Promise<void>(resolve => setImmediate(resolve))
+    if (index > startIndex && (index - startIndex) % 250 === 0) await new Promise<void>(resolve => setImmediate(resolve))
   }
   return { entries, truncated }
 }
@@ -235,10 +267,140 @@ function createInteractionState(conversation?: PersistedConversation | null): No
   }
 }
 
+function hasMeaningfulInteractionState(state?: ConversationInteractionState): boolean {
+  if (!state) return false
+  return state.queuedInputs.length > 0
+    || Boolean(state.draft.text.trim())
+    || Boolean(state.draft.attachments?.length)
+    || Boolean(state.draft.pendingPastes?.length)
+    || state.pendingSteering.length > 0
+    || state.pendingApprovals.length > 0
+}
+
+function interactionStateTitle(state: ConversationInteractionState): string {
+  const source = state.queuedInputs[0]?.prompt
+    || state.draft.text
+    || state.pendingSteering[0]?.text
+    || ''
+  return source.trim().slice(0, 60).replace(/\n/g, ' ')
+}
+
+function hasVisibleConversationContent(conversation: PersistedConversation): boolean {
+  return conversation.turns.length > 0 || hasMeaningfulInteractionState(conversation.interactionState)
+}
+
 function upsertTurn(turns: AgentTurn[], turn: AgentTurn): void {
-  const index = turns.findIndex(existing => existing.id === turn.id)
+  const index = turns.findIndex(existing => (
+    existing.id === turn.id
+    && existing.role === turn.role
+    && existing.timestamp === turn.timestamp
+  ))
   if (index >= 0) turns[index] = turn
   else turns.push(turn)
+}
+
+function turnIdentityKey(turn: AgentTurn): string {
+  return `${turn.id}\u0000${turn.role}\u0000${turn.timestamp}`
+}
+
+interface ConversationTurnRecord {
+  originalId: string
+  timestamp: number
+  firstSeen: number
+  turn: AgentTurn
+}
+
+function normalizeConversationTurns(conversation: PersistedConversation): void {
+  const reservoirTurns = conversation.contextReservoir?.flatMap(entry => entry.turns) || []
+  const activeTurns = conversation.activeTurns ?? conversation.turns
+  const allSequences = [reservoirTurns, conversation.turns, activeTurns]
+  const records = new Map<string, ConversationTurnRecord>()
+  let firstSeen = 0
+
+  for (const turns of allSequences) {
+    for (const turn of turns) {
+      const key = turnIdentityKey(turn)
+      const existing = records.get(key)
+      if (existing) {
+        existing.turn = turn
+        continue
+      }
+      records.set(key, {
+        originalId: turn.id,
+        timestamp: turn.timestamp,
+        firstSeen: firstSeen++,
+        turn,
+      })
+    }
+  }
+
+  const recordsByOriginalId = new Map<string, Array<[string, ConversationTurnRecord]>>()
+  for (const entry of records.entries()) {
+    const list = recordsByOriginalId.get(entry[1].originalId) || []
+    list.push(entry)
+    recordsByOriginalId.set(entry[1].originalId, list)
+  }
+
+  const reservedIds = new Set(recordsByOriginalId.keys())
+  const assignedIds = new Set<string>()
+  const canonicalIdByKey = new Map<string, string>()
+  for (const [originalId, entries] of recordsByOriginalId) {
+    entries.sort((left, right) => (
+      left[1].timestamp - right[1].timestamp
+      || left[1].firstSeen - right[1].firstSeen
+    ))
+    entries.forEach(([key, record], index) => {
+      if (index === 0 && !assignedIds.has(originalId)) {
+        canonicalIdByKey.set(key, originalId)
+        assignedIds.add(originalId)
+        return
+      }
+      const suffix = Math.max(0, Math.trunc(record.timestamp)).toString(36)
+      const baseCandidate = `${originalId}~${suffix}`
+      let candidate = baseCandidate
+      let ordinal = 2
+      while (reservedIds.has(candidate) || assignedIds.has(candidate)) {
+        candidate = `${baseCandidate}-${ordinal}`
+        ordinal += 1
+      }
+      canonicalIdByKey.set(key, candidate)
+      assignedIds.add(candidate)
+    })
+  }
+
+  const normalizeSequence = (turns: AgentTurn[]): AgentTurn[] => {
+    const normalized: AgentTurn[] = []
+    const seen = new Set<string>()
+    for (const turn of turns) {
+      const key = turnIdentityKey(turn)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const record = records.get(key)
+      if (!record) continue
+      normalized.push({ ...record.turn, id: canonicalIdByKey.get(key) || record.turn.id })
+    }
+    return normalized
+  }
+
+  conversation.turns = [...records.entries()]
+    .sort((left, right) => (
+      left[1].timestamp - right[1].timestamp
+      || left[1].firstSeen - right[1].firstSeen
+    ))
+    .map(([key, record]) => ({ ...record.turn, id: canonicalIdByKey.get(key) || record.turn.id }))
+  conversation.activeTurns = normalizeSequence(activeTurns)
+  if (conversation.contextReservoir) {
+    conversation.contextReservoir = conversation.contextReservoir.map(entry => {
+      const turns = normalizeSequence(entry.turns)
+      return {
+        ...entry,
+        turns,
+        startMessageId: turns[0]?.id ?? entry.startMessageId,
+        endMessageId: turns.at(-1)?.id ?? entry.endMessageId,
+      }
+    })
+  }
+  conversation.turnCount = conversation.turns.length
 }
 
 function createRecoveredAssistantTurn(timestamp: number, content: string, toolCalls?: ToolCall[], thinking = ''): AgentTurn {
@@ -271,9 +433,24 @@ function createRecoveredToolResultTurn(timestamp: number, results: ToolResult[],
   }
 }
 
+interface PendingStreamReplay {
+  startedAt: number
+  contentChunks: string[]
+  thinkingChunks: string[]
+  interrupted: boolean
+}
+
+function createPendingStream(startedAt: number): PendingStreamReplay {
+  return { startedAt, contentChunks: [], thinkingChunks: [], interrupted: false }
+}
+
+function hasPendingStreamContent(pendingStream: PendingStreamReplay): boolean {
+  return pendingStream.contentChunks.length > 0 || pendingStream.thinkingChunks.length > 0
+}
+
 function replayConversation(id: string, legacy: PersistedConversation | null, entries: ConversationJournalEntry[], truncatedJournal: boolean): PersistedConversation | null {
   let conversation = legacy ? cloneConversation(legacy) : null
-  let pendingStream: { startedAt: number; content: string; thinking: string; interrupted: boolean } | null = null
+  let pendingStream: PendingStreamReplay | null = null
   const pendingToolCalls = new Map<string, ToolCall>()
   const journalToolResults = new Map<string, ToolResult>()
   let latestTimestamp = conversation?.updatedAt || 0
@@ -284,8 +461,22 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
     latestTimestamp = Math.max(latestTimestamp, entry.timestamp)
     switch (entry.type) {
       case 'meta':
-        conversation = conversation || createConversation(entry.meta)
-        Object.assign(conversation, entry.meta)
+        if (
+          conversation
+          && Number.isFinite(conversation.createdAt)
+          && Number.isFinite(entry.meta.createdAt)
+          && conversation.createdAt !== entry.meta.createdAt
+        ) {
+          conversation = createConversation(entry.meta)
+          interactionState = createInteractionState(conversation)
+          pendingStream = null
+          pendingToolCalls.clear()
+          journalToolResults.clear()
+          interrupted = false
+        } else {
+          conversation = conversation || createConversation(entry.meta)
+          Object.assign(conversation, entry.meta)
+        }
         break
       case 'snapshot':
         conversation = cloneConversation(entry.conversation)
@@ -305,17 +496,17 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
         }
         break
       case 'stream_start':
-        if (pendingStream && (pendingStream.content || pendingStream.thinking || pendingToolCalls.size > 0)) interrupted = true
+        if (pendingStream && (hasPendingStreamContent(pendingStream) || pendingToolCalls.size > 0)) interrupted = true
         pendingToolCalls.clear()
-        pendingStream = { startedAt: entry.timestamp, content: '', thinking: '', interrupted: false }
+        pendingStream = createPendingStream(entry.timestamp)
         break
       case 'stream_delta':
-        pendingStream = pendingStream || { startedAt: entry.timestamp, content: '', thinking: '', interrupted: false }
-        pendingStream.content += entry.text
+        pendingStream = pendingStream || createPendingStream(entry.timestamp)
+        pendingStream.contentChunks.push(entry.text)
         break
       case 'stream_thinking_delta':
-        pendingStream = pendingStream || { startedAt: entry.timestamp, content: '', thinking: '', interrupted: false }
-        pendingStream.thinking += entry.text
+        pendingStream = pendingStream || createPendingStream(entry.timestamp)
+        pendingStream.thinkingChunks.push(entry.text)
         break
       case 'stream_end':
         if (pendingStream) pendingStream.interrupted = entry.interrupted
@@ -378,14 +569,15 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
 
   if (!conversation) return null
   conversation.activeTurns = conversation.activeTurns || [...conversation.turns]
+  normalizeConversationTurns(conversation)
 
-  if (pendingStream && (pendingStream.content || pendingStream.thinking || pendingToolCalls.size > 0)) {
+  if (pendingStream && (hasPendingStreamContent(pendingStream) || pendingToolCalls.size > 0)) {
     const calls = Array.from(pendingToolCalls.values())
     const recovered = createRecoveredAssistantTurn(
       Math.max(latestTimestamp, pendingStream.startedAt),
-      pendingStream.content,
+      pendingStream.contentChunks.join(''),
       calls,
-      pendingStream.thinking,
+      pendingStream.thinkingChunks.join(''),
     )
     upsertTurn(conversation.turns, recovered)
     upsertTurn(conversation.activeTurns, recovered)
@@ -431,8 +623,11 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
 
   conversation.id = id
   const firstUserTurn = conversation.turns.find(turn => turn.role === 'user')
-  if (firstUserTurn && (!conversation.title || conversation.title === 'Untitled')) {
-    conversation.title = firstUserTurn.content.slice(0, 60).replace(/\n/g, ' ')
+  const firstUserTitle = firstUserTurn?.content.trim().slice(0, 60).replace(/\n/g, ' ')
+  if (firstUserTitle) conversation.title = firstUserTitle
+  else if (!conversation.title || conversation.title === 'Untitled') {
+    const title = interactionStateTitle(interactionState)
+    if (title) conversation.title = title
   }
   conversation.turnCount = conversation.turns.length
   conversation.interactionState = interactionState
@@ -442,6 +637,7 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
     truncatedJournal,
     unresolvedToolCalls: missingToolResults.length,
   }
+  normalizeConversationTurns(conversation)
   return conversation
 }
 
@@ -558,6 +754,7 @@ export function listConversations(workspacePath?: string): ConversationMeta[] {
   for (const id of ids) {
     const conv = loadConversation(id)
     if (!conv) continue
+    if (!hasVisibleConversationContent(conv)) continue
     if (workspacePath && !sameWorkspacePath(conv.workspacePath, workspacePath)) continue
     metas.push({
       id: conv.id,
@@ -584,6 +781,7 @@ export async function listConversationsAsync(workspacePath?: string): Promise<Co
   for (const id of ids) {
     const conv = await loadConversationAsync(id)
     if (!conv) continue
+    if (!hasVisibleConversationContent(conv)) continue
     if (workspacePath && !sameWorkspacePath(conv.workspacePath, workspacePath)) continue
     metas.push({
       id: conv.id,

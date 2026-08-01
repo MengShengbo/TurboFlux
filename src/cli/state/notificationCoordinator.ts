@@ -42,6 +42,8 @@ const CATEGORY_PRIORITY: Record<NotificationCategory, number> = {
   info: 10,
 }
 
+const MAX_TRANSIENT_NOTIFICATIONS = 64
+
 function notificationOrder(left: CoordinatedNotification, right: CoordinatedNotification): number {
   return right.priority - left.priority || right.updatedAt - left.updatedAt || left.id.localeCompare(right.id)
 }
@@ -77,6 +79,7 @@ export class NotificationCoordinator {
         count: duplicate.count + 1,
       }
       this.notifications.set(updated.id, updated)
+      this.pruneTransientNotifications()
       return { ...updated }
     }
 
@@ -93,13 +96,14 @@ export class NotificationCoordinator {
     }
     if (!this.enabled) return { ...notification, acknowledged: true }
     this.notifications.set(notification.id, notification)
+    this.pruneTransientNotifications()
     return { ...notification }
   }
 
   acknowledge(id: string): boolean {
     const notification = this.notifications.get(id)
     if (!notification || notification.acknowledged) return false
-    this.notifications.set(id, { ...notification, acknowledged: true, updatedAt: this.now() })
+    this.notifications.delete(id)
     return true
   }
 
@@ -139,5 +143,14 @@ export class NotificationCoordinator {
     if (resultCount > 0) return `[${resultCount}] TurboFlux results ready`
     if (active?.category === 'warning') return '[!] TurboFlux warning'
     return 'TurboFlux - Ready'
+  }
+
+  private pruneTransientNotifications(): void {
+    const transient = [...this.notifications.values()]
+      .filter(notification => !notification.persistent)
+      .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)
+    for (const notification of transient.slice(MAX_TRANSIENT_NOTIFICATIONS)) {
+      this.notifications.delete(notification.id)
+    }
   }
 }

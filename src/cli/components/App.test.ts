@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import {
+  appendLiveReasoningTail,
+  appendLiveStreamTail,
+  createMessageIdFactory,
   getEngineUserOrdinalForUiMessage,
   createThinkingTrace,
   formatTaskProgressLabel,
   formatTaskToolSummary,
+  getProvisionalAssistantText,
   isThinkingToggleShortcut,
   resolveAssistantStreamDisplay,
   resolveLandingFrameWidth,
   selectAutoMountedModel,
+  StreamTextAccumulator,
   shouldUseFlowUi,
   shouldUseNoFlicker,
   shouldShowLandingView,
@@ -16,6 +21,41 @@ import {
 } from './App'
 import type { Message } from './messages/Messages'
 import type { AgentTurn } from '../../shared/agentTypes'
+
+describe('message identifiers', () => {
+  it('keeps ids unique across calls and process namespaces', () => {
+    const firstRun = createMessageIdFactory('run-a')
+    const secondRun = createMessageIdFactory('run-b')
+
+    expect([firstRun(), firstRun(), secondRun()]).toEqual([
+      'msg-run-a-1',
+      'msg-run-a-2',
+      'msg-run-b-1',
+    ])
+  })
+})
+
+describe('live reasoning buffer', () => {
+  it('retains only the configured reasoning tail', () => {
+    const first = appendLiveReasoningTail('', 'abcdefgh', 6)
+    const second = appendLiveReasoningTail(first, 'ijkl', 6)
+
+    expect(first).toBe('cdefgh')
+    expect(second).toBe('ghijkl')
+  })
+})
+
+describe('live stream buffer', () => {
+  it('keeps complete output bounded and exposes a small display tail', () => {
+    const accumulator = new StreamTextAccumulator(10)
+    expect(accumulator.append('abcdef')).toBe('abcdef')
+    expect(accumulator.append('ghijkl')).toBe('ghij')
+    expect(accumulator.length).toBe(10)
+    expect(accumulator.toString()).toContain('abcdefghij')
+    expect(appendLiveStreamTail('', 'abcdefghij', 4)).toBe('ghij')
+    expect(appendLiveStreamTail('abcd', 'ef', 4)).toBe('cdef')
+  })
+})
 
 describe('no-flicker mode selection', () => {
   it('keeps the full fixed cockpit by default for interactive sessions', () => {
@@ -194,7 +234,7 @@ describe('rewind helpers', () => {
 })
 
 describe('interrupted assistant messages', () => {
-  it('restores tool-loop assistant text as provisional instead of a final answer', () => {
+  it('restores tool-loop assistant text as visible progress instead of swallowing it', () => {
     const messages = turnsToMessages([
       {
         id: 'assistant-tool-step',
@@ -226,7 +266,8 @@ describe('interrupted assistant messages', () => {
     expect(messages).toHaveLength(2)
     expect(messages[0]).toMatchObject({
       id: 'assistant-tool-step',
-      content: '',
+      content: 'The directory is probably empty.',
+      progress: true,
       tools: [expect.objectContaining({ id: 'tool-1', status: 'done' })],
     })
     expect(messages[1]).toMatchObject({ id: 'assistant-final', content: 'The desktop contains project.' })
@@ -263,6 +304,26 @@ describe('interrupted assistant messages', () => {
     expect(messages[0]).toMatchObject({
       content: 'final answer',
       thinking: { content: 'inspect first', effort: 'high', durationMs: 1200 },
+    })
+  })
+
+  it('restores notify_user progress from persisted tool arguments', () => {
+    const turn: AgentTurn = {
+      id: 'assistant-notify',
+      role: 'assistant',
+      content: '',
+      timestamp: 1,
+      toolCalls: [{
+        id: 'notify-1',
+        name: 'notify_user',
+        arguments: { message: 'Repository mapping is complete; next I am patching the API.' },
+      }],
+    }
+
+    expect(getProvisionalAssistantText(turn)).toContain('Repository mapping is complete')
+    expect(turnsToMessages([turn])[0]).toMatchObject({
+      content: 'Repository mapping is complete; next I am patching the API.',
+      progress: true,
     })
   })
 

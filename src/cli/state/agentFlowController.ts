@@ -13,6 +13,7 @@ export class AgentFlowController {
   private runSequence = 0
   private stopping = false
   private readonly startedStreams = new Set<'answer' | 'thinking'>()
+  private readonly sampledStreams = new Set<'answer' | 'thinking'>()
   private readonly proposedTools = new Set<string>()
   private readonly runtimeItems = new Set<string>()
 
@@ -31,6 +32,7 @@ export class AgentFlowController {
     this.activeRunId = null
     this.stopping = false
     this.startedStreams.clear()
+    this.sampledStreams.clear()
     this.proposedTools.clear()
     this.runtimeItems.clear()
     this.store.activateThread(sessionId, threadId)
@@ -161,6 +163,8 @@ export class AgentFlowController {
         break
       case 'stream:delta':
         this.startStream('answer', publish)
+        if (this.sampledStreams.has('answer')) break
+        this.sampledStreams.add('answer')
         publish('stream.delta', { channel: 'answer', text: event.text }, {
           runId: this.activeRunId || undefined,
           itemId: this.streamItemId('answer'),
@@ -168,6 +172,8 @@ export class AgentFlowController {
         break
       case 'stream:thinking_delta':
         this.startStream('thinking', publish)
+        if (this.sampledStreams.has('thinking')) break
+        this.sampledStreams.add('thinking')
         publish('stream.delta', { channel: 'thinking', text: event.text }, {
           runId: this.activeRunId || undefined,
           itemId: this.streamItemId('thinking'),
@@ -195,6 +201,7 @@ export class AgentFlowController {
         }
         publish('tool.draft_cleared', {}, { runId: this.activeRunId || undefined })
         this.startedStreams.clear()
+        this.sampledStreams.clear()
         break
       case 'subagent:start': {
         const id = `subagent:${event.agentId}`
@@ -388,6 +395,7 @@ export class AgentFlowController {
     this.activeRunId = null
     this.stopping = false
     this.startedStreams.clear()
+    this.sampledStreams.clear()
     this.proposedTools.clear()
   }
 
@@ -398,6 +406,7 @@ export class AgentFlowController {
     this.ensureRun(publish)
     if (this.startedStreams.has(channel)) return
     this.startedStreams.add(channel)
+    this.sampledStreams.delete(channel)
     publish('stream.started', { channel }, {
       runId: this.activeRunId || undefined,
       itemId: this.streamItemId(channel),

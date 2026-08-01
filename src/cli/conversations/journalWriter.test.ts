@@ -25,6 +25,7 @@ describe.sequential('ConversationJournalWriter', () => {
     }
 
     expect(writer.getStats().physicalWrites).toBe(0)
+    expect(writer.getHealth().pendingStreamingEntries).toBe(1)
     writer.flush(true)
 
     expect(writer.getStats()).toMatchObject({
@@ -83,5 +84,33 @@ describe.sequential('ConversationJournalWriter', () => {
     writer.append({ version: 1, type: 'stream_delta', timestamp: 2, text: 'b' }, 'streaming')
 
     expect(writer.getStats()).toMatchObject({ physicalWrites: 2, streamingBatchesWritten: 2 })
+  })
+
+  it('bounds streaming and recovery buffers while persistence stays unavailable', () => {
+    vi.useFakeTimers()
+    rmSync(directory, { recursive: true, force: true })
+    writeFileSync(directory, 'not a directory', 'utf8')
+    const writer = new ConversationJournalWriter('conversation-1', {
+      flushIntervalMs: 60_000,
+      retryIntervalMs: 60_000,
+      maxPendingStreamingEntries: 2,
+      maxPendingStreamingCharacters: 500,
+      maxPendingRecoveryEntries: 1,
+      maxPendingRecoveryCharacters: 300,
+    })
+
+    for (let index = 0; index < 40; index += 1) {
+      writer.append({ version: 1, type: 'stream_delta', timestamp: index, text: 'x'.repeat(30) }, 'streaming')
+    }
+
+    expect(writer.getHealth()).toMatchObject({
+      status: 'degraded',
+      pendingRecoveryEntries: expect.any(Number),
+      pendingStreamingEntries: 1,
+    })
+    expect(writer.getHealth().pendingRecoveryEntries).toBeLessThanOrEqual(1)
+    expect(writer.getHealth().pendingRecoveryCharacters).toBeLessThanOrEqual(300)
+    expect(writer.getHealth().pendingStreamingCharacters).toBeLessThanOrEqual(500)
+    writer.close()
   })
 })

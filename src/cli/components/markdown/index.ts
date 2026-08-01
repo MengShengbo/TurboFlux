@@ -15,6 +15,7 @@ const HR_RE = /^---+$/gm
 
 const MAX_CACHE_ENTRIES = 512
 const MAX_CACHE_BYTES = 4 * 1024 * 1024
+export const MAX_DISPLAY_MARKDOWN_CHARS = 64 * 1024
 
 interface MarkdownCacheEntry {
   formatted: string
@@ -83,6 +84,14 @@ export function formatMarkdown(text: string): string {
     }
   }
   return formatted
+}
+
+export function formatMarkdownForDisplay(text: string, maxChars = MAX_DISPLAY_MARKDOWN_CHARS): string {
+  if (!text) return ''
+  const limit = Math.max(1, Math.floor(maxChars))
+  if (text.length <= limit) return formatMarkdown(text)
+  const visible = text.slice(0, limit)
+  return `${formatMarkdown(visible)}\n\n[display truncated after ${limit.toLocaleString()} characters]`
 }
 
 export function getMarkdownCacheStats(): MarkdownCacheStats {

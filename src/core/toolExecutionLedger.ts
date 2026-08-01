@@ -79,10 +79,13 @@ export function toolCallSignature(toolCall: Pick<ToolCall, 'name' | 'arguments'>
 
 function reusedResult(toolCall: ToolCall, cached: CachedToolResult): ToolResult {
   const status = cached.result.isError ? 'failed' : 'completed'
+  const priorFailure = cached.result.isError
+    ? `\nOriginal failure: ${cached.result.output.slice(0, 500)}\nChange the arguments before retrying this tool.`
+    : ''
   return {
     toolCallId: toolCall.id,
     name: toolCall.name,
-    output: `[reused: identical ${toolCall.name} call already ${status} as ${cached.sourceCallId}; the prior result remains in context]`,
+    output: `[reused: identical ${toolCall.name} call already ${status} as ${cached.sourceCallId}; the prior result remains in context]${priorFailure}`,
     isError: cached.result.isError,
     ...(cached.result.errorKind ? { errorKind: cached.result.errorKind } : {}),
   }

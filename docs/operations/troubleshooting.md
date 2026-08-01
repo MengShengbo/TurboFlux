@@ -38,7 +38,7 @@ To isolate a user-data issue, run with temporary configuration:
 ```powershell
 $env:TURBOFLUX_CONFIG_DIR = Join-Path $PWD '.tmp/diagnostic-config'
 $env:TURBOFLUX_CONVERSATIONS_DIR = Join-Path $PWD '.tmp/diagnostic-conversations'
-npm run dev:once -- .
+tf .
 ```
 
 ## Model request failure
@@ -57,7 +57,7 @@ Reduce variables first:
 $env:TURBOFLUX_REDUCED_MOTION = '1'
 $env:TURBOFLUX_DESKTOP_NOTIFICATIONS = '0'
 $env:TURBOFLUX_FLOW_WINDOWING = '1'
-npm run dev:once -- . --no-animation
+tf . --no-animation
 ```
 
 Record terminal size, resize behavior, terminal application/version, shell,

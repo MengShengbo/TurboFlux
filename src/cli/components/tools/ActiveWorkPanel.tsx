@@ -3,7 +3,7 @@ import { Box, Text } from 'ink'
 import cliTruncate from 'cli-truncate'
 import { useTheme } from '../../theme/index'
 import { useTerminalSize } from '../../hooks/useTerminalSize'
-import { formatMarkdown } from '../markdown/index'
+import { formatMarkdownForDisplay } from '../markdown/index'
 import { SpinnerGlyph } from '../spinner/SpinnerGlyph'
 import type { ToolStatus } from './toolTypes'
 import type { AgentRunState, ReasoningEffort, ThinkingTrace } from '../../../shared/agentTypes'
@@ -107,7 +107,7 @@ export function ActiveWorkPanel({
       {streamText && (
         <Box flexDirection="column" marginTop={hasToolActivity ? 1 : 0}>
           <Text color={theme.info} bold>{t('ui.work.mainAgent')}</Text>
-          <Text>{formatMarkdown(streamText)}</Text>
+          <Text>{formatMarkdownForDisplay(streamText)}</Text>
         </Box>
       )}
     </Box>

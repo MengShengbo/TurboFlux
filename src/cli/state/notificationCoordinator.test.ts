@@ -35,6 +35,20 @@ describe('NotificationCoordinator', () => {
     expect(coordinator.getSnapshot().inbox).toHaveLength(0)
   })
 
+  it('bounds transient progress notifications while retaining persistent results', () => {
+    const coordinator = new NotificationCoordinator()
+    for (let index = 0; index < 100; index += 1) {
+      coordinator.raise({ id: `progress-${index}`, category: 'info', title: `Progress ${index}` })
+    }
+    coordinator.raise({ id: 'result', category: 'result-ready', title: 'Ready' })
+
+    expect(coordinator.getSnapshot()).toMatchObject({
+      unacknowledgedCount: 65,
+      resultCount: 1,
+      inbox: [expect.objectContaining({ id: 'result' })],
+    })
+  })
+
   it('removes terminal control sequences from managed titles', () => {
     expect(sanitizeTerminalTitle('Ready\u001b]0;owned\u0007 now')).toBe('Ready ]0;owned now')
   })

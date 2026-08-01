@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
-import { AgentEngine, appendRuntimeContextToLatestUserMessage, downgradeReasoningEffort, extractResponsesReasoningEventDelta, extractResponsesReasoningSummary, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
+import { AgentEngine, appendRuntimeContextToLatestUserMessage, countTurnContextChars, downgradeReasoningEffort, extractResponsesReasoningEventDelta, extractResponsesReasoningSummary, normalizeAnthropicToolMessages, splitTurnsForCompaction, type AgentEventType } from './agentEngine'
 import { NodeToolExecutor } from './runtime/nodeToolExecutor'
 import { DefaultAgentStateProvider } from './runtime/stateProvider'
 
@@ -824,6 +824,85 @@ describe('AgentEngine filesystem tool output', () => {
       expect(first.output).toContain('const value = 1')
       expect(second.output).toContain('reused')
       expect(readFile).toHaveBeenCalledTimes(1)
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('classifies unexpected tool parameters as validation failures', async () => {
+    const { engine, executeSingleTool } = createFilesystemHarness({} as ToolExecutor)
+
+    try {
+      const result = await executeSingleTool({
+        id: 'invalid-read-1',
+        name: 'read_file',
+        arguments: { file_path: 'src/value.ts' },
+      })
+
+      expect(result).toMatchObject({
+        isError: true,
+        errorKind: 'validation',
+        output: expect.stringContaining('Unexpected parameter: file_path'),
+      })
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
+describe('AgentEngine repeated tool failure loop breaker', () => {
+  it('ends the run with a visible explanation after three identical validation failures', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+    }, {} as ToolExecutor, stateProvider)
+    let iteration = 0
+    const callModel = vi.spyOn(engine as any, 'callModel').mockImplementation(async () => {
+      iteration += 1
+      return {
+        id: `assistant-${iteration}`,
+        role: 'assistant',
+        content: 'Retrying with the corrected parameter.',
+        timestamp: 100 + iteration,
+        toolCalls: [{
+          id: `tool-${iteration}`,
+          name: 'read_file',
+          arguments: { file_path: 'src/value.ts' },
+        }],
+      } as AgentTurn
+    })
+    const executeToolCalls = vi.spyOn(engine as any, 'executeToolCalls').mockImplementation(async (calls: ToolCall[]) => (
+      calls.map(call => ({
+        toolCallId: call.id,
+        name: call.name,
+        output: 'Error: Unexpected parameter: file_path',
+        isError: true,
+        errorKind: 'validation' as const,
+      }))
+    ))
+    vi.spyOn(engine as any, 'initializeGit').mockResolvedValue(undefined)
+    vi.spyOn(engine as any, 'prepareContextWindow').mockResolvedValue(undefined)
+
+    try {
+      const turns = await engine.run('inspect the file')
+
+      expect(callModel).toHaveBeenCalledTimes(3)
+      expect(executeToolCalls).toHaveBeenCalledTimes(3)
+      expect(turns.at(-1)).toMatchObject({
+        role: 'assistant',
+        content: expect.stringContaining('Stopped a repeated tool-call loop after 3 identical failures'),
+        metadata: expect.objectContaining({ interrupted: true }),
+      })
     } finally {
       engine.destroy()
     }
@@ -1905,6 +1984,32 @@ describe('AgentEngine model protocol compatibility', () => {
 })
 
 describe('context compaction boundaries', () => {
+  it('counts runtime context and provider reasoning without double counting the display trace', () => {
+    expect(countTurnContextChars({
+      id: 'reasoning-turn',
+      role: 'assistant',
+      content: '',
+      timestamp: 1,
+      metadata: {
+        runtimeContext: 'ctx',
+        thinking: { content: 'reasoning' },
+        rawReasoningPayload: {
+          provider: 'openai-compatible',
+          blocks: [],
+          reasoningContent: 'reasoning',
+        },
+      },
+    })).toBe('ctx'.length + 'reasoning'.length)
+
+    expect(countTurnContextChars({
+      id: 'fallback-thinking',
+      role: 'assistant',
+      content: '',
+      timestamp: 2,
+      metadata: { thinking: { content: 'fallback' } },
+    })).toBe('fallback'.length)
+  })
+
   it('keeps assistant tool calls together with their tool results', () => {
     const turns = [
       { id: 'u1', role: 'user' as const, content: 'start', timestamp: 1 },

@@ -98,11 +98,14 @@ import {
   type TranscriptViewportMetrics,
 } from './TranscriptViewport'
 import {
+  appendLiveReasoningTail,
+  appendLiveStreamTail,
+  createMessageIdFactory,
   createThinkingTrace,
-  estimateOutputTokensForDisplay,
   formatElapsed,
   formatTaskProgressLabel,
   formatTaskToolSummary,
+  getProvisionalAssistantText,
   getEngineUserOrdinalForUiMessage,
   isProvisionalAssistantTurn,
   isThinkingToggleShortcut,
@@ -115,12 +118,17 @@ import {
   shouldShowLandingView,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
+  StreamTextAccumulator,
 } from './appHelpers'
 
 export {
+  appendLiveReasoningTail,
+  appendLiveStreamTail,
+  createMessageIdFactory,
   createThinkingTrace,
   formatTaskProgressLabel,
   formatTaskToolSummary,
+  getProvisionalAssistantText,
   getEngineUserOrdinalForUiMessage,
   isProvisionalAssistantTurn,
   isThinkingToggleShortcut,
@@ -132,6 +140,7 @@ export {
   shouldUseNoFlicker,
   sliceTurnsBeforeNthUserTurn,
   turnsToMessages,
+  StreamTextAccumulator,
 } from './appHelpers'
 
 interface AppProps {
@@ -384,8 +393,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const transcriptMetricsRef = useRef(transcriptMetrics)
   const selectedMessageRef = useRef<DOMElement>(null)
   const selectedMessageMetrics = useBoxMetrics(selectedMessageRef)
-  const messageIdRef = useRef(0)
-  const streamBufferRef = useRef('')
+  const streamBufferRef = useRef(new StreamTextAccumulator())
+  const streamDisplayBufferRef = useRef('')
   const streamThinkingBufferRef = useRef('')
   const streamThinkingStartedAtRef = useRef<number | undefined>(undefined)
   const streamTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -408,20 +417,17 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const pendingGlobalConfigurationRef = useRef<GlobalConfigurationSnapshot | null>(null)
   const promptHistoryRef = useRef<string[]>([])
   const [streamScheduler] = useState(() => new AdaptiveStreamScheduler(batch => {
-    setStreamText(streamBufferRef.current)
+    setStreamText(streamDisplayBufferRef.current)
     setStreamThinkingText(streamThinkingBufferRef.current)
     setCurrentTurnOutputTokens(previous => Math.max(
       previous,
-      estimateOutputTokensForDisplay(streamBufferRef.current),
+      streamBufferRef.current.length > 0 ? Math.ceil(streamBufferRef.current.length / 4) : 0,
     ))
     flowTelemetry.count('ui.stream_flush')
     flowTelemetry.observe('ui.stream_batch_depth', batch.depth)
     flowTelemetry.observe('ui.stream_oldest_age_ms', batch.oldestAgeMs)
   }))
-  const genMsgId = useCallback(() => {
-    messageIdRef.current += 1
-    return `msg-${messageIdRef.current}`
-  }, [])
+  const [genMsgId] = useState(() => createMessageIdFactory())
 
   // Refs to avoid stale closures in the engine event subscription (effect runs once)
   const currentToolsRef = useRef<ToolStatus[]>([])
@@ -688,10 +694,22 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (isInteractive) process.stdout.write('\u001b]0;\u0007')
   }, [approvalPresentationScheduler, convManager, flowBridge, flowTelemetry, isInteractive])
 
-  const appendMessages = useCallback((nextMessages: Message[], options?: { forceLatest?: boolean }) => {
+  const appendMessages = useCallback((nextMessages: Message[], options?: { forceLatest?: boolean; dedupeTail?: boolean }) => {
     if (nextMessages.length === 0) return
 
-    setMessages(msgs => retainTranscriptTail([...msgs, ...nextMessages]))
+    setMessages(current => {
+      const combined = [...current]
+      for (const message of nextMessages) {
+        const previous = combined.at(-1)
+        if (
+          options?.dedupeTail
+          && previous?.role === message.role
+          && previous.content.trim() === message.content.trim()
+        ) continue
+        combined.push(message)
+      }
+      return retainTranscriptTail(combined)
+    })
     if (noFlickerActive && options?.forceLatest === true) setScrollRowsFromBottom(0)
   }, [noFlickerActive])
 
@@ -708,10 +726,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     contextSegments: ContextSegment[] = [],
     contextReservoir: ContextReservoirEntry[] = [],
     transcriptTurns: AgentTurn[] = activeTurns,
+    options: { restoreEngine?: boolean } = {},
   ) => {
-    engine.restoreFromTurns(activeTurns)
-    engine.setContextSegments(contextSegments)
-    engine.setContextReservoir(contextReservoir)
+    if (options.restoreEngine !== false) {
+      engine.restoreFromTurns(activeTurns)
+      engine.setContextSegments(contextSegments)
+      engine.setContextReservoir(contextReservoir)
+    }
     replaceMessages(turnsToMessages(transcriptTurns))
     inputRef.current = nextInput
     pendingPastesRef.current = []
@@ -724,7 +745,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     updateCurrentTools(() => [])
     updateChangeSummaries(() => [])
     setCurrentTurnOutputTokens(0)
-    streamBufferRef.current = ''
+    streamBufferRef.current.reset()
+    streamDisplayBufferRef.current = ''
     streamThinkingBufferRef.current = ''
     streamThinkingStartedAtRef.current = undefined
     setStreamThinkingStartedAt(undefined)
@@ -863,6 +885,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           const interrupted = event.turn.metadata?.interrupted === true
           lastAssistantTurnInterruptedRef.current = interrupted
           if (isProvisionalAssistantTurn(event.turn)) {
+            const visibleText = stripTextToolCallMarkup(getProvisionalAssistantText(event.turn), { stripIncomplete: true })
+            if (visibleText) {
+              appendMessages([{
+                id: event.turn.id,
+                role: 'assistant',
+                content: visibleText,
+                progress: true,
+              }], { forceLatest: true })
+            }
             clearStreamFlushTimer()
             setStreamText('')
             setStreamThinkingText('')
@@ -897,7 +928,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         case 'stream:start': {
           const streamStartedAt = Date.now()
           setCurrentTurnOutputTokens(0)
-          streamBufferRef.current = ''
+          streamBufferRef.current.reset()
+          streamDisplayBufferRef.current = ''
           streamThinkingBufferRef.current = ''
           streamThinkingStartedAtRef.current = streamStartedAt
           setStreamThinkingStartedAt(streamStartedAt)
@@ -908,15 +940,19 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         }
         case 'stream:delta':
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
-          streamBufferRef.current += event.text
+          const acceptedText = streamBufferRef.current.append(event.text)
+          streamDisplayBufferRef.current = appendLiveStreamTail(
+            streamDisplayBufferRef.current,
+            acceptedText,
+          )
           terminalLatencyTracker.noteDeltaReceived()
           if (flowFeatures.streamScheduler) {
             streamScheduler.enqueue(Buffer.byteLength(event.text, 'utf8'))
           } else {
-            setStreamText(streamBufferRef.current)
+            setStreamText(streamDisplayBufferRef.current)
             setCurrentTurnOutputTokens(previous => Math.max(
               previous,
-              estimateOutputTokensForDisplay(streamBufferRef.current),
+              streamBufferRef.current.length > 0 ? Math.ceil(streamBufferRef.current.length / 4) : 0,
             ))
           }
           markActivity()
@@ -928,7 +964,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             streamThinkingStartedAtRef.current = thinkingStartedAt
             setStreamThinkingStartedAt(thinkingStartedAt)
           }
-          streamThinkingBufferRef.current += event.text
+          streamThinkingBufferRef.current = appendLiveReasoningTail(
+            streamThinkingBufferRef.current,
+            event.text,
+          )
           terminalLatencyTracker.noteDeltaReceived()
           if (flowFeatures.streamScheduler) {
             streamScheduler.enqueue(Buffer.byteLength(event.text, 'utf8'))
@@ -944,10 +983,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         case 'stream:end': {
           clearStreamFlushTimer()
-          const bufferedStreamText = streamBufferRef.current
+          const bufferedStreamText = streamBufferRef.current.toString()
           const bufferedThinkingText = streamThinkingBufferRef.current
           const thinkingStartedAt = streamThinkingStartedAtRef.current
-          streamBufferRef.current = ''
+          streamBufferRef.current.reset()
+          streamDisplayBufferRef.current = ''
           streamThinkingBufferRef.current = ''
           streamThinkingStartedAtRef.current = undefined
           setStreamThinkingStartedAt(undefined)
@@ -1135,8 +1175,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           })
           syncNotificationSnapshot()
           if (event.level === 'warning' || event.level === 'error') {
-            appendMessages([{ id: genMsgId(), role: 'system', content: event.message }])
+            appendMessages([{ id: genMsgId(), role: 'system', content: event.message }], { forceLatest: true, dedupeTail: true })
           } else {
+            appendMessages([{ id: genMsgId(), role: 'assistant', content: event.message, progress: true }], { forceLatest: true, dedupeTail: true })
             showRunControlHint(event.message)
           }
           break
@@ -1153,7 +1194,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           }
           break
         case 'error':
-          streamBufferRef.current = ''
+          streamBufferRef.current.reset()
+          streamDisplayBufferRef.current = ''
           streamThinkingBufferRef.current = ''
           streamThinkingStartedAtRef.current = undefined
           setStreamThinkingStartedAt(undefined)
@@ -1264,6 +1306,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             conv.contextSegments ?? [],
             conv.contextReservoir ?? [],
             conv.turns,
+            { restoreEngine: false },
           )
           restoreInteractionState(conv.interactionState)
         },
@@ -1398,7 +1441,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     }
     flowBridge.startRun(prompt)
     setMood('thinking')
-    streamBufferRef.current = ''
+    streamBufferRef.current.reset()
+    streamDisplayBufferRef.current = ''
     streamThinkingBufferRef.current = ''
     streamThinkingStartedAtRef.current = undefined
     setStreamThinkingStartedAt(undefined)
@@ -1429,7 +1473,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         }
       }
     } catch (e: any) {
-      const bufferedStreamText = streamBufferRef.current
+      const bufferedStreamText = streamBufferRef.current.toString()
       const bufferedThinkingText = streamThinkingBufferRef.current
       const thinkingStartedAt = streamThinkingStartedAtRef.current
       const visibleInterruptedText = stripTextToolCallMarkup(bufferedStreamText, { stripIncomplete: true })
@@ -1438,7 +1482,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const interrupted = abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))
       runOutcome = interrupted ? 'interrupted' : 'failed'
       runError = interrupted ? undefined : String(e?.message || e)
-      streamBufferRef.current = ''
+      streamBufferRef.current.reset()
+      streamDisplayBufferRef.current = ''
       streamThinkingBufferRef.current = ''
       streamThinkingStartedAtRef.current = undefined
       setStreamThinkingStartedAt(undefined)

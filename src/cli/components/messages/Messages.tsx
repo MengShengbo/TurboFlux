@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Text } from 'ink'
 import { resolveBackground, useTheme } from '../../theme/index'
-import { formatMarkdown } from '../markdown/index'
+import { formatMarkdownForDisplay } from '../markdown/index'
 import { ThinkingBlock } from './ThinkingBlock'
 import type { ToolStatus } from '../tools/ToolCallTree'
 import type { ChangeSummary, ThinkingTrace } from '../../../shared/agentTypes'
@@ -12,6 +12,7 @@ export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  progress?: boolean
   tools?: ToolStatus[]
   changes?: ChangeSummary[]
   interrupted?: boolean
@@ -38,7 +39,7 @@ export function AssistantMessage({ content, interrupted = false, thinking, showT
   return (
     <Box flexDirection="column">
       {thinking && <ThinkingBlock trace={thinking} expanded={showThinking} streaming={thinking.isStreaming} />}
-      <Text>{formatMarkdown(displayContent)}</Text>
+      <Text>{formatMarkdownForDisplay(displayContent)}</Text>
       {interrupted && <Text dimColor color={theme.inactive}>{t('common.interrupted')}</Text>}
     </Box>
   )

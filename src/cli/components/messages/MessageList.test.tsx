@@ -5,6 +5,28 @@ import { ThemeProvider } from '../../theme/index'
 import { MessageList } from './MessageList'
 
 describe('MessageList developer workflow', () => {
+  it('renders tool-loop commentary as progress before the tools without an Answer label', () => {
+    const output = renderToString(
+      <ThemeProvider>
+        <MessageList
+          messages={[{
+            id: 'assistant-progress',
+            role: 'assistant',
+            content: 'The API route is located; next I am patching validation.',
+            progress: true,
+            tools: [{ id: 'tool-1', name: 'read_file', status: 'done' }],
+          }]}
+          verbose={false}
+          availableWidth={72}
+        />
+      </ThemeProvider>,
+      { columns: 72 },
+    )
+
+    expect(output).toContain('The API route is located')
+    expect(output).not.toContain('Answer')
+  })
+
   it('renders every diff row by default', () => {
     const after = Array.from({ length: 140 }, (_, index) => `added-line-${String(index + 1).padStart(3, '0')}`).join('\n')
     const output = renderToString(

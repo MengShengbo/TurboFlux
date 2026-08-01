@@ -141,11 +141,16 @@ Acrylic, and background images are detected automatically. Override detection wi
 
 ```bash
 npm ci
-npm run dev:once -- .
+npm run build
+npm run link:tf
+tf .
 npm test
 npm run type-check
-npm run build
 ```
+
+`tf` always runs the local checkout's built `dist/`. The published npm package
+remains available as `turboflux`, so the two commands can be tested side by
+side.
 
 Start with the [documentation index](docs/README.md):
 
