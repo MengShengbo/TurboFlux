@@ -91,6 +91,21 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     expect(readFileSync(filePath, 'utf-8')).toBe('editor change')
   }))
 
+  it('moves files with source and destination version checks', async () => withWorkspace(async ({ workspace }) => {
+    const sourcePath = join(workspace, 'old.txt')
+    const destinationPath = join(workspace, 'nested', 'new.txt')
+    writeFileSync(sourcePath, 'content', 'utf-8')
+    const executor = new NodeToolExecutor(workspace)
+
+    const result = await executor.moveFile!(sourcePath, destinationPath, {
+      expectedHash: hashText('content'),
+    })
+
+    expect(result).toEqual({ success: true })
+    expect(existsSync(sourcePath)).toBe(false)
+    expect(readFileSync(destinationPath, 'utf-8')).toBe('content')
+  }))
+
   it('blocks paths through a symlink or junction outside the workspace', async () => withWorkspace(async ({ workspace, outside }) => {
     writeFileSync(join(outside, 'secret.txt'), 'outside', 'utf-8')
     const linkPath = join(workspace, 'linked')

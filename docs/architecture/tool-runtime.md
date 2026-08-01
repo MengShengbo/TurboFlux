@@ -16,6 +16,11 @@ permissions, or side effects.
 6. Execute through the runtime boundary and return a bounded `Result<T>`.
 7. Persist a structured tool result and invalidate stale read entries after writes.
 
+`apply_patch` follows the Codex patch grammar (`Add File`, `Update File`,
+`Move to`, and `Delete File`). It parses and validates every operation before
+writing, matches update hunks against unique context, and passes expected file
+hashes to the executor so concurrent edits are reported as conflicts.
+
 `ask_user`, memory writes, and background-agent creation are serialized side
 effects. `ask_user` does not return until the coordinator has a response, so a
 later write in the same model turn cannot run before the user decision.

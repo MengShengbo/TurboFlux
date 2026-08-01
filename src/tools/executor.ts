@@ -99,6 +99,7 @@ export interface ToolExecutor {
   readFileRange?(path: string, offset?: number, limit?: number, maxBytes?: number): Promise<Result<FileRangeResult>>
   writeFile(path: string, content: string, metadata?: Record<string, unknown>): Promise<Result<void>>
   deleteFile(path: string, options?: Record<string, any>): Promise<Result<void>>
+  moveFile?(sourcePath: string, destinationPath: string, options?: { expectedHash?: string; expectedDestinationHash?: string }): Promise<Result<void>>
   listTree(path: string, options?: ListTreeOptions): Promise<Result<TreeNode>>
 
   // Search operations

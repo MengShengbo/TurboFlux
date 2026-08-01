@@ -23,6 +23,7 @@ import { TaskManager, type TaskTreeNode } from './taskManager'
 import { CacheMonitor } from './cacheMonitor'
 import { toolsToOpenAIFormat, toolsToAnthropicFormat, getToolByName, validateToolArgs } from './toolRegistry'
 import { applyEdit, stripLineNumberPrefix } from './editHelpers'
+import { applyPatchAdd, applyPatchHunks, parseApplyPatch, type ApplyPatchOperation } from './applyPatch'
 import { canComputeDiff, computeHunks, summarizeHunks } from './diffCompute'
 import { ContextManager } from './contextManager'
 import {
@@ -4424,7 +4425,7 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
   private classifyToolErrorKind(output: string): ToolResult['errorKind'] {
     if (/timed out|timeout/i.test(output)) return 'timeout'
     if (/permission|denied|blocked by .*policy|requires an explicit permission/i.test(output)) return 'permission'
-    if (/required|invalid|unknown tool|not available in .* mode/i.test(output)) return 'validation'
+    if (/required|invalid|unknown tool|not available in .* mode|patch (?:must|contains|exceeds)|patch line|hunk|context is ambiguous/i.test(output)) return 'validation'
     return 'execution'
   }
 
@@ -4729,6 +4730,159 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         return writeResult.success
           ? `File edited: ${args.path} (${rawEdits.length} edits applied: ${summary.join(', ')})`
           : `Error: ${writeResult.error}`
+      }
+
+      case 'apply_patch': {
+        let operations: ApplyPatchOperation[]
+        try {
+          operations = parseApplyPatch(args.patch as string)
+        } catch (error) {
+          return `Error: ${error instanceof Error ? error.message : String(error)}`
+        }
+
+        type PreparedPatch = {
+          operation: ApplyPatchOperation
+          sourcePath: string
+          sourceRelativePath: string
+          sourceContent: string | null
+          sourceHash?: string
+          targetPath?: string
+          targetRelativePath?: string
+          targetHash?: string
+          nextContent?: string
+        }
+
+        const prepared: PreparedPatch[] = []
+        const touchedPaths = new Set<string>()
+        const readExisting = async (filePath: string, label: string): Promise<{ content: string | null; hash?: string; error?: string }> => {
+          const result = await this.toolExecutor.readFile(filePath)
+          if (result.success) {
+            const content = result.data ?? ''
+            return { content, hash: hashText(content) }
+          }
+          const error = result.error || 'file not found'
+          if (/not found|no such file|does not exist/i.test(error)) return { content: null }
+          return { content: null, error: `${label}: ${error}` }
+        }
+
+        for (const operation of operations) {
+          const sourcePath = this.resolvePath(basePath, operation.path)
+          const sourceRelativePath = this.toWorkspaceRelative(basePath, sourcePath)
+          const sourceKey = sourcePath.toLowerCase()
+          if (touchedPaths.has(sourceKey)) return `Error: patch touches the same file more than once: ${operation.path}`
+          touchedPaths.add(sourceKey)
+          const source = await readExisting(sourcePath, `Unable to inspect ${operation.path}`)
+          if (source.error) return `Error: ${source.error}`
+
+          if (operation.kind === 'add') {
+            prepared.push({
+              operation,
+              sourcePath,
+              sourceRelativePath,
+              sourceContent: source.content,
+              sourceHash: source.hash,
+              nextContent: applyPatchAdd(operation.content),
+            })
+            continue
+          }
+
+          if (source.content === null) return `Error: ${operation.kind} requires an existing file: ${operation.path}`
+          if (operation.kind === 'delete') {
+            prepared.push({ operation, sourcePath, sourceRelativePath, sourceContent: source.content, sourceHash: source.hash })
+            continue
+          }
+
+          let nextContent: string
+          try {
+            nextContent = applyPatchHunks(source.content, operation.hunks, operation.path)
+          } catch (error) {
+            return `Error: ${error instanceof Error ? error.message : String(error)}`
+          }
+
+          if (!operation.moveTo) {
+            prepared.push({ operation, sourcePath, sourceRelativePath, sourceContent: source.content, sourceHash: source.hash, nextContent })
+            continue
+          }
+
+          const targetPath = this.resolvePath(basePath, operation.moveTo)
+          const targetRelativePath = this.toWorkspaceRelative(basePath, targetPath)
+          const targetKey = targetPath.toLowerCase()
+          if (targetKey === sourceKey) return `Error: move destination must differ from source: ${operation.moveTo}`
+          if (touchedPaths.has(targetKey)) return `Error: patch touches the same file more than once: ${operation.moveTo}`
+          touchedPaths.add(targetKey)
+          const target = await readExisting(targetPath, `Unable to inspect ${operation.moveTo}`)
+          if (target.error) return `Error: ${target.error}`
+          prepared.push({
+            operation,
+            sourcePath,
+            sourceRelativePath,
+            sourceContent: source.content,
+            sourceHash: source.hash,
+            targetPath,
+            targetRelativePath,
+            targetHash: target.hash,
+            nextContent,
+          })
+        }
+
+        for (const item of prepared) {
+          await this.captureBeforeSnapshot(item.sourcePath)
+          if (item.targetPath) await this.captureBeforeSnapshot(item.targetPath)
+        }
+
+        const summaries: string[] = []
+        for (const item of prepared) {
+          const operation = item.operation
+          if (operation.kind === 'add') {
+            const writeResult = await this.toolExecutor.writeFile(item.sourcePath, item.nextContent || '', {
+              source: 'ai',
+              label: 'AI apply_patch add',
+              ...(item.sourceHash ? { expectedHash: item.sourceHash } : { expectNotExists: true }),
+            })
+            if (!writeResult.success) return `Error: ${writeResult.error}`
+            summaries.push(`A ${item.sourceRelativePath}`)
+            continue
+          }
+
+          if (operation.kind === 'delete') {
+            const deleteResult = await this.toolExecutor.deleteFile(item.sourcePath, { expectedHash: item.sourceHash })
+            if (!deleteResult.success) return `Error: ${deleteResult.error}`
+            summaries.push(`D ${item.sourceRelativePath}`)
+            continue
+          }
+
+          if (item.targetPath) {
+            if (item.nextContent === item.sourceContent && this.toolExecutor.moveFile) {
+              const moveResult = await this.toolExecutor.moveFile(item.sourcePath, item.targetPath, {
+                expectedHash: item.sourceHash,
+                ...(item.targetHash ? { expectedDestinationHash: item.targetHash } : {}),
+              })
+              if (!moveResult.success) return `Error: ${moveResult.error}`
+              summaries.push(`M ${item.targetRelativePath}`)
+              continue
+            }
+            const writeTarget = await this.toolExecutor.writeFile(item.targetPath, item.nextContent || '', {
+              source: 'ai',
+              label: 'AI apply_patch move',
+              ...(item.targetHash ? { expectedHash: item.targetHash } : { expectNotExists: true }),
+            })
+            if (!writeTarget.success) return `Error: ${writeTarget.error}`
+            const deleteSource = await this.toolExecutor.deleteFile(item.sourcePath, { expectedHash: item.sourceHash })
+            if (!deleteSource.success) return `Error: move completed at ${item.targetRelativePath}, but source cleanup failed: ${deleteSource.error}`
+            summaries.push(`M ${item.targetRelativePath}`)
+            continue
+          }
+
+          const writeResult = await this.toolExecutor.writeFile(item.sourcePath, item.nextContent || '', {
+            source: 'ai',
+            label: 'AI apply_patch update',
+            expectedHash: item.sourceHash,
+          })
+          if (!writeResult.success) return `Error: ${writeResult.error}`
+          summaries.push(`M ${item.sourceRelativePath}`)
+        }
+
+        return `Patch applied. Updated files:\n${summaries.join('\n')}`
       }
 
       case 'list_directory': {

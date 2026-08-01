@@ -1,4 +1,4 @@
-import { createReadStream, readFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { createReadStream, readFileSync, existsSync, mkdirSync, rmSync, renameSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { promisify } from 'util'
@@ -236,6 +236,36 @@ export class NodeToolExecutor implements ToolExecutor {
         }
       }
       rmSync(safePath, { recursive: options?.recursive, force: true })
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
+  async moveFile(sourcePath: string, destinationPath: string, options?: { expectedHash?: string; expectedDestinationHash?: string }): Promise<Result<void>> {
+    try {
+      const safeSourcePath = this.resolvePath(sourcePath, 'write')
+      const safeDestinationPath = this.resolvePath(destinationPath, 'write')
+      if (!existsSync(safeSourcePath)) return { success: false, error: `File not found: ${sourcePath}` }
+      if (statSync(safeSourcePath).isDirectory()) return { success: false, error: `Cannot move directory with moveFile: ${sourcePath}` }
+      if (typeof options?.expectedHash === 'string') {
+        const actualHash = hashText(readFileSync(safeSourcePath, 'utf-8'))
+        if (actualHash !== options.expectedHash) {
+          return { success: false, error: `Move conflict: source changed since it was read: ${sourcePath}` }
+        }
+      }
+      if (existsSync(safeDestinationPath)) {
+        if (statSync(safeDestinationPath).isDirectory()) return { success: false, error: `Cannot overwrite directory: ${destinationPath}` }
+        if (typeof options?.expectedDestinationHash === 'string') {
+          const actualHash = hashText(readFileSync(safeDestinationPath, 'utf-8'))
+          if (actualHash !== options.expectedDestinationHash) {
+            return { success: false, error: `Move conflict: destination changed since it was read: ${destinationPath}` }
+          }
+        }
+      }
+      const parent = dirname(safeDestinationPath)
+      if (!existsSync(parent)) mkdirSync(parent, { recursive: true })
+      renameSync(safeSourcePath, safeDestinationPath)
       return { success: true }
     } catch (e) {
       return { success: false, error: String(e) }

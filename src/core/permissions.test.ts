@@ -179,6 +179,7 @@ describe('PermissionPipeline', () => {
 
       expect(pipeline.check('write_file', { path: 'b.ts', content: 'b' }).verdict).toBe('allow')
       expect(pipeline.check('edit_file', { path: 'c.ts', old_string: 'a', new_string: 'b' }).verdict).toBe('allow')
+      expect(pipeline.check('apply_patch', { patch: '*** Begin Patch\n*** End Patch' }).verdict).toBe('allow')
     })
 
     it('shares a run grant across file write and edit tools', () => {

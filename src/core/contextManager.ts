@@ -192,7 +192,9 @@ function mapToolToOperation(toolName: string): 'read' | 'write' | 'edit' | 'dele
     case 'write_file':
     case 'replace_file':
       return 'write'
-    case 'edit_file': return 'edit'
+    case 'edit_file':
+    case 'multi_edit':
+    case 'apply_patch': return 'edit'
     case 'delete_file': return 'delete'
     default: return null
   }

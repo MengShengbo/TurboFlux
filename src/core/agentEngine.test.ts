@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { AgentTurn, ToolCall, ToolResult } from '../shared/agentTypes'
 import type { ToolExecutor } from '../tools/executor'
 import type { McpClient } from './mcp/client'
@@ -181,6 +184,66 @@ describe('AgentEngine MCP dispatch', () => {
     }).dispatchTool.bind(engine)
     await expect(dispatchTool('tool_search', { query: 'replace' }, 'mcp-search-1')).resolves.toContain('files__replace')
     engine.destroy()
+  })
+})
+
+describe('AgentEngine structured patch dispatch', () => {
+  it('preflights and applies multiple patch operations with conflict checks', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'turboflux-apply-patch-'))
+    const sourcePath = join(workspace, 'sample.txt')
+    writeFileSync(sourcePath, 'before\n')
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      maxTurns: 2,
+      workspacePath: workspace,
+    }, new NodeToolExecutor(workspace), stateProvider)
+    const dispatchTool = (engine as unknown as {
+      dispatchTool: (name: string, args: Record<string, unknown>, toolCallId: string) => Promise<string>
+    }).dispatchTool.bind(engine)
+
+    const patch = `*** Begin Patch
+*** Update File: sample.txt
+@@
+-before
++after
+*** Add File: added.txt
++created
+*** End Patch`
+    await expect(dispatchTool('apply_patch', { patch }, 'patch-1')).resolves.toContain('Patch applied')
+    expect(readFileSync(sourcePath, 'utf8')).toBe('after\n')
+    expect(readFileSync(join(workspace, 'added.txt'), 'utf8')).toBe('created\n')
+
+    const movePatch = `*** Begin Patch
+*** Update File: sample.txt
+*** Move to: moved.txt
+@@
+-after
++after
+*** End Patch`
+    await expect(dispatchTool('apply_patch', { patch: movePatch }, 'patch-move')).resolves.toContain('M moved.txt')
+    expect(readFileSync(join(workspace, 'moved.txt'), 'utf8')).toBe('after\n')
+
+    await expect(dispatchTool('apply_patch', { patch }, 'patch-2')).resolves.toMatch(/Error: (Failed to find expected lines|Write conflict|.*requires an existing file)/)
+    const executeSingleTool = (engine as unknown as {
+      executeSingleTool: (toolCall: ToolCall) => Promise<ToolResult>
+    }).executeSingleTool.bind(engine)
+    await expect(executeSingleTool({ id: 'patch-invalid', name: 'apply_patch', arguments: { patch: 'not a patch' } })).resolves.toMatchObject({
+      isError: true,
+      errorKind: 'validation',
+    })
+    engine.destroy()
+    rmSync(workspace, { recursive: true, force: true })
   })
 })
 

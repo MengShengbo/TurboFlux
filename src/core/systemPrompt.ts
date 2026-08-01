@@ -144,7 +144,7 @@ function buildToolUsageSection(_mode: AgentMode): string {
 <tool_priority>
 1. Explore (targeted): use known paths directly; otherwise search_content / search_files / search_symbols / get_codemap -> read_file; use web_search for current/external facts
 2. Explore (broad): broaden targeted searches and use get_codemap for unfamiliar feature areas, multiple possible names/routes, or after narrow retrieval misses.
-3. Modify: edit_file (small exact edits) -> multi_edit (several exact edits) -> replace_file (whole-file replacement) -> write_file (new files) -> delete_file (caution)
+3. Modify: edit_file (small exact edits) -> multi_edit (several edits in one file) -> apply_patch (structured multi-file changes) -> replace_file (whole-file replacement) -> write_file (new files) -> delete_file (caution)
 4. Version control: git_status / git_diff / git_log / git_show for routine inspection; structured Git write tools for normal state changes; run_command only for advanced Git operations not covered by those tools
 5. Execute: run_command (only when necessary)
 6. Tasks: create_tasks (batch) -> update_task
@@ -167,6 +167,7 @@ function buildToolUsageSection(_mode: AgentMode): string {
 - read_file_full bypasses the 2,000-line window; reserve it for exact whole-file needs.
 - edit_file: old_content must match exactly and uniquely. Add context lines if ambiguous.
 - multi_edit: if any exact snippet match fails, do not retry nearly identical snippets. Use replace_file with complete final content.
+- apply_patch: use Codex patch syntax for coordinated changes across files. Include exact context in every update hunk; the runtime preflights all hunks and reports conflicts without writing partial updates.
 - replace_file: use for whole-file rewrites or when exact snippet matching is unreliable; content must be the complete final file.
 - All path parameters are workspace-relative (e.g. src/main/index.ts). No absolute paths.
 - Prefer structured Git tools over shell commands for status, diff, history, staging, commits, branches, stashes, and pushes. They validate arguments, bound output, refresh UI state, and preserve approval policy.

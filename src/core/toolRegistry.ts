@@ -84,6 +84,19 @@ const tools: EnhancedToolDef[] = [
     requiredMode: ['vibe', 'plan'],
   },
   {
+    name: 'apply_patch',
+    description: 'Apply a Codex-compatible structured patch containing multiple add, update, move, or delete file operations. Use exact context lines in update hunks; the runtime preflights every hunk and detects concurrent file changes before writing.',
+    category: 'write',
+    parameters: [
+      { name: 'patch', type: 'string', description: "Patch text wrapped in '*** Begin Patch' and '*** End Patch'. Update hunks use '@@', context lines start with a space, removals with '-', and additions with '+'.", required: true },
+    ],
+    isReadOnly: false,
+    isDestructive: true,
+    isConcurrencySafe: false,
+    requiredMode: ['vibe', 'plan'],
+    maxResultSizeChars: 20_000,
+  },
+  {
     name: 'delete_file',
     description: 'Delete a file at the specified path. This operation is irreversible — use with caution.',
     category: 'write',

@@ -20,3 +20,4 @@ operations used by the core runtime.
 - Preserve the `Result<T>` data envelope; add fields to `data` instead of flat result properties.
 - Pass an `AbortSignal` through long-running process and network operations where available.
 - Use read-only process execution for repository inspection so read-only capability profiles remain usable.
+- Use `apply_patch` for coordinated multi-file edits; preflight context and expected hashes before writing.

@@ -46,6 +46,7 @@ const SESSION_GRANT_GROUPS = new Map<string, string>([
   ['replace_file', 'file-write'],
   ['edit_file', 'file-write'],
   ['multi_edit', 'file-write'],
+  ['apply_patch', 'file-write'],
 ])
 
 // ─── Permission Pipeline ────────────────────────────────────────────────────
@@ -191,6 +192,7 @@ export class PermissionPipeline {
       'replace_file',
       'edit_file',
       'multi_edit',
+      'apply_patch',
       'delete_file',
       'remember',
       'forget',

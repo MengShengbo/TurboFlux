@@ -9,6 +9,7 @@ describe('tool mode boundaries', () => {
     expect(tools.every(tool => tool.isReadOnly)).toBe(true)
     expect(tools.some(tool => tool.name === 'run_command')).toBe(false)
     expect(tools.some(tool => tool.name === 'write_file')).toBe(false)
+    expect(tools.some(tool => tool.name === 'apply_patch')).toBe(false)
   })
 
   it('emits closed schemas and strict nullable optionals for OpenAI', () => {
@@ -61,6 +62,9 @@ describe('tool mode boundaries', () => {
     expect(validateToolArgs('multi_edit', {
       path: 'src/app.ts',
       edits: [{ old_string: 'old', new_string: 'new' }],
+    })).toEqual({ valid: true })
+    expect(validateToolArgs('apply_patch', {
+      patch: '*** Begin Patch\n*** End Patch',
     })).toEqual({ valid: true })
   })
 
