@@ -4,7 +4,7 @@
 
 <h1 align="center">TurboFlux</h1>
 
-<p align="center">A local terminal coding agent for real workspaces.</p>
+<p align="center">A local TUI coding agent for real workspaces.</p>
 
 <p align="center">
   <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-20242a?logo=node.js" />
@@ -12,8 +12,9 @@
   <img alt="License" src="https://img.shields.io/badge/License-MIT-20242a" />
 </p>
 
-TurboFlux takes a project directory and a task, then searches code, edits files,
-runs commands, and reports progress and diffs in an Ink-based terminal UI.
+TurboFlux is a terminal user interface (TUI) for AI-assisted development. It takes
+a project directory and a task, then searches code, edits files, runs commands,
+and reports progress and diffs in an Ink-based terminal UI.
 
 <p align="center">
   <img src="turboflux-tui.png" alt="TurboFlux terminal interface" width="960" />

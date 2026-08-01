@@ -1,11 +1,9 @@
 {
   "name": "turboflux",
   "version": "1.0.0",
-  "description": "TurboFlux CLI - local AI workbench assistant for developer workflows",
+  "description": "TurboFlux TUI - a local terminal user interface for AI-assisted developer workflows",
   "main": "dist/cli/index.js",
-  "bin": {
-    "turboflux": "./bin/turboflux.mjs"
-  },
+  "bin": "bin/turboflux.mjs",
   "files": [
     "bin/turboflux.mjs",
     "dist/",
