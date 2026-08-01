@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "description": "TurboFlux TUI - a local terminal user interface for AI-assisted developer workflows",
   "main": "dist/cli/index.js",
-  "bin": "bin/turboflux.mjs",
+  "bin": {
+    "turboflux": "bin/turboflux.mjs"
+  },
   "files": [
     "bin/turboflux.mjs",
     "dist/",

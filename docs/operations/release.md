@@ -1,8 +1,8 @@
 # Release operations
 
-TurboFlux is currently distributed through the GitHub repository. The root
-package exposes the `turboflux` binary and TypeScript output is built into
-`dist/`. GitHub Actions provides cross-platform quality gates; there is no
+TurboFlux is distributed to end users through npm. The root package exposes
+the `turboflux` binary and TypeScript output is built into `dist/`. GitHub
+hosts the source code and provides cross-platform quality gates; there is no
 automatic release workflow in this repository.
 
 ## Pre-release checks
@@ -52,8 +52,8 @@ npm test
 5. Install the tarball locally and verify `turboflux --version`, `turboflux setup show`, and one single-shot task.
 6. Push the focused branch and wait for all platform gates.
 7. Merge to `main`, create the annotated `v<version>` tag, and push the tag.
-8. Verify the GitHub installation scripts and global installation path.
-9. Publish to npm only when that release channel is explicitly enabled.
+8. Verify the published npm package and global installation path.
+9. Publish to npm when the release is ready.
 
 Local tarball verification:
 

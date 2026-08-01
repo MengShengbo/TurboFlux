@@ -28,7 +28,7 @@ and reports progress and diffs in an Ink-based terminal UI.
 Requires Node.js 20 or newer.
 
 ```bash
-npm install -g github:MengShengbo/TurboFluxCli
+npm install -g turboflux
 turboflux setup
 cd your-project
 turboflux
@@ -40,24 +40,8 @@ The setup wizard configures a model provider. Then enter a task directly, for ex
 Inspect the login flow, fix session re-authentication, and run the relevant tests.
 ```
 
-Install from the published repository instead:
-
-```bash
-# macOS, Linux, or Git Bash
-curl -fsSL https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.sh | bash
-
-# Windows PowerShell
-irm https://raw.githubusercontent.com/MengShengbo/TurboFluxCli/main/install.ps1 | iex
-```
-
-Install from source:
-
-```bash
-git clone https://github.com/MengShengbo/TurboFluxCli.git
-cd TurboFluxCli
-npm ci
-npm install -g .
-```
+The npm package is the only supported end-user installation channel. GitHub
+hosts the source code and project documentation.
 
 ## Features
 
