@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -82,6 +82,20 @@ describe('RuntimeTaskManager', () => {
     expect(stopped).toMatchObject({ status: 'failed', error: 'kill failed', endedAt: 100 })
   })
 
+  it('prunes failed stop tasks through the same retention path', async () => {
+    let now = 100
+    const manager = new RuntimeTaskManager({ now: () => now++, maxRetainedTerminalTasks: 1 })
+    const stop = () => { throw new Error('kill failed') }
+    const first = manager.createTask({ kind: 'shell', status: 'running' }, { stop })
+    const second = manager.createTask({ kind: 'shell', status: 'running' }, { stop })
+
+    await manager.stopTask(first.id)
+    await manager.stopTask(second.id)
+
+    expect(manager.getTask(first.id)).toBeNull()
+    expect(manager.getTask(second.id)).toMatchObject({ status: 'failed' })
+  })
+
   it('preserves the first terminal status while accepting final metadata', () => {
     const manager = new RuntimeTaskManager({ now: () => 100 })
     const finished: string[] = []
@@ -122,6 +136,86 @@ describe('RuntimeTaskManager', () => {
     }
   })
 
+  it('compacts an oversized journal into recoverable task snapshots', () => {
+    const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-compact-'))
+    const journalPath = join(root, 'journal.jsonl')
+    try {
+      let now = 100
+      const manager = new RuntimeTaskManager({
+        journalPath,
+        now: () => now++,
+        journalMaxBytes: 256,
+        maxRetainedTerminalTasks: 2,
+      })
+      const taskIds: string[] = []
+      for (let index = 0; index < 6; index += 1) {
+        const task = manager.createTask({ kind: 'shell', status: 'running', command: `command-${index}-${'x'.repeat(200)}` })
+        taskIds.push(task.id)
+        manager.completeTask(task.id, { exitCode: index })
+      }
+
+      expect(manager.getTask(taskIds[0]!)).toBeNull()
+      expect(manager.listTasks()).toHaveLength(2)
+      expect(statSync(journalPath).size).toBeLessThan(4_096)
+
+      const recovered = new RuntimeTaskManager({
+        journalPath,
+        now: () => 1_000,
+        journalMaxBytes: 256,
+        maxRetainedTerminalTasks: 2,
+      })
+      expect(recovered.listTasks().map(task => task.id)).toEqual(taskIds.slice(-2))
+      expect(readFileSync(journalPath, 'utf8')).toContain('compacted')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('bounds completed tasks retained in memory', () => {
+    let now = 100
+    const manager = new RuntimeTaskManager({ now: () => now++, maxRetainedTerminalTasks: 2 })
+    const removed: string[] = []
+    manager.subscribe(event => {
+      if (event.type === 'runtime-task:removed') removed.push(event.taskId)
+    })
+    const tasks = Array.from({ length: 3 }, () => {
+      const task = manager.createTask({ kind: 'shell', status: 'running' })
+      manager.completeTask(task.id)
+      return task
+    })
+
+    expect(manager.listTasks().map(task => task.id)).toEqual(tasks.slice(-2).map(task => task.id))
+    expect(removed).toEqual([tasks[0]!.id])
+  })
+
+  it('persists terminal-task removals so pruned tasks stay gone after restart', () => {
+    const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-prune-recovery-'))
+    const journalPath = join(root, 'journal.jsonl')
+    try {
+      const manager = new RuntimeTaskManager({
+        journalPath,
+        now: () => 100,
+        maxRetainedTerminalTasks: 1,
+        journalMaxBytes: 1024 * 1024,
+      })
+      const first = manager.createTask({ kind: 'shell', status: 'running' })
+      manager.completeTask(first.id)
+      const second = manager.createTask({ kind: 'shell', status: 'running' })
+      manager.completeTask(second.id)
+
+      const recovered = new RuntimeTaskManager({
+        journalPath,
+        now: () => 200,
+        maxRetainedTerminalTasks: 1,
+        journalMaxBytes: 1024 * 1024,
+      })
+      expect(recovered.getTask(first.id)).toBeNull()
+      expect(recovered.getTask(second.id)).toMatchObject({ status: 'completed' })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('recovers a live process as observable and read-only', async () => {
     const root = mkdtempSync(join(tmpdir(), 'turboflux-runtime-live-recovery-'))
     const journalPath = join(root, 'journal.jsonl')
@@ -153,8 +247,14 @@ describe('RuntimeTaskManager', () => {
       const first = new RuntimeTaskManager({ journalPath, now: () => 100 })
       first.createTask({ kind: 'shell', status: 'running' })
       writeFileSync(journalPath, `${readFileSync(journalPath, 'utf8')}broken`, 'utf8')
-      new RuntimeTaskManager({ journalPath, now: () => 200 })
-      expect(readFileSync(journalPath, 'utf8')).toContain('truncated-tail')
+      const repaired = new RuntimeTaskManager({ journalPath, now: () => 200 })
+      const laterTask = repaired.createTask({ kind: 'agent', status: 'running' })
+      const repairedLines = readFileSync(journalPath, 'utf8').trim().split(/\r?\n/)
+
+      expect(repairedLines.map(line => JSON.parse(line))).toContainEqual(expect.objectContaining({ repair: 'truncated-tail' }))
+
+      const recovered = new RuntimeTaskManager({ journalPath, now: () => 300 })
+      expect(recovered.getTask(laterTask.id)).toMatchObject({ status: 'orphaned' })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

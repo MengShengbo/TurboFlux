@@ -407,7 +407,7 @@ const tools: EnhancedToolDef[] = [
   },
   {
     name: 'run_command',
-    description: 'Run a shell command. Background mode starts one dedicated process session with durable output, exact exit status, and immediate session_id return.',
+    description: 'Run a shell command. Long-running dependency installs, builds, tests, and toolchain commands are automatically moved to a durable background session unless run_in_background is explicitly false. Background mode returns a session_id immediately; use read_terminal to monitor it.',
     category: 'execute',
     parameters: [
       { name: 'command', type: 'string', description: 'Shell command to execute', required: true },
@@ -415,7 +415,7 @@ const tools: EnhancedToolDef[] = [
       { name: 'timeout', type: 'number', description: 'Timeout in milliseconds (foreground only). Default 30000.', required: false, default: 30000 },
       { name: 'env', type: 'object', description: 'Additional environment variables', required: false, schema: { type: 'object', additionalProperties: { type: 'string' } } },
       { name: 'approved', type: 'boolean', description: 'Legacy field; permission gates are enforced by the runtime.', required: false, default: false },
-      { name: 'run_in_background', type: 'boolean', description: 'When true, spawn one dedicated command session and return immediately. Use for dev servers, watch mode, builds, and multi-hour jobs. Default false.', required: false, default: false },
+      { name: 'run_in_background', type: 'boolean', description: 'When true, spawn one dedicated command session and return immediately. Long-running commands are selected automatically when omitted. Set false explicitly to force foreground execution.', required: false, default: false },
     ],
     isReadOnly: false,
     isDestructive: true,

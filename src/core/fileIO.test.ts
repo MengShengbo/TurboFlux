@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -7,6 +7,7 @@ import {
   quarantineCorruptFileSync,
   recoverFilesAtomicSync,
   withFileLockSync,
+  writeFileAtomic,
   writeFilesAtomicSync,
 } from './fileIO'
 
@@ -23,6 +24,19 @@ function temporaryDirectory(): string {
 }
 
 describe('atomic file transactions', () => {
+  it('preserves existing file permissions during async atomic writes', async () => {
+    const directory = temporaryDirectory()
+    const target = join(directory, 'executable.mjs')
+    writeFileSync(target, 'before\n', { encoding: 'utf-8', mode: 0o755 })
+
+    await writeFileAtomic(target, 'after\n')
+
+    expect(readFileSync(target, 'utf-8')).toBe('after\n')
+    if (process.platform !== 'win32') {
+      expect(statSync(target).mode & 0o777).toBe(0o755)
+    }
+  })
+
   it('commits related files and removes the transaction record', () => {
     const directory = temporaryDirectory()
     const first = join(directory, 'first.json')
@@ -88,6 +102,28 @@ describe('atomic file transactions', () => {
 
     expect(result).toBe('saved')
     expect(existsSync(lock)).toBe(false)
+  })
+
+  it('supports reentrant updates without waiting on its own lock', () => {
+    const directory = temporaryDirectory()
+    const lock = join(directory, '.config.lock')
+
+    const result = withFileLockSync(lock, () => withFileLockSync(lock, () => 'saved'))
+
+    expect(result).toBe('saved')
+    expect(existsSync(lock)).toBe(false)
+  })
+
+  it('reclaims a lock whose recorded owner is no longer running', () => {
+    const directory = temporaryDirectory()
+    const lock = join(directory, '.config.lock')
+    writeFileSync(lock, JSON.stringify({ pid: Number.MAX_SAFE_INTEGER, createdAt: new Date(0).toISOString() }), 'utf-8')
+    const staleAt = new Date(Date.now() - 2_000)
+    utimesSync(lock, staleAt, staleAt)
+
+    const startedAt = Date.now()
+    expect(withFileLockSync(lock, () => 'recovered', 500)).toBe('recovered')
+    expect(Date.now() - startedAt).toBeLessThan(500)
   })
 
   it('quarantines malformed data without deleting it', () => {

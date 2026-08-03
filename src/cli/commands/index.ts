@@ -12,7 +12,7 @@ import {
   type CapabilityProfile,
   type ReasoningEffort,
 } from '../../shared/agentTypes'
-import { createTranslator, type Translator } from '../i18n/index'
+import { createTranslator, type Translator } from '../i18n/translator'
 import { describeFlowFeatureFlags } from '../state/flowFeatureFlags'
 
 const DEFAULT_TRANSLATOR = createTranslator('en')

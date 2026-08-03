@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
   RuntimeRestartPolicy,
@@ -29,6 +29,9 @@ export interface RuntimeTaskManagerOptions {
   journalPath?: string
   recover?: boolean
   isProcessAlive?: (pid: number) => boolean
+  journalSyncIntervalMs?: number
+  journalMaxBytes?: number
+  maxRetainedTerminalTasks?: number
 }
 
 export interface CreateRuntimeTaskInput {
@@ -55,6 +58,8 @@ export type RuntimeTaskUpdate = Partial<Pick<
 >>
 
 const TERMINAL_STATUSES = new Set<RuntimeTaskStatus>(['completed', 'failed', 'stopped', 'interrupted', 'orphaned'])
+const DEFAULT_JOURNAL_MAX_BYTES = 4 * 1024 * 1024
+const DEFAULT_RETAINED_TERMINAL_TASKS = 512
 
 interface JournalRecord {
   version: 1
@@ -81,12 +86,31 @@ export class RuntimeTaskManager {
   private readonly journalPath?: string
   private readonly runtimeInfo: RuntimeInfo
   private readonly isProcessAlive: (pid: number) => boolean
+  private readonly journalSyncIntervalMs: number
+  private readonly journalMaxBytes: number
+  private readonly maxRetainedTerminalTasks: number
+  private lastJournalSyncAt = 0
+  private journalBytes = 0
+  private nextJournalCompactionAt: number
 
   constructor(private options: RuntimeTaskManagerOptions = {}) {
     this.now = options.now || Date.now
     this.journalPath = options.journalPath
     this.runtimeInfo = getRuntimeInfo()
     this.isProcessAlive = options.isProcessAlive || processIsAlive
+    this.journalSyncIntervalMs = Number.isFinite(options.journalSyncIntervalMs)
+      ? Math.max(0, Math.floor(options.journalSyncIntervalMs!))
+      : 1_000
+    this.journalMaxBytes = Number.isFinite(options.journalMaxBytes)
+      ? Math.max(1, Math.floor(options.journalMaxBytes!))
+      : DEFAULT_JOURNAL_MAX_BYTES
+    this.maxRetainedTerminalTasks = Number.isFinite(options.maxRetainedTerminalTasks)
+      ? Math.max(1, Math.floor(options.maxRetainedTerminalTasks!))
+      : DEFAULT_RETAINED_TERMINAL_TASKS
+    this.journalBytes = this.journalPath && existsSync(this.journalPath)
+      ? statSync(this.journalPath).size
+      : 0
+    this.nextJournalCompactionAt = this.journalMaxBytes
     if (options.recover !== false) this.recoverFromJournal()
   }
 
@@ -243,6 +267,7 @@ export class RuntimeTaskManager {
       if (!current) return cloneTask(task)
       const failed = this.setStatus(current, 'failed', { error: message }, true)
       this.controls.delete(taskId)
+      this.pruneTerminalTasks()
       return failed
     }
   }
@@ -294,6 +319,7 @@ export class RuntimeTaskManager {
     const nextStatus = task.status === 'stopping' ? 'stopped' : TERMINAL_STATUSES.has(task.status) ? task.status : status
     const finished = this.setStatus(task, nextStatus, patch, true)
     this.controls.delete(taskId)
+    this.pruneTerminalTasks()
     return finished
   }
 
@@ -334,19 +360,98 @@ export class RuntimeTaskManager {
       event,
     }
     mkdirSync(dirname(this.journalPath), { recursive: true })
+    const line = `${JSON.stringify(record)}\n`
     const fd = openSync(this.journalPath, 'a')
     try {
-      writeSync(fd, `${JSON.stringify(record)}\n`, undefined, 'utf8')
-      fsyncSync(fd)
+      writeSync(fd, line, undefined, 'utf8')
+      this.journalBytes += Buffer.byteLength(line)
+      const forceSync = event.type !== 'runtime-task:updated'
+      if (forceSync || record.recordedAt - this.lastJournalSyncAt >= this.journalSyncIntervalMs) {
+        fsyncSync(fd)
+        this.lastJournalSyncAt = record.recordedAt
+      }
     } finally {
       closeSync(fd)
+    }
+    this.maybeCompactJournal()
+  }
+
+  private pruneTerminalTasks(emitEvents = true): number {
+    const terminalTasks = Array.from(this.tasks.values())
+      .filter(task => TERMINAL_STATUSES.has(task.status))
+      .sort((left, right) => (
+        (left.endedAt ?? left.updatedAt) - (right.endedAt ?? right.updatedAt)
+        || left.startedAt - right.startedAt
+        || left.id.localeCompare(right.id)
+      ))
+    const overflow = terminalTasks.length - this.maxRetainedTerminalTasks
+    if (overflow <= 0) return 0
+    for (const task of terminalTasks.slice(0, overflow)) {
+      this.tasks.delete(task.id)
+      this.controls.delete(task.id)
+      if (emitEvents) this.emit({ type: 'runtime-task:removed', taskId: task.id })
+    }
+    return overflow
+  }
+
+  private maybeCompactJournal(): void {
+    if (this.journalBytes < this.nextJournalCompactionAt) return
+    this.compactJournal()
+  }
+
+  private compactJournal(): void {
+    if (!this.journalPath) return
+    const recordedAt = this.now()
+    const records: JournalRecord[] = [{
+      version: 1,
+      sequence: ++this.sequence,
+      recordedAt,
+      runtime: this.runtimeInfo,
+      repair: 'compacted',
+    }]
+    for (const task of this.tasks.values()) {
+      records.push({
+        version: 1,
+        sequence: ++this.sequence,
+        recordedAt,
+        runtime: this.runtimeInfo,
+        event: {
+          type: TERMINAL_STATUSES.has(task.status) ? 'runtime-task:finished' : 'runtime-task:created',
+          task: cloneTask(task),
+        },
+      })
+    }
+    const content = `${records.map(record => JSON.stringify(record)).join('\n')}\n`
+    this.replaceJournalContent(content, 'compact', recordedAt)
+    this.nextJournalCompactionAt = this.journalBytes + this.journalMaxBytes
+  }
+
+  private replaceJournalContent(content: string, operation: string, recordedAt: number): boolean {
+    if (!this.journalPath) return false
+    const tempPath = `${this.journalPath}.${process.pid}.${this.sequence}.${operation}.tmp`
+    let fd: number | undefined
+    try {
+      fd = openSync(tempPath, 'wx')
+      writeSync(fd, content, undefined, 'utf8')
+      fsyncSync(fd)
+      closeSync(fd)
+      fd = undefined
+      renameSync(tempPath, this.journalPath)
+      this.journalBytes = Buffer.byteLength(content)
+      this.lastJournalSyncAt = recordedAt
+      return true
+    } catch {
+      if (fd !== undefined) closeSync(fd)
+      if (existsSync(tempPath)) unlinkSync(tempPath)
+      return false
     }
   }
 
   private recoverFromJournal(): void {
     if (!this.journalPath || !existsSync(this.journalPath)) return
     const lines = readFileSync(this.journalPath, 'utf8').split(/\r?\n/)
-    let validLines = 0
+    const validLines: string[] = []
+    let invalidTail = false
     for (const line of lines) {
       if (!line.trim()) continue
       try {
@@ -354,27 +459,24 @@ export class RuntimeTaskManager {
         if (record.version !== 1 || typeof record.sequence !== 'number' || (!record.event && !record.repair)) throw new Error('invalid journal record')
         this.sequence = Math.max(this.sequence, record.sequence)
         if (record.event) this.applyRecoveredEvent(record.event)
-        validLines += 1
+        validLines.push(line)
       } catch {
+        invalidTail = true
         break
       }
     }
-    if (validLines < lines.filter(line => line.trim()).length) {
-      const repairRecord = `${JSON.stringify({
+    if (invalidTail) {
+      const recordedAt = this.now()
+      const repairRecord = JSON.stringify({
         version: 1,
         sequence: ++this.sequence,
-        recordedAt: this.now(),
+        recordedAt,
         runtime: this.runtimeInfo,
         repair: 'truncated-tail',
-      })}\n`
-      const fd = openSync(this.journalPath, 'a')
-      try {
-        writeSync(fd, repairRecord, undefined, 'utf8')
-        fsyncSync(fd)
-      } finally {
-        closeSync(fd)
-      }
+      })
+      this.replaceJournalContent(`${[...validLines, repairRecord].join('\n')}\n`, 'repair', recordedAt)
     }
+    const prunedTasks = this.pruneTerminalTasks(false)
     const recoveredTasks: RuntimeTask[] = []
     for (const task of this.tasks.values()) {
       if (!TERMINAL_STATUSES.has(task.status)) {
@@ -397,6 +499,7 @@ export class RuntimeTaskManager {
         task,
       })
     }
+    if (prunedTasks > 0 || this.journalBytes >= this.nextJournalCompactionAt) this.compactJournal()
   }
 
   private applyRecoveredEvent(event: RuntimeTaskEvent): void {

@@ -25,13 +25,20 @@ import { toolsToOpenAIFormat, toolsToAnthropicFormat, getToolByName, validateToo
 import { applyEdit, stripLineNumberPrefix } from './editHelpers'
 import { applyPatchAdd, applyPatchHunks, parseApplyPatch, type ApplyPatchOperation } from './applyPatch'
 import { canComputeDiff, computeHunks, summarizeHunks } from './diffCompute'
+import { shouldAutoBackgroundCommand } from './commandExecutionPolicy'
 import { ContextManager } from './contextManager'
 import {
+  buildContextHandoff,
   buildContinuationEvidence,
   buildContinuationSummaryPrompt,
+  buildContinuationSummaryAnchors,
+  buildDeterministicContinuationSummary,
+  collectContinuationHandoffFacts,
   CONTINUATION_SUMMARY_SYSTEM_PROMPT,
+  continuationSummaryTokenBudget,
   extractContinuationText,
   validateContinuationSummary,
+  type ContinuationWorkspaceSnapshot,
 } from './contextCompaction'
 import { autoCompactThreshold, blockingContextLimit, resolveContextPolicyProfile } from './contextPolicy'
 import { countMessagesTokens, countTurnishTokens } from './tokenCounter'
@@ -75,7 +82,7 @@ import {
 import { formatCodeMap } from './toolDispatcher'
 import { getSubAgentDefinition, runSubAgent, loadDynamicAgents, getAvailableAgentTypes } from './subAgent'
 import type { ToolExecutor, WebSearchResult } from '../tools/executor'
-import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
+import type { AgentStateProvider, APIConfig, APIModel, ContextCompactionState, ContextHandoff, ContextHandoffFacts, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../state/types'
 import type { TreeNode } from '../shared/types'
 import type { EnhancedToolDef } from '../shared/toolTypes'
 import { parseTextToolCalls, stripTextToolCallMarkup } from '../shared/toolCallMarkup'
@@ -141,6 +148,14 @@ export function countTurnContextChars(turn: AgentTurn): number {
   if (turn.toolResults) {
     for (const toolResult of turn.toolResults) {
       total += toolResult.output.length + 1
+      const change = toolResult.changeSummary
+      if (change) {
+        total += change.path.length + change.operation.length
+        total += change.preview?.length ?? 0
+        total += change.oldPreview?.length ?? 0
+        total += change.before?.length ?? 0
+        total += change.after?.length ?? 0
+      }
     }
   }
 
@@ -169,6 +184,12 @@ const MAX_STREAM_TEXT_CHARS = 8 * 1024 * 1024
 const MAX_STREAM_REASONING_CHARS = 8 * 1024 * 1024
 const MAX_STREAM_TOOL_ARGUMENT_CHARS = 1 * 1024 * 1024
 const MAX_IDENTICAL_TOOL_FAILURES = 3
+const DEFAULT_MAX_TOOL_ROUNDS_PER_RUN = 96
+const CONTEXT_COMPACTION_REQUEST_TIMEOUT_MS = 45_000
+const MODEL_TRANSIENT_RETRY_DELAYS_MS = [1_500, 5_000, 15_000]
+const MODEL_TRANSIENT_RETRYABLE_STATUSES = new Set([408, 409, 425, 429])
+const MAX_MODEL_TRANSIENT_RETRY_DELAY_MS = 120_000
+const MODEL_TRANSIENT_RETRY_BUDGET_MS = 120_000
 
 function isOutputLimitFinishReason(value: unknown): boolean {
   return typeof value === 'string' && /^(?:length|max_tokens|max_output_tokens)$/i.test(value)
@@ -354,6 +375,14 @@ export type AgentEventType =
     creation?: TaskSystemCreationEvent | null
   }
   | { type: 'context:segment_created'; segment: ContextSegment }
+  | { type: 'context:compaction_started'; state: ContextCompactionState }
+  | { type: 'context:compaction_summarizing'; state: ContextCompactionState }
+  | { type: 'context:compaction_fallback'; state: ContextCompactionState }
+  | { type: 'context:compaction_committing'; state: ContextCompactionState }
+  | { type: 'context:compaction_progress'; state: ContextCompactionState }
+  | { type: 'context:compaction_completed'; state: ContextCompactionState }
+  | { type: 'context:compaction_interrupted'; state: ContextCompactionState }
+  | { type: 'context:compaction_failed'; state: ContextCompactionState }
   | { type: 'git:state'; state: GitIntegrationState }
   | { type: 'subagent:start'; agentId: string; agentType: string; label: string; objective: string }
   | { type: 'subagent:progress'; agentId: string; agentType: string; label: string; event: SubAgentEvent }
@@ -526,6 +555,12 @@ export class AgentEngine {
   private runState: AgentRunState = { phase: 'idle', updatedAt: Date.now() }
   private forceContextCompactionBeforeNextCall = false
   private contextLimitRetryInProgress = false
+  private providerTransientRetryAttempt = 0
+  private providerTransientRetryStartedAt = 0
+  private contextCompactionState: ContextCompactionState | null = null
+  private contextCompactionPromise: Promise<boolean> | null = null
+  private contextCompactionAbortController: AbortController | null = null
+  private contextCompactionHeartbeat: ReturnType<typeof setInterval> | null = null
 
   private toolExecutor: ToolExecutor
   private stateProvider: AgentStateProvider
@@ -625,9 +660,13 @@ export class AgentEngine {
   destroy(): void {
     this.unsubscribeTaskManager?.()
     this.abortController?.abort()
+    this.contextCompactionAbortController?.abort()
+    if (this.contextCompactionHeartbeat) clearInterval(this.contextCompactionHeartbeat)
+    this.contextCompactionHeartbeat = null
     this.interactiveRequests.cancelAll('deny')
     this.resolvedAskUserResponses.clear()
     this.abortController = null
+    this.contextCompactionAbortController = null
     this.currentStreamId = null
     this.subAgentTaskManager.destroy()
     this.listeners.clear()
@@ -690,6 +729,12 @@ export class AgentEngine {
 
   isRunning(): boolean {
     return Boolean(this.currentRunPromise)
+  }
+
+  isContextCompacting(): boolean {
+    return this.contextCompactionPromise !== null
+      || (this.contextCompactionState?.phase !== undefined
+        && !['completed', 'interrupted', 'failed'].includes(this.contextCompactionState.phase))
   }
 
   setContextPolicy(mode: ContextPolicyMode): void {
@@ -847,6 +892,18 @@ export class AgentEngine {
     this.stateProvider.setContextReservoir(entries)
   }
 
+  getContextCompactionState(): ContextCompactionState | null {
+    const persisted = this.stateProvider.getContextCompactionState?.()
+    const state = persisted ?? this.contextCompactionState
+    return state ? { ...state } : null
+  }
+
+  setContextCompactionState(state: ContextCompactionState | null): void {
+    this.contextCompactionState = state ? { ...state } : null
+    this.stateProvider.setContextCompactionState?.(state ? { ...state } : null)
+    this.forceContextCompactionBeforeNextCall = state?.phase === 'interrupted' && state.recoverable
+  }
+
   getFullConversationTurns(): AgentTurn[] {
     const systemTurns = this.session.turns.filter(turn => turn.role === 'system')
     const liveTurns = this.session.turns.filter(turn => turn.role !== 'system')
@@ -869,6 +926,9 @@ export class AgentEngine {
     this.restoreFromMessages([])
     this.stateProvider.setContextSegments([])
     this.stateProvider.setContextReservoir([])
+    this.contextCompactionState = null
+    this.stateProvider.setContextCompactionState?.(null)
+    this.forceContextCompactionBeforeNextCall = false
     this.session.id = this.config.conversationId || generateSessionId()
     this.session.currentTaskId = null
     this.session.createdAt = now
@@ -1342,6 +1402,7 @@ export class AgentEngine {
     this.steeringOpen = false
     this.rejectPendingSteeringMessages('Current run was interrupted before guidance was committed')
     this.abortController?.abort()
+    this.contextCompactionAbortController?.abort()
     void this.subAgentTaskManager.stopAll('Parent agent run cancelled')
     for (const sessionId of this.agentBackgroundSessions.keys()) {
       const stop = this.toolExecutor.ptyKill?.(sessionId)
@@ -1493,8 +1554,10 @@ export class AgentEngine {
       throw new Error('AgentEngine.run() called while a previous run is still in flight')
     }
     const runPromise = (async () => {
+    const runAbortController = new AbortController()
+    this.abortController = runAbortController
     await this.initializeGit()
-    this.abortController = new AbortController()
+    if (runAbortController.signal.aborted) throw this.createAbortError()
     this.permissions.clearRunGrants()
     this.rejectPendingSteeringMessages('Previous run ended before guidance was committed')
     this.steeringOpen = true
@@ -1507,6 +1570,8 @@ export class AgentEngine {
     this.toolExecutionLedger.beginRun()
     this.conclusionGuardAttempts = 0
     this.contextLimitRetryInProgress = false
+    this.providerTransientRetryAttempt = 0
+    this.providerTransientRetryStartedAt = 0
     this.workspaceMemoryText = null
     this.workspaceMemoryWorkspace = null
     this.workspaceMemoryBuiltAt = 0
@@ -1526,6 +1591,10 @@ export class AgentEngine {
     let consecutiveToolErrors = 0
     const MAX_CONSECUTIVE_ERRORS = 1
     const identicalToolFailures = new Map<string, number>()
+    const maxToolRounds = Number.isFinite(this.config.maxToolRounds)
+      ? Math.max(1, Math.min(512, Math.floor(this.config.maxToolRounds!)))
+      : DEFAULT_MAX_TOOL_ROUNDS_PER_RUN
+    let toolRounds = 0
 
     try {
       if (!canReuseLastUserTurn) {
@@ -1536,16 +1605,34 @@ export class AgentEngine {
       }
 
       while (true) {
-        if (this.abortController?.signal.aborted) {
+        if (runAbortController.signal.aborted) throw this.createAbortError()
+
+        if (toolRounds >= maxToolRounds) {
+          const stoppedTurn = this.createAssistantTurn(
+            `Stopped after ${maxToolRounds} tool rounds in one request to prevent a runaway loop. Send a follow-up message to continue from the saved state.`,
+            undefined,
+            { mode: this.config.mode, interrupted: true },
+          )
+          this.session.turns.push(stoppedTurn)
+          newTurns.push(stoppedTurn)
+          this.emit({ type: 'turn:complete', turn: stoppedTurn })
           break
         }
 
         await this.waitIfPaused()
+        if (runAbortController.signal.aborted) throw this.createAbortError()
         this.consumeSteeringMessages(newTurns)
         await this.prepareContextWindow()
+        if (runAbortController.signal.aborted) throw this.createAbortError()
 
         this.setRunState('thinking', { detail: 'Planning the next step' })
         const assistantTurn = await this.callModel()
+
+        if (assistantTurn.metadata?.internalKind === 'request_error' && assistantTurn.metadata.internalError) {
+          const reported = new Error(assistantTurn.metadata.internalError) as Error & { alreadyReported: boolean }
+          reported.alreadyReported = true
+          throw reported
+        }
 
         this.session.turns.push(assistantTurn)
         newTurns.push(assistantTurn)
@@ -1592,6 +1679,7 @@ export class AgentEngine {
         const resultTurn = this.createToolResultTurn(toolResults)
         this.session.turns.push(resultTurn)
         newTurns.push(resultTurn)
+        toolRounds += 1
 
         if (repeatedFailure) {
           const lastError = repeatedFailure.result.output
@@ -1643,17 +1731,21 @@ export class AgentEngine {
       if (finalized.length > 0) {
         this.emit({ type: 'active:task', context: this.taskManager.getActiveTaskContext() })
       }
+      await this.prepareContextWindow()
+      const lastAssistantTurn = [...newTurns].reverse().find(turn => turn.role === 'assistant')
+      if (runAbortController.signal.aborted && lastAssistantTurn?.metadata?.interrupted !== true) {
+        throw this.createAbortError()
+      }
       this.emit({ type: 'session:complete', session: this.session })
       this.setRunState('completed', { detail: 'Run completed' })
-
-      await this.prepareContextWindow()
     } catch (error) {
       const errAborted = (error as { aborted?: boolean })?.aborted === true
         || this.abortController?.signal.aborted === true
+      const errorAlreadyReported = (error as { alreadyReported?: boolean })?.alreadyReported === true
       if (!errAborted) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error'
         this.setRunState('recoverable_error', { detail: errorMsg, recoverable: true })
-        this.emit({ type: 'error', error: errorMsg })
+        if (!errorAlreadyReported) this.emit({ type: 'error', error: errorMsg })
       }
       this.steeringOpen = false
       this.permissions.clearRunGrants()
@@ -1688,11 +1780,9 @@ export class AgentEngine {
    */
   private async ensureContextWindow(force = false): Promise<void> {
     const activeConfig = this.stateProvider.getActiveConfig()
-    if (!activeConfig || !activeConfig.apiKey) return
-
     if (!force) return
 
-    if (this.contextManager.getLastProviderUsage().source === 'provider') {
+    if (activeConfig?.apiKey && this.contextManager.getLastProviderUsage().source === 'provider') {
       this.emit({
         type: 'notification',
         message: 'Context usage is high; compacting older conversation before the next model call.',
@@ -1704,6 +1794,23 @@ export class AgentEngine {
   }
 
   private async performContextCompaction(source: ContextReservoirEntry['source']): Promise<boolean> {
+    if (this.contextCompactionPromise) return this.contextCompactionPromise
+    const promise = this.performContextCompactionInternal(
+      source,
+      Boolean(this.currentRunPromise) && this.runState.phase !== 'completed',
+    )
+    this.contextCompactionPromise = promise
+    try {
+      return await promise
+    } finally {
+      if (this.contextCompactionPromise === promise) this.contextCompactionPromise = null
+    }
+  }
+
+  private async performContextCompactionInternal(
+    source: ContextReservoirEntry['source'],
+    partOfRun: boolean,
+  ): Promise<boolean> {
     const keepRecent = resolveContextPolicyProfile(this.config.contextPolicy).keepRecentTurns
     const nonSystemTurns = this.session.turns.filter(turn => turn.role !== 'system')
     if (nonSystemTurns.length <= keepRecent) return false
@@ -1725,77 +1832,264 @@ export class AgentEngine {
       && segment.endMessageId === endMessageId
     )
 
-    if (!existingSegment) {
-      const summary = await this.generateContinuationSummary(oldTurns, recentTurns)
-      const segment: ContextSegment = {
-        startMessageId,
-        endMessageId,
-        summary,
-        isModelGenerated: true,
-        kind: 'compact',
-        originalCharCount,
-        isValid: true,
-        createdAt: Date.now(),
-        coveredTurnIds: oldTurns.map(turn => turn.id),
-      }
-      this.stateProvider.addContextSegment(segment)
-      this.emit({ type: 'context:segment_created', segment })
+    const compactionId = `context-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const startedAt = Date.now()
+    this.contextCompactionAbortController = new AbortController()
+    this.contextCompactionState = {
+      id: compactionId,
+      phase: 'started',
+      source,
+      startedAt,
+      updatedAt: startedAt,
+      elapsedMs: 0,
+      startMessageId,
+      endMessageId,
+      oldTurnCount: oldTurns.length,
+      originalCharCount,
+      progress: 0,
+      recoverable: true,
     }
+    this.stateProvider.setContextCompactionState?.({ ...this.contextCompactionState })
+    this.emit({ type: 'context:compaction_started', state: this.getContextCompactionState()! })
+    this.startContextCompactionHeartbeat()
+    if (partOfRun) this.setRunState('compacting', { detail: 'Preparing a durable context handoff' })
 
-    this.addReservoirEntry(startMessageId, endMessageId, oldTurns, source, originalCharCount)
-    this.preservedFiles = this.collectPreservedFiles(oldTurns)
+    const signal = this.contextCompactionAbortController.signal
+    try {
+      this.updateContextCompactionState('summarizing', {
+        progress: 0.12,
+        detail: existingSegment ? 'Restoring the previous handoff' : 'Summarizing older turns',
+      }, 'context:compaction_summarizing')
+      const previousHandoff = this.getLatestContextHandoff()
+      const workspace = await this.collectContinuationWorkspaceSnapshot()
+      if (signal.aborted) throw this.createContextCompactionAbortError()
+      const facts = collectContinuationHandoffFacts(oldTurns, recentTurns, workspace, previousHandoff?.facts)
+      const summaryResult = existingSegment
+        ? { text: existingSegment.summary, source: 'reused' as const }
+        : await this.generateContinuationSummary(oldTurns, recentTurns, workspace, previousHandoff, facts)
+      if (signal.aborted) throw this.createContextCompactionAbortError()
+      if (summaryResult.source === 'deterministic') {
+        this.updateContextCompactionState('fallback', {
+          progress: 0.58,
+          summarySource: summaryResult.source,
+          detail: 'Model summary unavailable; using deterministic handoff',
+        }, 'context:compaction_fallback')
+      }
 
-    const systemTurns = this.session.turns.filter(turn => turn.role === 'system')
-    this.session.turns = [...systemTurns, ...recentTurns]
-    this.contextManager.reset()
-    this.cacheMonitor.resetBaseline()
-    return true
+      let nextSegment = existingSegment
+      if (!existingSegment) {
+        const handoff = buildContextHandoff({
+          oldTurns,
+          recentTurns,
+          workspace,
+          previous: previousHandoff,
+          modelSummary: summaryResult.text,
+          startMessageId,
+          endMessageId,
+          source,
+          summarySource: summaryResult.source,
+          facts,
+        })
+        nextSegment = {
+          startMessageId,
+          endMessageId,
+          summary: summaryResult.text,
+          isModelGenerated: summaryResult.source === 'model',
+          kind: 'compact',
+          originalCharCount,
+          isValid: true,
+          createdAt: Date.now(),
+          coveredTurnIds: oldTurns.map(turn => turn.id),
+          handoff,
+        }
+      } else if (!existingSegment.handoff) {
+        const handoff = buildContextHandoff({
+          oldTurns,
+          recentTurns,
+          workspace,
+          previous: previousHandoff,
+          modelSummary: existingSegment.summary,
+          startMessageId,
+          endMessageId,
+          source,
+          summarySource: 'reused',
+          facts,
+        })
+        nextSegment = { ...existingSegment, handoff }
+      }
+
+      this.updateContextCompactionState('committing', {
+        progress: 0.72,
+        summarySource: summaryResult.source,
+        detail: 'Writing the compacted context checkpoint',
+      }, 'context:compaction_committing')
+      if (signal.aborted) throw this.createContextCompactionAbortError()
+
+      if (!existingSegment || !existingSegment.handoff) {
+        this.stateProvider.setContextSegments(this.stateProvider.getContextSegments().map(segment =>
+          segment.startMessageId === startMessageId && segment.endMessageId === endMessageId
+            ? nextSegment!
+            : segment
+        ).concat(existingSegment ? [] : [nextSegment!]))
+        this.emit({ type: 'context:segment_created', segment: nextSegment! })
+      }
+
+      this.addReservoirEntry(startMessageId, endMessageId, oldTurns, source, originalCharCount)
+      this.preservedFiles = this.collectPreservedFiles(oldTurns)
+
+      const systemTurns = this.session.turns.filter(turn => turn.role === 'system')
+      this.session.turns = [...systemTurns, ...recentTurns]
+      this.contextManager.reset()
+      this.cacheMonitor.resetBaseline()
+      this.updateContextCompactionState('completed', {
+        progress: 1,
+        summarySource: summaryResult.source,
+        detail: 'Context handoff committed; original turns remain in history',
+        recoverable: false,
+      }, 'context:compaction_completed')
+      if (partOfRun) this.setRunState('thinking', { detail: 'Continuing after context compaction' })
+      return true
+    } catch (error) {
+      const interrupted = signal.aborted || (error as { aborted?: boolean })?.aborted === true
+      const message = error instanceof Error ? error.message : String(error)
+      this.updateContextCompactionState(interrupted ? 'interrupted' : 'failed', {
+        detail: interrupted ? 'Compaction interrupted; original turns were preserved' : 'Compaction failed; retry is available',
+        error: interrupted ? undefined : message.slice(0, 500),
+        recoverable: true,
+      }, interrupted ? 'context:compaction_interrupted' : 'context:compaction_failed')
+      if (interrupted && partOfRun) {
+        this.setRunState('aborting', { detail: 'Context compaction interrupted; original turns preserved' })
+      }
+      if (interrupted) throw this.createContextCompactionAbortError()
+      throw error
+    } finally {
+      this.stopContextCompactionHeartbeat()
+      this.contextCompactionAbortController = null
+    }
+  }
+
+  private updateContextCompactionState(
+    phase: ContextCompactionState['phase'],
+    patch: Partial<ContextCompactionState>,
+    eventType: Extract<AgentEventType, { type: `context:compaction_${string}` }>['type'],
+  ): void {
+    const current = this.contextCompactionState
+    if (!current) return
+    const updatedAt = Date.now()
+    const next: ContextCompactionState = {
+      ...current,
+      ...patch,
+      phase,
+      updatedAt,
+      elapsedMs: Math.max(0, updatedAt - current.startedAt),
+    }
+    this.contextCompactionState = next
+    this.stateProvider.setContextCompactionState?.({ ...next })
+    this.emit({ type: eventType, state: { ...next } } as AgentEventType)
+  }
+
+  private startContextCompactionHeartbeat(): void {
+    this.stopContextCompactionHeartbeat()
+    this.contextCompactionHeartbeat = setInterval(() => {
+      const phase = this.contextCompactionState?.phase
+      if (!phase || ['completed', 'interrupted', 'failed'].includes(phase)) return
+      this.updateContextCompactionState(phase, {}, 'context:compaction_progress')
+    }, 1500)
+  }
+
+  private stopContextCompactionHeartbeat(): void {
+    if (this.contextCompactionHeartbeat) clearInterval(this.contextCompactionHeartbeat)
+    this.contextCompactionHeartbeat = null
+  }
+
+  private createContextCompactionAbortError(): Error & { aborted: boolean } {
+    const error = new Error('Context compaction aborted') as Error & { aborted: boolean }
+    error.aborted = true
+    return error
+  }
+
+  private createAbortError(): Error & { aborted: boolean } {
+    const error = new Error('aborted') as Error & { aborted: boolean }
+    error.aborted = true
+    return error
   }
 
   /**
    * Ask the model to generate a continuation summary for the next context window.
    * This is a hidden API call — the user does not see it as a regular message.
    */
-  private async generateContinuationSummary(oldTurns: AgentTurn[], recentTurns: AgentTurn[]): Promise<string> {
-    const activeConfig = this.stateProvider.getActiveConfig()
+  private getLatestContextHandoff(): ContextHandoff | null {
+    return this.stateProvider.getContextSegments()
+      .filter(segment => segment.isValid && segment.handoff)
+      .sort((a, b) => (b.handoff?.createdAt ?? b.createdAt ?? 0) - (a.handoff?.createdAt ?? a.createdAt ?? 0))[0]?.handoff ?? null
+  }
 
-    if (!activeConfig || !activeConfig.apiKey) throw new Error('No API key configured for continuation summary')
-
+  private async collectContinuationWorkspaceSnapshot(): Promise<ContinuationWorkspaceSnapshot> {
     const workspacePath = this.config.workspacePath || ''
     await Promise.all([
       workspacePath ? this.maybeBuildWorkspaceSkeleton(workspacePath) : Promise.resolve(),
       this.maybeRefreshWorkspaceMemory(),
       this.gitState.enabled ? this.refreshGitStatus() : Promise.resolve(),
     ])
-
-    const evidence = buildContinuationEvidence(oldTurns, recentTurns, {
+    return {
       workspacePath,
       workspaceSkeleton: this.workspaceSkeleton,
       gitStatus: this.cachedGitStatus,
       workspaceMemory: this.workspaceMemoryText,
       taskTree: this.taskManager.getFullTree(),
       activeTask: this.taskManager.getActiveTaskContext(),
-    })
-
-    const firstCandidate = await this.requestContinuationSummary(
-      activeConfig,
-      buildContinuationSummaryPrompt(evidence),
-    )
-    let validation = validateContinuationSummary(firstCandidate)
-    if (!validation.valid) {
-      const repaired = await this.requestContinuationSummary(
-        activeConfig,
-        buildContinuationSummaryPrompt(evidence, `${firstCandidate.slice(0, 20_000)}\nMissing sections: ${validation.missing.join(', ')}`),
-      )
-      validation = validateContinuationSummary(repaired)
     }
-    if (!validation.valid) {
-      throw new Error(`Continuation summary contract failed; missing: ${validation.missing.join(', ') || 'valid XML sections'}`)
-    }
-    return validation.text
   }
 
-  private async requestContinuationSummary(config: APIConfig, prompt: string): Promise<string> {
+  private async generateContinuationSummary(
+    oldTurns: AgentTurn[],
+    recentTurns: AgentTurn[],
+    workspace: ContinuationWorkspaceSnapshot,
+    previousHandoff: ContextHandoff | null,
+    facts: ContextHandoffFacts,
+  ): Promise<{ text: string; source: 'model' | 'deterministic' }> {
+    const activeConfig = this.stateProvider.getActiveConfig()
+    const deterministic = (): { text: string; source: 'deterministic' } => ({
+      text: buildDeterministicContinuationSummary(facts, previousHandoff?.modelSummary),
+      source: 'deterministic',
+    })
+
+    if (!activeConfig || !activeConfig.apiKey) return deterministic()
+
+    const evidence = buildContinuationEvidence(oldTurns, recentTurns, workspace, previousHandoff)
+    const anchors = buildContinuationSummaryAnchors(facts)
+    const summaryMaxTokens = continuationSummaryTokenBudget(
+      evidence.length,
+      this.config.contextPolicy,
+      this.config.contextPolicy === 'qualityFirst' ? 8_000 : 6_000,
+    )
+
+    try {
+      const firstCandidate = await this.requestContinuationSummary(
+        activeConfig,
+        buildContinuationSummaryPrompt(evidence),
+        summaryMaxTokens,
+      )
+      let validation = validateContinuationSummary(firstCandidate, anchors)
+      if (!validation.valid) {
+        const repaired = await this.requestContinuationSummary(
+          activeConfig,
+          buildContinuationSummaryPrompt(evidence, `${firstCandidate.slice(0, 20_000)}\nMissing requirements: ${validation.missing.join(', ')}`),
+          summaryMaxTokens,
+        )
+        validation = validateContinuationSummary(repaired, anchors)
+      }
+      if (validation.valid) return { text: validation.text, source: 'model' }
+    } catch (error) {
+      if (this.contextCompactionAbortController?.signal.aborted || (error as { aborted?: boolean })?.aborted === true) {
+        throw this.createContextCompactionAbortError()
+      }
+      return deterministic()
+    }
+    return deterministic()
+  }
+
+  private async requestContinuationSummary(config: APIConfig, prompt: string, maxTokens: number): Promise<string> {
     const protocols = planModelProtocols(config.provider, config.defaultModel)
     const attempts: ModelProtocolAttempt[] = []
     for (const protocol of protocols) {
@@ -1823,14 +2117,14 @@ export class AgentEngine {
             model: config.defaultModel,
             system: CONTINUATION_SUMMARY_SYSTEM_PROMPT,
             messages: [{ role: 'user', content: prompt }],
-            max_tokens: 2_200,
+            max_tokens: maxTokens,
           }
         : protocol === 'openai_responses'
           ? {
               model: config.defaultModel,
               instructions: CONTINUATION_SUMMARY_SYSTEM_PROMPT,
               input: toResponsesInput([{ role: 'user', content: prompt }]),
-              max_output_tokens: 2_200,
+              max_output_tokens: maxTokens,
               store: false,
             }
           : {
@@ -1839,16 +2133,17 @@ export class AgentEngine {
                 { role: 'system', content: CONTINUATION_SUMMARY_SYSTEM_PROMPT },
                 { role: 'user', content: prompt },
               ],
-              max_tokens: 2_200,
+              max_tokens: maxTokens,
               stream: false,
             }
 
       if (protocol === 'openai_chat') {
-        setOpenAIChatMaxTokens(body, 2_200, config.provider, config.defaultModel)
+        setOpenAIChatMaxTokens(body, maxTokens, config.provider, config.defaultModel)
       }
 
       const result = await this.toolExecutor.sendMessage(url, headers, JSON.stringify(body), {
-        signal: this.abortController?.signal,
+        signal: this.contextCompactionAbortController?.signal || this.abortController?.signal,
+        timeoutMs: CONTEXT_COMPACTION_REQUEST_TIMEOUT_MS,
       })
       if (result.success && result.data) {
         const text = extractContinuationText(protocol, result.data)
@@ -1866,6 +2161,7 @@ export class AgentEngine {
         protocol,
         url,
         status: result.status,
+        retryAfterMs: result.retryAfterMs,
       })
       attempts.push(toProtocolAttempt(error))
       if (!shouldFallbackProtocol(error)) break
@@ -2058,6 +2354,90 @@ Before retrying:
     }
   }
 
+  private shouldRetryModelTransient(error: ModelProtocolRequestError): boolean {
+    if (error.receivedStreamData || error.kind === 'stream' || error.kind === 'response_shape') return false
+    const retryStartedAt = this.providerTransientRetryStartedAt
+    const withinBudget = retryStartedAt > 0 && Date.now() - retryStartedAt < MODEL_TRANSIENT_RETRY_BUDGET_MS
+    if (!withinBudget) return false
+    if (error.kind === 'network') {
+      return this.providerTransientRetryAttempt < MODEL_TRANSIENT_RETRY_DELAYS_MS.length
+    }
+    const transientStatus = error.status !== undefined && (
+      MODEL_TRANSIENT_RETRYABLE_STATUSES.has(error.status)
+      || (error.status >= 500 && error.status <= 599)
+    )
+    return transientStatus && this.providerTransientRetryAttempt < MODEL_TRANSIENT_RETRY_DELAYS_MS.length
+  }
+
+  private async waitForModelTransientRetry(error: ModelProtocolRequestError): Promise<void> {
+    const retryAttempt = this.providerTransientRetryAttempt + 1
+    this.providerTransientRetryAttempt = retryAttempt
+    const configuredDelay = MODEL_TRANSIENT_RETRY_DELAYS_MS[retryAttempt - 1]
+      ?? MODEL_TRANSIENT_RETRY_DELAYS_MS.at(-1)
+      ?? 1_000
+    const delayMs = Math.min(
+      MAX_MODEL_TRANSIENT_RETRY_DELAY_MS,
+      Math.max(configuredDelay, error.retryAfterMs ?? 0),
+    )
+    const retryStartedAt = this.providerTransientRetryStartedAt || Date.now()
+    const remainingBudgetMs = Math.max(0, MODEL_TRANSIENT_RETRY_BUDGET_MS - (Date.now() - retryStartedAt))
+    const boundedDelayMs = Math.min(delayMs, Math.max(0, remainingBudgetMs - 1))
+    const maxRetries = MODEL_TRANSIENT_RETRY_DELAYS_MS.length
+    const signal = this.abortController?.signal
+    const protocol = protocolLabel(error.protocol)
+    const reason = error.status !== undefined
+      ? `HTTP ${error.status}`
+      : error.kind === 'network' ? 'network interruption' : 'temporary provider failure'
+
+    return new Promise<void>((resolve, reject) => {
+      const startedAt = Date.now()
+      let timer: ReturnType<typeof setTimeout> | null = null
+      let settled = false
+      let notified = false
+      const cleanup = () => {
+        if (timer) clearTimeout(timer)
+        timer = null
+        signal?.removeEventListener('abort', onAbort)
+      }
+      const abort = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        const aborted = new Error('aborted') as Error & { aborted: boolean }
+        aborted.aborted = true
+        reject(aborted)
+      }
+      const onAbort = () => abort()
+      const tick = () => {
+        if (settled) return
+        if (signal?.aborted) {
+          abort()
+          return
+        }
+        const remainingMs = Math.max(0, boundedDelayMs - (Date.now() - startedAt))
+        if (remainingMs === 0) {
+          settled = true
+          cleanup()
+          resolve()
+          return
+        }
+        const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1_000))
+        const detail = error.status === 429
+          ? `Provider rate limited ${protocol}; retrying the same protocol in ${remainingSeconds}s (attempt ${retryAttempt}/${maxRetries}).`
+          : `Provider returned ${reason} from ${protocol}; retrying the same protocol in ${remainingSeconds}s (attempt ${retryAttempt}/${maxRetries}).`
+        this.setRunState('thinking', { detail })
+        if (!notified) {
+          notified = true
+          this.emit({ type: 'notification', message: detail, level: 'warning' })
+        }
+        timer = setTimeout(tick, Math.min(1_000, remainingMs))
+      }
+
+      signal?.addEventListener('abort', onAbort, { once: true })
+      tick()
+    })
+  }
+
   private async callModel(): Promise<AgentTurn> {
     const activeConfig = this.stateProvider.getActiveConfig()
     const activeModel = this.stateProvider.getActiveModel()
@@ -2108,6 +2488,8 @@ Before retrying:
     })
 
     const startTime = Date.now()
+    this.providerTransientRetryAttempt = 0
+    this.providerTransientRetryStartedAt = startTime
     const protocolCandidates = planModelProtocols(activeConfig.provider, activeConfig.defaultModel)
     const preservedFiles = this.preservedFiles.map(file => ({ ...file }))
     const messagesByProvider = new Map<'openai' | 'anthropic', Array<Record<string, unknown>>>()
@@ -2140,6 +2522,8 @@ Before retrying:
             turn = await this.callOpenAICompatibleAPI(activeConfig, activeModel, messagesFor('openai'), startTime, turnStrategy)
           }
           this.emit({ type: 'model:protocol', phase: 'success', protocol, url })
+          this.providerTransientRetryAttempt = 0
+          this.providerTransientRetryStartedAt = 0
           return turn
         } catch (error) {
           if ((error as { aborted?: boolean })?.aborted === true || this.abortController?.signal.aborted) {
@@ -2152,6 +2536,11 @@ Before retrying:
               url,
               kind: 'internal',
             })
+          if (this.shouldRetryModelTransient(protocolError)) {
+            await this.waitForModelTransientRetry(protocolError)
+            index -= 1
+            continue
+          }
           const attempt = toProtocolAttempt(protocolError)
           attempts.push(attempt)
           const nextProtocol = protocolCandidates[index + 1]
@@ -2188,7 +2577,11 @@ Before retrying:
         return this.callModel()
       }
       this.emit({ type: 'error', error: errorMsg })
-      return this.createAssistantTurn(`**Request Error**\n\n${errorMsg}\n\nPlease check your API configuration.`)
+      return this.createAssistantTurn(`**Request Error**\n\n${errorMsg}\n\nPlease check your API configuration.`, undefined, {
+        internal: true,
+        internalKind: 'request_error',
+        internalError: errorMsg,
+      })
     }
   }
 
@@ -2336,8 +2729,8 @@ Before retrying:
     // sees a non-null id that matches the one the main process will use.
     // Previously we generated this in two unrelated places (here and in
     // preload's streamMessage), so streamAbort sent a phantom id and the
-    // SSE kept reading bytes + burning API quota until the upstream's
-    // 5-min timeout. Pre-allocating threads the same id through both.
+    // SSE kept reading bytes + burning API quota until the upstream request
+    // timeout. Pre-allocating threads the same id through both.
     const streamId = Date.now() + Math.floor(Math.random() * 1_000_000)
     this.currentStreamId = streamId
     let receivedStreamData = false
@@ -2473,7 +2866,9 @@ Before retrying:
     let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
       streamId,
       signal: this.abortController?.signal,
+      retry: false,
     })
+    receivedStreamData = receivedStreamData || result.receivedStreamData === true
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted || receivedStreamData) break
       if (result.status !== 400 && result.status !== 422) break
@@ -2489,7 +2884,9 @@ Before retrying:
           result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
             streamId,
             signal: this.abortController?.signal,
+            retry: false,
           })
+          receivedStreamData = receivedStreamData || result.receivedStreamData === true
           continue
         }
       }
@@ -2504,7 +2901,9 @@ Before retrying:
       result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
         streamId,
         signal: this.abortController?.signal,
+        retry: false,
       })
+      receivedStreamData = receivedStreamData || result.receivedStreamData === true
     }
     let textContent = textBuffer.toString()
     const reasoningContent = reasoningBuffer.toString()
@@ -2525,6 +2924,7 @@ Before retrying:
           protocol: 'anthropic_messages',
           url,
           status: result.status,
+          retryAfterMs: result.retryAfterMs,
           kind: result.status ? 'http' : 'network',
           receivedStreamData,
         })
@@ -2864,7 +3264,9 @@ Before retrying:
     let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
       streamId,
       signal: this.abortController?.signal,
+      retry: false,
     })
+    receivedStreamData = receivedStreamData || result.receivedStreamData === true
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted) break
       if (result.status !== 400) break
@@ -2880,7 +3282,9 @@ Before retrying:
           result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
             streamId,
             signal: this.abortController?.signal,
+            retry: false,
           })
+          receivedStreamData = receivedStreamData || result.receivedStreamData === true
           continue
         }
       }
@@ -2895,7 +3299,9 @@ Before retrying:
       result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
         streamId,
         signal: this.abortController?.signal,
+        retry: false,
       })
+      receivedStreamData = receivedStreamData || result.receivedStreamData === true
     }
     let textContent = textBuffer.toString()
     const reasoningContent = reasoningBuffer.toString()
@@ -2916,6 +3322,7 @@ Before retrying:
           protocol: 'openai_chat',
           url,
           status: result.status,
+          retryAfterMs: result.retryAfterMs,
           kind: result.status ? 'http' : 'network',
           receivedStreamData,
         })
@@ -3246,7 +3653,9 @@ Before retrying:
     let result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
       streamId,
       signal: this.abortController?.signal,
+      retry: false,
     })
+    receivedStreamData = receivedStreamData || result.receivedStreamData === true
     for (let retry = 0; !result.success && retry < 4; retry += 1) {
       if (this.abortController?.signal.aborted || result.status !== 400 || receivedStreamData) break
       if (isReasoningEffortValueError(result.error)) {
@@ -3261,7 +3670,9 @@ Before retrying:
           result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
             streamId,
             signal: this.abortController?.signal,
+            retry: false,
           })
+          receivedStreamData = receivedStreamData || result.receivedStreamData === true
           continue
         }
       }
@@ -3276,7 +3687,9 @@ Before retrying:
       result = await this.toolExecutor.streamMessage(url, headers, serializedBody, handleStreamLine, {
         streamId,
         signal: this.abortController?.signal,
+        retry: false,
       })
+      receivedStreamData = receivedStreamData || result.receivedStreamData === true
     }
     this.currentStreamId = null
 
@@ -3295,6 +3708,7 @@ Before retrying:
           protocol,
           url,
           status: result.status,
+          retryAfterMs: result.retryAfterMs,
           kind: result.status ? 'http' : 'network',
           receivedStreamData,
         })
@@ -5230,9 +5644,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
         const timeout = args.timeout as number | undefined
         const approved = args.approved === true
         const runInBackground = args.run_in_background === true
+        const foregroundCommand = args.command as string
+        const foregroundWasExplicit = Object.prototype.hasOwnProperty.call(args, 'run_in_background')
+          && args.run_in_background === false
+        const autoBackground = !runInBackground
+          && !foregroundWasExplicit
+          && shouldAutoBackgroundCommand(foregroundCommand)
+        const useBackground = runInBackground || autoBackground
 
-        if (runInBackground) {
-          const command = args.command as string
+        if (useBackground) {
+          const command = foregroundCommand
           const validation = await this.toolExecutor.validateCommand?.(command, cwd)
           if (validation && !validation.success) {
             return `Error: ${validation.error || 'command validation failed'}`
@@ -5257,11 +5678,16 @@ Before high-confidence claims: locate authoritative code via search_symbols/sear
           }
           this.agentBackgroundSessions.set(sessionId, { command, startedAt: Date.now() })
           await this.emitTerminalSessions()
-          return `Background command started in agent terminal ${sessionId}\nCommand: ${command}${terminalLogPath ? `\nLog: ${terminalLogPath}` : ''}\nUse read_terminal(session_id="${sessionId}") to view output, write_terminal to send stdin, or kill_terminal to stop.`
+          const prefix = autoBackground
+            ? 'Long-running command automatically moved to the background.'
+            : 'Background command started.'
+          const waitHint = autoBackground
+            ? '\nWait for an exited session with code 0 before running dependent commands.'
+            : ''
+          return `${prefix} Agent terminal: ${sessionId}\nCommand: ${command}${terminalLogPath ? `\nLog: ${terminalLogPath}` : ''}\nUse read_terminal(session_id="${sessionId}") to view output, write_terminal to send stdin, or kill_terminal to stop.${waitHint}`
         }
 
         // Foreground: exec-based path for one-shot commands
-        const foregroundCommand = args.command as string
         try {
           const result = await this.toolExecutor.runCommand(foregroundCommand, cwd, env, timeout, approved, this.abortController?.signal)
           const commandOutput = result.data

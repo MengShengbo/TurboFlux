@@ -7,7 +7,7 @@ import { stripTextToolCallMarkup } from '../shared/toolCallMarkup'
 import { commandRegistry } from './commands/index'
 import { ConversationManager } from './conversations/manager'
 import { loadProfile } from '../core/profile'
-import { createTranslator, type Translator } from './i18n/index'
+import { createTranslator, type Translator } from './i18n/translator'
 import { getProvisionalAssistantText } from './components/appHelpers'
 
 const DEFAULT_TRANSLATOR = createTranslator('en')
@@ -31,6 +31,7 @@ export class SingleShotProgressReporter {
   private lastPhase = ''
   private lastThinkingUpdate = 0
   private lastProgressMessage = ''
+  private requestStartedAt: number | undefined
 
   constructor(
     private readonly write: OutputWriter,
@@ -46,9 +47,39 @@ export class SingleShotProgressReporter {
   handle(event: AgentEventType): void {
     switch (event.type) {
       case 'run:state':
+        if (event.state.phase === 'compacting') {
+          this.finishRequest(true)
+          if (event.state.phase !== this.lastPhase) {
+            this.lastPhase = event.state.phase
+            this.write(`[${formatRunPhase(event.state.phase, this.t)}]\n`)
+          }
+          break
+        }
+        if (event.state.phase === 'thinking') {
+          this.startRequest()
+          break
+        }
         if (event.state.phase !== this.lastPhase && event.state.phase !== 'idle') {
           this.lastPhase = event.state.phase
           this.write(`[${formatRunPhase(event.state.phase, this.t)}]\n`)
+        }
+        break
+      case 'stream:start':
+        this.startRequest()
+        break
+      case 'stream:end':
+        this.finishRequest(event.interrupted === true)
+        break
+      case 'context:compaction_started':
+      case 'context:compaction_summarizing':
+      case 'context:compaction_fallback':
+      case 'context:compaction_committing':
+      case 'context:compaction_interrupted':
+      case 'context:compaction_failed':
+      case 'context:compaction_completed':
+        if (event.state.phase !== this.lastPhase) {
+          this.lastPhase = event.state.phase
+          this.write(`[${formatCompactionPhase(event.state.phase, this.t)} · ${formatElapsed(event.state.elapsedMs)}]\n`)
         }
         break
       case 'stream:thinking_delta': {
@@ -99,9 +130,23 @@ export class SingleShotProgressReporter {
         this.write(`[${this.t('single.inputRequired')}] ${singleLine(event.question, 240)}\n`)
         break
       case 'error':
+        this.requestStartedAt = undefined
         this.write(`[${this.t('single.error')}] ${singleLine(event.error, 240)}\n`)
         break
     }
+  }
+
+  private startRequest(): void {
+    if (this.requestStartedAt !== undefined) return
+    this.requestStartedAt = this.now()
+    this.write(`[${this.t('single.requesting')}]\n`)
+  }
+
+  private finishRequest(interrupted: boolean): void {
+    const startedAt = this.requestStartedAt
+    this.requestStartedAt = undefined
+    if (startedAt === undefined || interrupted) return
+    this.write(`[${this.t('single.requestCompleted', { elapsed: formatElapsed(this.now() - startedAt) })}]\n`)
   }
 
   private writeProgressMessage(message: string): void {
@@ -165,6 +210,7 @@ function finalAssistantText(turns: AgentTurn[]): string {
 function formatRunPhase(phase: string, t: Translator): string {
   if (phase === 'idle') return t('single.phase.idle')
   if (phase === 'thinking') return t('single.phase.thinking')
+  if (phase === 'compacting') return t('single.phase.compacting')
   if (phase === 'tool_running') return t('single.phase.toolRunning')
   if (phase === 'awaiting_approval') return t('single.phase.awaitingApproval')
   if (phase === 'awaiting_input') return t('single.phase.awaitingInput')
@@ -172,6 +218,17 @@ function formatRunPhase(phase: string, t: Translator): string {
   if (phase === 'aborting') return t('single.phase.aborting')
   if (phase === 'recoverable_error') return t('single.phase.recoverableError')
   if (phase === 'completed') return t('single.phase.completed')
+  return phase
+}
+
+function formatCompactionPhase(phase: string, t: Translator): string {
+  if (phase === 'started') return t('single.compaction.started')
+  if (phase === 'summarizing') return t('single.compaction.summarizing')
+  if (phase === 'fallback') return t('single.compaction.fallback')
+  if (phase === 'committing') return t('single.compaction.committing')
+  if (phase === 'completed') return t('single.compaction.completed')
+  if (phase === 'interrupted') return t('single.compaction.interrupted')
+  if (phase === 'failed') return t('single.compaction.failed')
   return phase
 }
 

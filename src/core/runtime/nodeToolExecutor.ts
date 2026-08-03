@@ -1,6 +1,7 @@
-import { createReadStream, readFileSync, existsSync, mkdirSync, rmSync, renameSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { createReadStream, readFileSync, existsSync, mkdirSync, rmSync, renameSync, readdirSync, statSync, writeFileSync, promises as fsPromises } from 'fs'
 import { join, dirname, relative, resolve as resolveNativePath, isAbsolute } from 'path'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { constants as osConstants, setPriority } from 'node:os'
 import { promisify } from 'util'
 import { createInterface } from 'readline'
 
@@ -25,16 +26,20 @@ import type { MemoryConfidence, MemoryKind, MemoryScope, MemorySnapshot } from '
 import type { TerminalOutputChunk, TerminalSessionInfo, TerminalStartCommandResult } from '../../shared/terminalTypes'
 import type { CapabilityProfile } from '../../shared/agentTypes'
 import { MemoryService } from '../../tools/memory/service'
-import { hashText, writeFileAtomicSync } from '../fileIO'
+import { hashText, writeFileAtomic } from '../fileIO'
 import { RuntimeTaskManager } from './runtimeTaskManager'
 import { getChildProcessSpawnOptions, getDefaultShellSpec, getProcessGroupSignal, usesProcessGroup } from '../../platform/process'
 import { RuntimeLogWriter } from './runtimeLogWriter'
 import { CapabilityBoundary, type FilesystemAccess } from './capabilityBoundary'
 
-const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
-const STREAM_RETRY_DELAYS_MS = [300, 900, 1800]
+const RETRYABLE_HTTP_STATUS = new Set([408, 409, 425, 429])
+const STREAM_RETRY_DELAYS_MS = [300, 900, 1800, 3600]
 const MAX_STREAM_DIAGNOSTIC_CHARS = 64 * 1024
 const MAX_STREAM_BUFFER_CHARS = 1 * 1024 * 1024
+
+function isRetryableHttpStatus(status: number): boolean {
+  return RETRYABLE_HTTP_STATUS.has(status) || (status >= 500 && status <= 599)
+}
 
 export interface NodeToolExecutorOptions {
   runtimeTaskManager?: RuntimeTaskManager
@@ -68,7 +73,7 @@ const COMMAND_TERMINATION_GRACE_MS = 2000
 const RUNTIME_LOG_DIRECTORY = join('.turboflux', 'runtime-logs')
 const TERMINAL_KILL_TIMEOUT_MS = 5000
 const RUNTIME_TASK_SNAPSHOT_INTERVAL_MS = 5000
-const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
+const MODEL_REQUEST_TIMEOUT_MS = 2 * 60 * 1000
 const WEB_SEARCH_TIMEOUT_MS = 8000
 const WEB_SEARCH_USER_AGENT = 'TurboFlux/0.1 (+https://github.com/MengShengbo/TurboFluxCli)'
 const DEFAULT_SHELL = getDefaultShellSpec()
@@ -124,7 +129,7 @@ export class NodeToolExecutor implements ToolExecutor {
       const safePath = this.resolvePath(path)
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
       if (!statSync(safePath).isFile()) return { success: false, error: 'Path is not a file' }
-      const content = readFileSync(safePath, 'utf-8')
+      const content = await fsPromises.readFile(safePath, 'utf-8')
       return { success: true, data: content }
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
@@ -212,12 +217,12 @@ export class NodeToolExecutor implements ToolExecutor {
       }
       if (typeof metadata?.expectedHash === 'string') {
         if (!existsSync(safePath)) return { success: false, error: `Write conflict: file was deleted: ${path}` }
-        const actualHash = hashText(readFileSync(safePath, 'utf-8'))
+        const actualHash = hashText(await fsPromises.readFile(safePath, 'utf-8'))
         if (actualHash !== metadata.expectedHash) {
           return { success: false, error: `Write conflict: file changed since it was read: ${path}` }
         }
       }
-      writeFileAtomicSync(safePath, content)
+      await writeFileAtomic(safePath, content)
       return { success: true }
     } catch (e) {
       return { success: false, error: String(e) }
@@ -230,7 +235,7 @@ export class NodeToolExecutor implements ToolExecutor {
       if (!existsSync(safePath)) return { success: false, error: 'File not found' }
       const expectedHash = options?.expectedHash
       if (typeof expectedHash === 'string') {
-        const actualHash = hashText(readFileSync(safePath, 'utf-8'))
+        const actualHash = hashText(await fsPromises.readFile(safePath, 'utf-8'))
         if (actualHash !== expectedHash) {
           return { success: false, error: `Delete conflict: file changed since it was read: ${path}` }
         }
@@ -249,7 +254,7 @@ export class NodeToolExecutor implements ToolExecutor {
       if (!existsSync(safeSourcePath)) return { success: false, error: `File not found: ${sourcePath}` }
       if (statSync(safeSourcePath).isDirectory()) return { success: false, error: `Cannot move directory with moveFile: ${sourcePath}` }
       if (typeof options?.expectedHash === 'string') {
-        const actualHash = hashText(readFileSync(safeSourcePath, 'utf-8'))
+        const actualHash = hashText(await fsPromises.readFile(safeSourcePath, 'utf-8'))
         if (actualHash !== options.expectedHash) {
           return { success: false, error: `Move conflict: source changed since it was read: ${sourcePath}` }
         }
@@ -257,7 +262,7 @@ export class NodeToolExecutor implements ToolExecutor {
       if (existsSync(safeDestinationPath)) {
         if (statSync(safeDestinationPath).isDirectory()) return { success: false, error: `Cannot overwrite directory: ${destinationPath}` }
         if (typeof options?.expectedDestinationHash === 'string') {
-          const actualHash = hashText(readFileSync(safeDestinationPath, 'utf-8'))
+          const actualHash = hashText(await fsPromises.readFile(safeDestinationPath, 'utf-8'))
           if (actualHash !== options.expectedDestinationHash) {
             return { success: false, error: `Move conflict: destination changed since it was read: ${destinationPath}` }
           }
@@ -1074,8 +1079,10 @@ export class NodeToolExecutor implements ToolExecutor {
     signal?: AbortSignal,
   ): Promise<Result<CommandOutput>> {
     return new Promise(resolve => {
-      let stdout = ''
-      let stderr = ''
+      const stdoutParts: string[] = []
+      const stderrParts: string[] = []
+      let stdoutChars = 0
+      let stderrChars = 0
       let truncated = false
       let timedOut = false
       let aborted = false
@@ -1092,16 +1099,20 @@ export class NodeToolExecutor implements ToolExecutor {
         onError: error => { logError = error.message },
       }) : undefined
 
-      const append = (current: string, value: Buffer | string): string => {
-        if (current.length >= MAX_COMMAND_OUTPUT_CHARS) {
+      const append = (parts: string[], currentLength: number, value: Buffer | string): number => {
+        if (currentLength >= MAX_COMMAND_OUTPUT_CHARS) {
           truncated = true
-          return current
+          return currentLength
         }
         const text = value.toString()
-        const remaining = MAX_COMMAND_OUTPUT_CHARS - current.length
+        const remaining = MAX_COMMAND_OUTPUT_CHARS - currentLength
         if (text.length > remaining) truncated = true
-        return current + text.slice(0, remaining)
+        const bounded = text.slice(0, remaining)
+        if (bounded) parts.push(bounded)
+        return currentLength + bounded.length
       }
+      const stdout = () => stdoutParts.join('')
+      const stderr = () => stderrParts.join('')
       const finish = async (result: Result<CommandOutput>) => {
         if (settled) return
         settled = true
@@ -1129,15 +1140,15 @@ export class NodeToolExecutor implements ToolExecutor {
       }
       const onStdout = (data: Buffer | string) => {
         recordOutput('stdout', data)
-        stdout = append(stdout, data)
+        stdoutChars = append(stdoutParts, stdoutChars, data)
       }
       const onStderr = (data: Buffer | string) => {
         recordOutput('stderr', data)
-        stderr = append(stderr, data)
+        stderrChars = append(stderrParts, stderrChars, data)
       }
       const onError = (error: Error) => {
         recordOutput('stderr', error.message)
-        void finish({ success: false, error: aborted ? 'Command aborted' : error.message, data: { stdout, stderr, exitCode: 1, timedOut, aborted, truncated } })
+        void finish({ success: false, error: aborted ? 'Command aborted' : error.message, data: { stdout: stdout(), stderr: stderr(), exitCode: 1, timedOut, aborted, truncated } })
       }
       const onClose = (code: number | null) => {
         const exitCode = code ?? 1
@@ -1147,7 +1158,7 @@ export class NodeToolExecutor implements ToolExecutor {
           : timedOut
           ? `Command timed out after ${timeout}ms`
           : code === null ? 'Command terminated without an exit code' : undefined
-        void finish({ success, error, data: { stdout, stderr, exitCode, timedOut, aborted, truncated } })
+        void finish({ success, error, data: { stdout: stdout(), stderr: stderr(), exitCode, timedOut, aborted, truncated } })
       }
       const onAbort = () => {
         if (settled || aborted) return
@@ -1159,7 +1170,7 @@ export class NodeToolExecutor implements ToolExecutor {
           void finish({
             success: false,
             error: `Command aborted; process termination failed: ${message}`,
-            data: { stdout, stderr, exitCode: 1, timedOut, aborted, truncated },
+            data: { stdout: stdout(), stderr: stderr(), exitCode: 1, timedOut, aborted, truncated },
           })
           return
         }
@@ -1168,7 +1179,7 @@ export class NodeToolExecutor implements ToolExecutor {
             void finish({
               success: false,
               error: 'Command aborted; process did not exit within the termination grace period',
-              data: { stdout, stderr, exitCode: 1, timedOut, aborted, truncated },
+              data: { stdout: stdout(), stderr: stderr(), exitCode: 1, timedOut, aborted, truncated },
             })
           }, COMMAND_TERMINATION_GRACE_MS)
         }
@@ -1190,7 +1201,7 @@ export class NodeToolExecutor implements ToolExecutor {
           void finish({
             success: false,
             error: `Command timed out after ${timeout}ms; process termination failed: ${message}`,
-            data: { stdout, stderr, exitCode: 1, timedOut, truncated },
+            data: { stdout: stdout(), stderr: stderr(), exitCode: 1, timedOut, truncated },
           })
           return
         }
@@ -1199,7 +1210,7 @@ export class NodeToolExecutor implements ToolExecutor {
           void finish({
             success: false,
             error: `Command timed out after ${timeout}ms; process did not exit within the ${COMMAND_TERMINATION_GRACE_MS}ms termination grace period`,
-            data: { stdout, stderr, exitCode: 1, timedOut, truncated },
+            data: { stdout: stdout(), stderr: stderr(), exitCode: 1, timedOut, truncated },
           })
         }, COMMAND_TERMINATION_GRACE_MS)
       }, Math.max(1, timeout))
@@ -1355,6 +1366,11 @@ export class NodeToolExecutor implements ToolExecutor {
         env: this.buildChildEnvironment(options.env),
         ...getChildProcessSpawnOptions(),
       })
+      if (proc.pid) {
+        try {
+          setPriority(proc.pid, osConstants.priority.PRIORITY_BELOW_NORMAL)
+        } catch {}
+      }
       const info: TerminalSessionInfo = {
         id: sessionId,
         pid: proc.pid ?? 0,
@@ -1810,8 +1826,9 @@ export class NodeToolExecutor implements ToolExecutor {
 
   async sendMessage(url: string, headers: Record<string, string>, body: string, options: RequestOptions = {}): Promise<Result<string>> {
     const request = this.createRequestController(options)
+    const maxRetries = options.retry === false ? 0 : STREAM_RETRY_DELAYS_MS.length
     try {
-      for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         try {
           const response = await fetch(url, {
             method: 'POST',
@@ -1822,11 +1839,18 @@ export class NodeToolExecutor implements ToolExecutor {
           const text = await response.text()
           if (!response.ok) {
             const error = this.formatHttpError(url, response.status, text)
-            if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
-              await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
+            const retryAfterMs = this.retryAfterMs(response.headers.get('retry-after'))
+            if (attempt < maxRetries && isRetryableHttpStatus(response.status)) {
+              await this.delay(Math.max(STREAM_RETRY_DELAYS_MS[attempt]!, retryAfterMs || 0), request.controller.signal)
               continue
             }
-            return { success: false, error, status: response.status }
+            return {
+              success: false,
+              error,
+              status: response.status,
+              receivedStreamData: false,
+              ...(retryAfterMs ? { retryAfterMs } : {}),
+            }
           }
           return { success: true, data: text }
         } catch (error) {
@@ -1838,7 +1862,7 @@ export class NodeToolExecutor implements ToolExecutor {
                 : 'Request aborted',
             }
           }
-          if (attempt < STREAM_RETRY_DELAYS_MS.length) {
+          if (attempt < maxRetries) {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
             continue
           }
@@ -1859,12 +1883,13 @@ export class NodeToolExecutor implements ToolExecutor {
     options: RequestOptions = {},
   ): Promise<Result<string>> {
     const request = this.createRequestController(options)
+    const maxRetries = options.retry === false ? 0 : STREAM_RETRY_DELAYS_MS.length
     if (options.streamId !== undefined) {
       this.activeStreams.get(options.streamId)?.abort()
       this.activeStreams.set(options.streamId, request.controller)
     }
     try {
-      for (let attempt = 0; attempt <= STREAM_RETRY_DELAYS_MS.length; attempt += 1) {
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         let emittedAnyLine = false
         let receivedAnyBytes = false
         let buffer = ''
@@ -1884,24 +1909,35 @@ export class NodeToolExecutor implements ToolExecutor {
             body,
             signal: request.controller.signal,
           })
+          request.refreshTimeout()
           if (!response.ok) {
             const text = await response.text()
             const error = this.formatHttpError(url, response.status, text)
-            if (attempt < STREAM_RETRY_DELAYS_MS.length && RETRYABLE_HTTP_STATUS.has(response.status)) {
-              await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
+            const retryAfterMs = this.retryAfterMs(response.headers.get('retry-after'))
+            if (attempt < maxRetries && isRetryableHttpStatus(response.status)) {
+              await this.delay(Math.max(STREAM_RETRY_DELAYS_MS[attempt]!, retryAfterMs || 0), request.controller.signal)
               continue
             }
-            return { success: false, error, status: response.status }
+            return {
+              success: false,
+              error,
+              status: response.status,
+              receivedStreamData: false,
+              ...(retryAfterMs ? { retryAfterMs } : {}),
+            }
           }
           const reader = response.body?.getReader()
-          if (!reader) return { success: false, error: 'No response body' }
+          if (!reader) return { success: false, error: 'No response body', receivedStreamData: false }
 
           const decoder = new TextDecoder()
 
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
-            if (value.byteLength > 0) receivedAnyBytes = true
+            if (value.byteLength > 0) {
+              receivedAnyBytes = true
+              request.refreshTimeout()
+            }
             buffer += decoder.decode(value, { stream: true })
             if (buffer.length > MAX_STREAM_BUFFER_CHARS) {
               const lastNewline = buffer.lastIndexOf('\n')
@@ -1932,6 +1968,7 @@ export class NodeToolExecutor implements ToolExecutor {
               error: request.timedOut() && !options.signal?.aborted
                 ? `Request timed out after ${request.timeoutMs}ms`
                 : 'Request aborted',
+              receivedStreamData: emittedAnyLine || receivedAnyBytes,
             }
           }
           if (buffer.trim()) {
@@ -1940,18 +1977,19 @@ export class NodeToolExecutor implements ToolExecutor {
             recordDiagnostic(buffer)
             buffer = ''
           }
-          if (!emittedAnyLine && !receivedAnyBytes && attempt < STREAM_RETRY_DELAYS_MS.length) {
+          if (!emittedAnyLine && !receivedAnyBytes && attempt < maxRetries) {
             await this.delay(STREAM_RETRY_DELAYS_MS[attempt], request.controller.signal)
             continue
           }
           return {
             success: false,
             error: this.formatNetworkError(url, error),
+            receivedStreamData: emittedAnyLine || receivedAnyBytes,
             ...(diagnosticChunks.length > 0 ? { data: diagnosticChunks.join('') } : {}),
           }
         }
       }
-      return { success: false, error: 'Stream request failed' }
+      return { success: false, error: 'Stream request failed', receivedStreamData: false }
     } finally {
       if (options.streamId !== undefined && this.activeStreams.get(options.streamId) === request.controller) {
         this.activeStreams.delete(options.streamId)
@@ -1967,25 +2005,34 @@ export class NodeToolExecutor implements ToolExecutor {
   private createRequestController(options: RequestOptions): {
     controller: AbortController
     cleanup: () => void
+    refreshTimeout: () => void
     timedOut: () => boolean
     timeoutMs: number
   } {
     const controller = new AbortController()
-    const timeoutMs = options.timeoutMs || MODEL_REQUEST_TIMEOUT_MS
+    const timeoutMs = Number.isFinite(options.timeoutMs) && (options.timeoutMs || 0) > 0
+      ? Math.floor(options.timeoutMs as number)
+      : MODEL_REQUEST_TIMEOUT_MS
     let timedOut = false
     const abortFromParent = () => controller.abort()
     if (options.signal?.aborted) controller.abort()
     else options.signal?.addEventListener('abort', abortFromParent, { once: true })
-    const timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, timeoutMs)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refreshTimeout = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, timeoutMs)
+    }
+    refreshTimeout()
     return {
       controller,
       timeoutMs,
       timedOut: () => timedOut,
+      refreshTimeout,
       cleanup: () => {
-        clearTimeout(timer)
+        if (timer) clearTimeout(timer)
         options.signal?.removeEventListener('abort', abortFromParent)
       },
     }
@@ -2438,6 +2485,15 @@ export class NodeToolExecutor implements ToolExecutor {
   private formatHttpError(url: string, status: number, text: string): string {
     const detail = text.trim() || 'empty response'
     return `HTTP ${status}: ${detail}`
+  }
+
+  private retryAfterMs(value: string | null): number | undefined {
+    if (!value) return undefined
+    const seconds = Number(value)
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(120_000, Math.round(seconds * 1000))
+    const date = Date.parse(value)
+    if (!Number.isFinite(date)) return undefined
+    return Math.min(120_000, Math.max(0, date - Date.now()))
   }
 
   private formatNetworkError(url: string, error: unknown): string {

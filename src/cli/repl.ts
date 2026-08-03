@@ -1,11 +1,8 @@
 import chalk from 'chalk'
-import { startInkApp } from './components/App'
 import type { TurboFluxConfig } from '../core/config'
 import type { ApprovalPolicy, CapabilityProfile } from '../shared/agentTypes'
-import { loadMcpSettings } from '../core/mcp/settings'
-import { runSingleShot } from './singleShot'
 import { loadProfile } from '../core/profile'
-import { createTranslator } from './i18n/index'
+import { createTranslator } from './i18n/translator'
 
 export interface ReplOptions {
   workspacePath: string
@@ -26,6 +23,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   if (singleShot) {
     try {
+      const { runSingleShot } = await import('./singleShot')
       await runSingleShot({ workspacePath, config, prompt: singleShot, verbose, approvalPolicy, capabilityProfile, mcpServers })
     } catch (error) {
       process.stderr.write(`${t('repl.commandFailed', { message: error instanceof Error ? error.message : String(error) })}\n`)
@@ -43,6 +41,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   }
 
   if (mcpServers?.length) {
+    const { loadMcpSettings } = await import('../core/mcp/settings')
     const selected = new Set(mcpServers)
     const settings = loadMcpSettings(workspacePath)
     const launchCommands = Object.entries(settings.mcpServers)
@@ -53,5 +52,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
+  const { startInkApp } = await import('./components/App')
   startInkApp({ workspacePath, config, singleShot, verbose, noFlicker, approvalPolicy, capabilityProfile, mcpServers, startupAnimation, transparentBackground })
 }

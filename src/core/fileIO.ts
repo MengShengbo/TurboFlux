@@ -12,7 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 export interface AtomicFileWrite {
@@ -25,6 +25,15 @@ interface FileTransactionDocument {
   version: 1
   files: Array<{ filePath: string; tempPath: string; hash: string }>
 }
+
+interface HeldFileLock {
+  descriptor: number
+  depth: number
+}
+
+const heldFileLocks = new Map<string, HeldFileLock>()
+const LOCK_STALE_AFTER_MS = 30_000
+const LOCK_OWNER_GRACE_MS = 1_000
 
 export function hashText(content: string): string {
   return createHash('sha256').update(content, 'utf-8').digest('hex')
@@ -43,12 +52,17 @@ function syncDirectory(directory: string): void {
 function secureFile(filePath: string, mode?: number): void {
   if (mode === undefined) return
   if (process.platform === 'win32' && process.env.USERNAME) {
-    const result = spawnSync('icacls.exe', [filePath, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:F`], {
-      windowsHide: true,
-      stdio: 'ignore',
-    })
-    if (result.error || result.status !== 0) {
-      throw result.error ?? new Error(`icacls exited with status ${result.status}`)
+    if (basename(filePath).toLowerCase() !== 'credentials.json') {
+      chmodSync(filePath, mode)
+      return
+    }
+    chmodSync(filePath, mode)
+    const args = [filePath, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:F`]
+    if (process.env.TURBOFLUX_STRICT_FILE_PERMISSIONS === '1') {
+      const result = spawnSync('icacls.exe', args, { windowsHide: true, stdio: 'ignore' })
+      if (result.error || result.status !== 0) {
+        throw result.error ?? new Error(`icacls exited with status ${result.status}`)
+      }
     }
     return
   }
@@ -67,7 +81,6 @@ function stageFileSync(filePath: string, content: string, mode?: number): string
     fsyncSync(descriptor)
     closeSync(descriptor)
     descriptor = undefined
-    secureFile(tempPath, mode)
     completed = true
     return tempPath
   } finally {
@@ -83,6 +96,7 @@ export function writeFileAtomicSync(filePath: string, content: string, mode?: nu
     tempPath = stageFileSync(filePath, content, mode)
     renameSync(tempPath, filePath)
     tempPath = undefined
+    secureFile(filePath, mode)
     syncDirectory(directory)
   } finally {
     if (tempPath && existsSync(tempPath)) rmSync(tempPath, { force: true })
@@ -130,6 +144,7 @@ export function writeFilesAtomicSync(files: AtomicFileWrite[], transactionPath: 
     writeFileAtomicSync(transactionPath, JSON.stringify(transaction, null, 2), 0o600)
     prepared = true
     recoverFilesAtomicSync(transactionPath)
+    for (const file of files) secureFile(file.filePath, file.mode)
   } finally {
     if (!prepared) {
       for (const entry of staged) {
@@ -139,15 +154,55 @@ export function writeFilesAtomicSync(files: AtomicFileWrite[], transactionPath: 
   }
 }
 
+function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  if (pid === process.pid) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+    return code === 'EPERM'
+  }
+}
+
+function shouldRemoveLock(lockPath: string, now: number): boolean {
+  let age = LOCK_STALE_AFTER_MS
+  try {
+    age = now - statSync(lockPath).mtimeMs
+  } catch {
+    return false
+  }
+  if (age >= LOCK_STALE_AFTER_MS) return true
+  if (age < LOCK_OWNER_GRACE_MS) return false
+  try {
+    const raw = JSON.parse(readFileSync(lockPath, 'utf-8')) as { pid?: unknown }
+    const pid = typeof raw.pid === 'number' ? raw.pid : Number(raw.pid)
+    return !processIsAlive(pid)
+  } catch {
+    return false
+  }
+}
+
 export function withFileLockSync<T>(lockPath: string, callback: () => T, timeoutMs = 5_000): T {
+  const normalizedLockPath = resolve(lockPath)
+  const held = heldFileLocks.get(normalizedLockPath)
+  if (held) {
+    held.depth += 1
+    try {
+      return callback()
+    } finally {
+      held.depth -= 1
+    }
+  }
+
   const startedAt = Date.now()
   let descriptor: number | undefined
   while (descriptor === undefined) {
     try {
-      const candidate = openSync(lockPath, 'wx', 0o600)
+      const candidate = openSync(normalizedLockPath, 'wx', 0o600)
       try {
         writeFileSync(candidate, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }), 'utf-8')
-        fsyncSync(candidate)
         descriptor = candidate
       } catch (error) {
         closeSync(candidate)
@@ -157,19 +212,22 @@ export function withFileLockSync<T>(lockPath: string, callback: () => T, timeout
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
       if (code !== 'EEXIST') throw error
-      if (existsSync(lockPath) && Date.now() - statSync(lockPath).mtimeMs > 30_000) {
-        rmSync(lockPath, { force: true })
+      const now = Date.now()
+      if (existsSync(normalizedLockPath) && shouldRemoveLock(normalizedLockPath, now)) {
+        rmSync(normalizedLockPath, { force: true })
         continue
       }
-      if (Date.now() - startedAt >= timeoutMs) throw new Error(`Timed out waiting for file lock: ${lockPath}`)
+      if (now - startedAt >= timeoutMs) throw new Error(`Timed out waiting for file lock: ${normalizedLockPath}`)
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
     }
   }
+  heldFileLocks.set(normalizedLockPath, { descriptor, depth: 1 })
   try {
     return callback()
   } finally {
+    heldFileLocks.delete(normalizedLockPath)
     closeSync(descriptor)
-    rmSync(lockPath, { force: true })
+    rmSync(normalizedLockPath, { force: true })
   }
 }
 
@@ -184,7 +242,11 @@ export async function writeFileAtomic(filePath: string, content: string): Promis
   const tempPath = join(directory, `.${basename(filePath)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`)
   let handle: Awaited<ReturnType<typeof fsPromises.open>> | undefined
   try {
-    handle = await fsPromises.open(tempPath, 'wx')
+    let existingMode: number | undefined
+    try {
+      existingMode = (await fsPromises.stat(filePath)).mode
+    } catch {}
+    handle = await fsPromises.open(tempPath, 'wx', existingMode)
     await handle.writeFile(content, 'utf-8')
     await handle.sync()
     await handle.close()

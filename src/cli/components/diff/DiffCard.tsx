@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react'
 import { Box, Text } from 'ink'
 import { useTheme } from '../../theme/index'
-import { canComputeDiff, computeHunks, MAX_DIFF_INPUT_BYTES, summarizeHunks } from '../../../core/diffCompute'
+import { canComputeDiff, computeHunks, MAX_DIFF_INPUT_BYTES, MAX_DIFF_INPUT_LINES, summarizeHunks } from '../../../core/diffCompute'
 import { DiffHunks } from './DiffHunks'
 import { useI18n } from '../../i18n/index'
 
@@ -77,7 +77,7 @@ export function DiffCard({
       {diffStatus === 'snapshot-too-large' && (
         <Box marginLeft={2}>
           <Text color={theme.warning}>
-            {t('ui.diff.limit', { before: formatBytes(beforeBytes, t('ui.diff.unknownSize')), after: formatBytes(afterBytes, t('ui.diff.unknownSize')), limit: formatBytes(MAX_DIFF_INPUT_BYTES, t('ui.diff.unknownSize')) })}
+            {t('ui.diff.limit', { before: formatBytes(beforeBytes, t('ui.diff.unknownSize')), after: formatBytes(afterBytes, t('ui.diff.unknownSize')), limit: formatBytes(MAX_DIFF_INPUT_BYTES, t('ui.diff.unknownSize')), lines: MAX_DIFF_INPUT_LINES })}
           </Text>
         </Box>
       )}

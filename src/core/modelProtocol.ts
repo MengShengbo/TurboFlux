@@ -20,6 +20,7 @@ export interface ModelProtocolErrorOptions {
   status?: number
   kind?: ModelProtocolErrorKind
   receivedStreamData?: boolean
+  retryAfterMs?: number
 }
 
 const PROTOCOL_LABELS: Record<ModelProtocol, string> = {
@@ -51,6 +52,7 @@ export class ModelProtocolRequestError extends Error {
   readonly status?: number
   readonly kind: ModelProtocolErrorKind
   readonly receivedStreamData: boolean
+  readonly retryAfterMs?: number
 
   constructor(message: string, options: ModelProtocolErrorOptions) {
     super(compactProtocolError(message))
@@ -60,6 +62,7 @@ export class ModelProtocolRequestError extends Error {
     this.status = options.status
     this.kind = options.kind || (options.status ? 'http' : 'internal')
     this.receivedStreamData = options.receivedStreamData === true
+    this.retryAfterMs = options.retryAfterMs
   }
 }
 

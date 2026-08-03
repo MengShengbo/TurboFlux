@@ -25,6 +25,7 @@ export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 export type AgentRunPhase =
   | 'idle'
   | 'thinking'
+  | 'compacting'
   | 'tool_running'
   | 'awaiting_approval'
   | 'awaiting_input'
@@ -114,6 +115,7 @@ export interface AgentTurn {
     internalKind?: string
     attachments?: AgentAttachment[]
     runtimeContext?: string
+    internalError?: string
   }
 }
 
@@ -207,7 +209,7 @@ export interface ChangeSummary {
    *
    * Populated by AgentEngine on successful write_file / edit_file /
    * multi_edit / delete_file when both sides are within MAX_DIFF_INPUT_BYTES
-   * (256 KB) — bigger files fall back to the lightweight oldPreview/preview
+   * (128 KB / 2,500 lines) — bigger files fall back to the lightweight oldPreview/preview
    * heuristics so we never bloat chat metadata. Both are optional; the diff
    * UI gracefully degrades when either is missing.
    *
@@ -250,6 +252,8 @@ export interface AgentConfig {
   maxTokens: number
   /** @deprecated Main-agent runs are user-controlled and do not enforce a turn budget. */
   maxTurns?: number
+  /** Emergency breaker for successful tool loops that never produce a final response. */
+  maxToolRounds?: number
   contextWindow?: number
   contextPolicy?: ContextPolicyMode
   conversationId?: string

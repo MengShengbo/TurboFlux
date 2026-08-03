@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   appendLiveReasoningTail,
   appendLiveStreamTail,
+  appendTranscriptBuffer,
   createMessageIdFactory,
   getEngineUserOrdinalForUiMessage,
   createThinkingTrace,
@@ -54,6 +55,36 @@ describe('live stream buffer', () => {
     expect(accumulator.toString()).toContain('abcdefghij')
     expect(appendLiveStreamTail('', 'abcdefghij', 4)).toBe('ghij')
     expect(appendLiveStreamTail('abcd', 'ef', 4)).toBe('cdef')
+  })
+})
+
+describe('classic static transcript buffer', () => {
+  it('keeps the logical item cursor growing when old messages are trimmed', () => {
+    const initial = appendTranscriptBuffer(
+      { messages: [], staticRevision: 0, staticItemOffset: 0 },
+      Array.from({ length: 1_000 }, (_, index) => ({
+        id: `message-${index}`,
+        role: 'assistant' as const,
+        content: `message ${index}`,
+      })),
+    )
+    const firstTrim = appendTranscriptBuffer(initial, [{ id: 'message-1000', role: 'assistant', content: 'newest' }])
+    const secondTrim = appendTranscriptBuffer(firstTrim, [{ id: 'message-1001', role: 'assistant', content: 'newest again' }])
+
+    expect(firstTrim.messages[0]?.id).toMatch(/^transcript-trim-/)
+    expect(firstTrim.staticItemOffset + firstTrim.messages.filter(message => !message.id.startsWith('transcript-trim-')).length).toBe(1_001)
+    expect(secondTrim.staticItemOffset + secondTrim.messages.filter(message => !message.id.startsWith('transcript-trim-')).length).toBe(1_002)
+  })
+
+  it('does not advance the static cursor for a deduplicated progress row', () => {
+    const state = appendTranscriptBuffer(
+      { messages: [], staticRevision: 0, staticItemOffset: 0 },
+      [{ id: 'progress-1', role: 'assistant', content: 'Still working', progress: true }],
+    )
+
+    expect(appendTranscriptBuffer(state, [
+      { id: 'progress-2', role: 'assistant', content: ' Still working ', progress: true },
+    ], { dedupeTail: true })).toBe(state)
   })
 })
 

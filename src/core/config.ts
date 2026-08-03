@@ -814,7 +814,25 @@ export function getActiveApiConfigProfile(config: TurboFluxConfig): TurboFluxApi
 
 export function saveApiConfigProfile(config: TurboFluxConfig, profile: TurboFluxApiConfigProfile, makeActive = true): TurboFluxConfig {
   const normalized = normalizeConfig(config)
-  const profiles = upsertApiConfigProfile(normalized.apiConfigs, { ...profile, updatedAt: Date.now() })
+  const existing = normalized.apiConfigs?.find(item => item.id === profile.id)
+  const unchanged = existing
+    && existing.name === profile.name
+    && existing.provider === profile.provider
+    && existing.apiKey === profile.apiKey
+    && existing.baseUrl === profile.baseUrl
+    && existing.model === profile.model
+    && existing.contextWindow === profile.contextWindow
+    && existing.maxTokens === profile.maxTokens
+    && existing.maxOutputTokens === profile.maxOutputTokens
+    && JSON.stringify(existing.modelCapabilities) === JSON.stringify(profile.modelCapabilities)
+    && JSON.stringify(existing.modelMetadataSources) === JSON.stringify(profile.modelMetadataSources)
+    && JSON.stringify(existing.reasoning) === JSON.stringify(profile.reasoning)
+  const storedProfile = {
+    ...profile,
+    createdAt: existing?.createdAt || profile.createdAt,
+    updatedAt: unchanged ? existing.updatedAt : Date.now(),
+  }
+  const profiles = upsertApiConfigProfile(normalized.apiConfigs, storedProfile)
   const next = {
     ...normalized,
     apiConfigs: profiles,

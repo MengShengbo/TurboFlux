@@ -136,6 +136,10 @@ export class FlowEventFactory {
     if (event.seq > current) this.nextSeqByThread.set(event.threadId, event.seq)
   }
 
+  reset(threadId: string): void {
+    this.nextSeqByThread.delete(threadId)
+  }
+
   getLastSequence(threadId: string): number {
     return this.nextSeqByThread.get(threadId) ?? 0
   }

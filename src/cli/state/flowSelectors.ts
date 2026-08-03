@@ -6,6 +6,7 @@ import type { FlowToolDraftState } from './flowReducer'
 export type PrimaryFlowActivityCode =
   | 'ready'
   | 'thinking'
+  | 'compacting'
   | 'working'
   | 'responding'
   | 'review-required'
@@ -174,6 +175,9 @@ export function selectPrimaryActivity(state: ThreadFlowState): PrimaryFlowActivi
   if (state.run.phase === 'stopping') return { kind: 'stopping', code: 'stopping' }
   if (state.streams.answer.status === 'streaming' && state.streams.answer.tail) {
     return { kind: 'streaming', code: 'responding' }
+  }
+  if (state.run.agentState.phase === 'compacting') {
+    return { kind: 'working', code: 'compacting', detail: state.run.agentState.detail }
   }
   const runningTool = Object.values(state.tools).find(tool => tool.status === 'running')
   if (runningTool) return { kind: 'working', code: 'working', detail: runningTool.name }

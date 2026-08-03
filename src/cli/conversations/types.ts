@@ -1,5 +1,5 @@
 import type { AgentAttachment, AgentMode, AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
-import type { ContextSegment } from '../../state/types'
+import type { ContextCompactionState, ContextSegment } from '../../state/types'
 import type { ContextReservoirEntry } from '../../state/types'
 
 export interface ConversationMeta {
@@ -19,6 +19,7 @@ export interface PersistedConversation extends ConversationMeta {
   activeTurns?: AgentTurn[]
   contextSegments?: ContextSegment[]
   contextReservoir?: ContextReservoirEntry[]
+  contextCompactionState?: ContextCompactionState | null
   interactionState?: ConversationInteractionState
   recovery?: {
     interrupted: boolean
@@ -85,6 +86,15 @@ export type ConversationJournalEntry =
       activeTurns: AgentTurn[]
       contextSegments: ContextSegment[]
       contextReservoir: ContextReservoirEntry[]
+    }
+  | {
+      version: 2
+      type: 'context_compaction'
+      timestamp: number
+      state: ContextCompactionState
+      activeTurns?: AgentTurn[]
+      contextSegments?: ContextSegment[]
+      contextReservoir?: ContextReservoirEntry[]
     }
   | { version: 2; type: 'queue_state'; timestamp: number; inputs: ConversationQueuedInput[] }
   | { version: 2; type: 'draft_state'; timestamp: number; draft: ConversationDraftState }

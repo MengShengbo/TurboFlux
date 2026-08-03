@@ -149,7 +149,7 @@ function buildToolUsageSection(_mode: AgentMode): string {
 2. Explore (broad): broaden targeted searches and use get_codemap for unfamiliar feature areas, multiple possible names/routes, or after narrow retrieval misses.
 3. Modify: edit_file (small exact edits) -> multi_edit (several edits in one file) -> apply_patch (structured multi-file changes) -> replace_file (whole-file replacement) -> write_file (new files) -> delete_file (caution)
 4. Version control: git_status / git_diff / git_log / git_show for routine inspection; structured Git write tools for normal state changes; run_command only for advanced Git operations not covered by those tools
-5. Execute: run_command (only when necessary)
+5. Execute: run_command (only when necessary). Dependency installs and long builds/tests may be auto-backgrounded; use read_terminal and wait for exit code 0 before dependent commands.
 6. Tasks: create_tasks (batch) -> update_task
 7. Communicate: notify_user (progress) -> ask_user (need reply)
 </tool_priority>

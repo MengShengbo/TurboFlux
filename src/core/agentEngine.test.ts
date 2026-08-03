@@ -248,6 +248,126 @@ describe('AgentEngine structured patch dispatch', () => {
 })
 
 describe('AgentEngine user-controlled run length', () => {
+  it('honors abort while initial Git preparation is pending', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+    }, {} as ToolExecutor, stateProvider)
+    let releasePreparation!: () => void
+    vi.spyOn(engine as any, 'initializeGit').mockImplementation(() => new Promise<boolean>(resolve => {
+      releasePreparation = () => resolve(false)
+    }))
+    const callModel = vi.spyOn(engine as any, 'callModel')
+    const events: AgentEventType[] = []
+    engine.subscribe(event => events.push(event))
+
+    try {
+      const pending = engine.run('abort before preparation finishes')
+      await Promise.resolve()
+      engine.abort()
+      releasePreparation()
+
+      await expect(pending).rejects.toMatchObject({ aborted: true })
+      expect(callModel).not.toHaveBeenCalled()
+      expect(engine.getSession().turns).toHaveLength(0)
+      expect(events.some(event => event.type === 'session:complete')).toBe(false)
+      expect(events.some(event => event.type === 'run:state' && event.state.phase === 'completed')).toBe(false)
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('keeps the run active until final context preparation settles', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({ mode: 'vibe', approvalPolicy: 'full', workspacePath: workspace }, {} as ToolExecutor, stateProvider)
+    vi.spyOn(engine as any, 'initializeGit').mockResolvedValue(false)
+    let prepareCalls = 0
+    let releaseFinalPreparation!: () => void
+    let finalPreparationStarted!: () => void
+    const finalPreparation = new Promise<void>(resolve => { finalPreparationStarted = resolve })
+    const finalPreparationGate = new Promise<void>(resolve => { releaseFinalPreparation = resolve })
+    vi.spyOn(engine as any, 'prepareContextWindow').mockImplementation(async () => {
+      prepareCalls += 1
+      if (prepareCalls === 2) {
+        finalPreparationStarted()
+        await finalPreparationGate
+      }
+    })
+    vi.spyOn(engine as any, 'callModel').mockResolvedValue({
+      id: 'final-before-persist',
+      role: 'assistant',
+      content: 'Done.',
+      timestamp: Date.now(),
+    } satisfies AgentTurn)
+    const events: AgentEventType[] = []
+    engine.subscribe(event => events.push(event))
+
+    try {
+      const pending = engine.run('finish after final preparation')
+      await finalPreparation
+      expect(engine.isRunning()).toBe(true)
+      expect(events.some(event => event.type === 'session:complete')).toBe(false)
+      releaseFinalPreparation()
+      await expect(pending).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ role: 'assistant', content: 'Done.' }),
+      ]))
+      const completeIndex = events.findIndex(event => event.type === 'session:complete')
+      const finalStateIndex = events.findIndex(event => event.type === 'run:state' && event.state.phase === 'completed')
+      expect(completeIndex).toBeGreaterThan(-1)
+      expect(finalStateIndex).toBeGreaterThan(completeIndex)
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('rejects a model failure without emitting a successful completion event', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({ mode: 'vibe', approvalPolicy: 'full', workspacePath: workspace }, {} as ToolExecutor, stateProvider)
+    vi.spyOn(engine as any, 'initializeGit').mockResolvedValue(false)
+    vi.spyOn(engine as any, 'callModel').mockRejectedValue(new Error('upstream disconnected'))
+    const events: AgentEventType[] = []
+    engine.subscribe(event => events.push(event))
+
+    try {
+      await expect(engine.run('fail this request')).rejects.toThrow('upstream disconnected')
+      expect(events).toContainEqual({ type: 'error', error: 'upstream disconnected' })
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'run:state',
+        state: expect.objectContaining({ phase: 'recoverable_error', detail: 'upstream disconnected' }),
+      }))
+      expect(events.some(event => event.type === 'session:complete')).toBe(false)
+      expect(events.some(event => event.type === 'run:state' && event.state.phase === 'completed')).toBe(false)
+    } finally {
+      engine.destroy()
+    }
+  })
+
   it('ignores legacy maxTurns values and continues until the model finishes', async () => {
     const workspace = process.cwd()
     const stateProvider = new DefaultAgentStateProvider({
@@ -734,6 +854,55 @@ describe('AgentEngine command output', () => {
       engine.destroy()
     }
   })
+
+  it('automatically backgrounds dependency installs unless foreground is explicit', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const startBackgroundCommand = vi.fn(async () => ({
+      success: true,
+      data: { sessionId: 'term-install', session: { logPath: 'C:/logs/install.jsonl' } },
+    }))
+    const runCommand = vi.fn(async () => ({
+      success: true,
+      data: { stdout: 'installed', stderr: '', exitCode: 0 },
+    }))
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+    }, { startBackgroundCommand, runCommand } as unknown as ToolExecutor, stateProvider)
+    const executeSingleTool = (engine as unknown as {
+      executeSingleTool: (toolCall: ToolCall) => Promise<ToolResult>
+    }).executeSingleTool.bind(engine)
+
+    try {
+      const background = await executeSingleTool({
+        id: 'install-background-1',
+        name: 'run_command',
+        arguments: { command: 'npm install' },
+      })
+      const foreground = await executeSingleTool({
+        id: 'install-foreground-1',
+        name: 'run_command',
+        arguments: { command: 'npm install --ignore-scripts', run_in_background: false },
+      })
+
+      expect(background.output).toContain('automatically moved to the background')
+      expect(background.output).toContain('term-install')
+      expect(startBackgroundCommand).toHaveBeenCalledOnce()
+      expect(foreground.output).toContain('Process exited with code 0')
+      expect(runCommand).toHaveBeenCalledOnce()
+    } finally {
+      engine.destroy()
+    }
+  })
 })
 
 describe('AgentEngine filesystem tool output', () => {
@@ -901,6 +1070,56 @@ describe('AgentEngine repeated tool failure loop breaker', () => {
       expect(turns.at(-1)).toMatchObject({
         role: 'assistant',
         content: expect.stringContaining('Stopped a repeated tool-call loop after 3 identical failures'),
+        metadata: expect.objectContaining({ interrupted: true }),
+      })
+    } finally {
+      engine.destroy()
+    }
+  })
+})
+
+describe('AgentEngine successful tool loop breaker', () => {
+  it('ends a runaway successful loop with a visible resumable explanation', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: 'test',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: workspace,
+      maxToolRounds: 2,
+    }, {} as ToolExecutor, stateProvider)
+    let iteration = 0
+    const callModel = vi.spyOn(engine as any, 'callModel').mockImplementation(async () => {
+      iteration += 1
+      return {
+        id: `assistant-success-${iteration}`,
+        role: 'assistant',
+        content: 'Continuing.',
+        timestamp: 100 + iteration,
+        toolCalls: [{ id: `tool-success-${iteration}`, name: 'read_file', arguments: { path: `file-${iteration}.ts` } }],
+      } as AgentTurn
+    })
+    const executeToolCalls = vi.spyOn(engine as any, 'executeToolCalls').mockImplementation(async (calls: ToolCall[]) => (
+      calls.map(call => ({ toolCallId: call.id, name: call.name, output: 'ok', isError: false }))
+    ))
+    vi.spyOn(engine as any, 'initializeGit').mockResolvedValue(undefined)
+    vi.spyOn(engine as any, 'prepareContextWindow').mockResolvedValue(undefined)
+
+    try {
+      const turns = await engine.run('keep inspecting forever')
+
+      expect(callModel).toHaveBeenCalledTimes(2)
+      expect(executeToolCalls).toHaveBeenCalledTimes(2)
+      expect(turns.at(-1)).toMatchObject({
+        role: 'assistant',
+        content: expect.stringContaining('Stopped after 2 tool rounds'),
         metadata: expect.objectContaining({ interrupted: true }),
       })
     } finally {
@@ -1714,6 +1933,181 @@ describe('AgentEngine model protocol compatibility', () => {
     }
   })
 
+  it('reconnects the same protocol after a pre-stream 429 and honors Retry-After', async () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async (_url, _headers, _body, onLine) => {
+      calls += 1
+      if (calls === 1) {
+        return {
+          success: false,
+          status: 429,
+          retryAfterMs: 2_500,
+          error: 'HTTP 429: rate limited',
+        }
+      }
+      onLine(`data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'reconnected' } })}`)
+      onLine(`data: ${JSON.stringify({ type: 'message_stop' })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      const pending = harness.callModel()
+      await vi.advanceTimersByTimeAsync(2_499)
+      expect(calls).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(pending).resolves.toMatchObject({ content: 'reconnected' })
+      expect(calls).toBe(2)
+      expect(harness.executor.streamMessage).toHaveBeenCalledTimes(2)
+      expect(harness.events.filter(event => event.type === 'model:protocol' && event.phase === 'fallback')).toHaveLength(0)
+      expect(harness.events.filter(event => event.type === 'notification' && event.level === 'warning')).toContainEqual(expect.objectContaining({
+        message: expect.stringContaining('retrying the same protocol in 3s'),
+      }))
+    } finally {
+      harness.engine.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([408, 425, 500, 503, 529])('reconnects the same protocol for transient HTTP %s', async status => {
+    vi.useFakeTimers()
+    let calls = 0
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async (_url, _headers, _body, onLine) => {
+      calls += 1
+      if (calls === 1) return { success: false, status, error: `HTTP ${status}: temporary provider failure` }
+      onLine(`data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: `reconnected-${status}` } })}`)
+      onLine(`data: ${JSON.stringify({ type: 'message_stop' })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      const pending = harness.callModel()
+      await vi.runAllTimersAsync()
+      await expect(pending).resolves.toMatchObject({ content: `reconnected-${status}` })
+      expect(calls).toBe(2)
+      expect(harness.events.filter(event => event.type === 'model:protocol' && event.phase === 'fallback')).toHaveLength(0)
+    } finally {
+      harness.engine.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('reconnects the same protocol after a pre-stream network failure', async () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async (_url, _headers, _body, onLine) => {
+      calls += 1
+      if (calls === 1) return { success: false, error: 'fetch failed', receivedStreamData: false }
+      onLine(`data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'network-reconnected' } })}`)
+      onLine(`data: ${JSON.stringify({ type: 'message_stop' })}`)
+      return { success: true, data: '' }
+    })
+
+    try {
+      const pending = harness.callModel()
+      await vi.runAllTimersAsync()
+      await expect(pending).resolves.toMatchObject({ content: 'network-reconnected' })
+      expect(calls).toBe(2)
+    } finally {
+      harness.engine.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels a rate-limit wait without issuing another request', async () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async () => {
+      calls += 1
+      return {
+        success: false,
+        status: 429,
+        retryAfterMs: 10_000,
+        error: 'HTTP 429: rate limited',
+      }
+    })
+
+    try {
+      const pending = harness.callModel()
+      await vi.advanceTimersByTimeAsync(500)
+      harness.engine.abort()
+      await expect(pending).rejects.toMatchObject({ aborted: true })
+      expect(calls).toBe(1)
+    } finally {
+      harness.engine.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops after the bounded same-protocol rate-limit retry budget', async () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async () => {
+      calls += 1
+      return {
+        success: false,
+        status: 429,
+        error: 'HTTP 429: rate limited',
+      }
+    })
+
+    try {
+      const pending = harness.callModel()
+      await vi.runAllTimersAsync()
+      const turn = await pending
+      expect(turn.content).toContain('All compatible model protocols failed')
+      expect(calls).toBe(4)
+      expect(harness.executor.streamMessage).toHaveBeenCalledTimes(4)
+      expect(harness.events.filter(event => event.type === 'model:protocol' && event.phase === 'fallback')).toHaveLength(0)
+    } finally {
+      harness.engine.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not replay a 429 after stream bytes have arrived', async () => {
+    let calls = 0
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async (_url, _headers, _body, onLine) => {
+      calls += 1
+      onLine('event: message_start')
+      return {
+        success: false,
+        status: 429,
+        error: 'HTTP 429: rate limited after stream start',
+      }
+    })
+
+    try {
+      const turn = await harness.callModel()
+      expect(turn.content).toContain('All compatible model protocols failed')
+      expect(calls).toBe(1)
+      expect(harness.executor.streamMessage).toHaveBeenCalledOnce()
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
+  it('does not replay a transient HTTP error after the transport reports stream bytes', async () => {
+    let calls = 0
+    const harness = createProtocolHarness('anthropic', 'claude-fable-5', async () => {
+      calls += 1
+      return {
+        success: false,
+        status: 503,
+        error: 'HTTP 503: connection ended after response bytes',
+        receivedStreamData: true,
+      }
+    })
+
+    try {
+      const turn = await harness.callModel()
+      expect(turn.content).toContain('All compatible model protocols failed')
+      expect(calls).toBe(1)
+    } finally {
+      harness.engine.destroy()
+    }
+  })
+
   it('uses a Claude model hint and falls back from Messages to Chat on a route mismatch', async () => {
     const harness = createProtocolHarness('custom', 'vendor/claude-fable-5', async (url, headers, _body, onLine) => {
       if (url.endsWith('/messages')) {
@@ -1984,6 +2378,43 @@ describe('AgentEngine model protocol compatibility', () => {
 })
 
 describe('context compaction boundaries', () => {
+  it('clears a stale forced-compaction flag when restoring a terminal state', () => {
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: '',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, process.cwd())
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      workspacePath: process.cwd(),
+      gitEnabled: false,
+    }, new NodeToolExecutor(process.cwd()), stateProvider)
+    const state = {
+      id: 'compact-state-1',
+      phase: 'interrupted' as const,
+      source: 'compact' as const,
+      startedAt: 1,
+      updatedAt: 2,
+      elapsedMs: 1,
+      recoverable: true,
+    }
+
+    try {
+      engine.setContextCompactionState(state)
+      expect((engine as any).forceContextCompactionBeforeNextCall).toBe(true)
+      engine.setContextCompactionState({ ...state, phase: 'completed', recoverable: false })
+      expect((engine as any).forceContextCompactionBeforeNextCall).toBe(false)
+      engine.setContextCompactionState(null)
+      expect((engine as any).forceContextCompactionBeforeNextCall).toBe(false)
+    } finally {
+      engine.destroy()
+    }
+  })
+
   it('counts runtime context and provider reasoning without double counting the display trace', () => {
     expect(countTurnContextChars({
       id: 'reasoning-turn',
@@ -2008,6 +2439,33 @@ describe('context compaction boundaries', () => {
       timestamp: 2,
       metadata: { thinking: { content: 'fallback' } },
     })).toBe('fallback'.length)
+  })
+
+  it('includes diff snapshots in the context budget', () => {
+    const before = 'a'.repeat(120)
+    const after = 'b'.repeat(80)
+    const count = countTurnContextChars({
+      id: 'diff-turn',
+      role: 'tool_result',
+      content: 'edit_file: ok',
+      timestamp: 3,
+      toolResults: [{
+        toolCallId: 'edit-1',
+        name: 'edit_file',
+        output: 'ok',
+        isError: false,
+        changeSummary: {
+          path: 'src/example.ts',
+          operation: 'edit',
+          before,
+          after,
+          preview: 'new',
+          oldPreview: 'old',
+        },
+      }],
+    })
+
+    expect(count).toBeGreaterThan(before.length + after.length)
   })
 
   it('keeps assistant tool calls together with their tool results', () => {
@@ -2097,6 +2555,180 @@ describe('context compaction boundaries', () => {
         path: 'src/important.ts',
         content: 'export const important = true',
       }])
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('creates a deterministic development handoff when summary generation is unavailable', async () => {
+    const workspace = process.cwd()
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: '',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, workspace)
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      workspacePath: workspace,
+      gitEnabled: false,
+    }, new NodeToolExecutor(workspace), stateProvider)
+    const oldTurns: AgentTurn[] = [
+      { id: 'u-old', role: 'user', content: 'improve context compaction reliability', timestamp: 1 },
+      {
+        id: 'a-edit',
+        role: 'assistant',
+        content: 'Added a handoff checkpoint.',
+        timestamp: 2,
+        toolCalls: [{ id: 'edit-1', name: 'apply_patch', arguments: { path: 'src/core/contextCompaction.ts' } }],
+      },
+      {
+        id: 'tr-edit',
+        role: 'tool_result',
+        content: '',
+        timestamp: 3,
+        toolResults: [{
+          toolCallId: 'edit-1',
+          name: 'apply_patch',
+          output: 'ok',
+          isError: false,
+          changeSummary: { path: 'src/core/contextCompaction.ts', operation: 'edit' },
+        }],
+      },
+    ]
+    const recentTurns: AgentTurn[] = Array.from({ length: 10 }, (_, index) => ({
+      id: 'recent-' + index,
+      role: 'user' as const,
+      content: index === 9 ? 'continue after compression without restarting' : 'follow up ' + index,
+      timestamp: index + 4,
+    }))
+    engine.restoreFromTurns([...oldTurns, ...recentTurns])
+
+    try {
+      await engine.compactContext()
+
+      expect(engine.getSession().turns.map(turn => turn.id)).toEqual(recentTurns.map(turn => turn.id))
+      const [segment] = stateProvider.getContextSegments()
+      expect(segment?.handoff?.summarySource).toBe('deterministic')
+      expect(segment?.handoff?.document).toContain('TurboFlux Development Handoff')
+      expect(segment?.handoff?.document).toContain('src/core/contextCompaction.ts')
+      expect(segment?.handoff?.document).toContain('continue after compression without restarting')
+      expect(segment?.summary).toContain('<continuation_summary>')
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('emits durable compaction lifecycle events and commits only after summarizing', async () => {
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: '',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, process.cwd())
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      workspacePath: process.cwd(),
+      gitEnabled: false,
+    }, new NodeToolExecutor(process.cwd()), stateProvider)
+    engine.restoreFromTurns([
+      { id: 'compact-user-old', role: 'user', content: 'old objective', timestamp: 1 },
+      { id: 'compact-assistant-old', role: 'assistant', content: 'old progress', timestamp: 2 },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        id: `compact-recent-${index}`,
+        role: 'user' as const,
+        content: `recent ${index}`,
+        timestamp: index + 3,
+      })),
+    ])
+    const events: AgentEventType[] = []
+    engine.subscribe(event => events.push(event))
+
+    try {
+      await engine.compactContext()
+
+      expect(events.map(event => event.type)).toEqual(expect.arrayContaining([
+        'context:compaction_started',
+        'context:compaction_summarizing',
+        'context:compaction_fallback',
+        'context:compaction_committing',
+        'context:segment_created',
+        'context:compaction_completed',
+      ]))
+      const completed = events.find(event => event.type === 'context:compaction_completed')
+      expect(completed).toMatchObject({
+        state: {
+          phase: 'completed',
+          recoverable: false,
+          summarySource: 'deterministic',
+          startMessageId: 'compact-user-old',
+        },
+      })
+      expect(engine.getContextCompactionState()?.phase).toBe('completed')
+      expect(engine.getContextReservoir()[0]?.turns.map(turn => turn.id)).toEqual([
+        'compact-user-old',
+        'compact-assistant-old',
+      ])
+    } finally {
+      engine.destroy()
+    }
+  })
+
+  it('marks an in-flight compaction interrupted without dropping original turns', async () => {
+    const stateProvider = new DefaultAgentStateProvider({
+      provider: 'custom',
+      apiKey: '',
+      baseUrl: 'http://example.test',
+      model: 'test-model',
+      contextWindow: 100_000,
+      maxTokens: 4096,
+    }, process.cwd())
+    const engine = new AgentEngine({
+      mode: 'vibe',
+      approvalPolicy: 'full',
+      temperature: 0,
+      maxTokens: 4096,
+      workspacePath: process.cwd(),
+      gitEnabled: false,
+    }, new NodeToolExecutor(process.cwd()), stateProvider)
+    const turns: AgentTurn[] = [
+      { id: 'interrupt-old', role: 'user', content: 'preserve me', timestamp: 1 },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        id: `interrupt-recent-${index}`,
+        role: 'user' as const,
+        content: `recent ${index}`,
+        timestamp: index + 2,
+      })),
+    ]
+    engine.restoreFromTurns(turns)
+    const originalWorkspaceSnapshot = (engine as any).collectContinuationWorkspaceSnapshot.bind(engine)
+    let releaseSnapshot: ((snapshot: unknown) => void) | undefined
+    vi.spyOn(engine as any, 'collectContinuationWorkspaceSnapshot').mockImplementation(() => new Promise(resolve => {
+      releaseSnapshot = resolve
+    }))
+    const events: AgentEventType[] = []
+    engine.subscribe(event => events.push(event))
+
+    try {
+      const pending = engine.compactContext()
+      await Promise.resolve()
+      await Promise.resolve()
+      engine.abort()
+      releaseSnapshot?.(await originalWorkspaceSnapshot())
+      await expect(pending).rejects.toMatchObject({ aborted: true })
+      expect(events.some(event => event.type === 'context:compaction_interrupted')).toBe(true)
+      expect(engine.getContextCompactionState()).toMatchObject({ phase: 'interrupted', recoverable: true })
+      expect(engine.getSession().turns.map(turn => turn.id)).toEqual(turns.map(turn => turn.id))
     } finally {
       engine.destroy()
     }

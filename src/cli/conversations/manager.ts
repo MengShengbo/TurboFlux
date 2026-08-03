@@ -43,6 +43,10 @@ function conversationSnapshotHash(conversation: PersistedConversation): string {
   return createHash('sha256').update(JSON.stringify(conversation)).digest('hex')
 }
 
+function snapshotRevisionHash(revision: number): string {
+  return createHash('sha256').update(String(revision)).digest('hex')
+}
+
 function createEmptyInteractionState(): ConversationInteractionState {
   return { queuedInputs: [], draft: { text: '' }, pendingSteering: [], pendingApprovals: [] }
 }
@@ -52,6 +56,8 @@ export class ConversationManager {
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private journalInitialized = false
   private lastPersistedSnapshotHash = ''
+  private snapshotRevision = 0
+  private persistedSnapshotRevision = -1
   private persistenceError: Error | null = null
   private persistenceDegradedAt: number | null = null
   private readonly journalWriter: ConversationJournalWriter
@@ -80,6 +86,8 @@ export class ConversationManager {
       this.currentId = currentId
       this.journalInitialized = false
       this.lastPersistedSnapshotHash = ''
+      this.snapshotRevision += 1
+      this.persistedSnapshotRevision = -1
       this.interactionState = createEmptyInteractionState()
     })
   }
@@ -90,11 +98,15 @@ export class ConversationManager {
 
   updateConfig(config: TurboFluxConfig): void {
     this.config = config
+    this.snapshotRevision += 1
   }
 
   scheduleSave(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer)
-    this.saveTimer = setTimeout(() => this.persist(), 500)
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null
+      this.persist(true)
+    }, 500)
   }
 
   recordEvent(event: AgentEventType): void {
@@ -102,9 +114,11 @@ export class ConversationManager {
     const timestamp = Date.now()
     switch (event.type) {
       case 'turn:start':
+        this.markSnapshotDirty()
         this.append({ version: 1, type: 'turn', timestamp, turn: event.turn }, 'critical')
         break
       case 'turn:complete':
+        this.markSnapshotDirty()
         this.append({ version: 1, type: 'turn', timestamp, turn: event.turn }, 'terminal')
         break
       case 'stream:start':
@@ -120,12 +134,15 @@ export class ConversationManager {
         this.append({ version: 1, type: 'stream_end', timestamp, interrupted: event.interrupted === true }, 'terminal')
         break
       case 'tool:call':
+        this.markSnapshotDirty()
         this.append({ version: 1, type: 'tool_call', timestamp, toolCall: event.toolCall }, 'critical')
         break
       case 'tool:result':
+        this.markSnapshotDirty()
         this.append({ version: 1, type: 'tool_result', timestamp, toolResult: event.toolResult }, 'terminal')
         break
       case 'input:state': {
+        this.markSnapshotDirty()
         const index = this.interactionState.pendingSteering.findIndex(input => input.id === event.inputId)
         if (event.state === 'accepted') {
           const pending = { id: event.inputId, text: event.text }
@@ -147,6 +164,7 @@ export class ConversationManager {
         break
       }
       case 'approval:state': {
+        this.markSnapshotDirty()
         const index = this.interactionState.pendingApprovals.findIndex(request => request.requestId === event.requestId)
         if (event.state === 'requested') {
           const pending = {
@@ -176,6 +194,7 @@ export class ConversationManager {
         break
       }
       case 'context:segment_created':
+        this.markSnapshotDirty()
         this.append({
           version: 1,
           type: 'state',
@@ -185,12 +204,37 @@ export class ConversationManager {
           contextReservoir: this.engine.getContextReservoir(),
         }, 'terminal')
         break
+      case 'context:compaction_started':
+      case 'context:compaction_summarizing':
+      case 'context:compaction_fallback':
+      case 'context:compaction_committing':
+      case 'context:compaction_progress':
+      case 'context:compaction_interrupted':
+      case 'context:compaction_failed':
+      case 'context:compaction_completed': {
+        this.markSnapshotDirty()
+        const completed = event.type === 'context:compaction_completed'
+        this.append({
+          version: 2,
+          type: 'context_compaction',
+          timestamp,
+          state: event.state,
+          ...(completed ? {
+            activeTurns: this.engine.getSession().turns,
+            contextSegments: this.engine.getContextSegments?.() ?? [],
+            contextReservoir: this.engine.getContextReservoir?.() ?? [],
+          } : {}),
+        }, event.type === 'context:compaction_progress' ? 'streaming' : 'critical')
+        break
+      }
       case 'mode:change':
         if (!this.hasPersistableConversationState()) break
+        this.markSnapshotDirty()
         this.append({ version: 1, type: 'meta', timestamp, meta: this.buildMeta() }, 'critical')
         break
       case 'error':
         if (!this.hasPersistableConversationState()) break
+        this.markSnapshotDirty()
         this.append({ version: 1, type: 'stream_end', timestamp, interrupted: true }, 'terminal')
         break
       case 'session:complete':
@@ -200,10 +244,13 @@ export class ConversationManager {
   }
 
   persist(compact = false): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer)
+      this.saveTimer = null
+    }
     if (!this.hasPersistableConversationState()) return
+    if (!compact && this.snapshotRevision === this.persistedSnapshotRevision) return
     const conv = this.buildConversation()
-    const snapshotHash = conversationSnapshotHash(conv)
-    if (!compact && snapshotHash === this.lastPersistedSnapshotHash) return
     try {
       this.ensureJournal()
       this.journalWriter.flush(true)
@@ -212,7 +259,8 @@ export class ConversationManager {
       } else {
         this.journalWriter.append({ version: 1, type: 'snapshot', timestamp: Date.now(), conversation: conv }, 'terminal')
       }
-      this.lastPersistedSnapshotHash = snapshotHash
+      this.lastPersistedSnapshotHash = snapshotRevisionHash(this.snapshotRevision)
+      this.persistedSnapshotRevision = this.snapshotRevision
       this.reportPersistenceSuccess()
     } catch (error) {
       this.reportPersistenceFailure(error)
@@ -350,6 +398,7 @@ export class ConversationManager {
       ...input,
       attachments: input.attachments ? [...input.attachments] : undefined,
     }))
+    this.markSnapshotDirty()
     if (!this.journalInitialized && !this.hasPersistableConversationState()) return true
     try {
       this.ensureJournal()
@@ -372,6 +421,7 @@ export class ConversationManager {
         ? draft.pendingPastes.map(pending => ({ ...pending }))
         : undefined,
     }
+    this.markSnapshotDirty()
     if (!this.journalInitialized && !this.hasPersistableConversationState()) return true
     try {
       this.ensureJournal()
@@ -405,6 +455,7 @@ export class ConversationManager {
       ...(activeTurnsMatchFullConversation ? {} : { activeTurns: session.turns }),
       contextSegments: this.engine.getContextSegments(),
       contextReservoir: this.engine.getContextReservoir(),
+      contextCompactionState: this.engine.getContextCompactionState?.() ?? null,
       interactionState: JSON.parse(JSON.stringify(this.interactionState)) as ConversationInteractionState,
     }
   }
@@ -418,10 +469,13 @@ export class ConversationManager {
     this.engine.restoreFromTurns(conv.activeTurns ?? conv.turns)
     this.engine.setContextSegments(conv.contextSegments ?? [])
     this.engine.setContextReservoir(conv.contextReservoir ?? [])
+    this.engine.setContextCompactionState?.(conv.contextCompactionState ?? null)
     const session = this.engine.getSession()
     session.createdAt = conv.createdAt
     session.updatedAt = conv.updatedAt
     if (this.engine.getMode() !== conv.mode) this.engine.setMode(conv.mode)
+    this.snapshotRevision += 1
+    this.persistedSnapshotRevision = this.snapshotRevision
     this.lastPersistedSnapshotHash = conversationSnapshotHash(conv)
     return conv
   }
@@ -478,6 +532,14 @@ export class ConversationManager {
       case 'input:state':
       case 'approval:state':
       case 'context:segment_created':
+      case 'context:compaction_started':
+      case 'context:compaction_summarizing':
+      case 'context:compaction_fallback':
+      case 'context:compaction_committing':
+      case 'context:compaction_progress':
+      case 'context:compaction_interrupted':
+      case 'context:compaction_failed':
+      case 'context:compaction_completed':
         return true
       case 'mode:change':
       case 'error':
@@ -508,6 +570,10 @@ export class ConversationManager {
       if (durability === 'critical') throw (error instanceof Error ? error : new Error(String(error)))
       return false
     }
+  }
+
+  private markSnapshotDirty(): void {
+    this.snapshotRevision += 1
   }
 
   private reportPersistenceFailure(error: unknown): void {

@@ -9,6 +9,9 @@ redacted telemetry.
 
 - API keys live in `~/.turboflux/credentials.json` or the process environment;
   ordinary configuration files contain redacted values.
+- Windows writes use the parent directory ACL and Node file mode by default to
+  keep startup responsive; set `TURBOFLUX_STRICT_FILE_PERMISSIONS=1` to run
+  synchronous `icacls` hardening for credentials.
 - Logs, telemetry, errors, and tests must not include complete keys,
   authorization headers, private prompts, or source contents.
 - Generated artifacts, benchmark output, conversation journals, and local server

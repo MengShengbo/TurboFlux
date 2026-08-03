@@ -6,6 +6,7 @@ import {
   canComputeDiff,
   classifyOperation,
   MAX_DIFF_INPUT_BYTES,
+  MAX_DIFF_INPUT_LINES,
 } from './diffCompute'
 
 describe('diffCompute', () => {
@@ -24,6 +25,12 @@ describe('diffCompute', () => {
       const huge = 'x'.repeat(MAX_DIFF_INPUT_BYTES + 1)
       expect(canComputeDiff(huge, 'small')).toBe(false)
       expect(canComputeDiff('small', huge)).toBe(false)
+    })
+
+    it('skips pathological line counts before invoking the diff algorithm', () => {
+      const manyLines = `${'x\n'.repeat(MAX_DIFF_INPUT_LINES)}x`
+      expect(canComputeDiff(manyLines, 'small')).toBe(false)
+      expect(canComputeDiff('small', manyLines)).toBe(false)
     })
   })
 

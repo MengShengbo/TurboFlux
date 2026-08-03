@@ -1,6 +1,6 @@
 import type { Command, CommandContext, CommandResult } from './types'
 import type { SkillRuntime } from '../../core/skills/runtime'
-import { createTranslator } from '../i18n/index'
+import { createTranslator } from '../i18n/translator'
 
 const DEFAULT_TRANSLATOR = createTranslator('en')
 

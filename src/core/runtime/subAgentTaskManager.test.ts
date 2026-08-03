@@ -49,6 +49,69 @@ describe('SubAgentTaskManager', () => {
     }
   })
 
+  it('releases old completed task results from memory', async () => {
+    const workspacePath = createWorkspace()
+    const runtimeTaskManager = new RuntimeTaskManager()
+    const manager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager, maxRetainedTasks: 2 })
+
+    try {
+      const started = []
+      for (let index = 0; index < 3; index += 1) {
+        const task = manager.startTask({
+          kind: 'agent',
+          agentType: 'explorer',
+          label: `Explorer ${index}`,
+          objective: `Inspect ${index}`,
+          workspacePath,
+          run: async () => ({ ok: true, payload: 'x'.repeat(10_000) }),
+        })
+        started.push(task)
+        await task.promise
+      }
+
+      expect(manager.getTask(started[0]!.task.id)).toBeNull()
+      expect(runtimeTaskManager.getTask(started[0]!.task.id)).toBeNull()
+      expect(manager.listTasks().map(task => task.id)).toEqual(started.slice(-2).map(task => task.task.id))
+    } finally {
+      manager.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
+  it('restores transcript results when the runtime journal recovered the task first', async () => {
+    const workspacePath = createWorkspace()
+    const journalPath = path.join(workspacePath, '.turboflux', 'runtime', 'journal.jsonl')
+    const firstRuntime = new RuntimeTaskManager({ journalPath })
+    const firstManager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager: firstRuntime })
+
+    try {
+      const started = firstManager.startTask({
+        kind: 'agent',
+        agentType: 'reviewer',
+        label: 'Reviewer',
+        objective: 'Persist a result',
+        workspacePath,
+        run: async () => ({ ok: true, finalText: 'Recovered result' }),
+      })
+      await started.promise
+      firstManager.destroy()
+
+      const recoveredRuntime = new RuntimeTaskManager({ journalPath })
+      const recoveredManager = new SubAgentTaskManager({ workspacePath, runtimeTaskManager: recoveredRuntime })
+      try {
+        expect(recoveredManager.getTask(started.task.id)).toMatchObject({
+          runtimeTask: { status: 'completed' },
+          result: { ok: true, finalText: 'Recovered result' },
+        })
+      } finally {
+        recoveredManager.destroy()
+      }
+    } finally {
+      firstManager.destroy()
+      rmSync(workspacePath, { recursive: true, force: true })
+    }
+  })
+
   it('redacts evidence bodies, bounds event bytes, and always persists terminal records', async () => {
     const workspacePath = createWorkspace()
     const runtimeTaskManager = new RuntimeTaskManager()

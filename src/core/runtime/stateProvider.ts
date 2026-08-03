@@ -1,4 +1,4 @@
-import type { AgentStateProvider, APIConfig, APIModel, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
+import type { AgentStateProvider, APIConfig, APIModel, ContextCompactionState, ContextReservoirEntry, ContextSegment, WorkspaceInfo } from '../../state/types'
 import type { ModelCapabilities, TurboFluxApiConfigProfile, TurboFluxProvider } from '../config'
 import type {
   ApprovalPolicy,
@@ -50,12 +50,22 @@ function normalizeContextSegments(segments: ContextSegment[]): ContextSegment[] 
       createdAt: segment.createdAt ?? Date.now(),
     })
   }
-  return normalized
+  let latestHandoffIndex = -1
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (normalized[index]?.handoff) latestHandoffIndex = index
+  }
+  return normalized.map((segment, index) => {
+    if (index === latestHandoffIndex || !segment.handoff) return segment
+    const copy = { ...segment }
+    delete copy.handoff
+    return copy
+  })
 }
 
 export class DefaultAgentStateProvider implements AgentStateProvider {
   private contextSegments: ContextSegment[] = []
   private contextReservoir: ContextReservoirEntry[] = []
+  private contextCompactionState: ContextCompactionState | null = null
   private conversationId: string | null
   private totalTokens = { input: 0, output: 0, cached: 0 }
   private tokenUsageListeners = new Set<(event: RuntimeTokenUsageEvent) => void>()
@@ -155,6 +165,14 @@ export class DefaultAgentStateProvider implements AgentStateProvider {
       ...entry,
       createdAt: entry.createdAt ?? Date.now(),
     }))
+  }
+
+  getContextCompactionState(): ContextCompactionState | null {
+    return this.contextCompactionState ? { ...this.contextCompactionState } : null
+  }
+
+  setContextCompactionState(state: ContextCompactionState | null): void {
+    this.contextCompactionState = state ? { ...state } : null
   }
 
   getLanguage(): string {

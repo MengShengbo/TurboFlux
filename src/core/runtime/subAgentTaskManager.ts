@@ -77,10 +77,12 @@ export interface SubAgentTaskManagerOptions {
   storageDir?: string | false
   now?: () => number
   maxTranscriptEventBytes?: number
+  maxRetainedTasks?: number
 }
 
-const TERMINAL_STATUSES = new Set<RuntimeTaskStatus>(['completed', 'failed', 'stopped', 'interrupted'])
+const TERMINAL_STATUSES = new Set<RuntimeTaskStatus>(['completed', 'failed', 'stopped', 'interrupted', 'orphaned'])
 const DEFAULT_MAX_TRANSCRIPT_EVENT_BYTES = 512 * 1024
+const DEFAULT_MAX_RETAINED_TASKS = 128
 
 function sanitizeTranscriptValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(item => sanitizeTranscriptValue(item))
@@ -100,7 +102,7 @@ export function sanitizeSubAgentTranscriptRecord(record: SubAgentTranscriptRecor
 }
 
 function isRuntimeTaskStatus(value: unknown): value is RuntimeTaskStatus {
-  return ['starting', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'].includes(String(value))
+  return ['starting', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted', 'orphaned'].includes(String(value))
 }
 
 function parseTranscript(content: string): SubAgentTranscriptRecord[] {
@@ -127,6 +129,7 @@ export class SubAgentTaskManager {
   private readonly outputBytes = new Map<string, number>()
   private readonly eventBytes = new Map<string, number>()
   private readonly maxTranscriptEventBytes: number
+  private readonly maxRetainedTasks: number
   private readonly unsubscribeRuntimeTasks: () => void
   private sequence = 0
   private destroyed = false
@@ -139,11 +142,18 @@ export class SubAgentTaskManager {
       : options.storageDir || path.join(options.workspacePath, '.turboflux', 'runtime-agents')
     this.now = options.now || Date.now
     this.maxTranscriptEventBytes = Math.max(1024, Math.floor(options.maxTranscriptEventBytes || DEFAULT_MAX_TRANSCRIPT_EVENT_BYTES))
+    this.maxRetainedTasks = Number.isFinite(options.maxRetainedTasks)
+      ? Math.max(1, Math.floor(options.maxRetainedTasks!))
+      : DEFAULT_MAX_RETAINED_TASKS
     if (this.storageDir) {
       mkdirSync(this.storageDir, { recursive: true })
       this.recoverTranscripts()
     }
     this.unsubscribeRuntimeTasks = this.runtimeTaskManager.subscribe(event => {
+      if (event.type === 'runtime-task:removed') {
+        this.releaseTask(event.taskId)
+        return
+      }
       if (event.type !== 'runtime-task:finished' || !this.descriptors.has(event.task.id)) return
       this.appendRecord(event.task.id, {
         version: 1,
@@ -152,6 +162,7 @@ export class SubAgentTaskManager {
         status: event.task.status,
         error: event.task.error,
       })
+      this.pruneTerminalTasks()
     })
   }
 
@@ -328,6 +339,10 @@ export class SubAgentTaskManager {
       void this.runtimeTaskManager.stopTask(descriptor.id, 'Subagent task manager destroyed').catch(() => {})
     }
     this.unsubscribeRuntimeTasks()
+    this.descriptors.clear()
+    this.results.clear()
+    this.outputBytes.clear()
+    this.eventBytes.clear()
   }
 
   private recoverTranscripts(): void {
@@ -335,12 +350,14 @@ export class SubAgentTaskManager {
     const files = readdirSync(this.storageDir)
       .filter(file => file.endsWith('.jsonl'))
       .sort()
+      .slice(-this.maxRetainedTasks)
     for (const file of files) {
       const transcriptPath = path.join(this.storageDir, file)
       const transcriptContent = readFileSync(transcriptPath, 'utf8')
       const records = parseTranscript(transcriptContent)
       const start = records.find((record): record is Extract<SubAgentTranscriptRecord, { type: 'start' }> => record.type === 'start')
-      if (!start?.task?.id || this.runtimeTaskManager.getTask(start.task.id)) continue
+      if (!start?.task?.id) continue
+      const recoveredRuntimeTask = this.runtimeTaskManager.getTask(start.task.id)
       const descriptor: SubAgentTaskDescriptor = {
         ...start.task,
         transcriptPath,
@@ -369,6 +386,8 @@ export class SubAgentTaskManager {
         ? stateStatus
         : resultStatus || stateStatus || 'running'
       if (result !== undefined) this.results.set(descriptor.id, result)
+
+      if (recoveredRuntimeTask) continue
 
       this.runtimeTaskManager.createTask({
         id: descriptor.id,
@@ -440,6 +459,29 @@ export class SubAgentTaskManager {
         outputOffset: bytes,
       })
     }
+  }
+
+  private pruneTerminalTasks(): void {
+    const terminalTasks = Array.from(this.descriptors.keys())
+      .map(taskId => this.runtimeTaskManager.getTask(taskId))
+      .filter((task): task is RuntimeTask => task !== null && TERMINAL_STATUSES.has(task.status))
+      .sort((left, right) => (
+        (left.endedAt ?? left.updatedAt) - (right.endedAt ?? right.updatedAt)
+        || left.startedAt - right.startedAt
+        || left.id.localeCompare(right.id)
+      ))
+    const overflow = terminalTasks.length - this.maxRetainedTasks
+    if (overflow <= 0) return
+    for (const task of terminalTasks.slice(0, overflow)) {
+      if (!this.runtimeTaskManager.removeTask(task.id)) this.releaseTask(task.id)
+    }
+  }
+
+  private releaseTask(taskId: string): void {
+    this.descriptors.delete(taskId)
+    this.results.delete(taskId)
+    this.outputBytes.delete(taskId)
+    this.eventBytes.delete(taskId)
   }
 
   private generateId(kind: Extract<RuntimeTaskKind, 'agent'>, now: number): string {

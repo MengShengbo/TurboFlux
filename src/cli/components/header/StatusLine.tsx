@@ -84,9 +84,11 @@ export function StatusLine({
     }
   })() : activity?.kind === 'error'
     ? t('ui.status.activity.needsAttention')
-    : activity?.kind === 'stopping'
-      ? t('ui.status.activity.stopping')
-      : undefined)
+      : activity?.kind === 'stopping'
+        ? t('ui.status.activity.stopping')
+        : activity?.code === 'compacting'
+          ? t('ui.status.activity.compacting')
+        : undefined)
   const activityPart = activityLabel && activity?.detail
     ? t('ui.status.activity.detail', { activity: activityLabel, detail: cliTruncate(activity.detail, 24, { position: 'end' }) })
     : activityLabel

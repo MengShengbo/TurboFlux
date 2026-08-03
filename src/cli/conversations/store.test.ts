@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentTurn } from '../../shared/agentTypes'
+import type { ContextCompactionState } from '../../state/types'
 import type { ConversationMeta, PersistedConversation } from './types'
 import {
   appendConversationJournal,
@@ -269,6 +270,46 @@ describe.sequential('conversation journal store', () => {
       metadata: { interrupted: true },
     })
     expect(recovered?.recovery).toMatchObject({ interrupted: true, truncatedJournal: true })
+  })
+
+  it('turns an unfinished compaction checkpoint into a recoverable interruption', () => {
+    const state: ContextCompactionState = {
+      id: 'compact-recovery-1',
+      phase: 'summarizing',
+      source: 'compact',
+      startedAt: 100,
+      updatedAt: 150,
+      elapsedMs: 50,
+      startMessageId: 'old-user',
+      endMessageId: 'old-assistant',
+      oldTurnCount: 2,
+      originalCharCount: 1200,
+      progress: 0.3,
+      recoverable: true,
+    }
+    appendConversationJournal('compaction-recovery', { version: 1, type: 'meta', timestamp: 100, meta: meta('compaction-recovery') })
+    appendConversationJournal('compaction-recovery', {
+      version: 1,
+      type: 'turn',
+      timestamp: 101,
+      turn: turn('old-user', 'user', 'preserve this', 101),
+    })
+    appendConversationJournal('compaction-recovery', {
+      version: 2,
+      type: 'context_compaction',
+      timestamp: 150,
+      state,
+    })
+
+    const recovered = loadConversation('compaction-recovery')
+    expect(recovered?.turns[0]?.id).toBe('old-user')
+    expect(recovered?.turns[0]?.content).toBe('preserve this')
+    expect(recovered?.contextCompactionState).toMatchObject({
+      phase: 'interrupted',
+      recoverable: true,
+      startMessageId: 'old-user',
+    })
+    expect(recovered?.recovery?.interrupted).toBe(true)
   })
 
   it('skips structurally invalid journal events without losing later valid turns', () => {

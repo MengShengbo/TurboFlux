@@ -1,6 +1,7 @@
 import React from 'react'
 import { renderToString } from 'ink'
 import { describe, expect, it } from 'vitest'
+import { MAX_DIFF_INPUT_BYTES, MAX_DIFF_INPUT_LINES } from '../../../core/diffCompute'
 import { ThemeProvider } from '../../theme/index'
 import { MessageList } from './MessageList'
 
@@ -102,7 +103,7 @@ describe('MessageList developer workflow', () => {
 
     expect(output).toContain('300.0 KB')
     expect(output).toContain('320.0 KB')
-    expect(output.replace(/\s+/g, ' ')).toContain('256.0 KB inline safety limit')
+    expect(output.replace(/\s+/g, ' ')).toContain(`${(MAX_DIFF_INPUT_BYTES / 1024).toFixed(1)} KB / ${MAX_DIFF_INPUT_LINES}-line inline safety limit`)
     expect(output).not.toContain('no file snapshot captured')
   })
 })

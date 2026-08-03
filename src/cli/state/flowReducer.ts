@@ -11,6 +11,9 @@ import type { AgentAttachment, AgentMode, AgentRunState, TokenUsage } from '../.
 
 export const MAX_FLOW_STREAM_TEXT_CHARS = 16 * 1024
 export const MAX_FLOW_NOTIFICATION_ITEMS = 64
+export const MAX_FLOW_HISTORY_ITEMS = 128
+export const MAX_FLOW_APPROVAL_HISTORY_ITEMS = 64
+export const MAX_FLOW_VIOLATIONS = 64
 
 export type FlowRunPhase = 'idle' | 'starting' | 'active' | 'stopping' | 'terminal'
 export type FlowInputStatus = 'submitted' | 'durable' | 'accepted' | 'queued' | 'rejected' | 'committed' | 'restored' | 'cancelled'
@@ -209,14 +212,68 @@ function appendBoundedStreamText(current: string, delta: string): string {
 
 function retainRecentNotifications(notifications: Record<string, FlowNotificationItem>): Record<string, FlowNotificationItem> {
   const values = Object.values(notifications)
-  const persistent = values.filter(notification => ['action-required', 'error', 'result-ready'].includes(notification.category))
-  const transient = values
-    .filter(notification => !['action-required', 'error', 'result-ready'].includes(notification.category))
-    .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)
+  const retained = values
+    .sort((left, right) => (
+      Number(left.acknowledged) - Number(right.acknowledged)
+      || right.priority - left.priority
+      || right.updatedAt - left.updatedAt
+      || right.createdAt - left.createdAt
+    ))
     .slice(0, MAX_FLOW_NOTIFICATION_ITEMS)
-  const retained = [...persistent, ...transient]
   if (retained.length === values.length) return notifications
   return Object.fromEntries(retained.map(notification => [notification.id, notification]))
+}
+
+function retainRecentItems<T extends { id: string; createdAt: number; updatedAt: number }>(
+  items: Record<string, T>,
+  maxHistoryItems: number,
+  keepActive: (item: T) => boolean,
+): Record<string, T> {
+  const values = Object.values(items)
+  const active = values.filter(keepActive)
+  const history = values
+    .filter(item => !keepActive(item))
+    .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+    .slice(0, maxHistoryItems)
+  if (active.length + history.length === values.length) return items
+  return Object.fromEntries([...active, ...history].map(item => [item.id, item]))
+}
+
+function compactFlowHistory(state: ThreadFlowState): ThreadFlowState {
+  const inputValues = Object.values(state.inputs)
+  const latestInput = [...inputValues].sort((left, right) => (
+    right.updatedAt - left.updatedAt || right.createdAt - left.createdAt || right.id.localeCompare(left.id)
+  ))[0]
+  const queuedInputs = new Set(state.inputQueue)
+  const inputs = retainRecentItems(state.inputs, MAX_FLOW_HISTORY_ITEMS, input => (
+    queuedInputs.has(input.id)
+    || ['submitted', 'durable', 'accepted', 'queued'].includes(input.status)
+    || input.id === latestInput?.id
+  ))
+  const approvalQueue = new Set(state.approvalQueue)
+  const approvals = retainRecentItems(state.approvals, MAX_FLOW_APPROVAL_HISTORY_ITEMS, approval => (
+    approvalQueue.has(approval.id)
+    || approval.id === state.activeApprovalId
+    || approval.status === 'requested'
+    || approval.status === 'presented'
+  ))
+  const tools = retainRecentItems(state.tools, MAX_FLOW_HISTORY_ITEMS, tool => (
+    tool.status === 'proposed' || tool.status === 'awaiting_approval' || tool.status === 'running'
+  ))
+  const runtimes = retainRecentItems(state.runtimes, MAX_FLOW_HISTORY_ITEMS, runtime => runtime.status === 'running')
+  const notifications = retainRecentNotifications(state.notifications)
+  const violations = state.violations.length > MAX_FLOW_VIOLATIONS
+    ? state.violations.slice(-MAX_FLOW_VIOLATIONS)
+    : state.violations
+  if (
+    inputs === state.inputs
+    && approvals === state.approvals
+    && tools === state.tools
+    && runtimes === state.runtimes
+    && notifications === state.notifications
+    && violations === state.violations
+  ) return state
+  return { ...state, inputs, approvals, tools, runtimes, notifications, violations }
 }
 
 function updateInput(
@@ -271,7 +328,7 @@ function updateApprovalTerminal(
   }
 }
 
-export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): ThreadFlowState {
+function reduceFlowEventInternal(current: ThreadFlowState, event: AnyFlowEvent): ThreadFlowState {
   if (event.threadId !== current.threadId || event.sessionId !== current.sessionId) {
     return violation(current, event, 'identity_mismatch', `Expected ${current.sessionId}/${current.threadId}`)
   }
@@ -705,4 +762,8 @@ export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): 
     case 'journal.degraded':
       return { ...state, persistence: { ...state.persistence, phase: 'degraded', error: event.payload.error } }
   }
+}
+
+export function reduceFlowEvent(current: ThreadFlowState, event: AnyFlowEvent): ThreadFlowState {
+  return compactFlowHistory(reduceFlowEventInternal(current, event))
 }

@@ -7,6 +7,8 @@ export interface Result<T = any> {
   success: boolean
   data?: T
   error?: string
+  retryAfterMs?: number
+  receivedStreamData?: boolean
   // TODO: remove this index signature once all IPC/tool results migrate to
   // the `data` envelope pattern instead of flat extra properties.
   [key: string]: any
@@ -85,6 +87,7 @@ export interface RequestOptions {
   signal?: AbortSignal
   streamId?: number
   timeoutMs?: number
+  retry?: boolean
 }
 
 export interface ListTreeOptions {

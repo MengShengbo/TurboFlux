@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentTurn } from '../../shared/agentTypes'
 import type { AgentEngine } from '../../core/agentEngine'
 import type { TurboFluxConfig } from '../../core/config'
@@ -17,6 +17,7 @@ describe.sequential('ConversationManager journal integration', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     delete process.env.TURBOFLUX_CONVERSATIONS_DIR
     rmSync(directory, { recursive: true, force: true })
   })
@@ -154,6 +155,31 @@ describe.sequential('ConversationManager journal integration', () => {
     const records = readFileSync(journalPath, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line))
     expect(records).toHaveLength(1)
     expect(records[0]).toMatchObject({ type: 'snapshot', conversation: { turnCount: 1 } })
+  })
+
+  it('compacts scheduled checkpoints instead of stacking full snapshots', () => {
+    vi.useFakeTimers()
+    const turns: AgentTurn[] = [{ id: 'user-1', role: 'user', content: 'checkpoint', timestamp: 101 }]
+    const engine = {
+      getSession: () => ({ id: 'session-1', mode: 'vibe', turns, createdAt: 100, updatedAt: 101 }),
+      getFullConversationTurns: () => turns,
+      getContextSegments: () => [],
+      getContextReservoir: () => [],
+    } as unknown as AgentEngine
+    const manager = new ConversationManager(
+      engine,
+      { model: 'test-model', provider: 'custom' } as TurboFluxConfig,
+      process.cwd(),
+    )
+
+    manager.recordEvent({ type: 'turn:start', turn: turns[0]! })
+    manager.scheduleSave()
+    vi.advanceTimersByTime(500)
+
+    const journalPath = join(directory, `${manager.getCurrentId()}.jsonl`)
+    const records = readFileSync(journalPath, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line))
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ type: 'snapshot', conversation: { title: 'checkpoint' } })
   })
 
   it('reports journal persistence failures instead of silently losing recovery data', () => {

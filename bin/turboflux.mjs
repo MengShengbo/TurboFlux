@@ -1,28 +1,16 @@
 #!/usr/bin/env node
 import { dirname, join } from 'node:path'
-import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
 const entry = join(root, 'dist', 'cli', 'index.js')
-const require = createRequire(import.meta.url)
-const tsxLoader = pathToFileURL(require.resolve('tsx')).href
 
-// Use tsx's resolver so extensionless ESM emitted by tsc can run under Node.
-const { spawnSync } = await import('node:child_process')
-const systemCaArgs = process.allowedNodeEnvironmentFlags.has('--use-system-ca') ? ['--use-system-ca'] : []
-const args = [...systemCaArgs, '--import', tsxLoader, entry, ...process.argv.slice(2)]
-
-const result = spawnSync(process.execPath, args, {
-  stdio: 'inherit',
-  cwd: process.cwd(),
-  env: { ...process.env, NODE_PATH: join(root, 'node_modules') },
-})
-
-if (result.error) {
-  console.error(result.error.message)
-  process.exit(1)
+if (process.argv[2] === '--version' || process.argv[2] === '-V') {
+  const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  process.stdout.write(`${packageJson.version}\n`)
+  process.exit(0)
 }
 
-process.exit(result.status ?? 1)
+await import(pathToFileURL(entry).href)

@@ -1,5 +1,4 @@
 import chalk from 'chalk'
-import inquirer from 'inquirer'
 import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
@@ -29,10 +28,9 @@ import {
   type ApprovalPolicy,
 } from '../shared/agentTypes'
 import { TURBOFLUX_VERSION, TURBOFLUX_WORDMARK_LINES } from './brand'
-import { createTranslator, type MessageKey, type TranslationValues, type Translator } from './i18n/index'
+import { createTranslator, type MessageKey, type TranslationValues, type Translator } from './i18n/translator'
 import { TURBOFLUX_ACCENTS } from './theme/palette'
 import {
-  DEFAULT_PROFILE,
   PERSONA_DEFINITIONS,
   getPersonaDefinition,
   getProfileFile,
@@ -116,6 +114,16 @@ type PromptChoice<T extends string = string> = {
   checked?: boolean
 }
 
+type InquirerApi = typeof import('inquirer').default
+let inquirerLoader: Promise<InquirerApi> | null = null
+
+async function getInquirer(): Promise<InquirerApi> {
+  if (!inquirerLoader) {
+    inquirerLoader = import('inquirer').then(module => module.default)
+  }
+  return inquirerLoader
+}
+
 function promptConfig<T extends Record<string, unknown>>(question: T): T {
   return {
     prefix: PROMPT_PREFIX,
@@ -126,8 +134,7 @@ function promptConfig<T extends Record<string, unknown>>(question: T): T {
 
 async function settlePromptInput(): Promise<void> {
   if (!process.stdin.isTTY) return
-  await new Promise(resolve => setTimeout(resolve, 50))
-  while (process.stdin.read() !== null) {}
+  await new Promise<void>(resolve => setImmediate(resolve))
 }
 
 function maskKey(key: string): string {
@@ -249,6 +256,7 @@ function approvalPolicyLabel(policy: ApprovalPolicy, t: Translator): string {
 }
 
 async function promptInput(message: string, options: { default?: string; required?: boolean; validate?: (value: string) => true | string } = {}): Promise<string> {
+  const inquirer = await getInquirer()
   const answer = await inquirer.prompt<{ value: string }>(promptConfig({
     type: 'input',
     name: 'value',
@@ -265,6 +273,7 @@ async function promptInput(message: string, options: { default?: string; require
 }
 
 async function promptPassword(message: string): Promise<string> {
+  const inquirer = await getInquirer()
   const answer = await inquirer.prompt<{ value: string }>(promptConfig({
     type: 'password',
     name: 'value',
@@ -276,6 +285,7 @@ async function promptPassword(message: string): Promise<string> {
 }
 
 async function promptConfirm(message: string, defaultValue = false): Promise<boolean> {
+  const inquirer = await getInquirer()
   const answer = await inquirer.prompt<{ ok: boolean }>(promptConfig({
     type: 'confirm',
     name: 'ok',
@@ -287,6 +297,7 @@ async function promptConfirm(message: string, defaultValue = false): Promise<boo
 }
 
 async function promptEditor(message: string, defaultValue: string): Promise<string> {
+  const inquirer = await getInquirer()
   const answer = await inquirer.prompt<{ value: string }>(promptConfig({
     type: 'editor',
     name: 'value',
@@ -310,6 +321,7 @@ async function promptChoice(message: string, valid: string[], fallback = ''): Pr
 }
 
 async function promptSelect<T extends string>(message: string, choices: PromptChoice<T>[], fallback?: T): Promise<T> {
+  const inquirer = await getInquirer()
   const answer = await inquirer.prompt<{ value: T }>(promptConfig({
     type: 'select',
     name: 'value',
@@ -323,6 +335,7 @@ async function promptSelect<T extends string>(message: string, choices: PromptCh
 }
 
 async function promptCheckbox<T extends string>(message: string, choices: PromptChoice<T>[]): Promise<T[]> {
+  const inquirer = await getInquirer()
   const answer = await inquirer.prompt<{ value: T[] }>(promptConfig({
     type: 'checkbox',
     name: 'value',
@@ -414,10 +427,13 @@ function providerLabel(preset: ProviderPreset): string {
 
 function defaultProviderForOptions(options: SetupOptions, current: TurboFluxConfig): ProviderPreset | undefined {
   if (options.provider) return resolveProvider(options.provider)
+  const currentPreset = getProviderPreset(current.provider)
+  if (currentPreset && (current.baseUrl || currentPreset.id !== 'custom' && (current.model || current.apiKey))) return currentPreset
   if (current.baseUrl) {
-    return PROVIDER_PRESETS.find(p => p.baseUrl.replace(/\/+$/, '') === current.baseUrl.replace(/\/+$/, ''))
+    const matchingPreset = PROVIDER_PRESETS.find(p => p.baseUrl.replace(/\/+$/, '') === current.baseUrl.replace(/\/+$/, ''))
+    if (matchingPreset) return matchingPreset
   }
-  return getProviderPreset(current.provider)
+  return PROVIDER_PRESETS.find(p => p.id !== 'custom' && Boolean(p.baseUrl))
 }
 
 function hasApiOptions(options: SetupOptions): boolean {
@@ -475,9 +491,13 @@ function parseStyleList(value?: string): string[] | 'skip' | undefined {
 }
 
 function validateUrl(value: string): true | string {
-  if (!value.trim()) return setupText('setup.url.required')
+  const trimmed = value.trim()
+  if (!trimmed) return setupText('setup.url.required')
   try {
-    new URL(value)
+    const parsed = new URL(trimmed)
+    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) {
+      return setupText('setup.url.invalid')
+    }
     return true
   } catch {
     return setupText('setup.url.invalid')
@@ -554,13 +574,13 @@ async function promptProfileFields(options: {
   const defaultBaseUrl = cliOptions.baseUrl
     || (providerChanged || providerWasExplicit ? preset.baseUrl : source.baseUrl)
     || preset.baseUrl
-  const baseUrl = directMode
+  const baseUrl = (directMode
     ? defaultBaseUrl
-    : await promptInput('Base URL', {
+    : await promptInput(setupText('setup.api.baseUrl'), {
       default: defaultBaseUrl,
       required: true,
       validate: validateUrl,
-    })
+    })).trim()
   const sameConnection = source.provider === preset.provider
     && source.baseUrl.replace(/\/+$/, '') === baseUrl.replace(/\/+$/, '')
   const model = cliOptions.model?.trim()
@@ -629,7 +649,7 @@ async function configureApiDirect(options: SetupOptions = {}): Promise<TurboFlux
     directMode: true,
   })
   const next = saveApiConfigProfile(current, profile, true)
-  const saved = saveConfig(next)
+  const saved = JSON.stringify(next) === JSON.stringify(current) ? current : saveConfig(next)
   console.log(chalk.green(setupText('setup.api.saved')))
   console.log(`  name:     ${profile.name}`)
   console.log(`  provider: ${saved.provider}`)
@@ -762,10 +782,18 @@ async function configureLanguage(options: SetupOptions = {}): Promise<TurboFluxP
   }
 
   if (options.yes || interfaceFromCli || outputFromCli.language) {
+    const nextInterfaceLanguage = interfaceFromCli || profile.interfaceLanguage
+    const nextAiOutputLanguage = outputFromCli.language || profile.aiOutputLanguage
+    const nextCustomAiOutputLanguage = outputFromCli.custom || profile.customAiOutputLanguage
+    if (
+      nextInterfaceLanguage === profile.interfaceLanguage
+      && nextAiOutputLanguage === profile.aiOutputLanguage
+      && nextCustomAiOutputLanguage === profile.customAiOutputLanguage
+    ) return profile
     profile = saveProfile({
-      interfaceLanguage: interfaceFromCli || profile.interfaceLanguage,
-      aiOutputLanguage: outputFromCli.language || profile.aiOutputLanguage,
-      customAiOutputLanguage: outputFromCli.custom || profile.customAiOutputLanguage,
+      interfaceLanguage: nextInterfaceLanguage,
+      aiOutputLanguage: nextAiOutputLanguage,
+      customAiOutputLanguage: nextCustomAiOutputLanguage,
     })
     console.log(chalk.green(setupText('setup.language.saved', undefined, profile)))
     return profile
@@ -825,6 +853,11 @@ async function configurePersona(options: SetupOptions = {}): Promise<TurboFluxPr
     if (defaultPersonaId !== 'custom' && !enabledPersonaIds.includes(defaultPersonaId)) {
       enabledPersonaIds = [...enabledPersonaIds, defaultPersonaId]
     }
+    if (
+      enabledPersonaIds.length === profile.enabledPersonaIds.length
+      && enabledPersonaIds.every((id, index) => id === profile.enabledPersonaIds[index])
+      && defaultPersonaId === profile.defaultPersonaId
+    ) return profile
     profile = saveProfile({ enabledPersonaIds, defaultPersonaId })
     console.log(chalk.green(setupText('setup.persona.saved', undefined, profile)))
     return profile
@@ -877,7 +910,9 @@ async function configurePersona(options: SetupOptions = {}): Promise<TurboFluxPr
 async function configureCustomInstructions(options: SetupOptions = {}): Promise<TurboFluxProfile> {
   const profile = loadProfile()
   if (options.yes || options.customInstructions !== undefined) {
-    const next = saveProfile({ customInstructions: options.customInstructions ?? profile.customInstructions })
+    const nextInstructions = options.customInstructions ?? profile.customInstructions
+    if (nextInstructions === profile.customInstructions) return profile
+    const next = saveProfile({ customInstructions: nextInstructions })
     console.log(chalk.green(setupText('setup.instructions.saved', undefined, next)))
     return next
   }
@@ -913,9 +948,11 @@ async function configureApprovalPolicy(options: SetupOptions = {}): Promise<Turb
   }
 
   const next = setConfigValue(config, 'approvalPolicy', approvalPolicy)
-  saveConfig(next)
+  const saved = next.approvalPolicy === config.approvalPolicy && next.capabilityProfile === config.capabilityProfile
+    ? config
+    : saveConfig(next)
   console.log(chalk.green(setupText('setup.approval.saved', { policy: approvalPolicyLabel(approvalPolicy, createTranslator(profile.interfaceLanguage)) }, profile)))
-  return next
+  return saved
 }
 
 async function runFullInitialization(options: SetupOptions = {}): Promise<void> {
@@ -1077,7 +1114,6 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
         await runFullInitialization({
           ...options,
           action: 'init',
-          lang: options.lang || DEFAULT_PROFILE.interfaceLanguage,
         })
         return
     }

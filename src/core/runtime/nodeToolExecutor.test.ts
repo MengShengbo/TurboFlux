@@ -660,6 +660,30 @@ it('distinguishes request deadlines from user cancellation', async () => withWor
   }
 }))
 
+it('refreshes the request deadline when a streaming response is still active', async () => withWorkspace(async ({ workspace }) => {
+  vi.useFakeTimers()
+  const executor = new NodeToolExecutor(workspace)
+  const request = (executor as unknown as {
+    createRequestController: (options: { timeoutMs: number }) => {
+      controller: AbortController
+      refreshTimeout: () => void
+      cleanup: () => void
+    }
+  }).createRequestController({ timeoutMs: 20 })
+
+  try {
+    await vi.advanceTimersByTimeAsync(15)
+    request.refreshTimeout()
+    await vi.advanceTimersByTimeAsync(15)
+    expect(request.controller.signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(5)
+    expect(request.controller.signal.aborted).toBe(true)
+  } finally {
+    request.cleanup()
+    vi.useRealTimers()
+  }
+}))
+
 it('does not replay a model request after receiving partial stream bytes', async () => withWorkspace(async ({ workspace }) => {
   const encoder = new TextEncoder()
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({
@@ -677,6 +701,91 @@ it('does not replay a model request after receiving partial stream bytes', async
     expect(result.success).toBe(false)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(onLine).toHaveBeenCalledWith('data: {"choices":[{"delta":{"content":"hi"}}]}')
+  } finally {
+    fetchMock.mockRestore()
+  }
+}))
+
+it('honors Retry-After while exhausting pre-stream 429 retries', async () => withWorkspace(async ({ workspace }) => {
+  vi.useFakeTimers()
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => (
+    new Response('rate limited', { status: 429, headers: { 'retry-after': '2' } })
+  ))
+  const executor = new NodeToolExecutor(workspace)
+
+  try {
+    const pending = executor.streamMessage('https://example.test/v1/chat/completions', {}, '{}', () => {}, { timeoutMs: 120_000 })
+    await vi.runAllTimersAsync()
+    await expect(pending).resolves.toMatchObject({
+      success: false,
+      status: 429,
+      retryAfterMs: 2_000,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+  } finally {
+    fetchMock.mockRestore()
+    vi.useRealTimers()
+  }
+}))
+
+it('allows the caller to own transient stream retries', async () => withWorkspace(async ({ workspace }) => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response('rate limited', { status: 429, headers: { 'retry-after': '2' } }),
+  )
+  const executor = new NodeToolExecutor(workspace)
+
+  try {
+    await expect(executor.streamMessage(
+      'https://example.test/v1/chat/completions',
+      {},
+      '{}',
+      () => {},
+      { retry: false },
+    )).resolves.toMatchObject({
+      success: false,
+      status: 429,
+      retryAfterMs: 2_000,
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  } finally {
+    fetchMock.mockRestore()
+  }
+}))
+
+it('retries every 5xx status before stream bytes arrive', async () => withWorkspace(async ({ workspace }) => {
+  vi.useFakeTimers()
+  let calls = 0
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+    calls += 1
+    if (calls < 5) return new Response('overloaded', { status: 529 })
+    return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  })
+  const executor = new NodeToolExecutor(workspace)
+
+  try {
+    const pending = executor.streamMessage('https://example.test/v1/chat/completions', {}, '{}', () => {})
+    await vi.runAllTimersAsync()
+    await expect(pending).resolves.toMatchObject({ success: true })
+    expect(calls).toBe(5)
+  } finally {
+    fetchMock.mockRestore()
+    vi.useRealTimers()
+  }
+}))
+
+it('marks a partial UTF-8 stream as received even without a complete line', async () => withWorkspace(async ({ workspace }) => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([0xE2]))
+      setTimeout(() => controller.error(new Error('socket closed mid-frame')), 0)
+    },
+  }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }))
+  const executor = new NodeToolExecutor(workspace)
+
+  try {
+    const result = await executor.streamMessage('https://example.test/v1/chat/completions', {}, '{}', () => {})
+    expect(result).toMatchObject({ success: false, receivedStreamData: true })
+    expect(fetchMock).toHaveBeenCalledOnce()
   } finally {
     fetchMock.mockRestore()
   }

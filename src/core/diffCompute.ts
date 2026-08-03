@@ -9,7 +9,7 @@
 //
 // Size discipline (DeepSeek-style "FP8 mixed precision" — keep the cheap path
 // always available, only commit memory when the input is small enough):
-//   - canComputeDiff() gates input size at 256 KB per side. Bigger files fall
+//   - canComputeDiff() gates input size at 128 KB and 2,500 lines per side. Bigger files fall
 //     back to existing oldPreview/preview heuristics elsewhere; they never
 //     get a full diff card.
 //   - hunks are computed lazily by callers (useMemo / store getter), not by
@@ -18,10 +18,11 @@
 
 import { structuredPatch } from 'diff'
 
-/** Maximum input size per side (bytes / characters). 256 KB is enough for
+/** Maximum input size per side (bytes / characters). 128 KB is enough for
  *  almost any source file we'd realistically diff inline; above this the
  *  Myers diff cost and the memory copy cost outweigh the UX benefit. */
-export const MAX_DIFF_INPUT_BYTES = 256 * 1024
+export const MAX_DIFF_INPUT_BYTES = 128 * 1024
+export const MAX_DIFF_INPUT_LINES = 2_500
 export const DEFAULT_UNIFIED_DIFF_CONTEXT_LINES = 3
 
 export type DiffLineKind = 'context' | 'add' | 'remove'
@@ -69,7 +70,18 @@ export function canComputeDiff(
   if (typeof before !== 'string' || typeof after !== 'string') return false
   if (before.length > MAX_DIFF_INPUT_BYTES) return false
   if (after.length > MAX_DIFF_INPUT_BYTES) return false
+  if (countLines(before) > MAX_DIFF_INPUT_LINES) return false
+  if (countLines(after) > MAX_DIFF_INPUT_LINES) return false
   return true
+}
+
+function countLines(value: string): number {
+  if (!value) return 0
+  let lines = 1
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 10) lines += 1
+  }
+  return lines
 }
 
 /**

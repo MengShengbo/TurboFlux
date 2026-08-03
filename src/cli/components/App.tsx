@@ -4,7 +4,7 @@ import { ThemeProvider, resolveBackground, useTheme } from '../theme/index'
 import { Header } from './header/Header'
 import { StatusLine } from './header/StatusLine'
 import type { ToolStatus } from './tools/ToolCallTree'
-import { ActiveWorkPanel } from './tools/ActiveWorkPanel'
+import { ActiveWorkPanel, type ModelRequestPresentation } from './tools/ActiveWorkPanel'
 import { ConversationHistory, type ConversationEntry } from './ConversationHistory'
 import { RewindSelector } from './input/RewindSelector'
 import { ModelPicker } from './input/ModelPicker'
@@ -17,7 +17,7 @@ import { useMessageCursor } from '../hooks/useMessageCursor'
 import type { SubAgentEvent } from '../../shared/subAgentTypes'
 import type { AgentAttachment, AgentTurn, ApprovalPolicy, CapabilityProfile, ChangeSummary, TokenUsage } from '../../shared/agentTypes'
 import type { TerminalSessionInfo } from '../../shared/terminalTypes'
-import type { ContextReservoirEntry, ContextSegment } from '../../state/types'
+import type { ContextCompactionState, ContextReservoirEntry, ContextSegment } from '../../state/types'
 import { type Message } from './messages/Messages'
 import { PromptInput } from './input/PromptInput'
 import { formatMarkdown, getMarkdownCacheStats } from './markdown/index'
@@ -163,8 +163,15 @@ type StaticTranscriptItem =
   | { kind: 'header'; id: string }
   | { kind: 'message'; id: string; message: Message }
 
+export interface TranscriptBufferState {
+  messages: Message[]
+  staticRevision: number
+  staticItemOffset: number
+}
+
 const MAX_TRANSCRIPT_MESSAGES = 1_000
 const MAX_TRANSCRIPT_CHARS = 8 * 1024 * 1024
+const MODEL_REQUEST_RESULT_VISIBLE_MS = 3_000
 
 function transcriptMessageChars(message: Message): number {
   let chars = message.content.length + (message.thinking?.content.length ?? 0)
@@ -201,6 +208,45 @@ function retainTranscriptTail(messages: Message[]): Message[] {
     },
     ...retained,
   ]
+}
+
+function isTranscriptTrimNotice(message: Message): boolean {
+  return message.id.startsWith('transcript-trim-')
+}
+
+function countStaticTranscriptMessages(messages: Message[]): number {
+  return messages.reduce((count, message) => count + (isTranscriptTrimNotice(message) ? 0 : 1), 0)
+}
+
+export function appendTranscriptBuffer(
+  state: TranscriptBufferState,
+  nextMessages: Message[],
+  options?: { dedupeTail?: boolean },
+): TranscriptBufferState {
+  if (nextMessages.length === 0) return state
+
+  const combined = [...state.messages]
+  let appendedCount = 0
+  for (const message of nextMessages) {
+    const previous = combined.at(-1)
+    if (
+      options?.dedupeTail
+      && previous?.role === message.role
+      && previous.content.trim() === message.content.trim()
+    ) continue
+    combined.push(message)
+    appendedCount += 1
+  }
+  if (appendedCount === 0) return state
+
+  const retained = retainTranscriptTail(combined)
+  const previousStaticCount = countStaticTranscriptMessages(state.messages)
+  const retainedStaticCount = countStaticTranscriptMessages(retained)
+  return {
+    messages: retained,
+    staticRevision: state.staticRevision,
+    staticItemOffset: state.staticItemOffset + previousStaticCount + appendedCount - retainedStaticCount,
+  }
 }
 
 type PendingAsk = {
@@ -324,19 +370,27 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const [config, setConfig] = useState(initialConfig)
   const [profile, setProfile] = useState(loadProfile)
   const t = useMemo(() => createTranslator(profile.interfaceLanguage), [profile.interfaceLanguage])
+  const tRef = useRef(t)
+  tRef.current = t
   const [globalCommandActivityController] = useState(() => new GlobalCommandActivityController())
   const globalCommandActivity = useSyncExternalStore(
     globalCommandActivityController.subscribe,
     globalCommandActivityController.getSnapshot,
     globalCommandActivityController.getSnapshot,
   )
-  const [messages, setMessages] = useState<Message[]>([])
-  const [staticTranscriptRevision, setStaticTranscriptRevision] = useState(0)
+  const [transcriptBuffer, setTranscriptBuffer] = useState<TranscriptBufferState>({
+    messages: [],
+    staticRevision: 0,
+    staticItemOffset: 0,
+  })
+  const { messages, staticRevision: staticTranscriptRevision, staticItemOffset } = transcriptBuffer
   const [input, setInput] = useState('')
   const [draftAttachments, setDraftAttachments] = useState<AgentAttachment[]>([])
   const [streamText, setStreamText] = useState('')
   const [streamThinkingText, setStreamThinkingText] = useState('')
   const [streamThinkingStartedAt, setStreamThinkingStartedAt] = useState<number | undefined>()
+  const [modelRequestStatus, setModelRequestStatus] = useState<ModelRequestPresentation | null>(null)
+  const [contextCompaction, setContextCompaction] = useState<ContextCompactionState | null>(null)
   const [showThinking, setShowThinking] = useState(false)
   const [showToolDetails, setShowToolDetails] = useState(verbose)
   const [currentTurnOutputTokens, setCurrentTurnOutputTokens] = useState(0)
@@ -397,6 +451,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const streamDisplayBufferRef = useRef('')
   const streamThinkingBufferRef = useRef('')
   const streamThinkingStartedAtRef = useRef<number | undefined>(undefined)
+  const modelRequestStartedAtRef = useRef<number | undefined>(undefined)
+  const modelRequestStatusRef = useRef<ModelRequestPresentation | null>(null)
+  const modelRequestResultTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const contextCompactionClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const streamTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastAssistantTurnInterruptedRef = useRef(false)
   const lastActivityPaintRef = useRef(0)
@@ -405,6 +463,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const pendingPastesRef = useRef<ConversationPendingPaste[]>([])
   const pendingAskRef = useRef<PendingAsk | null>(null)
   const activePromptRef = useRef<{ prompt: string; messageId: string; responseStarted: boolean; attachments?: AgentAttachment[]; priorTurns: AgentTurn[] } | null>(null)
+  const engineErrorMessageRef = useRef<string | null>(null)
   const abortingRef = useRef(false)
   const abortRestoredPromptRef = useRef(false)
   const runPromptRef = useRef<((prompt: string, attachments?: AgentAttachment[], messageId?: string) => Promise<void>) | null>(null)
@@ -591,6 +650,71 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     setLastActivity(timestamp)
   }, [])
 
+  const clearModelRequestResultTimer = useCallback(() => {
+    if (!modelRequestResultTimerRef.current) return
+    clearTimeout(modelRequestResultTimerRef.current)
+    modelRequestResultTimerRef.current = null
+  }, [])
+
+  const publishModelRequestStatus = useCallback((status: ModelRequestPresentation | null) => {
+    modelRequestStatusRef.current = status
+    setModelRequestStatus(status)
+  }, [])
+
+  const beginModelRequest = useCallback((startedAt = Date.now()) => {
+    if (modelRequestStartedAtRef.current !== undefined) return
+    clearModelRequestResultTimer()
+    modelRequestStartedAtRef.current = startedAt
+    publishModelRequestStatus({ phase: 'requesting', startedAt })
+  }, [clearModelRequestResultTimer, publishModelRequestStatus])
+
+  const markModelResponseStarted = useCallback((timestamp = Date.now()) => {
+    const startedAt = modelRequestStartedAtRef.current
+    if (startedAt === undefined || modelRequestStatusRef.current?.phase === 'responding') return
+    publishModelRequestStatus({
+      phase: 'responding',
+      startedAt,
+      elapsedMs: Math.max(0, timestamp - startedAt),
+    })
+  }, [publishModelRequestStatus])
+
+  const finishModelRequest = useCallback((timestamp = Date.now(), interrupted = false) => {
+    const startedAt = modelRequestStartedAtRef.current
+    modelRequestStartedAtRef.current = undefined
+    clearModelRequestResultTimer()
+    if (startedAt === undefined || interrupted) {
+      publishModelRequestStatus(null)
+      return
+    }
+    const completed: ModelRequestPresentation = {
+      phase: 'completed',
+      startedAt,
+      elapsedMs: Math.max(0, timestamp - startedAt),
+    }
+    publishModelRequestStatus(completed)
+    modelRequestResultTimerRef.current = setTimeout(() => {
+      modelRequestResultTimerRef.current = null
+      if (modelRequestStatusRef.current !== completed) return
+      publishModelRequestStatus(null)
+    }, MODEL_REQUEST_RESULT_VISIBLE_MS)
+  }, [clearModelRequestResultTimer, publishModelRequestStatus])
+
+  const clearModelRequest = useCallback(() => {
+    modelRequestStartedAtRef.current = undefined
+    clearModelRequestResultTimer()
+    publishModelRequestStatus(null)
+  }, [clearModelRequestResultTimer, publishModelRequestStatus])
+
+  const clearTerminalCompactionForRequest = useCallback(() => {
+    if (contextCompactionClearTimerRef.current) {
+      clearTimeout(contextCompactionClearTimerRef.current)
+      contextCompactionClearTimerRef.current = null
+    }
+    setContextCompaction(current => current && ['completed', 'interrupted', 'failed'].includes(current.phase)
+      ? null
+      : current)
+  }, [])
+
   const showRunControlHint = useCallback((message: string) => {
     if (runControlHintTimerRef.current) clearTimeout(runControlHintTimerRef.current)
     setRunControlHint(message)
@@ -626,7 +750,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     notificationCoordinator.raise({
       id: `approval:${ask.id}`,
       category: 'action-required',
-      title: ask.options?.includes('allow-once') ? t('ui.app.reviewRequired') : t('ui.app.inputRequired'),
+      title: ask.options?.includes('allow-once') ? tRef.current('ui.app.reviewRequired') : tRef.current('ui.app.inputRequired'),
       detail: ask.toolName || ask.reason,
       sourceId: ask.id,
     })
@@ -639,7 +763,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         setAskModalVisible(true)
       }
     }, requestedAt)
-  }, [approvalPresentationScheduler, flowBridge, flowTelemetry, notificationCoordinator, syncNotificationSnapshot, t])
+  }, [approvalPresentationScheduler, flowBridge, flowTelemetry, notificationCoordinator, syncNotificationSnapshot])
 
   const noteComposerActivity = useCallback(() => {
     flowTelemetry.count('ui.key_received')
@@ -696,28 +820,18 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
   const appendMessages = useCallback((nextMessages: Message[], options?: { forceLatest?: boolean; dedupeTail?: boolean }) => {
     if (nextMessages.length === 0) return
-
-    setMessages(current => {
-      const combined = [...current]
-      for (const message of nextMessages) {
-        const previous = combined.at(-1)
-        if (
-          options?.dedupeTail
-          && previous?.role === message.role
-          && previous.content.trim() === message.content.trim()
-        ) continue
-        combined.push(message)
-      }
-      return retainTranscriptTail(combined)
-    })
+    setTranscriptBuffer(current => appendTranscriptBuffer(current, nextMessages, options))
     if (noFlickerActive && options?.forceLatest === true) setScrollRowsFromBottom(0)
   }, [noFlickerActive])
 
   const replaceMessages = useCallback((nextMessages: React.SetStateAction<Message[]>) => {
-    setStaticTranscriptRevision(revision => revision + 1)
-    setMessages(previous => retainTranscriptTail(
-      typeof nextMessages === 'function' ? nextMessages(previous) : nextMessages,
-    ))
+    setTranscriptBuffer(previous => ({
+      messages: retainTranscriptTail(
+        typeof nextMessages === 'function' ? nextMessages(previous.messages) : nextMessages,
+      ),
+      staticRevision: previous.staticRevision + 1,
+      staticItemOffset: 0,
+    }))
   }, [])
 
   const restoreCliStateFromTurns = useCallback((
@@ -726,13 +840,19 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     contextSegments: ContextSegment[] = [],
     contextReservoir: ContextReservoirEntry[] = [],
     transcriptTurns: AgentTurn[] = activeTurns,
-    options: { restoreEngine?: boolean } = {},
+    options: { restoreEngine?: boolean; contextCompactionState?: ContextCompactionState | null } = {},
   ) => {
     if (options.restoreEngine !== false) {
       engine.restoreFromTurns(activeTurns)
       engine.setContextSegments(contextSegments)
       engine.setContextReservoir(contextReservoir)
+      engine.setContextCompactionState(options.contextCompactionState ?? null)
     }
+    if (contextCompactionClearTimerRef.current) {
+      clearTimeout(contextCompactionClearTimerRef.current)
+      contextCompactionClearTimerRef.current = null
+    }
+    setContextCompaction(options.contextCompactionState ?? null)
     replaceMessages(turnsToMessages(transcriptTurns))
     inputRef.current = nextInput
     pendingPastesRef.current = []
@@ -866,6 +986,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       switch (event.type) {
         case 'run:state':
           setLastActivity(event.state.updatedAt)
+          if (event.state.phase === 'thinking') {
+            clearTerminalCompactionForRequest()
+            beginModelRequest(event.state.updatedAt)
+          }
+          if (event.state.phase === 'aborting') clearModelRequest()
           if (event.state.phase === 'awaiting_approval' || event.state.phase === 'awaiting_input') setMood('thinking')
           break
         case 'input:state':
@@ -877,7 +1002,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             setComposedInput(current => current.trim()
               ? `${current}\n\n${event.text}`
               : event.text)
-            showRunControlHint(event.reason || t('ui.app.guidanceRestored'))
+            showRunControlHint(event.reason || tRef.current('ui.app.guidanceRestored'))
           }
           break
         case 'turn:complete': {
@@ -926,19 +1051,21 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           break
         }
         case 'stream:start': {
-          const streamStartedAt = Date.now()
+          clearTerminalCompactionForRequest()
+          beginModelRequest()
           setCurrentTurnOutputTokens(0)
           streamBufferRef.current.reset()
           streamDisplayBufferRef.current = ''
           streamThinkingBufferRef.current = ''
-          streamThinkingStartedAtRef.current = streamStartedAt
-          setStreamThinkingStartedAt(streamStartedAt)
+          streamThinkingStartedAtRef.current = undefined
+          setStreamThinkingStartedAt(undefined)
           setStreamThinkingText('')
           setStreamText('')
           clearStreamFlushTimer()
           break
         }
         case 'stream:delta':
+          markModelResponseStarted()
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
           const acceptedText = streamBufferRef.current.append(event.text)
           streamDisplayBufferRef.current = appendLiveStreamTail(
@@ -958,6 +1085,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           markActivity()
           break
         case 'stream:thinking_delta':
+          markModelResponseStarted()
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
           if (!streamThinkingStartedAtRef.current) {
             const thinkingStartedAt = Date.now()
@@ -977,11 +1105,13 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           markActivity()
           break
         case 'stream:usage':
+          markModelResponseStarted()
           if (typeof event.usage.output === 'number') {
             setCurrentTurnOutputTokens(previous => Math.max(previous, event.usage.output ?? 0))
           }
           break
         case 'stream:end': {
+          finishModelRequest(Date.now(), event.interrupted === true)
           clearStreamFlushTimer()
           const bufferedStreamText = streamBufferRef.current.toString()
           const bufferedThinkingText = streamThinkingBufferRef.current
@@ -1025,7 +1155,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             notificationCoordinator.raise({
               id: `turn-complete:${Date.now()}`,
               category: 'turn-complete',
-              title: t('ui.app.agentTurnComplete'),
+              title: tRef.current('ui.app.agentTurnComplete'),
               sourceId: 'foreground-run',
             })
             syncNotificationSnapshot()
@@ -1044,6 +1174,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           markActivity()
           break
         case 'stream:tool_call_delta':
+          markModelResponseStarted()
           if (activePromptRef.current) activePromptRef.current.responseStarted = true
           markActivity()
           break
@@ -1067,7 +1198,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               id: event.agentId,
               label: event.label,
               objective: event.objective,
-              detail: t('ui.subagent.starting'),
+              detail: tRef.current('ui.subagent.starting'),
               startedAt: Date.now(),
               status: 'running',
             },
@@ -1084,15 +1215,15 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
                 ...activity,
                 status: event.ok ? 'completed' : 'failed',
                 completedAt: Date.now(),
-                detail: event.ok ? t('ui.subagent.resultReady') : t('common.failed'),
+                detail: event.ok ? tRef.current('ui.subagent.resultReady') : tRef.current('common.failed'),
               }
             : activity))
           notificationCoordinator.raise({
             id: `subagent-result:${event.agentId}`,
             category: event.ok ? 'result-ready' : 'error',
             title: event.ok
-              ? t('ui.app.subagentResultReady', { agent: event.agentType })
-              : t('ui.app.subagentFailed', { agent: event.agentType }),
+              ? tRef.current('ui.app.subagentResultReady', { agent: event.agentType })
+              : tRef.current('ui.app.subagentFailed', { agent: event.agentType }),
             sourceId: event.agentId,
           })
           syncNotificationSnapshot()
@@ -1119,24 +1250,24 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
               : session))
             const durationMs = (event.task.endedAt || event.task.updatedAt) - event.task.startedAt
             const duration = formatElapsed(durationMs)
-            const exit = typeof event.task.exitCode === 'number' ? t('ui.app.exitCode', { code: event.task.exitCode }) : ''
-            const log = event.task.logPath ? t('ui.app.logPath', { path: event.task.logPath }) : ''
+            const exit = typeof event.task.exitCode === 'number' ? tRef.current('ui.app.exitCode', { code: event.task.exitCode }) : ''
+            const log = event.task.logPath ? tRef.current('ui.app.logPath', { path: event.task.logPath }) : ''
             appendMessages([{
               id: genMsgId(),
               role: 'system',
-              content: t('ui.app.backgroundFinished', {
+              content: tRef.current('ui.app.backgroundFinished', {
                 session: sessionId,
                 status: event.task.status,
                 duration,
                 exit,
-                command: event.task.command || t('ui.app.shellSession'),
+                command: event.task.command || tRef.current('ui.app.shellSession'),
                 log,
               }),
             }], { forceLatest: true })
             notificationCoordinator.raise({
               id: `terminal-result:${sessionId}`,
               category: event.task.status === 'failed' ? 'error' : 'result-ready',
-              title: t('ui.app.backgroundTerminalStatus', { status: event.task.status }),
+              title: tRef.current('ui.app.backgroundTerminalStatus', { status: event.task.status }),
               detail: sessionId,
               sourceId: sessionId,
             })
@@ -1166,6 +1297,36 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           convManager.scheduleSave()
           markActivity()
           break
+        case 'context:compaction_started':
+        case 'context:compaction_summarizing':
+        case 'context:compaction_fallback':
+        case 'context:compaction_committing':
+        case 'context:compaction_progress':
+        case 'context:compaction_interrupted':
+        case 'context:compaction_failed':
+        case 'context:compaction_completed': {
+          const state = event.state
+          if (contextCompactionClearTimerRef.current) {
+            clearTimeout(contextCompactionClearTimerRef.current)
+            contextCompactionClearTimerRef.current = null
+          }
+          if (state.phase !== 'completed' && state.phase !== 'interrupted' && state.phase !== 'failed') {
+            clearModelRequest()
+          }
+          setContextCompaction(state)
+          if (state.phase === 'completed') {
+            contextCompactionClearTimerRef.current = setTimeout(() => {
+              contextCompactionClearTimerRef.current = null
+              setContextCompaction(current => current?.id === state.id ? null : current)
+            }, 3500)
+          }
+          if (state.phase === 'interrupted' || state.phase === 'failed') {
+            showRunControlHint(state.error || tRef.current('ui.compaction.detail'))
+          }
+          convManager.scheduleSave()
+          markActivity(state.updatedAt)
+          break
+        }
         case 'notification':
           notificationCoordinator.raise({
             id: `engine:${event.level}:${event.message}`,
@@ -1186,14 +1347,16 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             appendMessages([{
               id: genMsgId(),
               role: 'system',
-              content: t('ui.app.protocolFallback', {
-                message: event.message || t('ui.app.protocolMismatch'),
+              content: tRef.current('ui.app.protocolFallback', {
+                message: event.message || tRef.current('ui.app.protocolMismatch'),
                 url: event.url,
               }),
             }], { forceLatest: true })
           }
           break
         case 'error':
+          engineErrorMessageRef.current = event.error
+          clearModelRequest()
           streamBufferRef.current.reset()
           streamDisplayBufferRef.current = ''
           streamThinkingBufferRef.current = ''
@@ -1202,11 +1365,11 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
           clearStreamFlushTimer()
       setStreamText('')
       setStreamThinkingText('')
-      appendMessages([{ id: genMsgId(), role: 'system', content: t('common.error', { message: event.error }) }])
+      appendMessages([{ id: genMsgId(), role: 'system', content: tRef.current('common.error', { message: event.error }) }])
           notificationCoordinator.raise({
             id: `run-error:${Date.now()}`,
             category: 'error',
-            title: t('ui.app.runFailed'),
+            title: tRef.current('ui.app.runFailed'),
             detail: event.error,
             sourceId: 'foreground-run',
           })
@@ -1220,15 +1383,20 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       }
     })
     return () => {
-      clearStreamFlushTimer()
-      if (runControlHintTimerRef.current) clearTimeout(runControlHintTimerRef.current)
       unsub()
-      void runtime.destroy().catch(() => {}).finally(() => {
-        engine.setEventRecorder(null)
-        convManager.destroy()
-      })
     }
-  }, [engine, runtime, convManager, flowBridge, clearStreamFlushTimer, appendMessages, replaceMessages, setComposedInput, markActivity, showRunControlHint, genMsgId, noFlickerActive, t, dismissPendingAsk, schedulePendingAsk, notificationCoordinator, syncNotificationSnapshot, streamScheduler, terminalLatencyTracker, flowFeatures.streamScheduler])
+  }, [engine, convManager, flowBridge, beginModelRequest, markModelResponseStarted, finishModelRequest, clearModelRequest, clearTerminalCompactionForRequest, appendMessages, replaceMessages, setComposedInput, markActivity, showRunControlHint, genMsgId, noFlickerActive, dismissPendingAsk, schedulePendingAsk, notificationCoordinator, syncNotificationSnapshot, streamScheduler, terminalLatencyTracker, flowFeatures.streamScheduler])
+
+  useEffect(() => () => {
+    clearStreamFlushTimer()
+    clearModelRequestResultTimer()
+    if (contextCompactionClearTimerRef.current) clearTimeout(contextCompactionClearTimerRef.current)
+    if (runControlHintTimerRef.current) clearTimeout(runControlHintTimerRef.current)
+    void runtime.destroy().catch(() => {}).finally(() => {
+      engine.setEventRecorder(null)
+      convManager.destroy()
+    })
+  }, [runtime, engine, convManager, clearStreamFlushTimer, clearModelRequestResultTimer])
 
   const loadConversationEntries = useCallback(async (): Promise<ConversationEntry[]> => {
     const convs = await convManager.listAsync()
@@ -1308,6 +1476,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
             conv.turns,
             { restoreEngine: false },
           )
+          setContextCompaction(conv.contextCompactionState ?? null)
           restoreInteractionState(conv.interactionState)
         },
       )
@@ -1395,7 +1564,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   ])
 
   const runNextQueuedPrompt = useCallback(() => {
-    if (flowBridge.isForegroundBusy() || engine.isRunning() || runPromptRef.current === null) return
+    if (flowBridge.isForegroundBusy() || engine.isRunning() || engine.isContextCompacting() || runPromptRef.current === null) return
     if (!convManager.isPersistenceHealthy()) {
       showRunControlHint(t('ui.app.persistenceBlocked'))
       return
@@ -1410,7 +1579,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       showRunControlHint(t('ui.app.persistenceBlocked'))
       return
     }
-    if (flowBridge.isForegroundBusy() || engine.isRunning()) {
+    if (flowBridge.isForegroundBusy() || engine.isRunning() || engine.isContextCompacting()) {
       flowBridge.enqueueInput({ id: queuedMessageId ?? genMsgId(), prompt, attachments })
       showRunControlHint(t('ui.flow.input.queued', { count: flowBridge.getQueuedInputs().length }))
       return
@@ -1418,6 +1587,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
 
     const userMessageId = queuedMessageId ?? genMsgId()
     lastAssistantTurnInterruptedRef.current = false
+    engineErrorMessageRef.current = null
     activePromptRef.current = { prompt, attachments, messageId: userMessageId, responseStarted: false, priorTurns: [...engine.getSession().turns] }
     abortingRef.current = false
     abortRestoredPromptRef.current = false
@@ -1439,6 +1609,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       }])
       return
     }
+    clearTerminalCompactionForRequest()
+    beginModelRequest()
     flowBridge.startRun(prompt)
     setMood('thinking')
     streamBufferRef.current.reset()
@@ -1473,6 +1645,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         }
       }
     } catch (e: any) {
+      clearModelRequest()
       const bufferedStreamText = streamBufferRef.current.toString()
       const bufferedThinkingText = streamThinkingBufferRef.current
       const thinkingStartedAt = streamThinkingStartedAtRef.current
@@ -1480,8 +1653,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       const toolsSnapshot = currentToolsRef.current
       const changesSnapshot = changeSummariesRef.current
       const interrupted = abortingRef.current || e?.aborted === true || /aborted/i.test(String(e?.message || ''))
+      const errorMessage = String(e?.message || e)
+      const engineAlreadyReportedError = engineErrorMessageRef.current === errorMessage
       runOutcome = interrupted ? 'interrupted' : 'failed'
-      runError = interrupted ? undefined : String(e?.message || e)
+      runError = interrupted ? undefined : errorMessage
       streamBufferRef.current.reset()
       streamDisplayBufferRef.current = ''
       streamThinkingBufferRef.current = ''
@@ -1504,8 +1679,8 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         }])
       } else if (interrupted) {
         appendMessages([{ id: genMsgId(), role: 'system', content: t('common.interrupted') }])
-      } else {
-        appendMessages([{ id: genMsgId(), role: 'system', content: t('common.error', { message: e.message }) }])
+      } else if (!engineAlreadyReportedError) {
+        appendMessages([{ id: genMsgId(), role: 'system', content: t('common.error', { message: errorMessage }) }])
       }
       updateCurrentTools(() => [])
       updateChangeSummaries(() => [])
@@ -1513,13 +1688,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       if (!abortingRef.current) setTimeout(() => setMood('idle'), 4000)
     } finally {
       activePromptRef.current = null
+      engineErrorMessageRef.current = null
       flowBridge.finishRun(runOutcome, runError)
       abortingRef.current = false
       abortRestoredPromptRef.current = false
       if (flowBridge.getQueuedInputs().length > 0) setTimeout(runNextQueuedPrompt, 0)
     }
     if (singleShot) exit()
-  }, [appendMessages, engine, singleShot, config, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, showRunControlHint, modelDiscoveryStatus.isRefreshing, t, dismissPendingAsk, notificationCoordinator, syncNotificationSnapshot, convManager, flowBridge])
+  }, [appendMessages, engine, singleShot, config, beginModelRequest, clearTerminalCompactionForRequest, clearModelRequest, clearStreamFlushTimer, exit, runNextQueuedPrompt, genMsgId, showRunControlHint, modelDiscoveryStatus.isRefreshing, t, dismissPendingAsk, notificationCoordinator, syncNotificationSnapshot, convManager, flowBridge])
 
   useEffect(() => {
     runPromptRef.current = runPrompt
@@ -1613,7 +1789,7 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
     if (pressedAt - lastCtrlCEventAtRef.current < 120) return
     lastCtrlCEventAtRef.current = pressedAt
 
-    if (flowBridge.isForegroundBusy() || engine.isRunning()) {
+    if (flowBridge.isForegroundBusy() || engine.isRunning() || engine.isContextCompacting()) {
       const activePrompt = activePromptRef.current
       abortingRef.current = true
       if (activePrompt && !activePrompt.responseStarted) {
@@ -1890,10 +2066,10 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
   const visibleStreamText = stripTextToolCallMarkup(streamText, { stripIncomplete: true })
   const streamTextForDisplay = visibleStreamText
   const reasoningLabel = formatNativeReasoningSetting(config.model, config.reasoning, config.provider, config.modelCapabilities)
-  const reasoningActive = Boolean(reasoningLabel && reasoningLabel !== 'off' && isRunning && runState.phase === 'thinking')
+  const reasoningActive = Boolean(reasoningLabel && reasoningLabel !== 'off' && isRunning && runState.phase === 'thinking' && streamThinkingStartedAt !== undefined)
   const conversationFrameWidth = Math.max(24, cockpit.contentWidth - 2)
 
-  const runningNode = (isRunning || subAgentActivities.length > 0 || queuedPrompts.length > 0) ? (
+  const runningNode = (isRunning || modelRequestStatus || contextCompaction || subAgentActivities.length > 0 || queuedPrompts.length > 0) ? (
     <Box flexDirection="column" marginBottom={1}>
       {!noFlickerActive && <SubAgentProgressLine activities={subAgentActivities} />}
       <ActiveWorkPanel
@@ -1910,7 +2086,9 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
         reasoningActive={reasoningActive}
         showThinking={showThinking}
         verbose={verbose}
-        idleLabel={isRunning && !visibleStreamText && currentTools.length === 0 && !pendingAsk ? t('ui.activity.phase.thinking') : null}
+        idleLabel={isRunning && runState.phase === 'thinking' && !visibleStreamText && currentTools.length === 0 && !pendingAsk ? t('ui.activity.phase.waitingOutput') : null}
+        requestStatus={modelRequestStatus}
+        compaction={contextCompaction}
         availableWidth={noFlickerActive
           ? cockpit.contentWidth - 4
           : terminal.columns - 4}
@@ -2160,10 +2338,14 @@ function App({ workspacePath, workspaceName, config: initialConfig, singleShot, 
       </TranscriptViewport>
     </Box>
   )
-  const staticTranscriptItems = useMemo<StaticTranscriptItem[]>(() => [
-    { kind: 'header', id: 'startup-header' },
-    ...messages.map(message => ({ kind: 'message' as const, id: message.id, message })),
-  ], [messages])
+  const staticTranscriptItems = useMemo<StaticTranscriptItem[]>(() => {
+    const items: StaticTranscriptItem[] = [{ kind: 'header', id: 'startup-header' }]
+    items.length += staticItemOffset
+    for (const message of messages) {
+      if (!isTranscriptTrimNotice(message)) items.push({ kind: 'message', id: message.id, message })
+    }
+    return items
+  }, [messages, staticItemOffset])
   const taskFlowNode = (
     <TaskFlowHud
       task={isRunning ? activeTask : null}

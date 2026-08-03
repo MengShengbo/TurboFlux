@@ -3,6 +3,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync, readdir as readdirAsync
 import { join, resolve } from 'path'
 import { homedir } from 'os'
 import type { AgentTurn, ToolCall, ToolResult } from '../../shared/agentTypes'
+import type { ContextCompactionState } from '../../state/types'
 import type { ConversationInteractionState, ConversationJournalEntry, ConversationMeta, PersistedConversation } from './types'
 import { writeFileAtomicSync } from '../../core/fileIO'
 import { RECOVERED_ASSISTANT_MESSAGE, RECOVERED_TOOL_RESULT_MESSAGE } from './recoveryMessages'
@@ -19,6 +20,17 @@ function isPendingPaste(value: unknown): boolean {
   return isRecord(value)
     && typeof value.placeholder === 'string'
     && typeof value.text === 'string'
+}
+
+function isContextCompactionState(value: unknown): value is ContextCompactionState {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string'
+    && ['started', 'summarizing', 'fallback', 'committing', 'completed', 'interrupted', 'failed'].includes(String(value.phase))
+    && (value.source === 'compact' || value.source === 'manual')
+    && Number.isFinite(value.startedAt)
+    && Number.isFinite(value.updatedAt)
+    && Number.isFinite(value.elapsedMs)
+    && typeof value.recoverable === 'boolean'
 }
 
 function isJournalEntry(value: unknown): value is ConversationJournalEntry {
@@ -60,6 +72,12 @@ function isJournalEntry(value: unknown): value is ConversationJournalEntry {
       return Array.isArray(value.activeTurns)
         && Array.isArray(value.contextSegments)
         && Array.isArray(value.contextReservoir)
+    case 'context_compaction':
+      return value.version === 2
+        && isContextCompactionState(value.state)
+        && (value.activeTurns === undefined || Array.isArray(value.activeTurns))
+        && (value.contextSegments === undefined || Array.isArray(value.contextSegments))
+        && (value.contextReservoir === undefined || Array.isArray(value.contextReservoir))
     case 'queue_state':
       return value.version === 2 && Array.isArray(value.inputs)
     case 'draft_state':
@@ -485,6 +503,13 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
         pendingToolCalls.clear()
         journalToolResults.clear()
         break
+      case 'context_compaction':
+        if (!conversation) break
+        conversation.contextCompactionState = { ...entry.state }
+        if (entry.activeTurns) conversation.activeTurns = entry.activeTurns
+        if (entry.contextSegments) conversation.contextSegments = entry.contextSegments
+        if (entry.contextReservoir) conversation.contextReservoir = entry.contextReservoir
+        break
       case 'turn':
         if (!conversation) break
         upsertTurn(conversation.turns, entry.turn)
@@ -636,6 +661,19 @@ function replayConversation(id: string, legacy: PersistedConversation | null, en
     interrupted,
     truncatedJournal,
     unresolvedToolCalls: missingToolResults.length,
+  }
+  const compaction = conversation.contextCompactionState
+  if (compaction && ['started', 'summarizing', 'fallback', 'committing'].includes(compaction.phase)) {
+    const recoveredAt = Math.max(latestTimestamp, Date.now())
+    conversation.contextCompactionState = {
+      ...compaction,
+      phase: 'interrupted',
+      updatedAt: recoveredAt,
+      elapsedMs: Math.max(compaction.elapsedMs, recoveredAt - compaction.startedAt),
+      detail: 'The previous compaction was interrupted; the original turns were preserved.',
+      recoverable: true,
+    }
+    conversation.recovery.interrupted = true
   }
   normalizeConversationTurns(conversation)
   return conversation

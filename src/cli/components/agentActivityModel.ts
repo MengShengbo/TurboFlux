@@ -30,6 +30,7 @@ export function deriveActivityModel(input: ActivityModelInput, t: Translator = D
   const phaseLabels: Record<AgentRunPhase, string> = {
     idle: t('ui.activity.phase.ready'),
     thinking: t('ui.activity.phase.thinking'),
+    compacting: t('ui.activity.phase.compacting'),
     tool_running: t('ui.activity.phase.working'),
     awaiting_approval: t('ui.activity.phase.awaitingApproval'),
     awaiting_input: t('ui.activity.phase.awaitingInput'),

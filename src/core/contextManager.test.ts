@@ -19,6 +19,7 @@ function segment(params: Partial<ContextSegment> & { summary: string }): Context
     originalCharCount: params.originalCharCount ?? params.summary.length,
     isValid: params.isValid ?? true,
     createdAt: params.createdAt,
+    handoff: params.handoff,
   }
 }
 
@@ -130,6 +131,59 @@ describe('ContextManager', () => {
     expect(messages[1]?.content).toContain('<compressed_conversation_history>')
     expect(messages[1]?.content).toContain('old task state')
     expect(messages[1]?.content).toContain('Earlier conversation turns were compacted')
+  })
+
+  it('injects the latest durable handoff before compressed history on every request', () => {
+    const manager = new ContextManager()
+    const handoff = {
+      version: 1 as const,
+      revision: 2,
+      createdAt: 20,
+      startMessageId: 'u-old',
+      endMessageId: 'a-old',
+      coveredTurnIds: ['u-old', 'a-old'],
+      source: 'compact' as const,
+      summarySource: 'model' as const,
+      modelSummary: '<continuation_summary>latest delivery</continuation_summary>',
+      facts: {
+        userRequirements: [],
+        files: [],
+        commands: [],
+        decisions: [],
+        errors: [],
+        progress: [],
+        workspace: {},
+      },
+      document: '# TurboFlux Development Handoff\nfull latest delivery',
+      compactDocument: '# TurboFlux Development Handoff\ncompact latest delivery',
+    }
+    const segments = [
+      segment({
+        startMessageId: 'u-old',
+        endMessageId: 'a-old',
+        summary: '<continuation_summary>old task state</continuation_summary>',
+        createdAt: 20,
+        handoff,
+      }),
+    ]
+    const build = () => manager.buildMessages(
+      [userTurn('u1', 'continue please')],
+      'system prompt',
+      1_000_000,
+      'openai',
+      4096,
+      segments,
+      undefined,
+      'gpt-5.5',
+    )
+
+    const first = build()
+    const second = build()
+    for (const messages of [first, second]) {
+      expect(messages[1]?.content).toContain('<development_handoff_checkpoint>')
+      expect(messages[1]?.content).toContain('compact latest delivery')
+      expect(messages[2]?.content).toContain('<compressed_conversation_history>')
+    }
   })
 
   it('does not inject invalid or empty context segments', () => {

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import type { AgentAttachment, AgentTurn, TokenUsage } from '../shared/agentTypes'
-import type { ContextSegment } from '../state/types'
+import type { ContextHandoff, ContextSegment } from '../state/types'
 import type { ContextPolicyProfile } from './contextPolicy'
 import { blockingContextLimit, resolveContextPolicyProfile } from './contextPolicy'
 import { countMessagesTokens, countTextTokens, type TokenCountResult } from './tokenCounter'
@@ -354,6 +354,17 @@ function tokenCountOptions(provider: 'openai' | 'anthropic', model?: string): { 
 export class ContextManager {
   private lastProviderUsage: TokenUsage | null = null
 
+  buildHandoffContext(handoff?: ContextHandoff | null): string {
+    const document = handoff?.compactDocument?.trim()
+    if (!document) return ''
+    return [
+      '<development_handoff_checkpoint>',
+      'A previous context window was compacted. Read this durable handoff before acting, continue from it instead of restarting, and verify against the live workspace when precision matters.',
+      document,
+      '</development_handoff_checkpoint>',
+    ].join('\n')
+  }
+
   buildSegmentContext(
     contextSegments?: ContextSegment[],
     maxTokens = Number.POSITIVE_INFINITY,
@@ -412,16 +423,23 @@ export class ContextManager {
   ): Array<Record<string, unknown>> {
     const counterOptions = tokenCountOptions(provider, model)
     const liveTurnIds = new Set(turns.map(turn => turn.id))
+    const handoff = (contextSegments ?? [])
+      .filter(segment => segment.isValid && segment.handoff?.compactDocument?.trim())
+      .sort((a, b) => (b.handoff?.createdAt ?? b.createdAt ?? 0) - (a.handoff?.createdAt ?? a.createdAt ?? 0))[0]?.handoff
     const injectableSegments = (contextSegments ?? []).filter(segment =>
       !(liveTurnIds.has(segment.startMessageId) && liveTurnIds.has(segment.endMessageId))
     )
     const inputBudget = getInputBudget(contextWindow, maxOutputTokens)
+    const handoffContext = this.buildHandoffContext(handoff)
     const segmentContext = this.buildSegmentContext(injectableSegments, policyProfile.maxSegmentTokens, counterOptions)
 
     // Cacheable history stays append-only until an explicit compaction.
     const messages: Array<Record<string, unknown>> = [
       { role: 'system', content: systemPrompt },
     ]
+    if (handoffContext) {
+      messages.push(this.contextMessage(handoffContext, provider))
+    }
     if (segmentContext) {
       messages.push(this.contextMessage(segmentContext, provider))
     }
@@ -438,6 +456,7 @@ export class ContextManager {
       systemPrompt,
       provider,
       contextSegments: injectableSegments,
+      handoffContext,
       inputBudget,
       policyProfile,
       model,
@@ -449,11 +468,12 @@ export class ContextManager {
     systemPrompt: string
     provider: 'openai' | 'anthropic'
     contextSegments: ContextSegment[]
+    handoffContext?: string
     inputBudget: number
     policyProfile: ContextPolicyProfile
     model?: string
   }): Array<Record<string, unknown>> {
-    const { turns, systemPrompt, provider, contextSegments, inputBudget, policyProfile, model } = params
+    const { turns, systemPrompt, provider, contextSegments, handoffContext, inputBudget, policyProfile, model } = params
     const counterOptions = tokenCountOptions(provider, model)
     const systemMessage = { role: 'system', content: systemPrompt }
     const messages: Array<Record<string, unknown>> = [systemMessage]
@@ -483,6 +503,9 @@ export class ContextManager {
     const firstSelectedIndex = selectedGroups[0]?.firstIndex ?? nonSystemTurns.length
     const omittedTurns = nonSystemTurns.slice(0, firstSelectedIndex)
     const summaryMessages: Array<Record<string, unknown>> = []
+    if (handoffContext) {
+      summaryMessages.push(this.contextMessage(handoffContext, provider))
+    }
     const segmentBudget = Math.max(0, Math.min(policyProfile.maxSegmentTokens, Math.floor(inputBudget * 0.25)))
     const segmentContext = this.buildSegmentContext(contextSegments, segmentBudget, counterOptions)
     if (segmentContext) {

@@ -5,6 +5,167 @@ import { ThemeProvider } from '../../theme/index'
 import { ActiveWorkPanel } from './ActiveWorkPanel'
 
 describe('ActiveWorkPanel', () => {
+  it('shows request latency instead of claiming reasoning before the first response', () => {
+    const now = Date.now()
+    const output = renderToString(
+      <ThemeProvider>
+        <ActiveWorkPanel
+          tools={[]}
+          draft={null}
+          streamText=""
+          thinkingText=""
+          lastActivity={now}
+          runState={{ phase: 'thinking', updatedAt: now, detail: 'Planning next step' }}
+          requestStatus={{ phase: 'requesting', startedAt: now - 1200 }}
+          reasoningActive
+          verbose={false}
+        />
+      </ThemeProvider>,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('REQUESTING')
+    expect(output).toContain('waiting for first response')
+    expect(output).toContain('1.2s')
+    expect(output).not.toContain('Reasoning')
+    expect(output).not.toContain('PLANNING')
+  })
+
+  it('keeps the completed request duration visible after the run becomes idle', () => {
+    const now = Date.now()
+    const output = renderToString(
+      <ThemeProvider>
+        <ActiveWorkPanel
+          tools={[]}
+          draft={null}
+          streamText=""
+          lastActivity={now}
+          runState={{ phase: 'completed', updatedAt: now }}
+          requestStatus={{ phase: 'completed', startedAt: now - 1350, elapsedMs: 1350 }}
+          verbose={false}
+        />
+      </ThemeProvider>,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('REQUEST COMPLETE')
+    expect(output).toContain('1.4s')
+  })
+
+  it('shows response streaming without claiming reasoning before a reasoning delta', () => {
+    const now = Date.now()
+    const output = renderToString(
+      <ThemeProvider>
+        <ActiveWorkPanel
+          tools={[]}
+          draft={null}
+          streamText="Answer token"
+          thinkingText=""
+          lastActivity={now}
+          runState={{ phase: 'thinking', updatedAt: now }}
+          requestStatus={{ phase: 'responding', startedAt: now - 900, elapsedMs: 900 }}
+          reasoningActive
+          verbose={false}
+        />
+      </ThemeProvider>,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('RESPONDING')
+    expect(output).toContain('first response 900ms')
+    expect(output).toContain('Answer token')
+    expect(output).not.toContain('Reasoning')
+  })
+
+  it('makes a long request visibly explicit instead of looking frozen', () => {
+    const now = Date.now()
+    const output = renderToString(
+      <ThemeProvider>
+        <ActiveWorkPanel
+          tools={[]}
+          draft={null}
+          streamText=""
+          thinkingText=""
+          lastActivity={now}
+          runState={{ phase: 'thinking', updatedAt: now }}
+          requestStatus={{ phase: 'requesting', startedAt: now - 31_000 }}
+          verbose={false}
+        />
+      </ThemeProvider>,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('REQUESTING')
+    expect(output).toContain('slow request, still waiting')
+    expect(output).toContain('31s')
+  })
+
+  it('shows compaction phase and progress instead of a generic request spinner', () => {
+    const now = Date.now()
+    const output = renderToString(
+      <ThemeProvider>
+        <ActiveWorkPanel
+          tools={[]}
+          draft={null}
+          streamText=""
+          thinkingText=""
+          lastActivity={now}
+          runState={{ phase: 'compacting', updatedAt: now, startedAt: now - 2200 }}
+          requestStatus={{ phase: 'requesting', startedAt: now - 2200 }}
+          compaction={{
+            id: 'compact-ui-1',
+            phase: 'summarizing',
+            source: 'compact',
+            startedAt: now - 2200,
+            updatedAt: now,
+            elapsedMs: 2200,
+            progress: 0.42,
+            detail: 'Summarizing older turns',
+            recoverable: true,
+          }}
+          verbose={false}
+        />
+      </ThemeProvider>,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('SUMMARIZING CONTEXT')
+    expect(output).toContain('42%')
+    expect(output).toContain('Summarizing older turns')
+    expect(output).not.toContain('REQUESTING')
+  })
+
+  it('keeps a recovered terminal compaction state visible while idle', () => {
+    const now = Date.now()
+    const output = renderToString(
+      <ThemeProvider>
+        <ActiveWorkPanel
+          tools={[]}
+          draft={null}
+          streamText=""
+          thinkingText=""
+          lastActivity={now}
+          runState={{ phase: 'idle', updatedAt: now }}
+          compaction={{
+            id: 'compact-ui-interrupted',
+            phase: 'interrupted',
+            source: 'compact',
+            startedAt: now - 3200,
+            updatedAt: now,
+            elapsedMs: 3200,
+            detail: 'Original turns were preserved',
+            recoverable: true,
+          }}
+          verbose={false}
+        />
+      </ThemeProvider>,
+      { columns: 88 },
+    )
+
+    expect(output).toContain('COMPACTION INTERRUPTED')
+    expect(output).toContain('Original turns were preserved')
+  })
+
   it('shows every parallel running tool with a live status', () => {
     const now = Date.now()
     const output = renderToString(

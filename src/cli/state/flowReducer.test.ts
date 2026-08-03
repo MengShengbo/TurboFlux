@@ -137,7 +137,7 @@ describe('flowReducer', () => {
     }
 
     expect(state.notifications['approval-1']).toBeDefined()
-    expect(Object.keys(state.notifications)).toHaveLength(MAX_FLOW_NOTIFICATION_ITEMS + 1)
+    expect(Object.keys(state.notifications)).toHaveLength(MAX_FLOW_NOTIFICATION_ITEMS)
   })
 
   it('preserves detailed Agent run phase transitions', () => {
@@ -237,5 +237,16 @@ describe('FlowStore', () => {
     expect(store.getSnapshot().activeThreadId).toBe('thread-1')
     expect(store.getThread('thread-1')?.run).toMatchObject({ id: 'run-1', phase: 'active' })
     expect(listener).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops least-recent inactive threads after the store limit', () => {
+    const store = new FlowStore({ maxThreads: 2 })
+    store.activateThread('session-1', 'thread-1')
+    store.activateThread('session-2', 'thread-2')
+    store.activateThread('session-3', 'thread-3')
+
+    expect(store.getThread('thread-1')).toBeUndefined()
+    expect(store.getThread('thread-2')).toBeDefined()
+    expect(store.getThread('thread-3')).toBeDefined()
   })
 })

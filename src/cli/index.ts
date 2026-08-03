@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 import { resolve } from 'path'
 import { Command } from 'commander'
-import { startRepl } from './repl'
-import { loadConfig, redactConfig, saveConfig, setConfigValue } from '../core/config'
-import { runSetup } from './setup'
 import {
   normalizeApprovalPolicy,
   normalizeCapabilityProfile,
@@ -11,15 +8,18 @@ import {
   type ApprovalPolicy,
   type CapabilityProfile,
 } from '../shared/agentTypes'
-import { configureNetworkProxy } from '../core/networkProxy'
-import { loadProfile } from '../core/profile'
-import { createTranslator } from './i18n/index'
-import { resolveTransparentBackground } from './platform/terminalTransparency'
+import { createTranslator, readStoredInterfaceLanguage } from './i18n/translator'
 
-configureNetworkProxy()
-
-const t = createTranslator(loadProfile().interfaceLanguage)
+const t = createTranslator(readStoredInterfaceLanguage())
 const program = new Command()
+
+function isSetupPromptCancellation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { name?: unknown; message?: unknown }
+  const name = typeof candidate.name === 'string' ? candidate.name : ''
+  const message = typeof candidate.message === 'string' ? candidate.message : ''
+  return name === 'ExitPromptError' || /force closed|cancelled|canceled|sigint/i.test(message)
+}
 
 program
   .name('turboflux')
@@ -40,6 +40,13 @@ program
   .option('--capability-profile <profile>', t('cli.capabilityProfile'))
   .option('--mcp <servers>', t('cli.mcp'))
   .action(async (workspace: string, opts) => {
+    const [{ configureNetworkProxy }, { loadConfig }, { startRepl }, { resolveTransparentBackground }] = await Promise.all([
+      import('../core/networkProxy'),
+      import('../core/config'),
+      import('./repl'),
+      import('./platform/terminalTransparency'),
+    ])
+    configureNetworkProxy()
     const workspacePath = resolve(workspace)
     const config = await loadConfig()
 
@@ -94,6 +101,7 @@ program
   .argument('[key]', t('cli.config.key'))
   .argument('[value]', t('cli.config.value'))
   .action(async (action: string, key?: string, value?: string) => {
+    const { loadConfig, redactConfig, saveConfig, setConfigValue } = await import('../core/config')
     const config = await loadConfig()
     if (action === 'show') {
       const display = redactConfig(config)
@@ -130,6 +138,7 @@ program
   .option('-y, --yes', t('cli.setup.yes'))
   .action(async (action: string | undefined, opts) => {
     try {
+      const { runSetup } = await import('./setup')
       await runSetup({
         action,
         provider: opts.provider,
@@ -147,6 +156,10 @@ program
         yes: Boolean(opts.yes),
       })
     } catch (error) {
+      if (isSetupPromptCancellation(error)) {
+        console.log(t('common.cancelled'))
+        return
+      }
       console.error(t('cli.setup.error', { message: error instanceof Error ? error.message : String(error) }))
       process.exitCode = 1
     }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AgentFlowController } from './agentFlowController'
 
 describe('AgentFlowController', () => {
@@ -22,6 +22,22 @@ describe('AgentFlowController', () => {
     expect(state.approvals['tool-1']).toMatchObject({ status: 'resolved', decision: 'allow-once' })
     expect(state.tools['tool-1']).toMatchObject({ status: 'completed' })
     expect(state.streams.answer).toMatchObject({ status: 'ended', tail: 'done' })
+    expect(state.violations).toEqual([])
+  })
+
+  it('keeps a terminal run stable when completed state arrives after session completion', () => {
+    const bridge = new AgentFlowController('thread-1')
+    bridge.startRun('finish request')
+
+    bridge.handle({ type: 'session:complete', session: { id: 'thread-1', mode: 'vibe', turns: [], currentTaskId: null, createdAt: 1, updatedAt: 2, totalTokens: { input: 0, output: 0 } } })
+    bridge.handle({ type: 'run:state', state: { phase: 'completed', detail: 'Run completed', updatedAt: 3 } })
+
+    const state = bridge.store.getThread('thread-1')!
+    expect(state.run).toMatchObject({
+      phase: 'terminal',
+      outcome: 'succeeded',
+      agentState: { phase: 'completed' },
+    })
     expect(state.violations).toEqual([])
   })
 
@@ -147,6 +163,16 @@ describe('AgentFlowController', () => {
     expect(bridge.store.getThread('thread-2')?.inputQueue).toEqual([])
   })
 
+  it('resets event sequencing when a thread was evicted from the flow history', () => {
+    const bridge = new AgentFlowController('thread-1')
+    for (let index = 2; index <= 9; index += 1) bridge.activateThread(`thread-${index}`)
+
+    bridge.activateThread('thread-1')
+    bridge.handle({ type: 'run:state', state: { phase: 'thinking', updatedAt: 10 } })
+
+    expect(bridge.store.getThread('thread-1')?.violations).toEqual([])
+  })
+
   it('projects journal degradation and recovery into visible Flow state', () => {
     const bridge = new AgentFlowController('thread-1')
     bridge.setPersistenceStatus(new Error('disk unavailable'))
@@ -205,5 +231,46 @@ describe('AgentFlowController', () => {
 
     expect(Object.values(bridge.store.getThread('thread-1')!.runtimes).filter(item => item.status === 'running')).toHaveLength(0)
     expect(bridge.store.getThread('thread-1')!.violations).toEqual([])
+  })
+
+  it('keeps same-timestamp notifications as distinct items', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    try {
+      const bridge = new AgentFlowController('thread-1')
+      bridge.handle({ type: 'notification', message: 'first', level: 'info' })
+      bridge.handle({ type: 'notification', message: 'second', level: 'info' })
+
+      expect(Object.keys(bridge.store.getThread('thread-1')!.notifications)).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bounds terminal Flow history while retaining live queue and runtime items', () => {
+    const bridge = new AgentFlowController('thread-1')
+    for (let index = 0; index < 180; index += 1) {
+      bridge.handle({
+        type: 'turn:start',
+        turn: { id: `input-${index}`, role: 'user', content: `prompt ${index}`, timestamp: index },
+      })
+      bridge.handle({
+        type: 'runtime-task:finished',
+        task: {
+          id: `runtime-${index}`,
+          kind: 'shell',
+          status: 'completed',
+          startedAt: index,
+          updatedAt: index + 1,
+          endedAt: index + 1,
+          interactive: false,
+          restartPolicy: 'never',
+        },
+      })
+    }
+
+    const state = bridge.store.getThread('thread-1')!
+    expect(Object.keys(state.inputs).length).toBeLessThanOrEqual(129)
+    expect(Object.keys(state.runtimes).length).toBeLessThanOrEqual(128)
   })
 })

@@ -16,6 +16,7 @@ export class AgentFlowController {
   private readonly sampledStreams = new Set<'answer' | 'thinking'>()
   private readonly proposedTools = new Set<string>()
   private readonly runtimeItems = new Set<string>()
+  private notificationSequence = 0
 
   constructor(sessionId: string, factory = new FlowEventFactory()) {
     this.factory = factory
@@ -27,6 +28,7 @@ export class AgentFlowController {
 
   activateThread(sessionId: string, threadId = sessionId): void {
     const previousThreadId = this.threadId
+    const threadWasEvicted = !this.store.getThread(threadId)
     this.sessionId = sessionId
     this.threadId = threadId
     this.activeRunId = null
@@ -35,6 +37,7 @@ export class AgentFlowController {
     this.sampledStreams.clear()
     this.proposedTools.clear()
     this.runtimeItems.clear()
+    if (threadWasEvicted) this.factory.reset(threadId)
     this.store.activateThread(sessionId, threadId)
     this.dispatch('thread.activated', { previousThreadId }, {})
   }
@@ -222,6 +225,7 @@ export class AgentFlowController {
           outcome: event.ok ? 'completed' : 'failed',
           error: event.ok ? undefined : `${event.agentType} failed`,
         }, { itemId: id })
+        this.runtimeItems.delete(id)
         break
       }
       case 'active:task':
@@ -257,13 +261,15 @@ export class AgentFlowController {
           outcome: event.task.status === 'completed' ? 'completed' : event.task.status === 'failed' ? 'failed' : 'cancelled',
           error: event.task.error,
         }, { itemId: id })
+        this.runtimeItems.delete(id)
         break
       }
       case 'notification':
+        this.notificationSequence += 1
         publish('notification.raised', {
           priority: event.level === 'error' ? 100 : event.level === 'warning' ? 80 : event.level === 'success' ? 40 : 20,
           category: event.level,
-        }, { itemId: `notification-${Date.now()}-${emitted.length}` })
+        }, { itemId: `notification-${Date.now()}-${this.notificationSequence}` })
         break
       case 'mode:change':
         publish('session.mode_changed', { mode: event.to }, { runId: this.activeRunId || undefined })

@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import type { AgentAttachment } from '../shared/agentTypes'
-import { createTranslator, type Translator } from './i18n/index'
+import { createTranslator, type Translator } from './i18n/translator'
 
 const DEFAULT_TRANSLATOR = createTranslator('en')
 

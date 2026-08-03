@@ -38,6 +38,51 @@ describe('turboflux setup integration', () => {
     expect(config.reasoning?.effort).toBe('high')
   })
 
+  it('keeps a custom provider endpoint when accepting API defaults', async () => {
+    const { runSetup } = await import('./setup.js')
+    const { loadConfig } = await import('../core/config.js')
+
+    await runSetup({
+      action: 'api',
+      provider: 'custom',
+      baseUrl: 'https://gateway.example.com/v1',
+      model: 'gateway-model',
+      apiKey: 'sk-custom',
+      yes: true,
+    })
+    const before = await loadConfig()
+
+    await runSetup({ action: 'api', yes: true })
+
+    expect(await loadConfig()).toEqual(before)
+  })
+
+  it('keeps the existing interface language when accepting full-init defaults', async () => {
+    const { runSetup } = await import('./setup.js')
+    const { loadProfile, saveProfile } = await import('../core/profile.js')
+
+    saveProfile({ interfaceLanguage: 'en', aiOutputLanguage: 'en' })
+    await runSetup({ yes: true })
+
+    expect(loadProfile()).toMatchObject({
+      interfaceLanguage: 'en',
+      aiOutputLanguage: 'en',
+    })
+  })
+
+  it('normalizes direct base URLs and rejects non-HTTP API endpoints', async () => {
+    const { runSetup } = await import('./setup.js')
+    const { loadConfig } = await import('../core/config.js')
+    const { saveProfile } = await import('../core/profile.js')
+
+    saveProfile({ interfaceLanguage: 'en' })
+    await runSetup({ action: 'api', provider: 'openai', baseUrl: '  https://api.example.com/v1/  ', yes: true })
+    expect((await loadConfig()).baseUrl).toBe('https://api.example.com/v1')
+
+    await expect(runSetup({ action: 'api', provider: 'openai', baseUrl: 'ftp://api.example.com/v1', yes: true }))
+      .rejects.toThrow(/complete URL|HTTP/i)
+  })
+
   it('recomputes model metadata when the model changes on the same connection', async () => {
     const { runSetup } = await import('./setup.js')
     const { loadConfig } = await import('../core/config.js')

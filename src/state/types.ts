@@ -30,6 +30,78 @@ export interface WorkspaceInfo {
   name: string
 }
 
+export type ContextHandoffFileOperation = 'read' | 'write' | 'edit' | 'delete'
+
+export interface ContextHandoffFacts {
+  originalGoal?: { turnId: string; text: string }
+  userRequirements: Array<{ turnId: string; text: string }>
+  files: Array<{
+    path: string
+    operations: ContextHandoffFileOperation[]
+    lastTool?: string
+    lastStatus?: 'success' | 'error' | 'unknown'
+  }>
+  commands: Array<{
+    toolCallId: string
+    tool: string
+    command: string
+    status: 'success' | 'error' | 'unknown'
+    result?: string
+  }>
+  decisions: Array<{ toolCallId: string; question: string; answer: string }>
+  errors: Array<{ toolCallId: string; tool: string; summary: string }>
+  progress: Array<{ turnId: string; text: string }>
+  workspace: {
+    path?: string
+    gitStatus?: string
+    memory?: string
+    taskTree?: string
+    activeTask?: string
+  }
+}
+
+export interface ContextHandoff {
+  version: 1
+  revision: number
+  createdAt: number
+  startMessageId: string
+  endMessageId: string
+  coveredTurnIds: string[]
+  source: 'compact' | 'manual'
+  summarySource: 'model' | 'deterministic' | 'reused'
+  modelSummary: string
+  facts: ContextHandoffFacts
+  document: string
+  compactDocument: string
+}
+
+export type ContextCompactionPhase =
+  | 'started'
+  | 'summarizing'
+  | 'fallback'
+  | 'committing'
+  | 'completed'
+  | 'interrupted'
+  | 'failed'
+
+export interface ContextCompactionState {
+  id: string
+  phase: ContextCompactionPhase
+  source: 'compact' | 'manual'
+  startedAt: number
+  updatedAt: number
+  elapsedMs: number
+  startMessageId?: string
+  endMessageId?: string
+  oldTurnCount?: number
+  originalCharCount?: number
+  progress?: number
+  summarySource?: 'model' | 'deterministic' | 'reused'
+  detail?: string
+  error?: string
+  recoverable: boolean
+}
+
 export interface ContextSegment {
   startMessageId: string
   endMessageId: string
@@ -40,6 +112,7 @@ export interface ContextSegment {
   isValid: boolean
   createdAt?: number
   coveredTurnIds?: string[]
+  handoff?: ContextHandoff
 }
 
 export interface ContextReservoirEntry {
@@ -64,6 +137,8 @@ export interface AgentStateProvider {
   getContextReservoir(): ContextReservoirEntry[]
   addContextReservoirEntry(entry: ContextReservoirEntry): void
   setContextReservoir(entries: ContextReservoirEntry[]): void
+  getContextCompactionState?(): ContextCompactionState | null
+  setContextCompactionState?(state: ContextCompactionState | null): void
   getLanguage(): string
 
   recordTokenUsage(usage: { model: string; inputTokens: number; outputTokens: number; provider: string; cached?: number; totalInputTokens?: number }): void

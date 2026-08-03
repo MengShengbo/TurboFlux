@@ -70,6 +70,9 @@ export function deriveDeveloperFlow(input: DeveloperFlowInput, t: Translator = D
   if (input.runState.phase === 'recoverable_error') {
     return flow(t('ui.runState.recovering'), input.runState.detail || t('ui.flow.retryStep'), 'error', background)
   }
+  if (input.runState.phase === 'compacting') {
+    return flow(t('ui.runState.compacting'), input.runState.detail || t('ui.flow.compactingContext'), 'active', background)
+  }
   if (input.streamText?.trim()) {
     return flow(t('ui.flow.responding'), t('ui.flow.writingResult'), 'active', background)
   }
