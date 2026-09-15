@@ -1,0 +1,8 @@
+# The repo's canonical text form is LF, enforced at checkout too.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.icns binary
+*.zip binary

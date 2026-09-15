@@ -1,0 +1,82 @@
+name: Issue policy
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  pr-policy:
+    name: External PR policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check authorship
+        id: authorship
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          # 技术团队成员名单（GitHub 用户名）
+          TEAM_MEMBERS="$REPOSITORY_OWNER dependabot[bot]"
+          AUTHOR="$(echo "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')"
+          IS_MEMBER=0
+          for member in $TEAM_MEMBERS; do
+            if [ "$AUTHOR" = "$(echo "$member" | tr '[:upper:]' '[:lower:]')" ]; then
+              IS_MEMBER=1
+              break
+            fi
+          done
+          echo "member=$IS_MEMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Close external pull request
+        if: steps.authorship.outputs.member != '1'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr close "$PR_NUMBER" --comment \
+            "感谢你的 Pull Request。TurboFlux 由核心技术团队负责开发，目前不接受外部 Pull Request。如果你发现了问题或有功能建议，请在 Issues 中提交（https://github.com/$GH_REPO/issues），我们会评估并跟进。"
+
+  issue-triage:
+    name: Issue triage
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label issue by template
+        id: label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          BODY="${ISSUE_BODY}"
+          LABEL=""
+          case "$BODY" in
+            *"复现、预期与验收"*) LABEL="kind/bug" ;;
+            *"验收与细节"*) LABEL="kind/feature" ;;
+            *"背景与价值"*) LABEL="kind/idea" ;;
+            *"范围与产出"*) LABEL="kind/research" ;;
+            *"实施与验收"*) LABEL="kind/task" ;;
+          esac
+          if [ -n "$LABEL" ]; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "$LABEL" || true
+          fi
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Add triage label
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --add-label "status/inbox" || true

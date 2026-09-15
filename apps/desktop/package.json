@@ -1,0 +1,51 @@
+{
+  "name": "@turboflux/desktop",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "main": "generated/packagedBootstrap.mjs",
+  "description": "TurboFlux Desktop - open-source Electron workbench",
+  "author": "TurboFlux",
+  "scripts": {
+    "dev": "node ../../scripts/desktop-dev.mjs",
+    "build:main": "node ../../scripts/build-desktop-main.mjs",
+    "build:core": "npm --prefix ../.. run build:core",
+    "build:remote": "npm --prefix ../../packages/remote-protocol run build && npm --prefix ../remote-mobile run build",
+    "build:app": "npm run build:remote && npm run build:main && vite build --config vite.config.mjs",
+    "build": "npm run build:core && npm run build:app",
+    "build:assets": "node ../../scripts/build-desktop-assets.mjs",
+    "package:dir": "npm run build && npm run build:assets && electron-builder --config electron-builder.yml --dir",
+    "package:mac": "node ../../scripts/verify-desktop-macos-release.mjs --preflight && TURBOFLUX_REQUIRE_SIGNING=1 TURBOFLUX_REQUIRE_NOTARIZATION=1 npm run package:mac:unverified && npm --prefix ../.. run verify:desktop:mac-release",
+    "package:mac:unverified": "npm run build && npm run build:assets && electron-builder --config electron-builder.yml --mac --arm64",
+    "package:win": "npm run build && electron-builder --config electron-builder.yml --win",
+    "package:linux": "npm run build && electron-builder --config electron-builder.yml --linux",
+    "type-check": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --config vitest.config.mjs renderer computer browser terminal remote desktop-contract.test.ts conversationPolicy.test.ts desktopPackaging.test.ts desktopPackageEvidenceVerifier.test.ts desktopPowerLifecycle.test.ts desktopHostPreferences.test.ts packagedBootstrapRuntime.test.ts automationNotificationNavigation.test.ts automationRemoteApprovalPolicy.test.ts profileCrossPlatformEvidenceVerifier.test.ts profileHiddenEvidenceVerifier.test.ts profileHiddenQa.contract.test.ts profileStableBenchmarkEvidenceVerifier.test.ts pathContainment.test.ts profileSummary.test.ts profileQaPathOverrides.test.ts profileSwitchCoordinator.test.ts profileSwitchBenchmark.contract.test.ts workspaceRuntimePool.test.ts automationDesktopCoordinator.test.ts automationProductFlow.test.ts automationNotifications.test.ts"
+  },
+  "dependencies": {
+    "@turboflux/agent-core": "*",
+    "@turboflux/remote-protocol": "*",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "highlight.js": "^11.11.1",
+    "lucide": "^1.45.0",
+    "marked": "^18.0.4",
+    "node-pty": "^1.1.0",
+    "qrcode": "^1.5.4",
+    "tsx": "^4.22.2"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.1",
+    "@types/node": "^22.19.9",
+    "@types/qrcode": "^1.5.6",
+    "electron": "41.10.6",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.7.3",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.7"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

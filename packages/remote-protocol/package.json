@@ -1,0 +1,31 @@
+{
+  "name": "@turboflux/remote-protocol",
+  "version": "0.1.0",
+  "description": "Open decentralized remote control protocol for agent runtimes",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && ../../node_modules/.bin/tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist --skip-runtime-assets",
+    "type-check": "../../node_modules/.bin/tsc --noEmit -p tsconfig.json",
+    "test": "../../node_modules/.bin/vitest run --config vitest.config.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

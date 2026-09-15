@@ -1,0 +1,51 @@
+import type { ITheme } from '@xterm/xterm'
+import type { WorkbenchBaseTheme, WorkbenchMode } from './workbenchMode'
+
+export function terminalTheme(mode: WorkbenchMode, theme: WorkbenchBaseTheme): ITheme {
+  const dark = theme === 'dark'
+  return dark ? {
+    background: '#171717',
+    foreground: '#f0f0ee',
+    cursor: '#f5f5f3',
+    cursorAccent: '#171717',
+    selectionBackground: '#405b5c99',
+    black: '#202020',
+    red: '#ef8c8c',
+    green: '#8fc99a',
+    yellow: '#dfbf76',
+    blue: '#83aee8',
+    magenta: '#c9a1e6',
+    cyan: '#79b8b5',
+    white: '#e7e7e4',
+    brightBlack: '#777773',
+    brightRed: '#f2a0a0',
+    brightGreen: '#a5d7ad',
+    brightYellow: '#e8ca89',
+    brightBlue: '#9bbdec',
+    brightMagenta: '#d7b6ec',
+    brightCyan: '#94cbc8',
+    brightWhite: '#ffffff',
+  } : {
+    background: '#fbfbfa',
+    foreground: '#2d2e2b',
+    cursor: '#30312e',
+    cursorAccent: '#fbfbfa',
+    selectionBackground: '#a8c4c580',
+    black: '#343532',
+    red: '#b65454',
+    green: '#4d8058',
+    yellow: '#8a6a2d',
+    blue: '#4d6f9e',
+    magenta: '#76548e',
+    cyan: '#4e7f80',
+    white: '#d9d9d5',
+    brightBlack: '#797a75',
+    brightRed: '#c56a6a',
+    brightGreen: '#60936a',
+    brightYellow: '#9e7c3a',
+    brightBlue: '#6384ae',
+    brightMagenta: '#8b69a1',
+    brightCyan: '#619596',
+    brightWhite: '#ffffff',
+  }
+}

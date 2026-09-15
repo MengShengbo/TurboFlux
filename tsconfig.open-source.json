@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./packages/agent-core/src",
+    "outDir": "./dist",
+    "jsx": "react-jsx",
+    "sourceMap": true
+  },
+  "include": [
+    "packages/agent-core/src/kernel/**/*",
+    "packages/agent-core/src/application/**/*",
+    "packages/agent-core/src/core/**/*",
+    "packages/agent-core/src/platform/**/*",
+    "packages/agent-core/src/server/**/*",
+    "packages/agent-core/src/shared/**/*",
+    "packages/agent-core/src/state/**/*",
+    "packages/agent-core/src/tools/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-desktop",
+    "packages/agent-core/src/desktop/**/*",
+    "packages/agent-core/src/**/*.test.ts",
+    "packages/agent-core/src/**/*.test.tsx",
+    "claude-code-reference"
+  ]
+}

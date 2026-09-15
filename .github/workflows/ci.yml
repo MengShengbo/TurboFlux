@@ -1,0 +1,334 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '22'
+
+jobs:
+  lint:
+    name: Lint (oxlint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Lint
+        run: npx oxlint --config .oxlintrc.json
+
+  typecheck:
+    name: Type check (kernel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Type check
+        run: npm run type-check
+
+  test:
+    name: Test (kernel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: npm ci
+      - name: Test
+        run: npm test
+
+  build:
+    name: Build (kernel + desktop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Build agent-core
+        run: npm run build:core
+      - name: Build desktop
+        run: npm run build
+
+  desktop-typecheck:
+    name: Type check (desktop)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Build agent-core
+        run: npm run build:core
+      - name: Build desktop remote protocol
+        run: npm run build --workspace @turboflux/remote-protocol
+      - name: Type check desktop
+        run: npm run type-check:desktop
+
+  desktop-test:
+    name: Test (desktop)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Build agent-core
+        run: npm run build:core
+      - name: Build desktop remote protocol
+        run: npm run build --workspace @turboflux/remote-protocol
+      - name: Test desktop
+        run: npm run test:desktop
+
+  desktop-package:
+    name: Package desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Profile archive performance budget
+        run: npm run perf:profiles
+      - name: Profile archive 1 GiB Stable performance budget
+        if: runner.os == 'Linux'
+        run: npm run perf:profiles:stable
+      - name: Conversation V2 Stable scale performance budget
+        if: runner.os == 'Linux'
+        run: npm run perf:conversations-v2:stable
+      - name: Profile archive export, import, and workspace rebind
+        run: npm run smoke:profiles
+      - name: Build unpacked desktop application
+        run: npm run package:dir --workspace @turboflux/desktop
+      - name: Verify unpacked desktop package contents
+        run: npm run verify:desktop:package -- --report=apps/desktop/generated/package-verification/package-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-package-report-${{ matrix.os }}
+          path: apps/desktop/generated/package-verification/package-report.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Install Linux virtual display
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Profile switch Stable performance budget
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run perf:profile-switch:stable
+      - name: Verify complete Stable profile benchmark evidence
+        if: runner.os == 'Linux' && always()
+        run: npm run verify:profiles:stable-benchmarks
+      - name: Run hidden profile acceptance
+        if: runner.os != 'Linux' && (success() || failure())
+        run: npm run qa:profiles:hidden -- --packaged
+      - name: Run hidden profile acceptance (Linux)
+        if: runner.os == 'Linux' && (success() || failure())
+        run: xvfb-run --auto-servernum npm run qa:profiles:hidden -- --packaged
+      - name: Run hidden Electron Remote Mobile acceptance
+        if: runner.os != 'Linux' && (success() || failure())
+        run: npm run qa:remote:hidden -- --package-correlated
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile-archive-smoke-${{ matrix.os }}
+          path: apps/desktop/generated/profile-smoke/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux' && always()
+        with:
+          name: profile-archive-stable-benchmark-${{ matrix.os }}
+          path: apps/desktop/generated/profile-benchmarks/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile-hidden-qa-${{ matrix.os }}
+          path: apps/desktop/generated/profile-qa
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: runner.os != 'Linux' && always()
+        with:
+          name: remote-mobile-hidden-qa-${{ matrix.os }}
+          path: apps/remote-mobile/generated/automation-qa
+          if-no-files-found: error
+          retention-days: 30
+
+  profile-evidence:
+    name: Verify cross-platform profile evidence
+    needs: desktop-package
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: profile-archive-smoke-*
+          path: apps/desktop/generated/profile-smoke
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: profile-hidden-qa-*
+          path: apps/desktop/generated/profile-qa
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: desktop-package-report-*
+          path: apps/desktop/generated/package-evidence
+      - name: Verify macOS, Windows, and Linux profile evidence
+        if: always()
+        run: npm run verify:profiles:evidence
+      - name: Verify macOS, Windows, and Linux hidden Profile evidence
+        if: always()
+        run: npm run verify:profiles:hidden:evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile-cross-platform-evidence-report
+          path: apps/desktop/generated/profile-smoke/profile-evidence-report.json
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: profile-hidden-cross-platform-evidence-report
+          path: apps/desktop/generated/profile-qa/profile-hidden-evidence-report.json
+          if-no-files-found: error
+          retention-days: 30
+
+  desktop-package-evidence:
+    name: Verify cross-platform desktop package evidence
+    needs: desktop-package
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: desktop-package-report-*
+          path: apps/desktop/generated/package-evidence
+      - name: Verify macOS, Windows, and Linux package evidence
+        if: always()
+        run: npm run verify:desktop:package:evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-package-cross-platform-evidence-report
+          path: apps/desktop/generated/package-verification/package-evidence-report.json
+          if-no-files-found: error
+          retention-days: 30
+
+  desktop-remote-evidence:
+    name: Verify cross-platform remote evidence
+    needs: desktop-package
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: remote-mobile-hidden-qa-*
+          path: apps/remote-mobile/generated/automation-qa
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: desktop-package-report-*
+          path: apps/desktop/generated/package-evidence
+      - name: Verify macOS and Windows Remote Mobile evidence
+        if: always()
+        run: npm run verify:remote:evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: remote-mobile-hidden-qa-report
+          path: apps/remote-mobile/generated/automation-qa/remote-mobile-evidence-report.json
+          if-no-files-found: error
+          retention-days: 30
+
+  boundary:
+    name: Public boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify public boundary
+        run: node scripts/verify-public-boundary.mjs
+      - name: Verify architecture
+        run: node scripts/verify-architecture.mjs
+      - name: Verify workspace
+        run: node scripts/verify-workspace-topology.mjs

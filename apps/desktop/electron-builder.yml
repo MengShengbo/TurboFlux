@@ -1,0 +1,77 @@
+appId: dev.turboflux.desktop
+productName: TurboFlux
+artifactName: TurboFlux-${version}-${os}-${arch}.${ext}
+asar: true
+asarUnpack:
+  - node_modules/esbuild/**/*
+  - node_modules/@esbuild/**/*
+  - node_modules/node-pty/**/*
+  - node_modules/@vscode/ripgrep*/**/*
+electronDist: ../../node_modules/electron/dist
+directories:
+  output: ../../release
+files:
+  - generated/main.mjs
+  - generated/packagedBootstrap.mjs
+  - generated/packagedBootstrapRuntime.mjs
+  - preload.cjs
+  - runtimeHost.ts
+  - desktopPowerLifecycle.ts
+  - automationNotificationNavigation.ts
+  - productExperience.ts
+  - conversationPolicy.ts
+  - contextUsageRecovery.ts
+  - desktopTypes.ts
+  - historyRewrite.ts
+  - runtimeTransitionPolicy.ts
+  - taskTitleGenerator.ts
+  - taskTitleApplyGate.ts
+  - pathContainment.js
+  - browser/**/*
+  - computer/**/*.ts
+  - computer/**/*.cjs
+  - terminal/**/*.ts
+  - remote/**/*.ts
+  - systems/**/*.ts
+  - package.json
+  - "!node_modules/pngjs/**/*"
+  - "!node_modules/**/coverage/**/*"
+extraResources:
+  - from: ../../dist-desktop/renderer
+    to: renderer
+  - from: build/turboflux-app-icon.png
+    to: renderer/turboflux-app-icon.png
+  - from: ../remote-mobile/dist
+    to: remote-mobile
+afterPack: build/sign-desktop-helper.mjs
+afterSign: build/notarize-desktop.mjs
+mac:
+  category: public.app-category.productivity
+  icon: generated/TurboFlux.icns
+  extraResources:
+    - from: generated/native
+      to: native
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.plist
+  target:
+    - dmg
+    - zip
+dmg:
+  sign: false
+win:
+  icon: build/turboflux-app-icon.png
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+linux:
+  category: Utility
+  icon: build/turboflux-app-icon.png
+  target:
+    - AppImage
+    - deb

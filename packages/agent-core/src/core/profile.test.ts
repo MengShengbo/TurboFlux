@@ -1,0 +1,83 @@
+import { describe, expect, it } from 'vitest'
+import {
+  DEFAULT_PROFILE,
+  buildProfileSystemPromptSection,
+  normalizeProfile,
+} from './profile'
+
+describe('TurboFlux profile', () => {
+  it('defaults the interface to Simplified Chinese', () => {
+    expect(DEFAULT_PROFILE.interfaceLanguage).toBe('zh-CN')
+    expect(normalizeProfile({}).interfaceLanguage).toBe('zh-CN')
+  })
+
+  it('normalizes invalid persona selections to a usable default', () => {
+    const profile = normalizeProfile({
+      interfaceLanguage: 'zh-CN',
+      aiOutputLanguage: 'zh-CN',
+      enabledPersonaIds: ['unknown'],
+      defaultPersonaId: 'missing-style',
+    })
+
+    expect(profile.enabledPersonaIds).toContain('engineer-professional')
+    expect(profile.defaultPersonaId).toBe('engineer-professional')
+  })
+
+  it('builds an effective prompt section from output language and persona', () => {
+    const section = buildProfileSystemPromptSection({
+      aiOutputLanguage: 'zh-CN',
+      defaultPersonaId: 'architect',
+      enabledPersonaIds: ['architect'],
+      customInstructions: 'Prefer release-ready answers.',
+    })
+
+    expect(section).toContain('<turboflux_profile>')
+    expect(section).toContain('Respond in Simplified Chinese')
+    expect(section).toContain('id="architect"')
+    expect(section).toContain('Prefer release-ready answers.')
+  })
+
+  it('uses custom persona text only when configured', () => {
+    const section = buildProfileSystemPromptSection({
+      defaultPersonaId: 'custom',
+      customPersonaName: 'Strict Reviewer',
+      customPersonaPrompt: 'Review every claim carefully.',
+    })
+
+    expect(section).toContain('name="Strict Reviewer"')
+    expect(section).toContain('Review every claim carefully.')
+  })
+
+  it('includes the nekomata engineer output style prompt', () => {
+    const section = buildProfileSystemPromptSection({
+      defaultPersonaId: 'nekomata-engineer',
+      enabledPersonaIds: ['nekomata-engineer'],
+    })
+
+    expect(section).toContain('id="nekomata-engineer"')
+    expect(section).toContain('猫娘 幽浮喵')
+    expect(section).toContain('浮浮酱')
+    expect(section).toContain('主人')
+    expect(section).toContain('KISS')
+  })
+
+  it('enables the richer built-in persona set by default', () => {
+    expect(DEFAULT_PROFILE.enabledPersonaIds).toEqual(expect.arrayContaining([
+      'default',
+      'engineer-professional',
+      'nekomata-engineer',
+      'architect',
+      'product-builder',
+    ]))
+  })
+
+  it('keeps the default persona neutral about the product being built', () => {
+    const section = buildProfileSystemPromptSection({
+      defaultPersonaId: 'default',
+      enabledPersonaIds: ['default'],
+    })
+
+    expect(section).toContain('capable execution partner')
+    expect(section).not.toContain('local workbench')
+  })
+})

@@ -1,0 +1,20 @@
+# Git hooks (lefthook). Keep these local checkpoints fast; CI owns the full
+# repository-wide gate matrix.
+
+pre-commit:
+  jobs:
+    - name: lint (staged)
+      glob: '*.{ts,tsx,mjs,cjs}'
+      exclude:
+        - 'dist/**'
+        - 'apps/desktop/build/**'
+      run: npx oxlint --config .oxlintrc.staged.json --fix --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+
+    - name: whitespace (staged)
+      run: git diff --cached --check
+
+pre-push:
+  jobs:
+    - name: typecheck
+      run: npm run type-check

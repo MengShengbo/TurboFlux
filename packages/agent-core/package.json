@@ -1,0 +1,56 @@
+{
+  "name": "@turboflux/agent-core",
+  "version": "1.0.1",
+  "description": "Versioned TurboFlux kernel built from the shared root source tree",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/kernel/index.d.ts",
+      "import": "./dist/kernel/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/kernel/contracts.d.ts",
+      "import": "./dist/kernel/contracts.js"
+    },
+    "./runtime": {
+      "types": "./dist/kernel/runtime.d.ts",
+      "import": "./dist/kernel/runtime.js"
+    },
+    "./renderer": {
+      "types": "./dist/kernel/renderer.d.ts",
+      "import": "./dist/kernel/renderer.js"
+    },
+    "./workbench": {
+      "types": "./dist/kernel/workbench.d.ts",
+      "import": "./dist/kernel/workbench.js"
+    },
+    "./extensions": {
+      "types": "./dist/kernel/extensions.d.ts",
+      "import": "./dist/kernel/extensions.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && ../../node_modules/.bin/tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "../../node_modules/.bin/tsc --noEmit -p tsconfig.json",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@vscode/ripgrep": "^1.18.0",
+    "diff": "^9.0.0",
+    "js-tiktoken": "^1.0.21",
+    "minimatch": "^10.2.6",
+    "strip-ansi": "^7.2.0",
+    "undici": "^7.29.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

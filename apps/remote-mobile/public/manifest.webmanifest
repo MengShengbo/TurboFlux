@@ -1,0 +1,10 @@
+{
+  "name": "TurboFlux Remote",
+  "short_name": "TF Remote",
+  "description": "去中心化 Agent 远程工作壳",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f4f0",
+  "theme_color": "#f4f4f0",
+  "icons": [{ "src": "/remote-mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

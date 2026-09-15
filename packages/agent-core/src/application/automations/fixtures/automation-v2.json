@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 2,
+  "automations": [
+    {
+      "id": "automation-v2-fixture",
+      "name": "V2 compatibility fixture",
+      "prompt": "Produce the persisted automation report.",
+      "workspacePath": "__WORKSPACE__",
+      "schedule": {
+        "kind": "weekly",
+        "weekday": 1,
+        "time": "09:30"
+      },
+      "timezone": "Asia/Shanghai",
+      "enabled": true,
+      "approvalPolicy": "ask",
+      "misfirePolicy": "run-once",
+      "overlapPolicy": "queue-one",
+      "retryPolicy": {
+        "maxRetries": 3,
+        "backoffMinutes": 4
+      },
+      "maxRuntimeMinutes": 90,
+      "createdAt": 1786021200000,
+      "updatedAt": 1786107600000,
+      "nextRunAt": 1893423000000,
+      "conversationId": "desktop-v2-automation-conversation",
+      "lastRunAt": 1786104000000,
+      "lastSuccessAt": 1786104060000,
+      "lastDurationMs": 60000,
+      "lastStatus": "completed",
+      "lastInputId": "v2-input-1",
+      "history": [
+        {
+          "id": "automation-run-v2-fixture",
+          "inputId": "v2-input-1",
+          "conversationId": "desktop-v2-automation-conversation",
+          "trigger": "scheduled",
+          "status": "completed",
+          "scheduledFor": 1786104000000,
+          "attempt": 1,
+          "startedAt": 1786104000000,
+          "updatedAt": 1786104060000,
+          "completedAt": 1786104060000,
+          "durationMs": 60000,
+          "resultSummary": "Persisted V2 run completed."
+        }
+      ]
+    }
+  ]
+}

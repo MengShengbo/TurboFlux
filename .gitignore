@@ -1,0 +1,48 @@
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# --- macOS / editor ---
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# --- Node and build output ---
+node_modules/
+apps/*/node_modules/
+apps/*/dist/
+dist/
+dist-desktop/
+release/
+apps/desktop/generated/
+apps/remote-mobile/generated/
+coverage/
+*.tsbuildinfo
+*.log
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pem
+*.key
+*.p12
+*.keystore
+.turboflux/
+.turboflux-e2e/
+
+# Local projects and design backups are not part of TurboFlux.
+douyin-chat-export/
+tmp/
+videos/
+
+# Local archives, prototypes, and reference checkouts.
+/archive/
+/tui/
+/orbit/
+/apps/orbit/
+/apps/terminal/
+/artifacts/
+/codex-open-source/

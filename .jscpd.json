@@ -1,0 +1,7 @@
+{
+  "threshold": 0,
+  "reporters": ["consoleFull"],
+  "ignore": ["node_modules", "dist", "dist-desktop"],
+  "absolute": true,
+  "minLines": 10
+}

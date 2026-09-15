@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f4f4f0" />
+    <meta name="description" content="TurboFlux 去中心化 Agent 远程工作壳" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/remote-mark.svg" />
+    <title>TurboFlux Remote</title>
+  </head>
+  <body>
+    <div id="app">
+      <section id="pair-view" class="pair-view">
+        <div class="pair-card">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span></div>
+          <h1>安全连接电脑</h1>
+          <p id="pair-status" class="lead">请扫描电脑端生成的安全配对二维码。</p>
+          <div class="trust-row">
+            <span>端到端加密</span><span>电脑确认</span><span>工作区权限</span>
+          </div>
+          <div class="pair-actions">
+            <button id="pair-button" class="primary-button" type="button" hidden>重新申请</button>
+          </div>
+          <p id="pair-error" class="inline-error" role="alert"></p>
+          <p class="fine-print">配对请求发出后，请回到电脑核对设备指纹并点击“允许”。HTTPS 代理无法读取控制内容。</p>
+        </div>
+      </section>
+
+      <section id="takeover-view" class="pair-view takeover-view" hidden>
+        <div class="pair-card takeover-card">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span></div>
+          <h1>另一页面正在控制</h1>
+          <p id="takeover-message" class="lead">同一时间只允许一个手机页面控制这台电脑。你可以明确接管，原页面会立即失去控制。</p>
+          <div class="takeover-actions">
+            <button id="takeover-cancel" class="secondary-button" type="button">断开此页面</button>
+            <button id="takeover-button" class="primary-button" type="button">接管控制</button>
+          </div>
+          <p class="fine-print">接管只切换当前控制页面，不会扩大设备能力或工作区权限。</p>
+        </div>
+      </section>
+
+      <section id="shell-view" class="shell-view" hidden>
+        <header class="topbar">
+          <button id="sessions-toggle" class="icon-button mobile-only" type="button" aria-label="打开任务列表">☰</button>
+          <div class="host-heading">
+            <strong id="host-name">我的电脑</strong>
+            <span><i id="connection-dot"></i><span id="connection-label">已连接</span></span>
+          </div>
+          <div class="top-actions">
+            <button id="sync-button" class="icon-button" type="button" aria-label="同步">↻</button>
+            <button id="disconnect-button" class="icon-button" type="button" aria-label="断开连接">···</button>
+          </div>
+        </header>
+
+        <div class="workspace-shell">
+          <aside id="session-panel" class="session-panel">
+            <div class="panel-heading">
+              <h2>任务</h2>
+              <span id="session-count">0</span>
+            </div>
+            <nav id="session-list" class="session-list" aria-label="远程任务"></nav>
+            <div class="privacy-note"><span>◆</span><p>设备只获得配对时授权的工作区和能力；可随时在电脑端撤销。</p></div>
+          </aside>
+
+          <main class="conversation-panel">
+            <div id="empty-state" class="empty-state">
+              <div class="empty-orbit"><span></span></div>
+              <h2>随时接手正在运行的工作</h2>
+              <p>在电脑端启动任务后，这里会实时同步进度、审批与产物。</p>
+            </div>
+            <div id="conversation-view" class="conversation-view" hidden>
+              <div class="conversation-header">
+                <div>
+                  <h1 id="session-title">远程任务</h1>
+                  <p id="session-meta">准备就绪</p>
+                </div>
+                <div class="run-controls">
+                  <button id="pause-button" type="button">暂停</button>
+                  <button id="resume-button" type="button">继续</button>
+                  <button id="stop-button" class="danger-text" type="button">停止</button>
+                </div>
+              </div>
+              <section id="approval-list" class="approval-list" aria-label="待处理审批"></section>
+              <div id="message-list" class="message-list" aria-live="polite"></div>
+              <section id="artifact-section" class="artifact-section" hidden>
+                <div class="section-heading"><h2>产物</h2><span id="artifact-count">0</span></div>
+                <div id="artifact-list" class="artifact-list"></div>
+              </section>
+            </div>
+
+            <form id="composer" class="composer" hidden>
+              <textarea id="prompt-input" rows="1" placeholder="输入新指令或纠偏…" aria-label="远程指令"></textarea>
+              <div class="composer-footer">
+                <label class="mode-switch"><input id="steer-mode" type="checkbox" /><span>作为纠偏发送</span></label>
+                <button id="send-button" class="send-button" type="submit" aria-label="发送">↑</button>
+              </div>
+            </form>
+          </main>
+        </div>
+      </section>
+
+      <div id="session-scrim" class="scrim" hidden></div>
+      <div id="toast" class="toast" role="status"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

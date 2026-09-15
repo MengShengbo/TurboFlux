@@ -1,0 +1,52 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "typescript",
+    "import",
+    "unicorn"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn"
+  },
+  "rules": {
+    "no-unused-vars": "off",
+    "typescript/no-unused-vars": "off",
+    "no-console": "off",
+    "no-shadow": "off",
+    "no-underscore-dangle": "off",
+    "no-useless-escape": "warn",
+    "no-control-regex": "warn",
+    "no-new": "off",
+    "no-unsafe-finally": "warn",
+    "preserve-caught-error": "warn",
+    "no-unneeded-ternary": "off",
+    "import/no-unassigned-import": "off",
+    "unicorn/no-array-sort": "off",
+    "unicorn/no-array-reverse": "off",
+    "unicorn/no-array-callback-reference": "off",
+    "unicorn/no-array-reduce": "off",
+    "unicorn/no-array-for-each": "off",
+    "unicorn/no-useless-spread": "off",
+    "unicorn/no-useless-fallback-in-spread": "off",
+    "unicorn/no-new-array": "off",
+    "unicorn/prefer-string-starts-ends-with": "off",
+    "unicorn/prefer-add-event-listener": "off",
+    "unicorn/prefer-ternary": "off",
+    "unicorn/prefer-number-properties": "off",
+    "unicorn/no-null": "off",
+    "unicorn/prefer-optional-catch-binding": "off",
+    "unicorn/consistent-function-scoping": "off",
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-extraneous-class": "warn",
+    "no-unmodified-loop-condition": "warn"
+  },
+  "ignorePatterns": [
+    "dist/**",
+    "dist-desktop/**",
+    "node_modules/**",
+    "coverage/**",
+    "**/*.d.ts"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "exclude": [
+    "duplicates"
+  ],
+  "ignoreWorkspaces": [
+    "apps/desktop"
+  ],
+  "workspaces": {
+    ".": {
+      "entry": [
+        "scripts/**/*.mjs"
+      ],
+      "project": [
+        "packages/agent-core/src/**/*.ts",
+        "packages/agent-core/src/**/*.tsx",
+        "scripts/**/*.ts",
+        "scripts/**/*.mjs"
+      ]
+    }
+  }
+}

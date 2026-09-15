@@ -1,0 +1,22 @@
+{
+  "name": "@turboflux/remote-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 4180",
+    "type-check": "tsc --noEmit -p tsconfig.json",
+    "test": "../../node_modules/.bin/vitest run --config vitest.config.ts",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@turboflux/remote-protocol": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vite": "^8.0.16"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

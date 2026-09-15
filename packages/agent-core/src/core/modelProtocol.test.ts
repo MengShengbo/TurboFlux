@@ -1,0 +1,191 @@
+import { describe, expect, it } from 'vitest'
+import {
+  ModelProtocolRequestError,
+  buildModelProtocolUrl,
+  formatProtocolFailure,
+  filterModelProtocols,
+  looksLikeResponsesPreferredModel,
+  planModelProtocols,
+  shouldFallbackProtocol,
+  toProtocolAttempt,
+  toResponsesInput,
+  toResponsesTools,
+} from './modelProtocol'
+
+describe('model protocol planning', () => {
+  it('prefers Anthropic Messages only for native Anthropic configs', () => {
+    expect(planModelProtocols('anthropic', 'claude-fable-5')[0]).toBe('anthropic_messages')
+    expect(planModelProtocols('custom', 'vendor/claude-fable-5')[0]).toBe('openai_chat')
+  })
+
+  it('keeps Chat Completions first for ordinary OpenAI-compatible configs', () => {
+    expect(planModelProtocols('custom', 'gpt-compatible-model')).toEqual([
+      'openai_chat',
+      'openai_responses',
+      'anthropic_messages',
+    ])
+  })
+
+  it('keeps Chat first for GPT model names on third-party gateways', () => {
+    expect(looksLikeResponsesPreferredModel('gpt-5.6-sol')).toBe(true)
+    expect(planModelProtocols('custom', 'gpt-5.6-sol')).toEqual([
+      'openai_chat',
+      'openai_responses',
+      'anthropic_messages',
+    ])
+  })
+
+  it('normalizes base URLs exactly once', () => {
+    expect(buildModelProtocolUrl('https://ai.zyyun.xyz/v1', 'anthropic_messages'))
+      .toBe('https://ai.zyyun.xyz/v1/messages')
+    expect(buildModelProtocolUrl('https://example.test', 'openai_responses'))
+      .toBe('https://example.test/v1/responses')
+  })
+
+  it('uses the DeepSeek Anthropic-compatible route and avoids unsupported Pro Responses', () => {
+    expect(buildModelProtocolUrl('https://api.deepseek.com', 'anthropic_messages', 'deepseek'))
+      .toBe('https://api.deepseek.com/anthropic/v1/messages')
+    expect(buildModelProtocolUrl('https://api.deepseek.com/v1', 'anthropic_messages', 'deepseek'))
+      .toBe('https://api.deepseek.com/anthropic/v1/messages')
+    expect(planModelProtocols('deepseek', 'deepseek-v4-pro')).toEqual([
+      'openai_chat',
+      'anthropic_messages',
+    ])
+    expect(planModelProtocols('deepseek', 'deepseek-v4-flash')).toEqual([
+      'openai_chat',
+      'openai_responses',
+      'anthropic_messages',
+    ])
+  })
+
+  it('honors explicitly supported gateway endpoints', () => {
+    expect(filterModelProtocols(
+      planModelProtocols('custom', 'deepseek-v4-flash'),
+      ['/chat/completions', '/responses'],
+    )).toEqual(['openai_chat', 'openai_responses'])
+    expect(filterModelProtocols(
+      planModelProtocols('custom', 'deepseek-v4-pro'),
+      ['/chat/completions'],
+    )).toEqual(['openai_chat'])
+  })
+})
+
+describe('model protocol fallback safety', () => {
+  const error = (status: number | undefined, message: string, receivedStreamData = false) => new ModelProtocolRequestError(message, {
+    protocol: 'anthropic_messages',
+    url: 'https://example.test/v1/messages',
+    status,
+    kind: status ? 'http' : 'network',
+    receivedStreamData,
+  })
+
+  it('falls back for endpoint and explicit schema mismatches', () => {
+    expect(shouldFallbackProtocol(error(404, 'route not found'))).toBe(true)
+    expect(shouldFallbackProtocol(error(415, 'unsupported content type'))).toBe(true)
+    expect(shouldFallbackProtocol(error(422, 'messages field is required by this endpoint'))).toBe(true)
+  })
+
+  it('does not cross protocols for auth, transient, or post-stream failures', () => {
+    expect(shouldFallbackProtocol(error(401, 'invalid API key'))).toBe(false)
+    expect(shouldFallbackProtocol(error(429, 'rate limited'))).toBe(false)
+    expect(shouldFallbackProtocol(error(503, 'temporarily unavailable'))).toBe(false)
+    expect(shouldFallbackProtocol(error(undefined, 'fetch failed'))).toBe(false)
+    expect(shouldFallbackProtocol(error(404, 'route not found', true))).toBe(false)
+  })
+
+  it('allows fallback after a streamed response-shape failure with no usable output', () => {
+    const shapeError = new ModelProtocolRequestError('Responses stream ended before a terminal event', {
+      protocol: 'openai_responses',
+      url: 'https://example.test/v1/responses',
+      kind: 'response_shape',
+      receivedStreamData: true,
+    })
+
+    expect(shouldFallbackProtocol(shapeError)).toBe(true)
+  })
+
+  it('recognizes rejected Responses instructions as a protocol mismatch', () => {
+    expect(shouldFallbackProtocol(error(400, 'unknown parameter: instructions'))).toBe(true)
+  })
+
+  it('does not change protocols for a valid parameter with an invalid numeric value', () => {
+    expect(shouldFallbackProtocol(error(400, 'Invalid max_tokens value, the valid range of max_tokens is [1, 393216)'))).toBe(false)
+  })
+
+  it('recognizes rejected prompt cache controls as compatible schema mismatches', () => {
+    expect(shouldFallbackProtocol(error(400, 'Unsupported parameter: prompt_cache_options'))).toBe(true)
+    expect(shouldFallbackProtocol(error(400, 'Unsupported parameter: prompt_cache_retention'))).toBe(true)
+  })
+
+  it('formats every attempted protocol and URL in the final diagnostic', () => {
+    const first = toProtocolAttempt(error(404, 'route not found'))
+    const second = toProtocolAttempt(new ModelProtocolRequestError('invalid input schema', {
+      protocol: 'openai_responses',
+      url: 'https://example.test/v1/responses',
+      status: 422,
+      kind: 'http',
+    }))
+    expect(formatProtocolFailure([first, second])).toContain('Anthropic Messages https://example.test/v1/messages')
+    expect(formatProtocolFailure([first, second])).toContain('OpenAI Responses https://example.test/v1/responses')
+  })
+})
+
+describe('Responses API conversion', () => {
+  it('converts chat tools and tool history into Responses items', () => {
+    expect(toResponsesTools([{
+      type: 'function',
+      function: { name: 'read_file', description: 'Read', parameters: { type: 'object' }, strict: true },
+    }])).toEqual([{
+      type: 'function',
+      name: 'read_file',
+      description: 'Read',
+      parameters: { type: 'object' },
+      strict: true,
+    }])
+
+    expect(toResponsesInput([
+      { role: 'system', content: 'system' },
+      { role: 'user', content: 'inspect it' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: 'file contents' },
+    ])).toEqual([
+      { role: 'user', content: 'inspect it' },
+      { type: 'function_call', call_id: 'call_1', name: 'read_file', arguments: '{"path":"a.ts"}' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'file contents' },
+    ])
+  })
+
+  it('keeps function output paired before converting browser evidence to input_image', () => {
+    const input = toResponsesInput([
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'call_visual', type: 'function', function: { name: 'browser__visual_observe', arguments: '{}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_visual', content: '{"viewport":"current"}' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Inspect the current viewport.' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+        ],
+      },
+    ])
+
+    expect(input).toEqual([
+      { type: 'function_call', call_id: 'call_visual', name: 'browser__visual_observe', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_visual', output: '{"viewport":"current"}' },
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Inspect the current viewport.' },
+          { type: 'input_image', image_url: 'data:image/png;base64,AAAA' },
+        ],
+      },
+    ])
+  })
+})
