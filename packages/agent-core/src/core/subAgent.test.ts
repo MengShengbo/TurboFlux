@@ -514,7 +514,7 @@ describe('runSubAgent', () => {
       expect(requestBodies[0].tools.map((tool: any) => tool.function.name)).toEqual(['web_search', 'web_fetch', 'write_research_report'])
       expect(executor.webSearch).toHaveBeenCalledWith(expect.objectContaining({ query: 'premium product design' }))
       expect(writeFile).toHaveBeenCalledWith(
-        expect.stringContaining('.turboflux/design-research/run-1/index.json'),
+        expect.stringContaining(join('.turboflux', 'design-research', 'run-1', 'index.json')),
         '{"items":[]}',
         expect.objectContaining({ source: 'subagent' }),
       )

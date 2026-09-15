@@ -8,7 +8,7 @@ const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 function workspace() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'turboflux-search-')))
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'turboflux-search-')))
   roots.push(root)
   const write = (path: string, content: string) => {
     const target = join(root, path)

@@ -247,6 +247,7 @@ async function main(options = parseArguments(process.argv.slice(2))) {
     const pairing = await manager.createPairingCode()
     const targetUrl = `${status.localEndpointUrl}/#${new URLSearchParams({ pair: pairing.code })}`
     child = spawn(electron, [
+      ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
       ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : []),
       `--user-data-dir=${join(qaRoot, 'electron')}`,
       electronEntry,

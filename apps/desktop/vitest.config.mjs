@@ -1,7 +1,8 @@
 import { defineConfig } from 'vitest/config'
+import { fileURLToPath } from 'node:url'
 
 export default defineConfig({
-  root: new URL('.', import.meta.url).pathname,
+  root: fileURLToPath(new URL('.', import.meta.url)),
   test: {
     environment: 'node',
     exclude: ['node_modules/**'],

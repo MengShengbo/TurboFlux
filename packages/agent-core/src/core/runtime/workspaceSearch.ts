@@ -36,7 +36,9 @@ function boundedInteger(value: number | undefined, fallback: number, min: number
 async function capture(args: string[], cwd: string, signal?: AbortSignal): Promise<{ output: string; complete: boolean; warning?: string }> {
   type SearchProcessError = Error & { code?: string | number; stdout?: string; stderr?: string; killed?: boolean }
   try {
-    const { stdout } = await execFileAsync(rgPath.replace(/\.asar([\\/])/, '.asar.unpacked$1'), args, {
+    const packagedPath = rgPath.replace(/\.asar([\\/])/, '.asar.unpacked$1')
+    const executable = process.platform === 'win32' && !/\.exe$/i.test(packagedPath) ? `${packagedPath}.exe` : packagedPath
+    const { stdout } = await execFileAsync(executable, args, {
       cwd, signal, encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: MAX_CAPTURE_BYTES,
     })
     return { output: stdout, complete: true }
@@ -84,7 +86,7 @@ export async function searchWorkspaceFiles(pattern: string, scope: string, optio
     const captured = await capture([...searchArguments(options.includeIgnored === true), '--files', '--null', '--', '.'], scope, options.signal)
     const records = captured.output.split('\0')
     records.pop()
-    const files = records.filter(path => searchable(path) && matcher.match(path.replace(/^\.\//, ''))).map(path => resolve(scope, path))
+    const files = records.filter(path => searchable(path) && matcher.match(path.replace(/\\/g, '/').replace(/^\.\//, ''))).map(path => resolve(scope, path))
     const { selected, ...pagination } = page(files, options, captured.complete, path => path, path => path.length + 1)
     return { success: true, data: { matches: selected, ...pagination, ...(captured.warning ? { warning: captured.warning } : {}) } }
   } catch (error) {

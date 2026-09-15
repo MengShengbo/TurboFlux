@@ -70,6 +70,7 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
 linux:
+  executableName: TurboFlux
   category: Utility
   icon: build/turboflux-app-icon.png
   target:

@@ -280,10 +280,9 @@ describe('ConversationEventStoreV2', () => {
   it('serializes concurrent writers across processes without sequence gaps', async () => {
     const directory = root()
     const moduleUrl = pathToFileURL(resolve('packages/agent-core/src/application/conversations/conversationEventStoreV2.ts')).href
-    const executable = resolve('node_modules/.bin/tsx')
     const runWriter = (prefix: string) => new Promise<void>((resolveWriter, rejectWriter) => {
       const source = `import { ConversationEventStoreV2 } from ${JSON.stringify(moduleUrl)}; const store = new ConversationEventStoreV2(${JSON.stringify(directory)}); for (let index = 0; index < 20; index += 1) store.append([{ eventId: ${JSON.stringify(prefix)} + '-' + index, profileId: 'profile-1', conversationId: 'conversation-concurrent', source: 'runtime', provenance: 'live', type: 'conversation.renamed', payload: { title: ${JSON.stringify(prefix)} + '-' + index, titleSource: 'custom' } }]);`
-      const child = spawn(executable, ['-e', source], { stdio: 'pipe' })
+      const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], { stdio: 'pipe' })
       let error = ''
       child.stderr.on('data', chunk => { error += String(chunk) })
       child.on('error', rejectWriter)

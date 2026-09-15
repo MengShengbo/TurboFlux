@@ -222,6 +222,7 @@ async function main(options) {
   const fixture = await createQaProfileFixture(qaRoot)
   const port = await availablePort()
   const child = spawn(executable, [
+    ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : []),
     `--user-data-dir=${join(qaRoot, 'electron')}`,
     `--remote-debugging-port=${port}`,

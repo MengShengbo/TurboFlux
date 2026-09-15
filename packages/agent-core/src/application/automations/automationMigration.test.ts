@@ -16,7 +16,9 @@ function createFixture() {
   directories.push(root)
   const sourcePath = join(root, 'automations.json')
   const fixturePath = join(import.meta.dirname, 'fixtures', 'automation-v2.json')
-  writeFileSync(sourcePath, readFileSync(fixturePath, 'utf8').replace('__WORKSPACE__', join(root, 'workspace')))
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as { automations: Array<{ workspacePath: string }> }
+  fixture.automations[0]!.workspacePath = join(root, 'workspace')
+  writeFileSync(sourcePath, `${JSON.stringify(fixture, null, 2)}\n`)
   const repository = new AutomationRepository(join(root, 'automations-v3'))
   repository.initialize()
   return { root, sourcePath, repository }

@@ -25,7 +25,7 @@ await build({
 const desktopRequire = createRequire(join(desktopRoot, 'package.json'))
 const electron = desktopRequire('electron')
 const exitCode = await new Promise((resolvePromise, reject) => {
-  const child = spawn(electron, [entryPath], {
+  const child = spawn(electron, [...(process.platform === 'linux' ? ['--no-sandbox'] : []), entryPath], {
     cwd: repositoryRoot,
     env: { ...process.env, TURBOFLUX_PROFILE_SWITCH_BENCHMARK: '1' },
     stdio: 'inherit',

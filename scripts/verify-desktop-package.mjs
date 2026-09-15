@@ -453,7 +453,7 @@ export function verifyDesktopPackage(options = {}) {
   const asarPath = resolve(options.asarPath ?? discoverAsar(platform))
   invariant(existsSync(asarPath), `ASAR does not exist: ${asarPath}`)
   invariant(statSync(asarPath).isFile(), `ASAR does not exist: ${asarPath}`)
-  const entries = listPackage(asarPath)
+  const entries = listPackage(asarPath).map(entry => entry.replaceAll('\\', '/'))
   const entrySet = new Set(entries)
   for (const required of requiredAsarEntries) invariant(entrySet.has(required), `missing required ASAR entry: ${required}`)
   const forbidden = entries.filter(desktopPackageForbiddenEntry)

@@ -296,8 +296,9 @@ describe('AutomationService', () => {
     directories.push(root)
     const store = join(root, 'automations.json')
     const fixturePath = join(import.meta.dirname, 'fixtures', 'automation-v2.json')
-    const fixture = readFileSync(fixturePath, 'utf8').replace('__WORKSPACE__', root)
-    writeFileSync(store, fixture)
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as { automations: Array<{ workspacePath: string }> }
+    fixture.automations[0]!.workspacePath = root
+    writeFileSync(store, `${JSON.stringify(fixture, null, 2)}\n`)
 
     const automation = new AutomationService(store).get('automation-v2-fixture')
 
