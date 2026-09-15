@@ -29,7 +29,7 @@
     "@xterm/xterm": "^6.0.0",
     "highlight.js": "^11.11.1",
     "lucide": "^1.45.0",
-    "marked": "^18.0.4",
+    "marked": "^18.0.12",
     "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
     "tsx": "^4.22.2"
