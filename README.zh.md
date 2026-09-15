@@ -21,7 +21,7 @@ npm ci
 npm run dev:desktop
 ```
 
-在 Desktop 设置中配置模型地址和 API Key。原生能力取决于操作系统和授权；电脑操控使用 macOS 辅助功能权限。
+在 Desktop 设置中配置模型地址和 API Key。Desktop 支持 macOS、Windows 和 Linux，内置终端分别使用 zsh、PowerShell 和 bash。原生能力取决于操作系统和授权；电脑操控目前仅支持 macOS 辅助功能权限。
 
 开发服务器默认使用 `http://127.0.0.1:15174`。需要调整端口时运行：
 
@@ -58,6 +58,8 @@ npm run ci                    # 完整本地检查流程
 ```
 
 单独构建内核使用 `npm run build:core`。生成未封装的 Desktop 应用目录使用 `npm run package:dir --workspace @turboflux/desktop`。签名及各平台分发需要对应平台的工具链和证书。
+
+Windows 开发环境、PowerShell 配置及 NSIS 安装包构建见 [Windows 指南](docs/windows.md)。
 
 桌面远控配置参见[运维指南](docs/architecture/remote-shell-runbook.md)。浏览器客户端需要可信 HTTPS，并与 Desktop 主机配对。
 

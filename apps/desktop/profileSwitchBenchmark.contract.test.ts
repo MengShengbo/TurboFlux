@@ -33,6 +33,7 @@ describe('hidden profile switch performance benchmark', () => {
     expect(conversations).toContain("process.stderr.write('Conversation V2 benchmark failed\\n')")
     expect(workflow).toContain('path: apps/desktop/generated/profile-benchmarks/*.json')
     expect(entry).toContain("process.stderr.write('[profile-switch-benchmark] failed\\n')")
-    expect(archive).toContain("process.stderr.write('Profile archive benchmark failed\\n')")
+    expect(archive).toContain('Profile archive benchmark failed (${code})')
+    expect(archive).toContain('clearInterval(sampler)')
   })
 })

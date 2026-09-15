@@ -130,6 +130,8 @@ async function* entryFrames(entries: ArchiveEntryInput[], signal?: AbortSignal):
 }
 
 async function fsyncDirectory(path: string): Promise<void> {
+  // Windows cannot open directories for fsync; the archive file is flushed above.
+  if (process.platform === 'win32') return
   const handle = await open(path, 'r')
   try { await handle.sync() } finally { await handle.close() }
 }

@@ -75,12 +75,16 @@ async function createDesktopPackageFixture(platform: 'darwin' | 'linux' | 'win32
   const ptyDirectory = `app.asar.unpacked/node_modules/node-pty/prebuilds/${platform}-${arch}`
   const ptyFiles = platform === 'win32'
     ? ['pty.node', 'conpty.node', 'conpty_console_list.node']
-    : ['pty.node', 'spawn-helper']
+    : platform === 'darwin'
+      ? ['pty.node', 'spawn-helper']
+      : ['pty.node']
   for (const filename of ptyFiles) writeFixtureFile(resources, `${ptyDirectory}/${filename}`, {
     executable: platform !== 'win32' && filename === 'spawn-helper',
     value: createNativeBinaryFixture(platform, arch),
   })
-  writeFixtureFile(resources, `app.asar.unpacked/node_modules/@esbuild/${esbuildPackage}/bin/${platform === 'win32' ? 'esbuild.exe' : 'esbuild'}`, {
+  writeFixtureFile(resources, platform === 'win32'
+    ? `app.asar.unpacked/node_modules/@esbuild/${esbuildPackage}/esbuild.exe`
+    : `app.asar.unpacked/node_modules/@esbuild/${esbuildPackage}/bin/esbuild`, {
     executable: platform !== 'win32',
     value: createNativeBinaryFixture(platform, arch),
   })

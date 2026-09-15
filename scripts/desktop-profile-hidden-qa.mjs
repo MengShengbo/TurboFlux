@@ -253,7 +253,7 @@ async function main(options) {
     await Promise.all([cdp.call('Runtime.enable'), cdp.call('Page.enable'), cdp.call('Log.enable')])
     const evaluate = async expression => {
       const result = await cdp.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
-      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || 'Desktop QA evaluation failed')
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Desktop QA evaluation failed')
       return result.result.value
     }
     const waitFor = async (expression, label, attempts = 750) => {
@@ -322,9 +322,11 @@ async function main(options) {
         viewport: { width: innerWidth, height: innerHeight },
         document: { scrollWidth: document.documentElement.scrollWidth, scrollHeight: document.documentElement.scrollHeight },
         overlay: rect('.settings-overlay'),
-        workbenchSidebar: rect('.desktop-shell .sidebar'),
+        settingsSidebar: rect('.settings-nav'),
+        settingsMain: rect('.settings-main'),
+        settingsHeading: rect('.settings-header'),
         page: rect('.profile-manager-shell'),
-        head: rect('.profile-manager-header'),
+        head: rect('.profile-manager-toolbar'),
         list: rect('.profile-manager-nav'),
         portability: rect('.profile-manager-content'),
         entry: rect('.profile-manager-row'),
@@ -340,11 +342,10 @@ async function main(options) {
         settingsVisible: settingsOverlay?.classList.contains('visible') === true,
         settingsOpacity: settingsStyle?.opacity,
         settingsVisibility: settingsStyle?.visibility,
-        title: document.querySelector('.profile-manager-header h2')?.textContent,
+        title: document.querySelector('#settings-title')?.textContent,
         tabs: document.querySelectorAll('.profile-manager-tabs [role="tab"]').length,
         metrics: document.querySelectorAll('.profile-manager-metrics').length,
-        headerBacks: document.querySelectorAll('.profile-manager-back').length,
-        closeActions: document.querySelectorAll('.profile-manager-header [data-profile-close]').length,
+        closeActions: document.querySelectorAll('.settings-nav #settings-back').length,
         searchFields: document.querySelectorAll('.profile-manager-search').length,
         conversationRows: document.querySelectorAll('.profile-manager-conversation-row').length,
         workspaceRows: document.querySelectorAll('.profile-manager-object-row[data-profile-tab="workspaces"]').length,
@@ -427,22 +428,27 @@ async function main(options) {
     lightSwitcher.screenshot = await screenshot('profile-switcher-light')
     await click('[data-profile-switcher-manage]')
     await waitFor(`document.querySelector('.profile-manager-shell')`, 'local profile page')
-    await waitFor(`Number.parseFloat(getComputedStyle(document.querySelector('.settings-overlay')).opacity) >= 0.99`, 'settled light profile page')
+    await waitFor(`getComputedStyle(document.querySelector('.settings-overlay')).opacity === '1' && !document.querySelector('#toast.visible')`, 'settled light profile page')
     const light = await inspectProfilePage('light')
     light.screenshot = await screenshot('profile-center-light-1440-overview')
     const wallpaperMaterial = await evaluate(`(() => {
       document.documentElement.dataset.backgroundMedia = 'image'
       const layer = document.querySelector('.background-media-layer')
       if (layer) layer.style.background = 'radial-gradient(circle at 22% 18%, #54c6c8 0, #4961ac 34%, #d95d98 68%, #1d253c 100%)'
-      const background = selector => getComputedStyle(document.querySelector(selector)).backgroundColor
+      const element = selector => {
+        const target = document.querySelector(selector)
+        if (!target) throw new Error('Missing Profile material element: ' + selector)
+        return target
+      }
+      const background = selector => getComputedStyle(element(selector)).backgroundColor
       const backdrop = selector => {
-        const styles = getComputedStyle(document.querySelector(selector))
+        const styles = getComputedStyle(element(selector))
         return { standard: styles.backdropFilter, webkit: styles.webkitBackdropFilter }
       }
       return {
         overlay: background('.settings-overlay[data-section="data"]'),
         shell: background('.profile-manager-shell'),
-        header: background('.profile-manager-header'),
+        header: background('.profile-manager-toolbar'),
         nav: background('.profile-manager-nav'),
         content: background('.profile-manager-content'),
         overlayBackdrop: backdrop('.settings-overlay[data-section="data"]'),
@@ -489,7 +495,7 @@ async function main(options) {
 
     await setViewport(1440, 900)
 
-    await click('[data-profile-close]')
+    await click('#settings-back')
     await waitFor(`!document.querySelector('.settings-overlay.visible')`, 'profile center close')
     await click('#settings-button')
     await waitFor(`document.querySelector('.settings-overlay.visible')`, 'settings center for dark theme')
@@ -504,7 +510,7 @@ async function main(options) {
     darkSwitcher.screenshot = await screenshot('profile-switcher-dark')
     await click('[data-profile-switcher-manage]')
     await waitFor(`document.querySelector('.profile-manager-shell')`, 'dark profile page')
-    await waitFor(`Number.parseFloat(getComputedStyle(document.querySelector('.settings-overlay')).opacity) >= 0.99`, 'settled dark profile page')
+    await waitFor(`getComputedStyle(document.querySelector('.settings-overlay')).opacity === '1' && !document.querySelector('#toast.visible')`, 'settled dark profile page')
     const dark = await inspectProfilePage('dark')
     dark.screenshot = await screenshot('profile-center-dark-1440-overview')
     const createDark = await captureCreateSheet('profile-create-dark-1440')
@@ -639,7 +645,7 @@ async function main(options) {
       }
       return true
     })()`)
-    await click('[data-profile-close]')
+    await click('#settings-back')
     await waitFor(`!document.querySelector('.settings-overlay.visible')`, 'profile center close before eight-user evidence')
     await click('#profile-center-button')
     await waitFor(`document.querySelector('.profile-switcher.visible [data-profile-switcher-manage]')`, 'eight-user profile switcher')
@@ -652,14 +658,15 @@ async function main(options) {
       invariant(state.theme === state.expectedTheme, `${state.expectedTheme} theme did not apply`)
       invariant(state.overlay && state.page && state.head && state.list && state.portability && state.entry, `${state.expectedTheme} profile layout is incomplete`)
       invariant(state.page.x === state.head.x && state.page.x === state.list.x && state.head.width === state.page.width, `${state.expectedTheme} profile shell axes are misaligned`)
-      invariant(state.head.y + state.head.height === state.list.y && state.head.y + state.head.height === state.portability.y, `${state.expectedTheme} profile header overlaps its content`)
-      invariant(state.page.x === state.overlay.x && state.page.y === state.overlay.y && state.page.width === state.overlay.width && state.page.height === state.overlay.height, `${state.expectedTheme} profile workspace does not fill its editor surface`)
-      invariant(state.workbenchSidebar && state.workbenchSidebar.x + state.workbenchSidebar.width === state.page.x, `${state.expectedTheme} profile editor is detached from the application sidebar`)
+      invariant(state.head.y + state.head.height <= state.list.y && state.head.y + state.head.height <= state.portability.y, `${state.expectedTheme} profile toolbar overlaps its content`)
+      invariant(state.settingsMain && state.page.x >= state.settingsMain.x && state.page.x + state.page.width <= state.settingsMain.x + state.settingsMain.width + 1, `${state.expectedTheme} profile page escapes its settings content`)
+      invariant(state.settingsSidebar && Math.abs(state.settingsSidebar.x + state.settingsSidebar.width - state.settingsMain.x) <= 1, `${state.expectedTheme} settings navigation is detached from its content`)
+      invariant(state.settingsHeading && state.settingsHeading.y + state.settingsHeading.height <= state.page.y, `${state.expectedTheme} settings heading overlaps the profile page`)
       invariant(state.document.scrollWidth <= state.viewport.width, `${state.expectedTheme} profile page overflows horizontally`)
       invariant(state.profiles >= 1 && state.activeProfiles === 1, `${state.expectedTheme} profile state is incomplete`)
       invariant(state.title === '用户资料', `${state.expectedTheme} profile heading is incorrect`)
       invariant(state.tabs === 3 && state.metrics === 0 && state.footer === null, `${state.expectedTheme} profile information architecture regressed`)
-      invariant(state.headerBacks === 1 && state.closeActions === 1, `${state.expectedTheme} profile workspace does not have one clear return action`)
+      invariant(state.closeActions === 1, `${state.expectedTheme} profile workspace does not have one clear return action`)
       invariant(state.searchFields === 0, `${state.expectedTheme} profile workspace wastes space on search for one user`)
       invariant(state.conversationRows >= 1 && state.workspaceRows >= 1 && state.text?.includes('界面迁移验证会话') && state.text?.includes('可移植工作区'), `${state.expectedTheme} profile workspace does not show real conversation and workspace objects`)
     }
@@ -675,9 +682,9 @@ async function main(options) {
       return commaAlpha ? Number(commaAlpha[1]) < 1 : false
     }
     const materialBackdrop = hasBackdrop(wallpaperMaterial.overlayBackdrop) || hasBackdrop(wallpaperMaterial.shellBackdrop)
-    const materialFallback = translucent(wallpaperMaterial.shell) && translucent(wallpaperMaterial.header) && translucent(wallpaperMaterial.nav)
+    const materialFallback = translucent(wallpaperMaterial.overlay) || translucent(wallpaperMaterial.shell)
     invariant(!opaqueCanvas(wallpaperMaterial.overlay) && (materialBackdrop || materialFallback), `Profile editor does not retain a supported background material: ${JSON.stringify(wallpaperMaterial)}`)
-    invariant(!transparent(wallpaperMaterial.shell) && transparent(wallpaperMaterial.content), `Profile editor material layers are incorrect: ${JSON.stringify(wallpaperMaterial)}`)
+    invariant(transparent(wallpaperMaterial.header) && transparent(wallpaperMaterial.nav) && transparent(wallpaperMaterial.content), `Profile settings page material layers are incorrect: ${JSON.stringify(wallpaperMaterial)}`)
     invariant(light1024.document.scrollWidth <= light1024.viewport.width && light1024.tabs === 3, `1024px profile layout regressed: ${JSON.stringify(light1024)}`)
     invariant(workspaces1024.text?.includes('工作区绑定') && transfer1024.text?.includes('迁移边界'), 'Profile task tabs do not expose their intended content')
     invariant(narrowList.mobileView === 'list' && narrowList.listVisible && !narrowList.contentVisible, `760px list state is incorrect: ${JSON.stringify(narrowList)}`)
@@ -721,6 +728,36 @@ async function main(options) {
     invariant(finalProfiles.rebindActions === 0, `Imported profile summary did not retain the completed rebind state: ${JSON.stringify(finalProfiles)}`)
     invariant(eightUsers.profiles === 8 && eightUsers.searchFields === 1, `Eight-user search threshold failed: ${JSON.stringify(eightUsers)}`)
 
+    const terminalSession = await evaluate('window.turbofluxDesktop.terminalCreate({ cols: 100, rows: 24 })')
+    let terminal
+    try {
+      const sessionId = JSON.stringify(terminalSession.id)
+      const resized = await evaluate(`window.turbofluxDesktop.terminalResize(${sessionId}, 120, 30)`)
+      const command = process.platform === 'win32'
+        ? "Write-Output ('orbit-terminal-' + 'ok'); exit 0\r"
+        : "printf 'orbit-terminal-%s\\n' ok; exit 0\r"
+      await evaluate(`window.turbofluxDesktop.terminalWrite(${sessionId}, ${JSON.stringify(command)})`)
+      let buffer
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        buffer = await evaluate(`window.turbofluxDesktop.terminalRead(${sessionId}, 0)`)
+        if (buffer.session.status === 'exited') break
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+      }
+      terminal = {
+        shell: terminalSession.shell,
+        outputVerified: buffer?.chunks.map(chunk => chunk.data).join('').includes('orbit-terminal-ok') === true,
+        resized: resized.cols === 120 && resized.rows === 30,
+        exitCode: buffer?.session.status === 'exited' ? buffer.session.exitCode : null,
+        closed: false,
+      }
+      invariant(terminal.outputVerified && terminal.resized && terminal.exitCode === 0, 'Packaged terminal did not complete the shell round trip')
+    } finally {
+      await evaluate(`window.turbofluxDesktop.terminalClose(${JSON.stringify(terminalSession.id)})`)
+    }
+    const remainingTerminals = await evaluate('window.turbofluxDesktop.terminalList()')
+    terminal.closed = !remainingTerminals.some(session => session.id === terminalSession.id)
+    invariant(terminal.closed, 'Packaged terminal did not close')
+
     const result = {
       schemaVersion: 2,
       platform: process.platform,
@@ -757,6 +794,7 @@ async function main(options) {
       readonlyAfterRebind,
       finalProfiles,
       eightUsers,
+      terminal,
       rendererErrors: cdp.events.filter(event => event.method === 'Runtime.exceptionThrown' || (event.method === 'Log.entryAdded' && event.params?.entry?.level === 'error')).map(event => event.params),
     }
     invariant(result.rendererErrors.length === 0, `Renderer reported ${result.rendererErrors.length} error(s)`)
@@ -777,7 +815,8 @@ async function main(options) {
 
 try {
   await main(parseArguments(process.argv.slice(2)))
-} catch {
+} catch (error) {
+  if (process.env.TURBOFLUX_PROFILE_QA_DIAGNOSTICS === '1') console.error(error)
   process.stderr.write('Profile hidden QA failed\n')
   process.exitCode = 1
 }

@@ -45,7 +45,7 @@ const topLevelFields = [
   'schemaVersion', 'platform', 'arch', 'provenance', 'mode',
   'applicationMode', 'packageEvidence',
   ...Object.keys(screenshotFields),
-  'reducedMotion', 'exportFocusTrap', 'importFocusTrap', 'rendererErrors',
+  'reducedMotion', 'exportFocusTrap', 'importFocusTrap', 'rendererErrors', 'terminal',
 ]
 
 function check(condition, errors, message) {
@@ -76,7 +76,7 @@ function inspectPixels(contents) {
 function checkPage(page, theme, width, errors, label) {
   check(page?.theme === theme && page?.expectedTheme === theme, errors, `${label} theme evidence is invalid`)
   check(page?.viewport?.width === width && page?.document?.scrollWidth <= width, errors, `${label} viewport evidence is invalid`)
-  check(page?.tabs === 3 && page?.metrics === 0 && page?.headerBacks === 1 && page?.closeActions === 1, errors, `${label} information architecture is invalid`)
+  check(page?.tabs === 3 && page?.metrics === 0 && page?.title === '用户资料' && page?.closeActions === 1, errors, `${label} information architecture is invalid`)
   check(page?.settingsVisible === true && page?.settingsOpacity === '1' && page?.settingsVisibility === 'visible', errors, `${label} is not visibly painted`)
 }
 
@@ -101,6 +101,9 @@ async function inspectResult(resultFile) {
   check(result.packageEvidence === null || packageEvidence !== null, errors, 'package evidence is invalid')
   check(result.applicationMode !== 'packaged-app' || packageEvidence !== null, errors, 'packaged application evidence is missing')
   check(Array.isArray(result.rendererErrors) && result.rendererErrors.length === 0, errors, 'Renderer errors were recorded')
+  rejectUnexpectedKeys(result.terminal, ['shell', 'outputVerified', 'resized', 'exitCode', 'closed'], errors, 'terminal')
+  check(result.terminal?.outputVerified === true && result.terminal?.resized === true && result.terminal?.exitCode === 0 && result.terminal?.closed === true, errors, 'native terminal round-trip evidence is invalid')
+  check(typeof result.terminal?.shell === 'string' && result.terminal.shell.length > 0, errors, 'terminal shell is missing')
 
   for (const [field, filename] of Object.entries(screenshotFields)) {
     const reference = result[field]?.screenshot

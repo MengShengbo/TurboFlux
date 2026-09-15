@@ -48,8 +48,13 @@ jobs:
         run: npm run type-check
 
   test:
-    name: Test (kernel)
-    runs-on: ubuntu-latest
+    name: Test kernel (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,6 +64,7 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
       - name: Install ripgrep
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm ci
       - name: Test
@@ -101,8 +107,13 @@ jobs:
         run: npm run type-check:desktop
 
   desktop-test:
-    name: Test (desktop)
-    runs-on: macos-14
+    name: Test desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,6 +132,7 @@ jobs:
 
   desktop-package:
     name: Package desktop (${{ matrix.os }})
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -136,6 +148,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Profile archive performance budget
+        timeout-minutes: 5
         run: npm run perf:profiles
       - name: Profile archive 1 GiB Stable performance budget
         if: runner.os == 'Linux'
@@ -147,8 +160,15 @@ jobs:
         run: npm run smoke:profiles
       - name: Build unpacked desktop application
         run: npm run package:dir --workspace @turboflux/desktop
+      - name: Build Windows NSIS installer
+        if: runner.os == 'Windows'
+        run: npm exec --workspace @turboflux/desktop -- electron-builder --config electron-builder.yml --win nsis --prepackaged ../../release/win-unpacked
       - name: Verify unpacked desktop package contents
         run: npm run verify:desktop:package -- --report=apps/desktop/generated/package-verification/package-report.json
+      - name: Verify Windows installation and uninstallation
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: node scripts/verify-windows-installer.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -167,9 +187,15 @@ jobs:
         run: npm run verify:profiles:stable-benchmarks
       - name: Run hidden profile acceptance
         if: runner.os != 'Linux' && (success() || failure())
+        timeout-minutes: 5
+        env:
+          TURBOFLUX_PROFILE_QA_DIAGNOSTICS: '1'
         run: npm run qa:profiles:hidden -- --packaged
       - name: Run hidden profile acceptance (Linux)
         if: runner.os == 'Linux' && (success() || failure())
+        timeout-minutes: 5
+        env:
+          TURBOFLUX_PROFILE_QA_DIAGNOSTICS: '1'
         run: xvfb-run --auto-servernum npm run qa:profiles:hidden -- --packaged
       - name: Run hidden Electron Remote Mobile acceptance
         if: runner.os != 'Linux' && (success() || failure())

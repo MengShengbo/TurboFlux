@@ -77,7 +77,9 @@ if (!ownsSingleInstanceLock) app.quit()
 
 if (app.isPackaged) {
   const esbuildPackage = `${process.platform === 'win32' ? 'win32' : process.platform}-${process.arch}`
-  const esbuildBinary = join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@esbuild', esbuildPackage, 'bin', process.platform === 'win32' ? 'esbuild.exe' : 'esbuild')
+  const esbuildBinary = process.platform === 'win32'
+    ? join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@esbuild', esbuildPackage, 'esbuild.exe')
+    : join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', '@esbuild', esbuildPackage, 'bin', 'esbuild')
   if (existsSync(esbuildBinary)) process.env.ESBUILD_BINARY_PATH = esbuildBinary
 }
 let mainWindow

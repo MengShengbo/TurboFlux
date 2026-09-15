@@ -3,7 +3,7 @@ import { getChildProcessSpawnOptions, getDefaultShellSpec, getProcessGroupSignal
 
 describe('platform process adapter', () => {
   it('selects native shells for each supported desktop platform', () => {
-    expect(getDefaultShellSpec('win32')).toMatchObject({ command: 'powershell.exe', id: 'powershell' })
+    expect(getDefaultShellSpec('win32')).toMatchObject({ command: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass'], id: 'powershell' })
     expect(getDefaultShellSpec('linux')).toMatchObject({ command: '/bin/bash', id: 'bash' })
     expect(getDefaultShellSpec('darwin')).toMatchObject({ command: '/bin/zsh', id: 'zsh' })
   })

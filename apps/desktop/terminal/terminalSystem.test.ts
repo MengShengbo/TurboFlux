@@ -1,6 +1,6 @@
 import type { IPty } from 'node-pty'
 import { describe, expect, it, vi } from 'vitest'
-import { DesktopTerminalSystem } from './terminalSystem'
+import { DesktopTerminalSystem, desktopTerminalShell, desktopTerminalShellArguments } from './terminalSystem'
 import type { DesktopTerminalEvent } from './terminalTypes'
 
 class FakePty {
@@ -47,6 +47,12 @@ class FakePty {
 }
 
 describe('DesktopTerminalSystem', () => {
+  it('selects PowerShell with profile isolation on Windows', () => {
+    expect(desktopTerminalShell('win32', { TURBOFLUX_POWERSHELL: 'pwsh.exe' })).toBe('pwsh.exe')
+    expect(desktopTerminalShell('win32', {})).toBe('powershell.exe')
+    expect(desktopTerminalShellArguments('win32')).toEqual(['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass'])
+  })
+
   it('creates independent interactive sessions and streams resumable output', async () => {
     const processes: FakePty[] = []
     const spawn = vi.fn((_file: string, _args: string[], _options: unknown) => {

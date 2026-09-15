@@ -21,7 +21,7 @@ npm ci
 npm run dev:desktop
 ```
 
-Configure your model endpoint and API key in Desktop settings. Native capabilities depend on the host operating system and permissions; computer control uses macOS accessibility.
+Configure your model endpoint and API key in Desktop settings. Desktop runs on macOS, Windows, and Linux; its integrated terminal uses zsh, PowerShell, and bash respectively. Native capabilities depend on the host operating system and permissions; computer control is currently available on macOS only.
 
 The development server defaults to `http://127.0.0.1:15174`. To use another port:
 
@@ -58,6 +58,8 @@ npm run ci                    # complete local check sequence
 ```
 
 `npm run build:core` builds the kernel alone. To package an unpacked Desktop application, run `npm run package:dir --workspace @turboflux/desktop`. Signing and platform-specific distribution require the corresponding platform toolchain and certificates.
+
+Windows development, PowerShell configuration, and NSIS packaging are covered in the [Windows guide](docs/windows.md).
 
 For Desktop remote control setup, see the [runbook](docs/architecture/remote-shell-runbook.md). The browser client requires trusted HTTPS and pairing with the Desktop host.
 

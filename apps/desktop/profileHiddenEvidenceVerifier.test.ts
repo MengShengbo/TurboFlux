@@ -71,7 +71,7 @@ function page(theme: 'light' | 'dark', width: number, screenshot: string) {
     document: { scrollWidth: width, scrollHeight: 900 },
     tabs: 3,
     metrics: 0,
-    headerBacks: 1,
+    title: '用户资料',
     closeActions: 1,
     settingsVisible: true,
     settingsOpacity: '1',
@@ -146,6 +146,7 @@ function result(platform: 'darwin' | 'win32' | 'linux' = 'darwin', arch: 'arm64'
     readonlyAfterRebind: readonly(screenshotFields.readonlyAfterRebind),
     finalProfiles: { profiles: 2, activeProfiles: 1, rebindActions: 0, screenshot: screenshotFields.finalProfiles },
     eightUsers: { profiles: 8, searchFields: 1, screenshot: screenshotFields.eightUsers },
+    terminal: { shell: platform === 'win32' ? 'powershell' : 'bash', outputVerified: true, resized: true, exitCode: 0, closed: true },
     rendererErrors: [],
   }
 }
@@ -248,6 +249,16 @@ describe('Profile hidden evidence verifier', () => {
     })
     expect(report.status).toBe('failed')
     expect(report.errors).toContain('win32-x64/result.json: package SHA-256 does not match package report')
+  })
+
+  it('rejects missing or unsuccessful native terminal evidence', async () => {
+    for (const terminal of [undefined, { shell: 'powershell', outputVerified: false, resized: true, exitCode: 0, closed: true }]) {
+      const root = temporaryRoot()
+      writeArtifact(root, 'win32', { terminal })
+      const report = await verifyProfileHiddenEvidence({ evidenceRoot: root, requiredPlatforms: ['win32'] })
+      expect(report.status).toBe('failed')
+      expect(report.errors).toContain('win32-x64/result.json: native terminal round-trip evidence is invalid')
+    }
   })
 
   it('rejects unknown result fields and missing screenshots', async () => {

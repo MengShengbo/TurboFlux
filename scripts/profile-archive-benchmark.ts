@@ -51,6 +51,7 @@ async function run(): Promise<void> {
   const archivePath = join(root, 'benchmark.turboflux-profile')
   const blobPath = join(root, 'blob.bin')
   const password = Buffer.from('benchmark-password-not-a-secret', 'utf8')
+  let sampler: ReturnType<typeof setInterval> | undefined
   try {
     const kdfStarted = performance.now()
     const material = await createArchiveEncryption(password)
@@ -74,7 +75,7 @@ async function run(): Promise<void> {
 
     const rssBefore = process.memoryUsage().rss
     let peakRss = rssBefore
-    const sampler = setInterval(() => { peakRss = Math.max(peakRss, process.memoryUsage().rss) }, 10)
+    sampler = setInterval(() => { peakRss = Math.max(peakRss, process.memoryUsage().rss) }, 10)
     const roundTripStarted = performance.now()
     const written = await writeProfileArchive({ targetPath: archivePath, entries, password, verifyDocument: false })
     let expandedBytes = 0
@@ -129,6 +130,7 @@ async function run(): Promise<void> {
     console.log(JSON.stringify(sanitizedResult, null, 2))
     if (failures.length > 0) throw new Error(`Profile archive benchmark failed: ${failures.join('; ')}`)
   } finally {
+    clearInterval(sampler)
     password.fill(0)
     await rm(root, { recursive: true, force: true })
   }
@@ -136,7 +138,8 @@ async function run(): Promise<void> {
 
 try {
   await run()
-} catch {
-  process.stderr.write('Profile archive benchmark failed\n')
+} catch (error) {
+  const code = error instanceof Error ? (error as NodeJS.ErrnoException).code || error.name : 'unknown error'
+  process.stderr.write(`Profile archive benchmark failed (${code})\n`)
   process.exitCode = 1
 }

@@ -393,7 +393,9 @@ function verifyNativeRuntime(resourcesDirectory, platform, arch) {
   ]
   const ptyFiles = platform === 'win32'
     ? ['pty.node', 'conpty.node', 'conpty_console_list.node']
-    : ['pty.node', 'spawn-helper']
+    : platform === 'darwin'
+      ? ['pty.node', 'spawn-helper']
+      : ['pty.node']
   const completePtyDirectory = ptyCandidates.find(directory => ptyFiles.every(filename => {
     const path = join(directory, filename)
     return existsSync(path) && lstatSync(path).isFile() && lstatSync(path).size > 0
@@ -406,7 +408,9 @@ function verifyNativeRuntime(resourcesDirectory, platform, arch) {
   }
   const esbuildPackage = `${platform === 'win32' ? 'win32' : platform}-${arch}`
   const esbuildPackageEntry = `/node_modules/@esbuild/${esbuildPackage}/package.json`
-  const esbuildBinary = join(unpackedModules, '@esbuild', esbuildPackage, 'bin', platform === 'win32' ? 'esbuild.exe' : 'esbuild')
+  const esbuildBinary = platform === 'win32'
+    ? join(unpackedModules, '@esbuild', esbuildPackage, 'esbuild.exe')
+    : join(unpackedModules, '@esbuild', esbuildPackage, 'bin', 'esbuild')
   verifyNativeBinary(esbuildBinary, `esbuild ${platform}-${arch} runtime`, platform, arch, { executable: platform !== 'win32' })
   return {
     esbuildBinary,

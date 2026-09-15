@@ -410,7 +410,7 @@ html[data-background-media] .profile-manager-toolbar {
   padding-left: 0;
 }
 
-.settings-content[data-section="data"] .profile-manager-detail {
+.settings-content[data-section="data"] .profile-manager-content > .profile-manager-detail {
   padding-right: 0;
   padding-left: 28px;
 }
@@ -429,7 +429,7 @@ html[data-background-media] .profile-manager-toolbar {
     min-height: 34px;
   }
 
-  .settings-content[data-section="data"] .profile-manager-detail {
+  .settings-content[data-section="data"] .profile-manager-content > .profile-manager-detail {
     padding-right: 0;
     padding-left: 0;
   }
@@ -882,16 +882,23 @@ html[data-background-media] .profile-manager-toolbar {
 }
 
 .profile-manager-create-overlay .profile-manager-create-view {
+  --profile-create-padding: 26px;
   width: min(560px, 100%);
   max-height: min(660px, calc(100% - 24px));
-  padding: 24px 26px 0;
+  padding: 24px var(--profile-create-padding) 0;
   border-radius: 14px;
   box-shadow: 0 24px 70px rgba(12, 14, 12, .24), 0 2px 9px rgba(12, 14, 12, .08);
 }
 
 .profile-manager-create-overlay .profile-manager-create-form {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
   margin-top: 24px;
+}
+
+.profile-manager-create-form > .settings-switch {
+  display: inline-flex;
 }
 
 .profile-manager-create-overlay .profile-manager-create-form fieldset:not(.profile-manager-color-field) {
@@ -909,8 +916,8 @@ html[data-background-media] .profile-manager-toolbar {
 
 .profile-manager-create-overlay .profile-manager-footer-actions {
   min-height: 58px;
-  margin-top: 24px;
-  padding: 9px 26px;
+  margin: 24px calc(-1 * var(--profile-create-padding)) 0;
+  padding: 9px var(--profile-create-padding);
 }
 
 html[data-theme="dark"] .profile-export-window {
@@ -1007,10 +1014,11 @@ html[data-theme="dark"] .profile-export-footer {
   }
 
   .profile-manager-create-overlay .profile-manager-create-view {
+    --profile-create-padding: 20px;
     width: 100%;
     height: 100%;
     max-height: none;
-    padding: 22px 20px 0;
+    padding: 22px var(--profile-create-padding) 0;
     border: 0;
     border-radius: 0;
   }

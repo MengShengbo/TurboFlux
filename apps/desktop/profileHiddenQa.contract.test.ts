@@ -9,7 +9,7 @@ describe('hidden profile acceptance contract', () => {
     expect(script).toContain('styles.backdropFilter')
     expect(script).toContain('styles.webkitBackdropFilter')
     expect(script).toContain('materialBackdrop = hasBackdrop(wallpaperMaterial.overlayBackdrop) || hasBackdrop(wallpaperMaterial.shellBackdrop)')
-    expect(script).toContain('materialFallback = translucent(wallpaperMaterial.shell) && translucent(wallpaperMaterial.header) && translucent(wallpaperMaterial.nav)')
+    expect(script).toContain('materialFallback = translucent(wallpaperMaterial.overlay) || translucent(wallpaperMaterial.shell)')
     expect(script).toContain('(materialBackdrop || materialFallback)')
     expect(script).toContain('transparent(wallpaperMaterial.content)')
     expect(script).not.toContain("wallpaperMaterial.overlayBackdrop === 'none'")

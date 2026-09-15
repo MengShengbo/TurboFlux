@@ -124,7 +124,7 @@ function expectedRemoteMobilePath(platform) {
 
 function expectedRuntimeSuffixes(platform) {
   if (platform === 'darwin') return ['/pty.node', '/spawn-helper', '/esbuild', '/native/TurboFluxComputerHelper']
-  if (platform === 'linux') return ['/pty.node', '/spawn-helper', '/esbuild']
+  if (platform === 'linux') return ['/pty.node', '/esbuild']
   return ['/pty.node', '/conpty.node', '/conpty_console_list.node', '/esbuild.exe']
 }
 

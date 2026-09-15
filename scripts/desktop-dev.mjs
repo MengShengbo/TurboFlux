@@ -9,8 +9,8 @@ const scriptsDirectory = dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = resolve(scriptsDirectory, '..')
 const publicRepositoryRoot = resolve(process.env.TURBOFLUX_PUBLIC_REPO || repositoryRoot)
 const desktopRoot = join(repositoryRoot, 'apps', 'desktop')
-const viteBinary = join(desktopRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite')
 const desktopRequire = createRequire(join(desktopRoot, 'package.json'))
+const viteBinary = join(dirname(desktopRequire.resolve('vite/package.json')), 'bin', 'vite.js')
 const electronBinary = desktopRequire('electron')
 const mainEntry = join(desktopRoot, 'main.mjs')
 const builtMainEntry = join(desktopRoot, 'generated', 'main.mjs')
@@ -25,7 +25,8 @@ const installedCoreRoot = resolve(dirname(installedCoreEntry), '..', '..')
 const viteConfig = join(desktopRoot, 'vite.config.mjs')
 const desktopServer = resolveDesktopDevServer(process.env)
 const desktopUrl = desktopServer.url
-const npmBinary = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const npmCli = process.env.npm_execpath
+if (!npmCli || !existsSync(npmCli)) throw new Error('Start Desktop with npm run dev:desktop.')
 const devLockPath = join(desktopRoot, 'generated', 'desktop-dev.lock')
 const remoteDebuggingPort = process.env.TURBOFLUX_ELECTRON_REMOTE_DEBUGGING_PORT?.trim()
 const isolatedUserDataDirectory = process.env.TURBOFLUX_ELECTRON_USER_DATA_DIR?.trim()
@@ -68,7 +69,7 @@ function acquireDevLock() {
       if (error?.code !== 'EEXIST') throw error
       let existingPid = 0
       try { existingPid = Number.parseInt(readFileSync(devLockPath, 'utf8').trim(), 10) } catch {}
-      if (processIsRunning(existingPid)) throw new Error(`TurboFlux Desktop dev is already running (PID ${existingPid}).`)
+      if (processIsRunning(existingPid)) throw new Error(`TurboFlux Desktop dev is already running (PID ${existingPid}).`, { cause: error })
       try { unlinkSync(devLockPath) } catch (unlinkError) {
         if (unlinkError?.code !== 'ENOENT') throw unlinkError
       }
@@ -86,7 +87,7 @@ function releaseDevLock() {
 acquireDevLock()
 
 function buildSharedCore() {
-  const result = spawnSync(npmBinary, ['run', 'build:core'], {
+  const result = spawnSync(process.execPath, [npmCli, 'run', 'build:core'], {
     cwd: publicRepositoryRoot,
     stdio: 'inherit',
     env: process.env,
@@ -98,7 +99,7 @@ function buildSharedCore() {
 }
 
 function buildRemoteProtocol() {
-  const result = spawnSync(npmBinary, ['run', 'build'], {
+  const result = spawnSync(process.execPath, [npmCli, 'run', 'build'], {
     cwd: remoteProtocolRoot,
     stdio: 'inherit',
     env: process.env,
@@ -119,7 +120,7 @@ buildRemoteProtocol()
 buildSharedCore()
 buildDesktopMain()
 
-const viteProcess = spawn(viteBinary, ['--config', viteConfig], {
+const viteProcess = spawn(process.execPath, [viteBinary, '--config', viteConfig], {
   cwd: repositoryRoot,
   stdio: 'inherit',
   env: { ...process.env, BROWSER: 'none' },
@@ -234,7 +235,7 @@ function rebuildRemoteProtocolAndRestart() {
 }
 
 const closeWatchers = [mainEntry, preloadEntry, desktopPathsEntry, runtimeHostEntry].map(file => watch(file, restartElectron))
-for (const directory of ['browser', 'computer', 'systems']) {
+for (const directory of ['browser', 'computer', 'systems', 'terminal', 'remote']) {
   closeWatchers.push(watch(join(desktopRoot, directory), { recursive: true }, restartElectron))
 }
 for (const directory of ['application', 'core', 'kernel', 'platform', 'shared', 'state', 'tools']) {

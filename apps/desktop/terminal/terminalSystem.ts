@@ -48,13 +48,13 @@ function terminalEnvironment(): Record<string, string> {
   return environment
 }
 
-function defaultShell(): string {
-  if (process.platform === 'win32') return process.env.ComSpec || 'powershell.exe'
-  return process.env.SHELL || '/bin/zsh'
+export function desktopTerminalShell(platform: NodeJS.Platform = process.platform, environment: NodeJS.ProcessEnv = process.env): string {
+  if (platform === 'win32') return environment.TURBOFLUX_POWERSHELL || environment.POWERSHELL || 'powershell.exe'
+  return environment.SHELL || (platform === 'darwin' ? '/bin/zsh' : '/bin/bash')
 }
 
-function shellArguments(): string[] {
-  return process.platform === 'win32' ? [] : ['-l']
+export function desktopTerminalShellArguments(platform: NodeJS.Platform = process.platform): string[] {
+  return platform === 'win32' ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass'] : ['-l']
 }
 
 function shellLabel(shell: string): string {
@@ -85,11 +85,11 @@ export class DesktopTerminalSystem {
     if (!options.cwd || typeof options.cwd !== 'string') throw new Error('Terminal workspace is required')
     if (!this.ptyFactory) this.ptyFactory = await import('node-pty')
 
-    const shell = defaultShell()
+    const shell = desktopTerminalShell()
     const label = shellLabel(shell)
     const cols = boundedInteger(options.cols, DEFAULT_COLS, 20, 400)
     const rows = boundedInteger(options.rows, DEFAULT_ROWS, 5, 200)
-    const processHandle = this.ptyFactory.spawn(shell, shellArguments(), {
+    const processHandle = this.ptyFactory.spawn(shell, desktopTerminalShellArguments(), {
       name: 'xterm-256color',
       cols,
       rows,

@@ -37,8 +37,8 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && ../../node_modules/.bin/tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
-    "type-check": "../../node_modules/.bin/tsc --noEmit -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json",
     "prepack": "npm run build"
   },
   "dependencies": {

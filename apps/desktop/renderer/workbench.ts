@@ -5810,7 +5810,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
       event.preventDefault()
       return
     }
-    if (event.metaKey && event.key.toLowerCase() === 'l' && browserSnapshot?.visible) {
+    if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l' && browserSnapshot?.visible) {
       event.preventDefault()
       openInspector('browser')
       window.requestAnimationFrame(() => {
@@ -5820,18 +5820,18 @@ export function mountWorkbench(app: HTMLDivElement): void {
       })
       return
     }
-    if (event.metaKey && event.key.toLowerCase() === 't' && browserSnapshot?.visible) {
+    if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 't' && browserSnapshot?.visible) {
       event.preventDefault()
       void bridge?.browserNewTab().then(renderBrowserSnapshot).catch(error => showToast(errorMessage(error)))
       return
     }
-    if (event.metaKey && event.key.toLowerCase() === 'w' && activeInspectorPanelTab()?.kind === 'browser') {
+    if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'w' && activeInspectorPanelTab()?.kind === 'browser') {
       event.preventDefault()
       const panelTab = activeInspectorPanelTab()
       if (panelTab) void closeInspectorPanelTab(panelTab.id)
       return
     }
-    if (event.metaKey && event.key.toLowerCase() === 'k') {
+    if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault()
       void commandPalette?.open()
     }

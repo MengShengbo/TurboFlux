@@ -18,10 +18,14 @@ function runtimeFiles(platform: 'darwin' | 'linux' | 'win32', arch: 'arm64' | 'x
   const target = `${platform}-${arch}`
   const root = platform === 'darwin' ? 'Contents/Resources' : 'resources'
   const ptyRoot = `${root}/app.asar.unpacked/node_modules/node-pty/prebuilds/${platform}-${arch}`
-  const esbuild = `${root}/app.asar.unpacked/node_modules/@esbuild/${platform}-${arch}/bin/${platform === 'win32' ? 'esbuild.exe' : 'esbuild'}`
+  const esbuild = platform === 'win32'
+    ? `${root}/app.asar.unpacked/node_modules/@esbuild/${platform}-${arch}/esbuild.exe`
+    : `${root}/app.asar.unpacked/node_modules/@esbuild/${platform}-${arch}/bin/esbuild`
   const paths = platform === 'win32'
     ? [`${ptyRoot}/pty.node`, `${ptyRoot}/conpty.node`, `${ptyRoot}/conpty_console_list.node`, esbuild]
-    : [`${ptyRoot}/pty.node`, `${ptyRoot}/spawn-helper`, esbuild]
+    : platform === 'darwin'
+      ? [`${ptyRoot}/pty.node`, `${ptyRoot}/spawn-helper`, esbuild]
+      : [`${ptyRoot}/pty.node`, esbuild]
   if (platform === 'darwin') paths.push(`${root}/native/TurboFluxComputerHelper`)
   return paths.map(path => ({ path, bytes: 1024, sha256: digest, targets: [target] }))
 }
