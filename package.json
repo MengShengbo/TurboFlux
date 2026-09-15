@@ -78,7 +78,7 @@
     "@electron/asar": "^3.4.1",
     "@types/node": "^20.10.0",
     "@types/react": "^19.2.15",
-    "jscpd": "^5.0.15",
+    "jscpd": "^5.2.0",
     "knip": "^6.32.2",
     "lefthook": "^2.1.10",
     "node-pty": "^1.1.0",
