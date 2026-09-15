@@ -149,7 +149,7 @@ jobs:
         run: npm run package:dir --workspace @turboflux/desktop
       - name: Verify unpacked desktop package contents
         run: npm run verify:desktop:package -- --report=apps/desktop/generated/package-verification/package-report.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: desktop-package-report-${{ matrix.os }}
@@ -174,28 +174,28 @@ jobs:
       - name: Run hidden Electron Remote Mobile acceptance
         if: runner.os != 'Linux' && (success() || failure())
         run: npm run qa:remote:hidden -- --package-correlated
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: profile-archive-smoke-${{ matrix.os }}
           path: apps/desktop/generated/profile-smoke/*.json
           if-no-files-found: error
           retention-days: 30
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: runner.os == 'Linux' && always()
         with:
           name: profile-archive-stable-benchmark-${{ matrix.os }}
           path: apps/desktop/generated/profile-benchmarks/*.json
           if-no-files-found: error
           retention-days: 30
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: profile-hidden-qa-${{ matrix.os }}
           path: apps/desktop/generated/profile-qa
           if-no-files-found: error
           retention-days: 30
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: runner.os != 'Linux' && always()
         with:
           name: remote-mobile-hidden-qa-${{ matrix.os }}
@@ -240,14 +240,14 @@ jobs:
       - name: Verify macOS, Windows, and Linux hidden Profile evidence
         if: always()
         run: npm run verify:profiles:hidden:evidence
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: profile-cross-platform-evidence-report
           path: apps/desktop/generated/profile-smoke/profile-evidence-report.json
           if-no-files-found: error
           retention-days: 30
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: profile-hidden-cross-platform-evidence-report
@@ -275,7 +275,7 @@ jobs:
       - name: Verify macOS, Windows, and Linux package evidence
         if: always()
         run: npm run verify:desktop:package:evidence
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: desktop-package-cross-platform-evidence-report
@@ -311,7 +311,7 @@ jobs:
       - name: Verify macOS and Windows Remote Mobile evidence
         if: always()
         run: npm run verify:remote:evidence
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: remote-mobile-hidden-qa-report
