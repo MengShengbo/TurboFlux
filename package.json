@@ -80,7 +80,7 @@
     "@types/react": "^19.2.15",
     "jscpd": "^5.0.15",
     "knip": "^6.32.2",
-    "lefthook": "^2.1.10",
+    "lefthook": "^2.1.12",
     "node-pty": "^1.1.0",
     "oxlint": "^1.78.0",
     "pngjs": "^5.0.0",
