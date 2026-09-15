@@ -438,15 +438,17 @@ describe('Desktop packaging contract', () => {
     expect(result.stderr).not.toContain('verify-desktop-macos-release.mjs:')
   })
 
-  it('verifies every native CI package before hidden acceptance and artifact upload', () => {
+  it('verifies every native CI package and uploads reports without application bundles', () => {
     expect(rootPackage.scripts['verify:desktop:package']).toBe(
       'node scripts/verify-desktop-package.mjs --report=apps/desktop/generated/package-verification/package-report.json',
     )
     expect(continuousIntegration).toContain('os: [macos-14, windows-latest, ubuntu-latest]')
     expect(continuousIntegration).toContain('npm run verify:desktop:package -- --report=apps/desktop/generated/package-verification/package-report.json')
-    expect(continuousIntegration).toContain('release/*-unpacked/')
-    expect(continuousIntegration).toContain('release/mac/')
-    expect(continuousIntegration).toContain('release/mac-*/')
+    expect(continuousIntegration).toContain('run: npm run package:dir --workspace @turboflux/desktop')
+    expect(continuousIntegration).not.toContain('name: desktop-unpacked-')
+    expect(continuousIntegration).not.toContain('release/*-unpacked/')
+    expect(continuousIntegration).not.toContain('release/mac/')
+    expect(continuousIntegration).not.toContain('release/mac-*/')
     expect(continuousIntegration).toContain('name: desktop-package-report-${{ matrix.os }}')
     expect(continuousIntegration).toMatch(/uses: actions\/upload-artifact@v4\n\s+if: always\(\)\n\s+with:\n\s+name: desktop-package-report-/u)
     expect(continuousIntegration).toContain('pattern: desktop-package-report-*')
