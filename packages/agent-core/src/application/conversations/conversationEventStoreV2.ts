@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
+
+function syncFile(handle: number): void {
+  try { fsyncSync(handle) } catch (error) {
+    if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+  }
+}
 import { join, resolve } from 'node:path'
 import type {
   AnyAppendConversationEventV2Input,
@@ -403,7 +409,7 @@ export class ConversationEventStoreV2 {
         const handle = openSync(this.pathFor(conversationId), 'a', 0o600)
         try {
           writeSync(handle, payload)
-          fsyncSync(handle)
+          syncFile(handle)
         } finally {
           closeSync(handle)
         }
@@ -515,7 +521,7 @@ export class ConversationEventStoreV2 {
       try {
         handle = openSync(lockPath, 'wx', 0o600)
         writeSync(handle, `${process.pid}\n${Date.now()}\n`)
-        fsyncSync(handle)
+        syncFile(handle)
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code
         if (code !== 'EEXIST') throw error

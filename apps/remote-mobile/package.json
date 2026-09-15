@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 4180",
     "type-check": "tsc --noEmit -p tsconfig.json",
-    "test": "../../node_modules/.bin/vitest run --config vitest.config.ts",
+    "test": "vitest run --config vitest.config.ts",
     "build": "vite build"
   },
   "dependencies": {

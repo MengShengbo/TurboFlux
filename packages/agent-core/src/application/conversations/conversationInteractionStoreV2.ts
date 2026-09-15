@@ -1,4 +1,10 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+
+function syncFile(handle: number): void {
+  try { fsyncSync(handle) } catch (error) {
+    if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+  }
+}
 import { join, resolve } from 'node:path'
 import type { ConversationInteractionState } from './types'
 
@@ -27,7 +33,7 @@ function durableJson(path: string, value: unknown): void {
   writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 })
   const handle = openSync(temporary, 'r')
   try {
-    fsyncSync(handle)
+    syncFile(handle)
   } finally {
     closeSync(handle)
   }

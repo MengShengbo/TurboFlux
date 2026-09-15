@@ -108,6 +108,12 @@ function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
+function syncFile(handle: number): void {
+  try { fsyncSync(handle) } catch (error) {
+    if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+  }
+}
+
 function recoveryEventId(kind: string, ...parts: Array<string | number>): string {
   return stableConversationV2Id(`recovery-${kind}`, ...parts)
 }
@@ -117,7 +123,7 @@ function atomicJson(path: string, value: unknown): void {
   writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 })
   const handle = openSync(temporary, 'r')
   try {
-    fsyncSync(handle)
+    syncFile(handle)
   } finally {
     closeSync(handle)
   }

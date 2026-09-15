@@ -12,6 +12,12 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+
+function syncFile(handle: number): void {
+  try { fsyncSync(handle) } catch (error) {
+    if (process.platform !== 'win32' || (error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+  }
+}
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { assertAutomationRunTransition } from './automationStateMachine'
 import {
@@ -1366,14 +1372,14 @@ export class AutomationRepository {
     const descriptor = openSync(temporaryPath, 'wx', 0o600)
     try {
       writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-      fsyncSync(descriptor)
+      syncFile(descriptor)
     } finally {
       closeSync(descriptor)
     }
     renameSync(temporaryPath, path)
     try {
       const directory = openSync(dirname(path), 'r')
-      try { fsyncSync(directory) } finally { closeSync(directory) }
+      try { syncFile(directory) } finally { closeSync(directory) }
     } catch {}
   }
 
@@ -1382,7 +1388,7 @@ export class AutomationRepository {
     try {
       descriptor = openSync(this.lockPath, 'wx', 0o600)
       writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, acquiredAt: this.now() })}\n`, 'utf8')
-      fsyncSync(descriptor)
+      syncFile(descriptor)
       return descriptor
     } catch (error) {
       if (descriptor !== undefined) {

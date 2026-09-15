@@ -123,7 +123,7 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   const data = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
   try {
     await writeFile(temporaryPath, data, { mode: 0o600, flag: 'wx' })
-    const handle = await open(temporaryPath, 'r')
+    const handle = await open(temporaryPath, 'r+')
     try { await handle.sync() } finally { await handle.close() }
     await rename(temporaryPath, path)
   } finally {
