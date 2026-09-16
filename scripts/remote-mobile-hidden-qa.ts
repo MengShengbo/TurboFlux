@@ -364,7 +364,7 @@ async function main(options = parseArguments(process.argv.slice(2))) {
     invariant(report.status === 'passed', report.errors.join('; '))
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
   } catch (error) {
-    if (electronErrors) reportDiagnostic(electronErrors)
+    for (const line of electronErrors.split(/\r?\n/).filter(Boolean)) reportDiagnostic(line)
     throw error
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')

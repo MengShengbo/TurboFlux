@@ -486,19 +486,21 @@ describe('NodeToolExecutor file and process lifecycle', () => {
   }))
 
 
-  it('propagates cancellation into ripgrep searches', async () => withWorkspace(async ({ workspace }) => {
+  it.each(['before', 'after'] as const)('cancels ripgrep searches %s launch and releases the workspace', async timing => withWorkspace(async ({ workspace }) => {
     writeFileSync(join(workspace, 'source.ts'), 'needle\n', 'utf-8')
     const executor = new NodeToolExecutor(workspace)
     const controller = new AbortController()
-    controller.abort()
+    if (timing === 'before') controller.abort()
 
-    const [content, files] = await Promise.all([
+    const pending = Promise.all([
       executor.searchContentPage('needle', workspace, '*.ts', false, { signal: controller.signal }),
       executor.searchFiles('**/*.ts', workspace, { signal: controller.signal }),
     ])
+    controller.abort()
+    const [content, files] = await pending
 
-    expect(content.success).toBe(false)
-    expect(files.success).toBe(false)
+    expect(content).toMatchObject({ success: false, error: 'Search cancelled' })
+    expect(files).toMatchObject({ success: false, error: 'Search cancelled' })
   }))
 
 

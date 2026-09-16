@@ -34,13 +34,17 @@ function boundedInteger(value: number | undefined, fallback: number, min: number
 }
 
 async function capture(args: string[], cwd: string, signal?: AbortSignal): Promise<{ output: string; complete: boolean; warning?: string }> {
+  if (signal?.aborted) throw new Error('Search cancelled')
   type SearchProcessError = Error & { code?: string | number; stdout?: string; stderr?: string; killed?: boolean }
   try {
     const packagedPath = rgPath.replace(/\.asar([\\/])/, '.asar.unpacked$1')
     const executable = process.platform === 'win32' && !/\.exe$/i.test(packagedPath) ? `${packagedPath}.exe` : packagedPath
-    const { stdout } = await execFileAsync(executable, args, {
+    const pending = execFileAsync(executable, args, {
       cwd, signal, encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: MAX_CAPTURE_BYTES,
     })
+    // Abort errors can arrive before the process releases its Windows directory handles.
+    const closed = new Promise<void>(resolveClose => pending.child.once('close', () => resolveClose()))
+    const { stdout } = await pending.finally(() => closed)
     return { output: stdout, complete: true }
   } catch (error) {
     const failure = error as SearchProcessError
