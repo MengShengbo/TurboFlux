@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const privatePrefixes = [
   'control-plane/',
@@ -81,7 +82,7 @@ function collectSourceFiles(directory) {
     else if (/\.(?:ts|tsx|mjs|cjs)$/.test(entry.name) && !/\.test\.(?:ts|tsx)$/.test(entry.name)) publicSourceFiles.push(path)
   }
 }
-for (const root of publicSourceRoots) collectSourceFiles(new URL(`../packages/agent-core/src/${root}/`, import.meta.url).pathname)
+for (const root of publicSourceRoots) collectSourceFiles(fileURLToPath(new URL(`../packages/agent-core/src/${root}/`, import.meta.url)))
 for (const file of publicSourceFiles) {
   const source = readFileSync(file, 'utf8')
   if (/from ['"][^'"]*desktop\//.test(source) || /import\(['"][^'"]*desktop\//.test(source)) {
@@ -109,8 +110,8 @@ for (const path of removedCommercialPaths) {
   }
 }
 const commercialSymbolPattern = /PluginMarketplaceFeedClient|MarketplaceInstallManager|TURBOFLUX_WORK_PACK_CATALOG_URL|turboflux-managed|controlPlane|productAccount|creditBalance|creditUsage|official-market/
-collectSourceFiles(new URL('../apps/desktop/renderer/', import.meta.url).pathname)
-for (const file of [...publicSourceFiles, ...['main.mjs', 'runtimeHost.ts', 'preload.cjs'].map(name => new URL(`../apps/desktop/${name}`, import.meta.url).pathname)]) {
+collectSourceFiles(fileURLToPath(new URL('../apps/desktop/renderer/', import.meta.url)))
+for (const file of [...publicSourceFiles, ...['main.mjs', 'runtimeHost.ts', 'preload.cjs'].map(name => fileURLToPath(new URL(`../apps/desktop/${name}`, import.meta.url)))]) {
   if (commercialSymbolPattern.test(readFileSync(file, 'utf8'))) failures.push(`source contains removed commercial coupling: ${file}`)
 }
 

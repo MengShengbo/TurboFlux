@@ -233,6 +233,7 @@ async function main(options) {
   const port = await availablePort()
   const child = spawn(executable, [
     ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+    ...(process.platform !== 'darwin' ? ['--disable-gpu'] : []),
     ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : []),
     `--user-data-dir=${join(qaRoot, 'electron')}`,
     `--remote-debugging-port=${port}`,

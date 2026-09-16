@@ -1234,6 +1234,7 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       backgroundThrottling: !hiddenQaWindow,
+      offscreen: hiddenQaWindow && process.platform !== 'darwin',
       webSecurity: true,
       allowRunningInsecureContent: false,
       webviewTag: false,

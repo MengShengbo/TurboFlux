@@ -9,7 +9,7 @@ import { DesktopRemoteHostManager, type DesktopRemoteHostStatus } from '../apps/
 import { verifyRemoteMobileEvidence } from './verify-remote-mobile-evidence.mjs'
 import { captureGithubActionsProvenance } from './github-actions-provenance.mjs'
 import { discoverPackagedExecutable, verifyPackagedExecutableIdentity } from './desktop-packaged-executable.mjs'
-import { projectEvidenceFields, writeSourceEvidenceReportAtomically } from './source-evidence-report.mjs'
+import { projectEvidenceFields, sanitizeSourceEvidenceReport, writeSourceEvidenceReportAtomically } from './source-evidence-report.mjs'
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const mobileRoot = join(repositoryRoot, 'apps', 'remote-mobile')
@@ -24,6 +24,16 @@ const electron = desktopRequire('electron') as string
 
 function invariant(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`Remote Mobile hidden QA failed: ${message}`)
+}
+
+function reportDiagnostic(error: unknown) {
+  if (process.env.TURBOFLUX_REMOTE_QA_DIAGNOSTICS !== '1') return
+  try {
+    const diagnostic = sanitizeSourceEvidenceReport({ message: error instanceof Error ? error.message : String(error) })
+    process.stderr.write(`${JSON.stringify(diagnostic)}\n`)
+  } catch {
+    process.stderr.write('Remote Mobile QA diagnostic was redacted\n')
+  }
 }
 
 function parseArguments(argumentsList: string[]) {
@@ -238,6 +248,7 @@ async function main(options = parseArguments(process.argv.slice(2))) {
   const diagnosticPath = join(rendererTemporaryRoot, 'diagnostic.json')
   await mkdir(rendererTemporaryRoot, { recursive: true })
   let child: ReturnType<typeof spawn> | undefined
+  let electronErrors = ''
   try {
     await manager.initialize()
     await manager.attachRuntime(runtime)
@@ -248,12 +259,13 @@ async function main(options = parseArguments(process.argv.slice(2))) {
     const targetUrl = `${status.localEndpointUrl}/#${new URLSearchParams({ pair: pairing.code })}`
     child = spawn(electron, [
       ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+      ...(process.platform !== 'darwin' ? ['--disable-gpu'] : []),
       ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : []),
       `--user-data-dir=${join(qaRoot, 'electron')}`,
       electronEntry,
     ], {
       cwd: repositoryRoot,
-      stdio: ['ignore', 'ignore', 'ignore'],
+      stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
       env: {
         ...process.env,
@@ -261,6 +273,9 @@ async function main(options = parseArguments(process.argv.slice(2))) {
         TURBOFLUX_REMOTE_MOBILE_QA_EVIDENCE: evidenceRoot,
         TURBOFLUX_REMOTE_MOBILE_QA_TEMP: rendererTemporaryRoot,
       },
+    })
+    child.stderr?.on('data', chunk => {
+      electronErrors = (electronErrors + String(chunk)).slice(-16_384)
     })
 
     const exitPromise = waitForExit(child, 30_000)
@@ -348,6 +363,9 @@ async function main(options = parseArguments(process.argv.slice(2))) {
     })
     invariant(report.status === 'passed', report.errors.join('; '))
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  } catch (error) {
+    if (electronErrors) reportDiagnostic(electronErrors)
+    throw error
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
     if (child) {
@@ -365,7 +383,8 @@ async function main(options = parseArguments(process.argv.slice(2))) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     await main()
-  } catch {
+  } catch (error) {
+    reportDiagnostic(error)
     process.stderr.write('Remote Mobile hidden QA failed\n')
     process.exitCode = 1
   }

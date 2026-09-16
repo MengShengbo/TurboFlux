@@ -33,6 +33,7 @@ async function main() {
     backgroundColor: '#f4f4f0',
     webPreferences: {
       backgroundThrottling: false,
+      offscreen: process.platform !== 'darwin',
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
