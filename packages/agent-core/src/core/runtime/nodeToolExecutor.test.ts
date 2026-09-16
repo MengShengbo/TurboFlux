@@ -12,7 +12,10 @@ import { RuntimeTaskManager } from './runtimeTaskManager.js'
 import { WebResearchService } from './webResearchService.js'
 import { hashText } from '../fileIO.js'
 
-const shellTimeout = process.platform === 'win32' ? 15_000 : 5_000
+// The first Windows PowerShell process can exceed 15 seconds on a fresh runner.
+// Give real shell integration checks the runtime's normal 30-second deadline.
+const shellTimeout = process.platform === 'win32' ? 30_000 : 5_000
+const shellTestTimeout = shellTimeout + 10_000
 
 function makeTempDir(prefix: string): string {
   return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)))
@@ -128,13 +131,14 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
 
     const blocked = await executor.runCommand('echo hello', workspace)
-    const approved = await executor.runCommand('echo hello', workspace, {}, shellTimeout, true)
-
     expect(blocked.success).toBe(false)
     expect(blocked.error).toContain('explicit permission')
-    expect(approved).toMatchObject({ success: true, data: { exitCode: 0 } })
+    expect(executor.getRuntimeTaskManager().listTasks()).toEqual([])
+
+    const approved = await executor.runCommand('echo hello', workspace, {}, shellTimeout, true)
+    expect(approved, JSON.stringify(approved)).toMatchObject({ success: true, data: { exitCode: 0, timedOut: false } })
     expect(approved.data?.stdout.trim()).toBe('hello')
-  }), 20_000)
+  }), shellTestTimeout)
 
   it('does not let an approval decision expand the capability profile', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace)
@@ -246,18 +250,18 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
     const result = await executor.runCommand('node -e "process.exit(7)"', workspace, {}, shellTimeout, true)
 
-    expect(result).toMatchObject({ success: true, data: { exitCode: 7 } })
+    expect(result, JSON.stringify(result)).toMatchObject({ success: true, data: { exitCode: 7, timedOut: false } })
     expect(result.error).toBeUndefined()
-  }), 20_000)
+  }), shellTestTimeout)
 
   it('decodes shell output as UTF-8', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
     const command = process.platform === 'win32' ? "Write-Output '你好，世界'" : "printf '你好，世界'"
     const result = await executor.runCommand(command, workspace, {}, shellTimeout, true)
 
-    expect(result).toMatchObject({ success: true, data: { exitCode: 0 } })
+    expect(result, JSON.stringify(result)).toMatchObject({ success: true, data: { exitCode: 0, timedOut: false } })
     expect(result.data?.stdout).toContain('你好，世界')
-  }), 20_000)
+  }), shellTestTimeout)
 
   it('tracks successful foreground processes through completion', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace)
