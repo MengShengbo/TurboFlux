@@ -192,6 +192,7 @@ class CdpSession {
       const pending = this.pending.get(payload.id)
       if (!pending) return
       this.pending.delete(payload.id)
+      clearTimeout(pending.timeout)
       if (payload.error) pending.reject(new Error(payload.error.message))
       else pending.resolve(payload.result)
     })
@@ -200,12 +201,21 @@ class CdpSession {
   call(method, params = {}) {
     const id = this.nextId++
     return new Promise((resolvePromise, reject) => {
-      this.pending.set(id, { resolve: resolvePromise, reject })
+      const timeout = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`Desktop QA protocol request timed out: ${method}`))
+      }, 30_000)
+      this.pending.set(id, { resolve: resolvePromise, reject, timeout })
       this.socket.send(JSON.stringify({ id, method, params }))
     })
   }
 
   close() {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout)
+      pending.reject(new Error('Desktop QA protocol session closed'))
+    }
+    this.pending.clear()
     this.socket.close()
   }
 }

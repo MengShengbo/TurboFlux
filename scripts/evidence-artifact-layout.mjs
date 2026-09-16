@@ -1,9 +1,13 @@
 import { readdir } from 'node:fs/promises'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { formatEvidenceFailure, validateEvidenceReportOutputPath } from './evidence-report-output.mjs'
 
 function check(condition, errors, message) {
   if (!condition) errors.push(message)
+}
+
+export function portableRelative(root, value) {
+  return relative(root, value).split(sep).join('/')
 }
 
 const digestPattern = /^[a-f0-9]{64}$/u
@@ -82,16 +86,16 @@ export async function verifyEvidenceArtifactLayout(options) {
     try {
       entries = await readdir(directory, { withFileTypes: true })
     } catch (error) {
-      options.errors.push(`${relative(evidenceRoot, directory)}: ${formatEvidenceFailure('evidence directory cannot be read', error)}`)
+      options.errors.push(`${portableRelative(evidenceRoot, directory)}: ${formatEvidenceFailure('evidence directory cannot be read', error)}`)
       return
     }
     const available = new Set()
     for (const entry of entries) {
       if (entry.isFile() && options.allowedArtifactEntries.has(entry.name)) available.add(entry.name)
-      else options.errors.push(`${relative(evidenceRoot, directory)}: unexpected evidence entry`)
+      else options.errors.push(`${portableRelative(evidenceRoot, directory)}: unexpected evidence entry`)
     }
     for (const name of options.allowedArtifactEntries) {
-      if (!available.has(name)) options.errors.push(`${relative(evidenceRoot, directory)}: missing evidence entry: ${name}`)
+      if (!available.has(name)) options.errors.push(`${portableRelative(evidenceRoot, directory)}: missing evidence entry: ${name}`)
     }
   }))
   return { reportPathAllowed }

@@ -12,6 +12,8 @@ import { RuntimeTaskManager } from './runtimeTaskManager.js'
 import { WebResearchService } from './webResearchService.js'
 import { hashText } from '../fileIO.js'
 
+const shellTimeout = process.platform === 'win32' ? 15_000 : 5_000
+
 function makeTempDir(prefix: string): string {
   return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)))
 }
@@ -126,12 +128,13 @@ describe('NodeToolExecutor file and process lifecycle', () => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
 
     const blocked = await executor.runCommand('echo hello', workspace)
-    const approved = await executor.runCommand('echo hello', workspace, {}, 5000, true)
+    const approved = await executor.runCommand('echo hello', workspace, {}, shellTimeout, true)
 
     expect(blocked.success).toBe(false)
     expect(blocked.error).toContain('explicit permission')
-    expect(approved.success).toBe(true)
-  }))
+    expect(approved).toMatchObject({ success: true, data: { exitCode: 0 } })
+    expect(approved.data?.stdout.trim()).toBe('hello')
+  }), 20_000)
 
   it('does not let an approval decision expand the capability profile', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace)
@@ -241,20 +244,20 @@ describe('NodeToolExecutor file and process lifecycle', () => {
 
   it('preserves exact shell command exit codes', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
-    const result = await executor.runCommand('node -e "process.exit(7)"', workspace, {}, 5000, true)
+    const result = await executor.runCommand('node -e "process.exit(7)"', workspace, {}, shellTimeout, true)
 
     expect(result).toMatchObject({ success: true, data: { exitCode: 7 } })
     expect(result.error).toBeUndefined()
-  }), 15_000)
+  }), 20_000)
 
   it('decodes shell output as UTF-8', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace, { capabilityProfile: 'danger-full-access' })
     const command = process.platform === 'win32' ? "Write-Output '你好，世界'" : "printf '你好，世界'"
-    const result = await executor.runCommand(command, workspace, {}, 5000, true)
+    const result = await executor.runCommand(command, workspace, {}, shellTimeout, true)
 
     expect(result).toMatchObject({ success: true, data: { exitCode: 0 } })
     expect(result.data?.stdout).toContain('你好，世界')
-  }))
+  }), 20_000)
 
   it('tracks successful foreground processes through completion', async () => withWorkspace(async ({ workspace }) => {
     const executor = new NodeToolExecutor(workspace)

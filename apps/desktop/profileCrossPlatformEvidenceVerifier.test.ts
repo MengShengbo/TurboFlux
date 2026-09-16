@@ -186,7 +186,7 @@ describe('Profile cross-platform evidence verifier', () => {
 
   it('writes a fixed failure report when the evidence root is not a directory', async () => {
     const root = temporaryRoot()
-    const sensitive = 'not-a-directory?token=secret'
+    const sensitive = 'not-a-directory-token-secret'
     const evidenceRoot = join(root, sensitive)
     const reportPath = join(root, 'profile-evidence-report.json')
     writeFileSync(evidenceRoot, 'not an evidence directory')

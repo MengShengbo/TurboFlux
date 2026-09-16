@@ -78,7 +78,7 @@ function verifyRegularFile(path, label, options = {}) {
   const metadata = lstatSync(path)
   invariant(metadata.isFile() && !metadata.isSymbolicLink(), `${label} is not a regular file: ${path}`)
   invariant(metadata.size > 0, `${label} is empty: ${path}`)
-  if (options.executable) invariant((metadata.mode & 0o111) !== 0, `${label} is not executable: ${path}`)
+  if (options.executable && process.platform !== 'win32') invariant((metadata.mode & 0o111) !== 0, `${label} is not executable: ${path}`)
 }
 
 function nativeArchitecture(machine) {
@@ -422,7 +422,7 @@ function verifyNativeRuntime(resourcesDirectory, platform, arch) {
 function packageVersion(asarPath, entry) {
   let manifest
   try {
-    manifest = JSON.parse(extractFile(asarPath, entry.slice(1)).toString('utf8'))
+    manifest = JSON.parse(extractFile(asarPath, join(...entry.slice(1).split('/'))).toString('utf8'))
   } catch (error) {
     throw new Error(`Desktop package verification failed: invalid package manifest ${entry}: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
   }
@@ -458,11 +458,11 @@ export function verifyDesktopPackage(options = {}) {
   for (const required of requiredAsarEntries) invariant(entrySet.has(required), `missing required ASAR entry: ${required}`)
   const forbidden = entries.filter(desktopPackageForbiddenEntry)
   invariant(forbidden.length === 0, `forbidden ASAR entries: ${forbidden.slice(0, 8).join(', ')}`)
-  const main = extractFile(asarPath, 'generated/main.mjs').toString('utf8')
+  const main = extractFile(asarPath, join('generated', 'main.mjs')).toString('utf8')
   invariant(main.includes('qrcode/lib/browser.js'), 'packaged Main does not use the SVG-only QR code entry')
-  const bootstrap = extractFile(asarPath, 'generated/packagedBootstrap.mjs').toString('utf8')
+  const bootstrap = extractFile(asarPath, join('generated', 'packagedBootstrap.mjs')).toString('utf8')
   invariant(bootstrap.includes("import('./main.mjs')") && bootstrap.includes('runPackagedDesktopBootstrap'), 'packaged bootstrap does not load the production Main through its guarded runtime')
-  const bootstrapRuntime = extractFile(asarPath, 'generated/packagedBootstrapRuntime.mjs').toString('utf8')
+  const bootstrapRuntime = extractFile(asarPath, join('generated', 'packagedBootstrapRuntime.mjs')).toString('utf8')
   for (const marker of ['TURBOFLUX_DESKTOP_QA_HIDDEN', 'uncaughtException', 'unhandledRejection', 'TurboFlux hidden QA bootstrap failure']) {
     invariant(bootstrapRuntime.includes(marker), `packaged bootstrap runtime is missing marker: ${marker}`)
   }

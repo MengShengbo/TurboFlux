@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { resolve } from 'node:path'
 import { DesktopRuntimeHost } from '../runtimeHost'
 
 interface FakeRuntime {
@@ -12,9 +13,11 @@ interface FakeRuntime {
 describe('DesktopRuntimeHost directed remote operations', () => {
   it('serializes cross-workspace targets and re-resolves each conversation before execution', async () => {
     const executed: string[] = []
+    const workspaceA = resolve('/workspace/a')
+    const workspaceB = resolve('/workspace/b')
     const catalog = [
-      { id: 'a', workspacePath: '/workspace/a' },
-      { id: 'b', workspacePath: '/workspace/b' },
+      { id: 'a', workspacePath: workspaceA },
+      { id: 'b', workspacePath: workspaceB },
     ]
     const runtime = (workspacePath: string): FakeRuntime => ({
       getSnapshot: () => ({ workspace: { path: workspacePath }, conversationCatalog: catalog }),
@@ -24,11 +27,11 @@ describe('DesktopRuntimeHost directed remote operations', () => {
       },
     })
     const runtimes = new Map([
-      ['/workspace/a', runtime('/workspace/a')],
-      ['/workspace/b', runtime('/workspace/b')],
+      [workspaceA, runtime(workspaceA)],
+      [workspaceB, runtime(workspaceB)],
     ])
     const host = Object.create(DesktopRuntimeHost.prototype) as DesktopRuntimeHost & Record<string, unknown>
-    host.runtime = runtimes.get('/workspace/a')
+    host.runtime = runtimes.get(workspaceA)
     host.directedConversationOperations = Promise.resolve()
     host.runtimeTransitioning = false
     host.suppressRuntimeEvents = false
@@ -45,8 +48,8 @@ describe('DesktopRuntimeHost directed remote operations', () => {
     ])
 
     expect(executed).toEqual([
-      '/workspace/b:b:request-b:allow',
-      '/workspace/a:a:request-a:deny',
+      `${workspaceB}:b:request-b:allow`,
+      `${workspaceA}:a:request-a:deny`,
     ])
   })
 })

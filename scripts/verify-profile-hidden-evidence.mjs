@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { discoverEvidenceResultFiles, isEvidenceRecord, normalizeEvidenceIdentity, rejectUnexpectedKeys, sanitizePackageEvidence, verifyEvidenceArtifactLayout } from './evidence-artifact-layout.mjs'
+import { discoverEvidenceResultFiles, isEvidenceRecord, normalizeEvidenceIdentity, portableRelative, rejectUnexpectedKeys, sanitizePackageEvidence, verifyEvidenceArtifactLayout } from './evidence-artifact-layout.mjs'
 import { formatEvidenceFailure, writeEvidenceReportAtomically } from './evidence-report-output.mjs'
 import { verifyCrossPlatformGithubProvenance } from './github-actions-provenance.mjs'
 import { correlatePackagedApplicationEvidence } from './packaged-application-evidence-correlation.mjs'
@@ -176,7 +176,7 @@ export async function verifyProfileHiddenEvidence(options = {}) {
   const errors = []
   const resultFiles = await discoverEvidenceResultFiles(evidenceRoot, errors)
   const artifacts = await Promise.all(resultFiles.map(inspectResult))
-  errors.push(...artifacts.flatMap(artifact => artifact.errors.map(message => `${relative(evidenceRoot, artifact.resultFile)}: ${message}`)))
+  errors.push(...artifacts.flatMap(artifact => artifact.errors.map(message => `${portableRelative(evidenceRoot, artifact.resultFile)}: ${message}`)))
   const layout = await verifyEvidenceArtifactLayout({
     evidenceRoot,
     resultFiles,
@@ -188,14 +188,14 @@ export async function verifyProfileHiddenEvidence(options = {}) {
     const matches = artifacts.filter(artifact => artifact.platform === platform)
     check(matches.length === 1, errors, `${platform}: expected exactly one Profile hidden result, found ${matches.length}`)
   }
-  for (const artifact of artifacts) check(basename(dirname(artifact.resultFile)) === `${artifact.platform}-${artifact.arch}`, errors, `${relative(evidenceRoot, artifact.resultFile)}: artifact directory must match platform and architecture`)
+  for (const artifact of artifacts) check(basename(dirname(artifact.resultFile)) === `${artifact.platform}-${artifact.arch}`, errors, `${portableRelative(evidenceRoot, artifact.resultFile)}: artifact directory must match platform and architecture`)
   if (options.requiredApplicationMode) {
-    for (const artifact of artifacts) check(artifact.applicationMode === options.requiredApplicationMode, errors, `${relative(evidenceRoot, artifact.resultFile)}: applicationMode must be ${options.requiredApplicationMode}`)
+    for (const artifact of artifacts) check(artifact.applicationMode === options.requiredApplicationMode, errors, `${portableRelative(evidenceRoot, artifact.resultFile)}: applicationMode must be ${options.requiredApplicationMode}`)
   }
   check(options.requiredApplicationMode !== 'packaged-app' || Boolean(options.packageEvidenceRoot), errors, 'package evidence root is required when packaged-app evidence is required')
   const provenance = verifyCrossPlatformGithubProvenance(artifacts.map(artifact => ({
     ...artifact,
-    path: relative(evidenceRoot, artifact.resultFile),
+    path: portableRelative(evidenceRoot, artifact.resultFile),
   })), errors, {
     requiredPlatforms,
     expectedSourceJob: options.expectedSourceJob,
@@ -214,7 +214,7 @@ export async function verifyProfileHiddenEvidence(options = {}) {
     })
     packageCorrelation = correlatePackagedApplicationEvidence(artifacts.map(artifact => ({
       ...artifact,
-      path: relative(evidenceRoot, artifact.resultFile),
+      path: portableRelative(evidenceRoot, artifact.resultFile),
     })), packageReport, errors, { requiredPlatforms })
   }
   const report = {
@@ -224,7 +224,7 @@ export async function verifyProfileHiddenEvidence(options = {}) {
     provenance,
     packageCorrelation,
     artifacts: artifacts.map(artifact => ({
-      path: relative(evidenceRoot, artifact.resultFile),
+      path: portableRelative(evidenceRoot, artifact.resultFile),
       platform: artifact.platform,
       arch: artifact.arch,
       applicationMode: artifact.applicationMode,

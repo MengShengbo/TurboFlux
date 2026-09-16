@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isEvidenceRecord, normalizeEvidenceIdentity, rejectUnexpectedKeys } from './evidence-artifact-layout.mjs'
+import { isEvidenceRecord, normalizeEvidenceIdentity, portableRelative, rejectUnexpectedKeys } from './evidence-artifact-layout.mjs'
 import { formatEvidenceFailure, writeEvidenceReportAtomically } from './evidence-report-output.mjs'
 import { verifyCrossPlatformGithubProvenance } from './github-actions-provenance.mjs'
 
@@ -83,7 +83,7 @@ export async function verifyProfileCrossPlatformEvidence(options = {}) {
   const artifacts = await Promise.all(resultFiles.map(inspectResult))
   const errors = [
     ...discovered.errors,
-    ...artifacts.flatMap(artifact => artifact.errors.map(message => `${relative(evidenceRoot, artifact.resultFile)}: ${message}`)),
+    ...artifacts.flatMap(artifact => artifact.errors.map(message => `${portableRelative(evidenceRoot, artifact.resultFile)}: ${message}`)),
   ]
   for (const platform of requiredPlatforms) {
     const matches = artifacts.filter(artifact => artifact.platform === platform)
@@ -91,7 +91,7 @@ export async function verifyProfileCrossPlatformEvidence(options = {}) {
   }
   const provenance = verifyCrossPlatformGithubProvenance(artifacts.map(artifact => ({
     ...artifact,
-    path: relative(evidenceRoot, artifact.resultFile),
+    path: portableRelative(evidenceRoot, artifact.resultFile),
   })), errors, {
     requiredPlatforms,
     expectedSourceJob: options.expectedSourceJob,
@@ -104,7 +104,7 @@ export async function verifyProfileCrossPlatformEvidence(options = {}) {
     requiredPlatforms,
     provenance,
     artifacts: artifacts.map(artifact => ({
-      path: relative(evidenceRoot, artifact.resultFile),
+      path: portableRelative(evidenceRoot, artifact.resultFile),
       platform: artifact.platform,
       arch: artifact.arch,
       status: artifact.errors.length === 0 ? 'passed' : 'failed',

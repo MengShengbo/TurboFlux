@@ -1233,6 +1233,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: !hiddenQaWindow,
       webSecurity: true,
       allowRunningInsecureContent: false,
       webviewTag: false,

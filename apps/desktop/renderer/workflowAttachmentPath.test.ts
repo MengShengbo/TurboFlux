@@ -21,7 +21,7 @@ describe('workflow screenshot attachment boundary', () => {
     ;(host as unknown as { workspacePath: string }).workspacePath = workspacePath
 
     await expect(host.resolveImageAttachment(screenshotPath)).resolves.toMatchObject({
-      path: realpathSync(screenshotPath),
+      path: realpathSync.native(screenshotPath),
       filename: '01.png',
       mime: 'image/png',
       size: 4,
