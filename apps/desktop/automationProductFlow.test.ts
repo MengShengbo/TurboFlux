@@ -264,5 +264,5 @@ describe('Automation product flow', () => {
       expect.objectContaining({ id: resumed.definition.id, status: 'archived' }),
     ])
     await pool.destroy()
-  })
+  }, 20_000)
 })

@@ -77,10 +77,13 @@ async function main() {
   }
   const capture = async name => {
     const filename = `${name}.png`
-    const image = await window.capturePage()
-    invariant(!image.isEmpty(), `${name} screenshot is empty`)
+    const screenshot = await window.webContents.debugger.sendCommand('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: false,
+    })
+    invariant(typeof screenshot.data === 'string' && screenshot.data.length > 0, `${name} screenshot is empty`)
     const path = join(evidenceRoot, filename)
-    await writeEvidenceFileAtomically(path, image.toPNG())
+    await writeEvidenceFileAtomically(path, Buffer.from(screenshot.data, 'base64'))
     return filename
   }
   const inspect = () => evaluate(`(() => {
@@ -124,6 +127,14 @@ async function main() {
   })()`)
 
   await window.loadURL(targetUrl)
+  // Apply emulation after navigation: Windows can clamp native windows to 720px tall.
+  window.webContents.debugger.attach('1.3')
+  await window.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  })
   await writeDiagnostic('loaded')
   diagnosticTimer = setInterval(() => void writeDiagnostic('waiting-for-pairing'), 500)
   await waitFor(`!document.querySelector('#shell-view')?.hidden`, 'encrypted pairing and control claim')
@@ -163,7 +174,6 @@ async function main() {
 
   await evaluate(`document.querySelector('#session-scrim')?.click()`)
   await waitFor(`!document.querySelector('#session-panel')?.classList.contains('open') && document.querySelector('#session-scrim')?.hidden && document.querySelector('#session-panel')?.getBoundingClientRect().right <= 0.5`, 'closed mobile session drawer')
-  window.webContents.debugger.attach('1.3')
   await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
     features: [
       { name: 'prefers-color-scheme', value: 'dark' },

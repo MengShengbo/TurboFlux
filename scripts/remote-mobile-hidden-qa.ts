@@ -290,7 +290,7 @@ async function main(options = parseArguments(process.argv.slice(2))) {
       return approvePendingPairing(attempt + 1)
     }
     const approvedPairing = await approvePendingPairing(0)
-    invariant(approvedPairing, 'Desktop never received a pairing approval request')
+    invariant(approvedPairing, `Desktop never received a pairing approval request (exit=${child.exitCode}, signal=${child.signalCode})`)
     const exit = await exitPromise
     invariant(exit.code === 0, 'hidden Electron did not exit cleanly')
 
@@ -365,6 +365,7 @@ async function main(options = parseArguments(process.argv.slice(2))) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
   } catch (error) {
     for (const line of electronErrors.split(/\r?\n/).filter(Boolean)) reportDiagnostic(line)
+    await readFile(diagnosticPath, 'utf8').then(reportDiagnostic).catch(() => undefined)
     throw error
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')

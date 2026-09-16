@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -814,13 +814,21 @@ async function main(options) {
     process.stdout.write(`${JSON.stringify(sanitizedResult, null, 2)}\n`)
   } finally {
     cdp?.close()
-    child.kill('SIGTERM')
+    if (process.platform === 'win32' && child.pid && child.exitCode === null && child.signalCode === null) {
+      try {
+        // Terminate Chromium children too, so they release the temporary profile files.
+        execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5_000 })
+      } catch {
+        child.kill('SIGKILL')
+      }
+    } else child.kill('SIGTERM')
     await new Promise(resolvePromise => {
       if (child.exitCode !== null || child.signalCode !== null) return resolvePromise()
-      child.once('exit', resolvePromise)
-      setTimeout(() => { child.kill('SIGKILL'); resolvePromise() }, 4_000).unref()
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolvePromise() }, 4_000)
+      timer.unref()
+      child.once('close', () => { clearTimeout(timer); resolvePromise() })
     })
-    if (process.env.TURBOFLUX_QA_PRESERVE !== '1') await rm(qaRoot, { recursive: true, force: true })
+    if (process.env.TURBOFLUX_QA_PRESERVE !== '1') await rm(qaRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
     else process.stderr.write('Preserved hidden QA root\n')
   }
 }
