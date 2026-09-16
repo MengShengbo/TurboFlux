@@ -180,16 +180,19 @@ button { -webkit-tap-highlight-color: transparent; }
 @media (prefers-color-scheme: dark) {
   :root { color-scheme: dark; color: #f2f3ee; background: #111310; --ink: #f2f3ee; --muted: #a5a89f; --line: rgba(242,243,238,.12); --paper: #171916; --accent: #9fc969; --accent-deep: #b9df7a; --danger: #e17b70; }
   .pair-view { background: radial-gradient(circle at 12% 18%,rgba(159,201,105,.12),transparent 30%),radial-gradient(circle at 88% 82%,rgba(110,120,102,.14),transparent 32%),#111310; }
-  .pair-card, .remote-shell, .session-panel, .conversation-header { background-color: rgba(23,25,22,.94); }
-  .session-card, .run-controls button, .artifact-card, .approval-actions button { color: #dfe2da; background: #20231e; }
-  .session-card.active, .message-row.user { background: #292d26; }
+  .pair-card, .shell-view, .topbar, .session-panel, .conversation-header { background-color: rgba(23,25,22,.94); }
+  .session-item, .secondary-button, .run-controls button, .artifact-card, .approval-actions button { color: #dfe2da; background: #20231e; }
+  .session-item:hover, .icon-button:active { background: rgba(255,255,255,.08); }
+  .session-item.active, .message-row.user { background: #292d26; }
+  .icon-button, .lead { color: var(--muted); }
   .approval-card { border-color: rgba(185,223,122,.25); background: #242719; }
   .approval-card h2 { color: #f2f3ee; }
   .approval-card p { color: #b9bdae; }
   .approval-card .approval-scope { background: rgba(0,0,0,.12); }
   .composer { border-color: rgba(242,243,238,.14); background: rgba(28,31,26,.95); }
   .composer textarea { color: #f2f3ee; }
-  .send-button, .brand-mark { color: #171916; background: #e8eadf; }
+  .primary-button, .send-button, .brand-mark { color: #171916; background: #e8eadf; }
+  .brand-mark span { border-color: #171916; }
 }
 
 @media (prefers-reduced-motion: reduce) {
