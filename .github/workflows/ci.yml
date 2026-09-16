@@ -245,19 +245,19 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: profile-archive-smoke-*
           path: apps/desktop/generated/profile-smoke
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: profile-hidden-qa-*
           path: apps/desktop/generated/profile-qa
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: desktop-package-report-*
@@ -295,7 +295,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: desktop-package-report-*
@@ -325,13 +325,13 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: remote-mobile-hidden-qa-*
           path: apps/remote-mobile/generated/automation-qa
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: desktop-package-report-*
