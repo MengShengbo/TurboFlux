@@ -36,9 +36,10 @@ export function registerBrowserSession(browserSession: Session, owner: BrowserSe
   }
 
   const owners = new Set<BrowserSessionOwner>([owner])
-  const onWillDownload = (_event: Event, item: DownloadItem, webContents: WebContents) => {
-    const downloadOwner = [...owners].find(candidate => candidate.ownsWebContents(webContents.id))
-    downloadOwner?.handleDownload(item)
+  const onWillDownload = (event: Event, item: DownloadItem, webContents: WebContents) => {
+    const downloadOwner = webContents && [...owners].find(candidate => candidate.ownsWebContents(webContents.id))
+    if (!downloadOwner) { event.preventDefault(); return }
+    downloadOwner.handleDownload(item)
   }
   const registry = { owners, onWillDownload }
   browserSessionRegistries.set(browserSession, registry)

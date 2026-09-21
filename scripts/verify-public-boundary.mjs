@@ -1,3 +1,4 @@
+import { readWorkspaces } from './workspace-packages.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
@@ -39,17 +40,14 @@ const dependencyNames = Object.keys({ ...packageJson.dependencies, ...packageJso
 const productDependencies = dependencyNames.filter(name => ['electron', 'electron-builder', 'fastify', '@fastify/static', 'better-sqlite3', 'pg'].includes(name))
 if (productDependencies.length) failures.push(`public package contains product-only dependencies: ${productDependencies.join(', ')}`)
 
-const openSourceConfig = readFileSync(new URL('../tsconfig.open-source.json', import.meta.url), 'utf8')
-if (!openSourceConfig.includes('packages/agent-core/src/desktop/**/*')) failures.push('tsconfig.open-source.json must exclude packages/agent-core/src/desktop/**/*')
-if (!openSourceConfig.includes('packages/agent-core/src/kernel/**/*')) failures.push('tsconfig.open-source.json must include packages/agent-core/src/kernel/**/*')
-
 const corePackage = JSON.parse(readFileSync(new URL('../packages/agent-core/package.json', import.meta.url), 'utf8'))
 const desktopPackage = JSON.parse(readFileSync(new URL('../apps/desktop/package.json', import.meta.url), 'utf8'))
 const expectedCoreExports = ['.', './contracts', './runtime', './renderer', './workbench', './extensions']
 if (corePackage.name !== '@turboflux/agent-core') failures.push('shared kernel package must be named @turboflux/agent-core')
 if (corePackage.private === true) failures.push('@turboflux/agent-core must be publishable')
 if (packageJson.turbofluxCoreVersion !== corePackage.version) failures.push('Workspace turbofluxCoreVersion must match the Agent kernel version')
-if (desktopPackage.dependencies?.['@turboflux/agent-core'] !== '*') failures.push('Desktop must depend on the Agent kernel via workspace link ("*"), not a pinned version — pinned specs silently resolve to stale registry copies whenever the kernel version drifts')
+if (desktopPackage.dependencies?.['@turboflux/workbench'] !== '*') failures.push('Desktop must link the workspace workbench package')
+if (desktopPackage.dependencies?.['@turboflux/agent-core']) failures.push('Desktop must not depend on the compatibility facade')
 if (desktopPackage.version !== packageJson.version) failures.push('Workspace and Desktop product versions must stay aligned')
 if (JSON.stringify(Object.keys(corePackage.exports)) !== JSON.stringify(expectedCoreExports)) {
   failures.push(`Agent kernel exports changed without an explicit boundary update: ${Object.keys(corePackage.exports).join(', ')}`)
@@ -58,7 +56,8 @@ const coreDependencies = Object.keys({ ...corePackage.dependencies, ...corePacka
 const forbiddenCoreDependencies = coreDependencies.filter(name => ['electron', 'electron-builder', 'fastify', '@fastify/static', 'better-sqlite3', 'pg', 'react', 'ink'].includes(name))
 if (forbiddenCoreDependencies.length) failures.push(`Agent kernel contains shell or product dependencies: ${forbiddenCoreDependencies.join(', ')}`)
 
-const workspaceRoots = ['apps/desktop', 'apps/remote-mobile', 'packages/agent-core', 'packages/remote-protocol']
+const workspaces = readWorkspaces()
+const workspaceRoots = workspaces.map(({ manifest, kind }) => `${kind}/${manifest.name.replace('@turboflux/', '')}`)
 for (const root of workspaceRoots) {
   const manifest = JSON.parse(readFileSync(new URL(`../${root}/package.json`, import.meta.url), 'utf8'))
   const internalDependencies = Object.entries({ ...manifest.dependencies, ...manifest.devDependencies })
@@ -73,7 +72,7 @@ for (const root of workspaceRoots) {
   }
 }
 
-const publicSourceRoots = ['application', 'core', 'kernel', 'platform', 'server', 'shared', 'state', 'tools']
+const publicSourceRoots = workspaces.filter(entry => entry.kind === 'packages').map(entry => join(entry.directory, 'src'))
 const publicSourceFiles = []
 function collectSourceFiles(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -82,7 +81,7 @@ function collectSourceFiles(directory) {
     else if (/\.(?:ts|tsx|mjs|cjs)$/.test(entry.name) && !/\.test\.(?:ts|tsx)$/.test(entry.name)) publicSourceFiles.push(path)
   }
 }
-for (const root of publicSourceRoots) collectSourceFiles(fileURLToPath(new URL(`../packages/agent-core/src/${root}/`, import.meta.url)))
+for (const root of publicSourceRoots) collectSourceFiles(root)
 for (const file of publicSourceFiles) {
   const source = readFileSync(file, 'utf8')
   if (/from ['"][^'"]*desktop\//.test(source) || /import\(['"][^'"]*desktop\//.test(source)) {

@@ -2,7 +2,7 @@ import type {
   ComputerAccessibilityElement,
   ComputerObservation,
   ComputerPoint,
-} from '@turboflux/agent-core/extensions'
+} from '@turboflux/contracts'
 import type { ComputerExpectedTarget } from './computerDriver'
 import { boundsContainPoint } from './computerPolicy'
 

@@ -9,7 +9,7 @@ import {
   readProfileArchive,
   writeProfileArchive,
   type ArchiveEntryInput,
-} from '../packages/agent-core/src/application/profiles/profileArchive/index'
+} from '@turboflux/profiles/profileArchive/index'
 import { captureGithubActionsProvenance } from './github-actions-provenance.mjs'
 import { resolveProfileArchiveBenchmarkConfig } from './profile-archive-benchmark-config'
 import { sanitizeSourceEvidenceReport, writeSourceEvidenceReportAtomically } from './source-evidence-report.mjs'

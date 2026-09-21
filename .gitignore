@@ -27,6 +27,9 @@ coverage/
 *.sqlite-shm
 *.sqlite-wal
 *.pem
+# Self-signed TLS fixtures used only by loopback transport tests.
+!/packages/tools/src/fixtures/web-test-cert.pem
+!/packages/tools/src/fixtures/web-test-key.pem
 *.key
 *.p12
 *.keystore

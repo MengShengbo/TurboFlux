@@ -1,0 +1,105 @@
+{
+  "name": "@turboflux/tools",
+  "version": "1.0.1",
+  "description": "Tool execution, search, memory, permissions and runtime processes",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./applyPatch": {
+      "types": "./dist/applyPatch.d.ts",
+      "import": "./dist/applyPatch.js"
+    },
+    "./capabilityBoundary": {
+      "types": "./dist/capabilityBoundary.d.ts",
+      "import": "./dist/capabilityBoundary.js"
+    },
+    "./commandExecutionPolicy": {
+      "types": "./dist/commandExecutionPolicy.d.ts",
+      "import": "./dist/commandExecutionPolicy.js"
+    },
+    "./editHelpers": {
+      "types": "./dist/editHelpers.d.ts",
+      "import": "./dist/editHelpers.js"
+    },
+    "./gitService": {
+      "types": "./dist/gitService.d.ts",
+      "import": "./dist/gitService.js"
+    },
+    "./memory/loaders": {
+      "types": "./dist/memory/loaders.d.ts",
+      "import": "./dist/memory/loaders.js"
+    },
+    "./memory/sanitizer": {
+      "types": "./dist/memory/sanitizer.d.ts",
+      "import": "./dist/memory/sanitizer.js"
+    },
+    "./memory/service": {
+      "types": "./dist/memory/service.d.ts",
+      "import": "./dist/memory/service.js"
+    },
+    "./memory/writer": {
+      "types": "./dist/memory/writer.d.ts",
+      "import": "./dist/memory/writer.js"
+    },
+    "./nodeToolExecutor": {
+      "types": "./dist/nodeToolExecutor.d.ts",
+      "import": "./dist/nodeToolExecutor.js"
+    },
+    "./permissions": {
+      "types": "./dist/permissions.d.ts",
+      "import": "./dist/permissions.js"
+    },
+    "./retrievalResults": {
+      "types": "./dist/retrievalResults.d.ts",
+      "import": "./dist/retrievalResults.js"
+    },
+    "./runtimeLogWriter": {
+      "types": "./dist/runtimeLogWriter.d.ts",
+      "import": "./dist/runtimeLogWriter.js"
+    },
+    "./runtimeTaskManager": {
+      "types": "./dist/runtimeTaskManager.d.ts",
+      "import": "./dist/runtimeTaskManager.js"
+    },
+    "./toolArgumentNormalization": {
+      "types": "./dist/toolArgumentNormalization.d.ts",
+      "import": "./dist/toolArgumentNormalization.js"
+    },
+    "./toolRegistry": {
+      "types": "./dist/toolRegistry.d.ts",
+      "import": "./dist/toolRegistry.js"
+    },
+    "./webResearchService": {
+      "types": "./dist/webResearchService.d.ts",
+      "import": "./dist/webResearchService.js"
+    },
+    "./workspaceSearch": {
+      "types": "./dist/workspaceSearch.d.ts",
+      "import": "./dist/workspaceSearch.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/contracts": "*",
+    "@turboflux/platform": "*",
+    "@vscode/ripgrep": "^1.18.0",
+    "minimatch": "^10.2.6",
+    "undici": "^7.29.0"
+  }
+}

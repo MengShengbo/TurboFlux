@@ -4,7 +4,7 @@ import {
   browserToolResultDetail,
   normalizeThinkingContent,
   setThinkingBlockExpanded,
-} from './richContent'
+} from '@turboflux/renderer/richContent'
 
 describe('normalizeThinkingContent', () => {
   it('keeps collapsed reasoning out of the accessibility tree', () => {
@@ -66,6 +66,6 @@ describe('normalizeThinkingContent', () => {
       name: 'browser__click',
       output: JSON.stringify({ clicked: '全部接受', changed: true }),
       isError: false,
-    })).toBe('已点击「全部接受」 · 页面已更新')
+    })).toBe('已点击「全部接受」')
   })
 })

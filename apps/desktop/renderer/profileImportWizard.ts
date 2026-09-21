@@ -4,7 +4,7 @@ import type {
   PersistedConversation,
   ProfileArchivePreview,
   ProfileImportPlan,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import { presentDesktopError } from './conversationRendering'
 import {
   captureProfileDialogReturnFocus,

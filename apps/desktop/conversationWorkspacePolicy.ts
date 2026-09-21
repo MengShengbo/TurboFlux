@@ -1,4 +1,4 @@
-import { isUnboundWorkspacePath } from '@turboflux/agent-core/workbench'
+import { isUnboundWorkspacePath } from '@turboflux/workbench'
 
 export function assertExecutableConversationWorkspace(workspacePath: string): void {
   if (isUnboundWorkspacePath(workspacePath)) {

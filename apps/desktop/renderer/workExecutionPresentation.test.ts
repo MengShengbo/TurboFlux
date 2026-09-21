@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { WorkExecutionSnapshot, WorkRun, WorkStep } from '@turboflux/agent-core/workbench'
+import type { WorkExecutionSnapshot, WorkRun, WorkStep } from '@turboflux/workbench'
 import {
   activeSiblingCount,
   activeWorkSteps,

@@ -5,7 +5,7 @@ import type {
   ComputerPermissionStatus,
   ComputerSystemEvent,
   ComputerSystemSnapshot,
-} from '@turboflux/agent-core/contracts'
+} from '@turboflux/contracts'
 import { presentDesktopError } from './conversationRendering'
 
 interface ComputerControlsOptions {
@@ -19,6 +19,7 @@ export interface ComputerControlsController {
   refresh(): Promise<ComputerSystemSnapshot | null>
   renderSettings(container: HTMLElement): void
   setRuntimeActive(active: boolean): void
+  dispose(): void
 }
 
 const permissionDefinitions: Array<{
@@ -411,7 +412,7 @@ export function createComputerControls(
     options.onActivityChange?.()
   }
 
-  bridge.onComputerEvent(handleEvent)
+  const unsubscribe = bridge.onComputerEvent(handleEvent)
   void bridge.computerRefresh().then(applySnapshot).catch(() => {
     void bridge.computerGetState().then(applySnapshot).catch(() => undefined)
   })
@@ -432,5 +433,6 @@ export function createComputerControls(
     refresh,
     renderSettings,
     setRuntimeActive,
+    dispose: unsubscribe,
   }
 }

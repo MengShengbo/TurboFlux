@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { LinearTaskFlowItem, WorkRun } from '@turboflux/agent-core/renderer'
-import { formatTaskDuration, taskRunElapsedMs, taskRunStatusLabel, withTaskRunStatus } from './taskRunPresentation'
+import type { LinearTaskFlowItem, TaskFlowNode, WorkRun } from '@turboflux/presentation'
+import { formatTaskDuration, phaseStatusLabel, taskRunElapsedMs, taskRunStatusLabel, withTaskRunStatus } from '@turboflux/renderer/taskRunPresentation'
 
 const run: WorkRun = {
   id: 'run-1', conversationId: 'conversation-1', objective: 'Inspect', responseMode: 'task', presentation: 'work',
@@ -20,6 +20,28 @@ function item(id: string, kind: 'input' | 'answer', at: number): LinearTaskFlowI
 }
 
 describe('task run presentation', () => {
+  const phase: TaskFlowNode = {
+    id: 'phase:run-1', runId: 'run-1', kind: 'phase', ordinal: 2, phase: 'execution',
+    status: 'running', settled: false, content: 'Planning the next step', createdAt: 1_000, updatedAt: 60_000,
+  }
+
+  it.each([
+    [1_000, '0秒'], [1_999, '0秒'], [2_000, '1秒'],
+    [60_999, '59秒'], [61_000, '1分0秒'], [62_000, '1分1秒'],
+  ])('keeps the request timer anchored at its start at %i', (now, duration) => {
+    expect(phaseStatusLabel(phase, undefined, now)).toBe(`正在请求中 ${duration}`)
+    expect(phaseStatusLabel({ ...phase, content: 'Running 1 tool', updatedAt: now }, undefined, now))
+      .toBe(`正在请求中 ${duration}`)
+  })
+
+  it('uses execution time after pause and preserves non-request statuses', () => {
+    expect(phaseStatusLabel(phase, run, 248_000)).toBe('正在请求中 1分0秒')
+    expect(phaseStatusLabel({ ...phase, status: 'paused' }, run, 248_000)).toBe('工作已暂停')
+    expect(phaseStatusLabel({ ...phase, content: 'awaiting_approval' }, run, 248_000)).toBe('正在等待确认')
+    expect(phaseStatusLabel({ ...phase, status: 'failed' }, run, 248_000)).toBe('任务需要处理')
+    expect(phaseStatusLabel({ ...phase, status: 'completed', settled: true }, run, 248_000)).toBe('任务已完成')
+  })
+
   it.each([
     [0, '0秒'], [999, '0秒'], [1_000, '1秒'], [59_999, '59秒'], [60_000, '1分0秒'], [61_000, '1分1秒'], [3_600_000, '60分0秒'],
   ])('formats %i milliseconds as %s', (ms, label) => {

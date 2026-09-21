@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import type { WorkbenchSnapshot } from '@turboflux/workbench'
 import { projectWorkspaceConversationGroups, UNGROUPED_WORKSPACE_KEY } from './workspaceConversationProjection'
 
 type Conversation = WorkbenchSnapshot['conversationCatalog'][number]
@@ -59,7 +59,7 @@ describe('workspace conversation projection', () => {
       platform: 'darwin',
     })
 
-    expect(groups.map(group => group.key)).toEqual([UNGROUPED_WORKSPACE_KEY])
+    expect(groups.map(group => group.key)).toEqual([UNGROUPED_WORKSPACE_KEY, 'alpha-id'])
     expect(groups[0]).toMatchObject({ name: '未分组', containsCurrent: true })
   })
 
@@ -91,7 +91,7 @@ describe('workspace conversation projection', () => {
     expect(groups[0]?.conversations.map(item => item.id)).toEqual(['task'])
   })
 
-  it('keeps empty tasks and workspaces out of the navigation tree', () => {
+  it('keeps a newly registered workspace visible without showing its empty draft task', () => {
     const empty = conversation('empty', '/work/empty', 4)
     empty.turnCount = 0
     const groups = projectWorkspaceConversationGroups({
@@ -101,7 +101,22 @@ describe('workspace conversation projection', () => {
       platform: 'darwin',
     })
 
-    expect(groups.map(group => group.name)).toEqual(['Active'])
+    expect(groups.map(group => group.name)).toEqual(['Empty', 'Active'])
+    expect(groups[0]).toMatchObject({ containsCurrent: true, conversations: [] })
+  })
+
+  it('shows a workspace immediately after registration, before any conversation exists', () => {
+    const input = {
+      conversations: [],
+      projects: [project('new-project', '/work/new', '新项目')],
+      currentConversationId: 'unscoped-draft',
+      platform: 'darwin' as const,
+    }
+    expect(projectWorkspaceConversationGroups(input)).toEqual([
+      { key: 'new-project', projectId: 'new-project', name: '新项目', path: '/work/new', containsCurrent: false, conversations: [] },
+    ])
+    expect(projectWorkspaceConversationGroups({ ...input, query: '新项目' })).toHaveLength(1)
+    expect(projectWorkspaceConversationGroups({ ...input, query: '其他项目' })).toHaveLength(0)
   })
 
   it('places the current workspace first and Ungrouped last', () => {

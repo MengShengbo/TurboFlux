@@ -16,8 +16,9 @@ describe('browser testing helpers', () => {
   it('bounds waits and sanitizes element refs', () => {
     expect(normalizeBrowserTimeout(80)).toBe(100)
     expect(normalizeBrowserTimeout(60_000)).toBe(15_000)
-    expect(sanitizeBrowserRef('e12<script>')).toBe('e12script')
-    expect(() => sanitizeBrowserRef('***')).toThrow('Element ref is required')
+    expect(sanitizeBrowserRef('o2-scope-r0-e12')).toBe('o2-scope-r0-e12')
+    expect(() => sanitizeBrowserRef('e12<script>')).toThrow('Invalid element ref')
+    expect(() => sanitizeBrowserRef('***')).toThrow('Invalid element ref')
   })
 
   it('removes credentials, queries, and fragments from diagnostic URLs', () => {

@@ -26,6 +26,7 @@ export interface DesktopTerminalPanel {
   close(): void
   toggle(): void
   isOpen(): boolean
+  dispose(): void
 }
 
 const heightStorageKey = 'turboflux.terminal.panel-height:v1'
@@ -380,7 +381,7 @@ export function createTerminalPanel(
     for (const client of clients.values()) client.terminal.options.theme = theme
   })
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-workbench-mode'] })
-  bridge.onTerminalEvent(handleTerminalEvent)
+  const unsubscribe = bridge.onTerminalEvent(handleTerminalEvent)
   updateHeight(panelHeight, false)
   updateToggleState()
 
@@ -389,5 +390,17 @@ export function createTerminalPanel(
     close: () => setOpen(false),
     toggle: () => setOpen(!open),
     isOpen: () => open,
+    dispose: () => {
+      open = false
+      unsubscribe()
+      resizeObserver.disconnect()
+      themeObserver.disconnect()
+      for (const client of clients.values()) {
+        if (client.resizeFrame !== null) window.cancelAnimationFrame(client.resizeFrame)
+        client.terminal.dispose()
+        client.host.remove()
+      }
+      clients.clear()
+    },
   }
 }

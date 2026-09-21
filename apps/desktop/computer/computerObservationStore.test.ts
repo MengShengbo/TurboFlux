@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { ComputerObservation } from '@turboflux/agent-core/extensions'
+import type {
+  ComputerObservation,
+} from '@turboflux/contracts'
 import { ComputerObservationStore } from './computerObservationStore'
 
 function observation(frameId: string, capturedAt = Date.now()): ComputerObservation {

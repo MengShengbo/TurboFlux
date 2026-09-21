@@ -3,7 +3,7 @@ import type {
   AnyConversationEvent,
   ConversationEventPayloadMap,
   ConversationEventType,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import {
   applyTaskFlowWorkSnapshot,
   applyTaskFlowEvent,

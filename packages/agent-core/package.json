@@ -1,7 +1,7 @@
 {
   "name": "@turboflux/agent-core",
   "version": "1.0.1",
-  "description": "Versioned TurboFlux kernel built from the shared root source tree",
+  "description": "Compatibility entrypoints for the TurboFlux package ecosystem; new consumers use domain packages",
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
@@ -42,13 +42,15 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@vscode/ripgrep": "^1.18.0",
-    "diff": "^9.0.0",
-    "js-tiktoken": "^1.0.21",
-    "minimatch": "^10.2.6",
-    "strip-ansi": "^7.2.0",
-    "undici": "^7.29.0"
+    "@turboflux/agent-runtime": "*",
+    "@turboflux/contracts": "*",
+    "@turboflux/conversations": "*",
+    "@turboflux/extensions": "*",
+    "@turboflux/presentation": "*",
+    "@turboflux/workbench": "*",
+    "@turboflux/models": "*",
+    "@turboflux/platform": "*",
+    "@turboflux/tools": "*"
   },
   "engines": {
     "node": ">=20"

@@ -1,159 +1,104 @@
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { builtinModules } from 'node:module'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
+import { readWorkspaces, orderedPackages, repositoryRoot } from './workspace-packages.mjs'
 
-const ROOT = fileURLToPath(new URL('..', import.meta.url))
+// Includes type-only edges: package ownership is explicit and dependencies point down.
+export const packageDependencies = {
+  contracts: [], platform: [], renderer: ['presentation'],
+  models: ['contracts', 'platform'],
+  tools: ['contracts', 'platform'],
+  extensions: ['contracts', 'platform'],
+  presentation: ['contracts'],
+  'agent-runtime': ['contracts', 'platform', 'models', 'tools', 'extensions', 'presentation'],
+  conversations: ['contracts', 'platform', 'models', 'agent-runtime', 'presentation'],
+  profiles: ['platform', 'conversations'],
+  automations: ['contracts', 'platform'],
+  workbench: ['contracts', 'platform', 'models', 'tools', 'extensions', 'presentation', 'agent-runtime', 'conversations', 'profiles', 'automations'],
+  'remote-protocol': [],
+  'agent-core': ['models', 'platform', 'tools', 'contracts', 'agent-runtime', 'conversations', 'extensions', 'presentation', 'workbench'],
+}
+const browserPackages = new Set(['contracts', 'presentation', 'renderer'])
+const builtin = new Set(builtinModules.map(name => name.replace(/^node:/, '')))
+const skipped = new Set(['node_modules', 'dist', 'generated', 'build', 'release', 'coverage', '.git'])
 
-const SKIP_DIRS = new Set([
-  'node_modules', '.git', 'dist', 'dist-desktop', 'release', 'coverage',
-  'douyin-chat-export', 'docs', 'generated', 'poc', 'cli',
-])
-const SOURCE_RE = /\.(?:ts|tsx|mts|cts|mjs|cjs)$/
-const TEST_RE = /\.(?:test|spec)\.(?:ts|tsx|mjs|cjs)$/
-const STATIC_USER_ROOT_ALLOWLIST = new Set([
-  'packages/agent-core/src/core/profilePaths.ts',
-  'apps/desktop/main.mjs',
-])
-
-const SRC_LAYERS = new Set(['kernel', 'application', 'core', 'tools', 'platform', 'shared', 'state', 'server'])
-const PRODUCT_LAYERS = new Set(['server'])
-const FOUNDATION_LAYERS = new Set(['core', 'tools', 'platform', 'shared', 'state'])
-const ORCHESTRATION_LAYERS = new Set(['application', 'kernel'])
-
-const IMPORT_PATTERNS = [
-  /^[ \t]*import\s[^'"`\n]*?from\s*['"]([^'"]+)['"]/gm,
-  /^[ \t]*import\s*['"]([^'"]+)['"]/gm,
-  /^[ \t]*export\s[^'"`\n]*?from\s*['"]([^'"]+)['"]/gm,
-  /^[ \t]*\}\s*from\s*['"]([^'"]+)['"]/gm,
-  /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
-  /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
-]
-
-function walk(directory, files = []) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('dist-')) continue
-      walk(join(directory, entry.name), files)
-    } else if (SOURCE_RE.test(entry.name) && !TEST_RE.test(entry.name) && !entry.name.endsWith('.d.ts')) {
-      files.push(join(directory, entry.name))
-    }
-  }
-  return files
+export function sourceFiles(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    if (skipped.has(entry.name)) return []
+    const path = join(directory, entry.name)
+    if (entry.isDirectory()) return sourceFiles(path)
+    return /\.(?:ts|tsx|mjs|cjs|mts|cts)$/.test(entry.name) && !/\.(?:test|spec)\./.test(entry.name) ? [path] : []
+  })
 }
 
-function classify(absPath) {
-  const rel = relative(ROOT, absPath).replaceAll('\\', '/')
-  if (rel.startsWith('../')) return { kind: 'outside' }
-  if (rel.startsWith('packages/agent-core/src/')) {
-    const parts = rel.split('/')
-    if (parts.length === 3) return { kind: 'src-root' }
-    return { kind: 'layer', layer: parts[3] }
+export function moduleReferences(file, source) {
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+  const references = []
+  function visit(node) {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      const clause = node.importClause
+      const bindings = clause?.namedBindings || node.exportClause
+      const typeOnly = node.isTypeOnly || clause?.isTypeOnly || Boolean(!clause?.name && bindings?.elements?.length && bindings.elements.every(item => item.isTypeOnly))
+      references.push({ specifier: node.moduleSpecifier.text, typeOnly })
+    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
+      references.push({ specifier: node.argument.literal.text, typeOnly: true })
+    } else if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || ts.isIdentifier(node.expression) && node.expression.text === 'require') && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+      references.push({ specifier: node.arguments[0].text, typeOnly: false })
+    }
+    ts.forEachChild(node, visit)
   }
-  if (rel.startsWith('apps/')) return { kind: 'app', app: rel.split('/')[1] }
-  if (rel.startsWith('packages/')) return { kind: 'package', pkg: rel.split('/')[1] }
-  return { kind: 'outside' }
+  visit(ast)
+  return references
 }
 
-function specifiersOf(source) {
-  const specs = new Set()
-  for (const pattern of IMPORT_PATTERNS) {
-    pattern.lastIndex = 0
-    let match
-    while ((match = pattern.exec(source))) specs.add(match[1])
-  }
-  return specs
-}
-
-function evaluate(from, to, spec) {
-  if (from.kind === 'layer') {
-    if (!SRC_LAYERS.has(from.layer)) {
-      return `unclassified src/ layer "${from.layer}": classify it in scripts/verify-architecture.mjs before adding cross-layer imports`
+export function verifyArchitecture(root = repositoryRoot) {
+  const workspaces = readWorkspaces(root)
+  const byName = new Map(workspaces.map(entry => [entry.manifest.name, entry]))
+  const failures = []
+  let edges = 0, count = 0
+  try { orderedPackages(workspaces) } catch (error) { failures.push(error.message) }
+  for (const workspace of workspaces) {
+    const { directory, manifest, kind } = workspace
+    const packageId = manifest.name.replace('@turboflux/', '')
+    if (kind === 'packages' && !packageDependencies[packageId]) failures.push(`Unclassified package: ${manifest.name}`)
+    for (const dependency of Object.keys(manifest.dependencies || {})) {
+      if (kind === 'packages' && dependency.startsWith('@turboflux/') && !packageDependencies[packageId]?.includes(dependency.replace('@turboflux/', ''))) failures.push(`${manifest.name}: forbidden dependency ${dependency}`)
     }
-    if (to.kind === 'layer' && !SRC_LAYERS.has(to.layer)) {
-      return `unclassified src/ layer "${to.layer}": classify it in scripts/verify-architecture.mjs before importing from it`
-    }
-    if (spec.startsWith('@turboflux/')) {
-      return `src/${from.layer} imports published package "${spec}" — src/ IS the package source, use relative imports`
-    }
-    if (!PRODUCT_LAYERS.has(from.layer)) {
-      if (to.kind === 'layer' && PRODUCT_LAYERS.has(to.layer)) {
-        return `src/${from.layer} imports product layer src/${to.layer} — products (cli, server) are leaves, nothing below them may depend on them`
+    const sourceRoot = kind === 'packages' ? join(directory, 'src') : directory
+    for (const file of sourceFiles(sourceRoot)) {
+      count++
+      const source = readFileSync(file, 'utf8'), label = relative(root, file)
+      if (packageId === 'agent-core' && ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true).statements.some(statement => !ts.isExportDeclaration(statement))) failures.push(`${label}: compatibility facade must contain exports only`)
+      if (!['packages/platform/src/profilePaths.ts', 'apps/desktop/main.mjs'].includes(label.replaceAll('\\', '/')) && /homedir\s*\(\s*\)[\s\S]{0,120}['"]\.turboflux['"]/.test(source)) failures.push(`${label}: resolve user storage through ActiveProfilePaths or ProfileStorageLayout`)
+      for (const { specifier, typeOnly } of moduleReferences(file, source)) {
+        edges++
+        if (specifier.startsWith('.')) {
+          const target = resolve(dirname(file), specifier)
+          if (relative(directory, target).startsWith('..') && !(kind === 'apps' && relative(root, target).replaceAll('\\', '/').startsWith('scripts/'))) failures.push(`${label}: relative import crosses workspace boundary: ${specifier}`)
+          continue
+        }
+        const name = specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0]
+        const isNode = specifier.startsWith('node:') || builtin.has(name)
+        if (browserPackages.has(packageId) && (isNode || name === 'electron')) failures.push(`${label}: browser package imports ${specifier}`)
+        if (label.replaceAll('\\', '/').startsWith('apps/desktop/renderer/') && !typeOnly && (isNode || name.startsWith('@turboflux/') && !browserPackages.has(name.replace('@turboflux/', '')))) failures.push(`${label}: renderer runtime imports host module ${specifier}`)
+        if (isNode) continue
+        if (name !== manifest.name && !manifest.dependencies?.[name] && !manifest.devDependencies?.[name]) failures.push(`${label}: undeclared dependency ${name}`)
+        if (!name.startsWith('@turboflux/')) continue
+        const target = byName.get(name)
+        if (!target) { failures.push(`${label}: unknown workspace ${name}`); continue }
+        if (target.kind === 'apps' && target !== workspace) failures.push(`${label}: imports application ${name}`)
+        if (name === '@turboflux/agent-core' && manifest.name !== name) failures.push(`${label}: use domain packages instead of the compatibility facade`)
+        const subpath = specifier === name ? '.' : `.${specifier.slice(name.length)}`
+        if (!target.manifest.exports?.[subpath]) failures.push(`${label}: package does not export ${specifier}`)
       }
-      if (to.kind === 'app') {
-        return `src/${from.layer} imports app "${to.app}" — apps are product shells on top of the kernel`
-      }
     }
-    if (FOUNDATION_LAYERS.has(from.layer) && to.kind === 'layer' && ORCHESTRATION_LAYERS.has(to.layer)) {
-      return `foundation layer src/${from.layer} imports orchestration layer src/${to.layer} — dependencies must point downward`
-    }
-    return null
   }
-  if (from.kind === 'app') {
-    if (spec.startsWith('@turboflux/')) return null
-    if (to.kind === 'layer') {
-      return `apps/${from.app} reaches into src/${to.layer} via relative import — apps must consume the kernel through @turboflux/* package exports`
-    }
-    if (to.kind === 'package') {
-      return `apps/${from.app} reaches into packages/${to.pkg} source — import the package by name instead`
-    }
-    if (to.kind === 'app' && to.app !== from.app) {
-      return `apps/${from.app} imports sibling app "${to.app}" — apps must not share source`
-    }
-    return null
-  }
-  if (from.kind === 'package') {
-    if (to.kind === 'layer') {
-      return `packages/${from.pkg} imports repo src/${to.layer} — packages must stay independent of the workspace source tree`
-    }
-    if (to.kind === 'app') {
-      return `packages/${from.pkg} imports app "${to.app}" — packages must stay independent of product shells`
-    }
-    if (to.kind === 'package' && to.pkg !== from.pkg) {
-      return `packages/${from.pkg} imports sibling packages/${to.pkg} via relative path — use the package name and declare the dependency`
-    }
-    return null
-  }
-  return null
+  return { failures, files: count, edges }
 }
-
-const files = walk(ROOT)
-const violations = []
-let edgeCount = 0
-const zoneCounts = {}
-
-for (const file of files) {
-  const from = classify(file)
-  if (from.kind === 'outside' || from.kind === 'src-root') continue
-  zoneCounts[from.kind === 'layer' ? `packages/agent-core/src/${from.layer}` : from.kind === 'app' ? `apps/${from.app}` : `packages/${from.pkg}`] =
-    (zoneCounts[from.kind === 'layer' ? `packages/agent-core/src/${from.layer}` : from.kind === 'app' ? `apps/${from.app}` : `packages/${from.pkg}`] || 0) + 1
-
-  const source = readFileSync(file, 'utf8')
-  const relativeFile = relative(ROOT, file).replaceAll('\\', '/')
-  if (
-    !STATIC_USER_ROOT_ALLOWLIST.has(relativeFile)
-    && /homedir\s*\(\s*\)[\s\S]{0,120}['"]\.turboflux['"]/u.test(source)
-  ) {
-    violations.push(`${relativeFile}\n    static user storage root\n    → resolve user-owned paths through ActiveProfilePaths or ProfileStorageLayout`)
-  }
-  for (const spec of specifiersOf(source)) {
-    const to = spec.startsWith('.')
-      ? classify(resolve(dirname(file), spec))
-      : spec.startsWith('@turboflux/')
-        ? { kind: 'package-name', name: spec.split('/').slice(0, 2).join('/') }
-        : null
-    if (!to || to.kind === 'outside') continue
-    if (to.kind === 'layer' && from.kind === 'layer' && to.layer === from.layer) continue
-    if (to.kind === 'app' && from.kind === 'app' && to.app === from.app) continue
-    edgeCount += 1
-    const violation = evaluate(from, to, spec)
-    if (violation) violations.push(`${relative(ROOT, file)}\n    import "${spec}"\n    → ${violation}`)
-  }
-}
-
-if (violations.length) {
-  process.stderr.write(`TurboFlux architecture boundary check failed (${violations.length} violation${violations.length === 1 ? '' : 's'}):\n\n${violations.join('\n\n')}\n`)
-  process.exitCode = 1
-} else {
-  const zones = Object.entries(zoneCounts).map(([zone, count]) => `${zone}(${count})`).join(' ')
-  process.stdout.write(`TurboFlux architecture boundary check passed.\n  ${files.length} source files scanned, ${edgeCount} cross-layer import edges verified.\n  zones: ${zones}\n`)
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const result = verifyArchitecture()
+  if (result.failures.length) { console.error(`Package boundary check failed:\n${result.failures.join('\n')}`); process.exitCode = 1 }
+  else console.log(`Package boundaries passed: ${result.files} files, ${result.edges} imports; no cycles, undeclared dependencies or browser/host leaks.`)
 }

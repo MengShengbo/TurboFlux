@@ -1,0 +1,143 @@
+{
+  "name": "@turboflux/contracts",
+  "version": "1.0.1",
+  "description": "Browser-safe Agent, event, state and tool contracts",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./agentTypes": {
+      "types": "./dist/agentTypes.d.ts",
+      "import": "./dist/agentTypes.js"
+    },
+    "./apiKeyPresentation": {
+      "types": "./dist/apiKeyPresentation.d.ts",
+      "import": "./dist/apiKeyPresentation.js"
+    },
+    "./browserToolPresentation": {
+      "types": "./dist/browserToolPresentation.d.ts",
+      "import": "./dist/browserToolPresentation.js"
+    },
+    "./browserTypes": {
+      "types": "./dist/browserTypes.d.ts",
+      "import": "./dist/browserTypes.js"
+    },
+    "./computerPrivacy": {
+      "types": "./dist/computerPrivacy.d.ts",
+      "import": "./dist/computerPrivacy.js"
+    },
+    "./computerToolPresentation": {
+      "types": "./dist/computerToolPresentation.d.ts",
+      "import": "./dist/computerToolPresentation.js"
+    },
+    "./computerTypes": {
+      "types": "./dist/computerTypes.d.ts",
+      "import": "./dist/computerTypes.js"
+    },
+    "./conversationEvent": {
+      "types": "./dist/conversationEvent.d.ts",
+      "import": "./dist/conversationEvent.js"
+    },
+    "./flowEvents": {
+      "types": "./dist/flowEvents.d.ts",
+      "import": "./dist/flowEvents.js"
+    },
+    "./gitTypes": {
+      "types": "./dist/gitTypes.d.ts",
+      "import": "./dist/gitTypes.js"
+    },
+    "./memoryTypes": {
+      "types": "./dist/memoryTypes.d.ts",
+      "import": "./dist/memoryTypes.js"
+    },
+    "./modelConfigTypes": {
+      "types": "./dist/modelConfigTypes.d.ts",
+      "import": "./dist/modelConfigTypes.js"
+    },
+    "./modelSurfaceTypes": {
+      "types": "./dist/modelSurfaceTypes.d.ts",
+      "import": "./dist/modelSurfaceTypes.js"
+    },
+    "./pluginTypes": {
+      "types": "./dist/pluginTypes.d.ts",
+      "import": "./dist/pluginTypes.js"
+    },
+    "./retrievalTypes": {
+      "types": "./dist/retrievalTypes.d.ts",
+      "import": "./dist/retrievalTypes.js"
+    },
+    "./runtimeTaskTypes": {
+      "types": "./dist/runtimeTaskTypes.d.ts",
+      "import": "./dist/runtimeTaskTypes.js"
+    },
+    "./skillTypes": {
+      "types": "./dist/skillTypes.d.ts",
+      "import": "./dist/skillTypes.js"
+    },
+    "./stateTypes": {
+      "types": "./dist/stateTypes.d.ts",
+      "import": "./dist/stateTypes.js"
+    },
+    "./subAgentTypes": {
+      "types": "./dist/subAgentTypes.d.ts",
+      "import": "./dist/subAgentTypes.js"
+    },
+    "./terminalTypes": {
+      "types": "./dist/terminalTypes.d.ts",
+      "import": "./dist/terminalTypes.js"
+    },
+    "./toolCallMarkup": {
+      "types": "./dist/toolCallMarkup.d.ts",
+      "import": "./dist/toolCallMarkup.js"
+    },
+    "./toolExecutor": {
+      "types": "./dist/toolExecutor.d.ts",
+      "import": "./dist/toolExecutor.js"
+    },
+    "./toolResultData": {
+      "types": "./dist/toolResultData.d.ts",
+      "import": "./dist/toolResultData.js"
+    },
+    "./toolTypes": {
+      "types": "./dist/toolTypes.d.ts",
+      "import": "./dist/toolTypes.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./workExecutionTypes": {
+      "types": "./dist/workExecutionTypes.d.ts",
+      "import": "./dist/workExecutionTypes.js"
+    },
+    "./workPackTypes": {
+      "types": "./dist/workPackTypes.d.ts",
+      "import": "./dist/workPackTypes.js"
+    },
+    "./workflowSurfaceTypes": {
+      "types": "./dist/workflowSurfaceTypes.d.ts",
+      "import": "./dist/workflowSurfaceTypes.js"
+    },
+    "./modelUsage": {
+      "types": "./dist/modelUsage.d.ts",
+      "import": "./dist/modelUsage.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {}
+}

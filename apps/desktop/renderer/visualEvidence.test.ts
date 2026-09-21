@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import type { WorkbenchSnapshot } from '@turboflux/workbench'
 import {
   visualEvidenceItems,
   visualEvidenceLabel,

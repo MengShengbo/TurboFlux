@@ -1,0 +1,174 @@
+{
+  "name": "@turboflux/agent-runtime",
+  "version": "1.0.1",
+  "description": "Agent execution, context, subagents and lifecycle orchestration",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./agentEngine": {
+      "types": "./dist/agentEngine.d.ts",
+      "import": "./dist/agentEngine.js"
+    },
+    "./cacheMonitor": {
+      "types": "./dist/cacheMonitor.d.ts",
+      "import": "./dist/cacheMonitor.js"
+    },
+    "./contextCompaction": {
+      "types": "./dist/contextCompaction.d.ts",
+      "import": "./dist/contextCompaction.js"
+    },
+    "./contextCompactionBoundary": {
+      "types": "./dist/contextCompactionBoundary.d.ts",
+      "import": "./dist/contextCompactionBoundary.js"
+    },
+    "./contextManager": {
+      "types": "./dist/contextManager.d.ts",
+      "import": "./dist/contextManager.js"
+    },
+    "./contextPolicy": {
+      "types": "./dist/contextPolicy.d.ts",
+      "import": "./dist/contextPolicy.js"
+    },
+    "./persona/voiceProfile": {
+      "types": "./dist/persona/voiceProfile.d.ts",
+      "import": "./dist/persona/voiceProfile.js"
+    },
+    "./responseMode": {
+      "types": "./dist/responseMode.d.ts",
+      "import": "./dist/responseMode.js"
+    },
+    "./runtime/agentContextCoordinator": {
+      "types": "./dist/runtime/agentContextCoordinator.d.ts",
+      "import": "./dist/runtime/agentContextCoordinator.js"
+    },
+    "./runtime/agentEventHub": {
+      "types": "./dist/runtime/agentEventHub.d.ts",
+      "import": "./dist/runtime/agentEventHub.js"
+    },
+    "./runtime/agentRunLifecycle": {
+      "types": "./dist/runtime/agentRunLifecycle.d.ts",
+      "import": "./dist/runtime/agentRunLifecycle.js"
+    },
+    "./runtime/agentRuntime": {
+      "types": "./dist/runtime/agentRuntime.d.ts",
+      "import": "./dist/runtime/agentRuntime.js"
+    },
+    "./runtime/agentSessionRehydrator": {
+      "types": "./dist/runtime/agentSessionRehydrator.d.ts",
+      "import": "./dist/runtime/agentSessionRehydrator.js"
+    },
+    "./runtime/approvalCoordinator": {
+      "types": "./dist/runtime/approvalCoordinator.d.ts",
+      "import": "./dist/runtime/approvalCoordinator.js"
+    },
+    "./runtime/modelStreamControl": {
+      "types": "./dist/runtime/modelStreamControl.d.ts",
+      "import": "./dist/runtime/modelStreamControl.js"
+    },
+    "./runtime/runControl": {
+      "types": "./dist/runtime/runControl.d.ts",
+      "import": "./dist/runtime/runControl.js"
+    },
+    "./runtime/sessionRegistry": {
+      "types": "./dist/runtime/sessionRegistry.d.ts",
+      "import": "./dist/runtime/sessionRegistry.js"
+    },
+    "./runtime/stateProvider": {
+      "types": "./dist/runtime/stateProvider.d.ts",
+      "import": "./dist/runtime/stateProvider.js"
+    },
+    "./runtime/subAgentTaskManager": {
+      "types": "./dist/runtime/subAgentTaskManager.d.ts",
+      "import": "./dist/runtime/subAgentTaskManager.js"
+    },
+    "./runtime/systems/controlLease": {
+      "types": "./dist/runtime/systems/controlLease.d.ts",
+      "import": "./dist/runtime/systems/controlLease.js"
+    },
+    "./runtime/systems/index": {
+      "types": "./dist/runtime/systems/index.d.ts",
+      "import": "./dist/runtime/systems/index.js"
+    },
+    "./runtime/systems/operationCoordinator": {
+      "types": "./dist/runtime/systems/operationCoordinator.d.ts",
+      "import": "./dist/runtime/systems/operationCoordinator.js"
+    },
+    "./runtime/systems/systemCapability": {
+      "types": "./dist/runtime/systems/systemCapability.d.ts",
+      "import": "./dist/runtime/systems/systemCapability.js"
+    },
+    "./runtime/toolCallLifecycle": {
+      "types": "./dist/runtime/toolCallLifecycle.d.ts",
+      "import": "./dist/runtime/toolCallLifecycle.js"
+    },
+    "./runtime/toolExecutionCoordinator": {
+      "types": "./dist/runtime/toolExecutionCoordinator.d.ts",
+      "import": "./dist/runtime/toolExecutionCoordinator.js"
+    },
+    "./runtime/toolExecutionResult": {
+      "types": "./dist/runtime/toolExecutionResult.d.ts",
+      "import": "./dist/runtime/toolExecutionResult.js"
+    },
+    "./subAgent": {
+      "types": "./dist/subAgent.d.ts",
+      "import": "./dist/subAgent.js"
+    },
+    "./systemPrompt": {
+      "types": "./dist/systemPrompt.d.ts",
+      "import": "./dist/systemPrompt.js"
+    },
+    "./taskManager": {
+      "types": "./dist/taskManager.d.ts",
+      "import": "./dist/taskManager.js"
+    },
+    "./taskToolDispatcher": {
+      "types": "./dist/taskToolDispatcher.d.ts",
+      "import": "./dist/taskToolDispatcher.js"
+    },
+    "./tokenCompressor": {
+      "types": "./dist/tokenCompressor.d.ts",
+      "import": "./dist/tokenCompressor.js"
+    },
+    "./toolCallOrchestrator": {
+      "types": "./dist/toolCallOrchestrator.d.ts",
+      "import": "./dist/toolCallOrchestrator.js"
+    },
+    "./toolExecutionLedger": {
+      "types": "./dist/toolExecutionLedger.d.ts",
+      "import": "./dist/toolExecutionLedger.js"
+    },
+    "./turnStrategy": {
+      "types": "./dist/turnStrategy.d.ts",
+      "import": "./dist/turnStrategy.js"
+    },
+    "./workExecutionTracker": {
+      "types": "./dist/workExecutionTracker.d.ts",
+      "import": "./dist/workExecutionTracker.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/contracts": "*",
+    "@turboflux/extensions": "*",
+    "@turboflux/models": "*",
+    "@turboflux/platform": "*",
+    "@turboflux/presentation": "*",
+    "@turboflux/tools": "*"
+  }
+}

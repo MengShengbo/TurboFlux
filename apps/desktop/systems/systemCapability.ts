@@ -1,4 +1,4 @@
-import type { McpClient } from '@turboflux/agent-core/extensions'
+import type { McpClient } from '@turboflux/extensions'
 
 export interface AgentSystemCapability<TSnapshot> {
   register(client: McpClient): void

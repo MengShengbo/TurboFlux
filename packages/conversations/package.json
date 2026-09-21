@@ -1,0 +1,125 @@
+{
+  "name": "@turboflux/conversations",
+  "version": "1.0.1",
+  "description": "Conversation event log, persistence, recovery and privacy",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./conversations/conversationCatalog": {
+      "types": "./dist/conversations/conversationCatalog.d.ts",
+      "import": "./dist/conversations/conversationCatalog.js"
+    },
+    "./conversations/conversationEventStoreV2": {
+      "types": "./dist/conversations/conversationEventStoreV2.d.ts",
+      "import": "./dist/conversations/conversationEventStoreV2.js"
+    },
+    "./conversations/conversationInteractionStoreV2": {
+      "types": "./dist/conversations/conversationInteractionStoreV2.d.ts",
+      "import": "./dist/conversations/conversationInteractionStoreV2.js"
+    },
+    "./conversations/conversationJournalIndex": {
+      "types": "./dist/conversations/conversationJournalIndex.d.ts",
+      "import": "./dist/conversations/conversationJournalIndex.js"
+    },
+    "./conversations/conversationProjections": {
+      "types": "./dist/conversations/conversationProjections.d.ts",
+      "import": "./dist/conversations/conversationProjections.js"
+    },
+    "./conversations/conversationRepositoryV2": {
+      "types": "./dist/conversations/conversationRepositoryV2.d.ts",
+      "import": "./dist/conversations/conversationRepositoryV2.js"
+    },
+    "./conversations/conversationRuntimeRepositoryV2": {
+      "types": "./dist/conversations/conversationRuntimeRepositoryV2.d.ts",
+      "import": "./dist/conversations/conversationRuntimeRepositoryV2.js"
+    },
+    "./conversations/conversationV2Ids": {
+      "types": "./dist/conversations/conversationV2Ids.d.ts",
+      "import": "./dist/conversations/conversationV2Ids.js"
+    },
+    "./conversations/conversationV2Migration": {
+      "types": "./dist/conversations/conversationV2Migration.d.ts",
+      "import": "./dist/conversations/conversationV2Migration.js"
+    },
+    "./conversations/conversationV2MigrationService": {
+      "types": "./dist/conversations/conversationV2MigrationService.d.ts",
+      "import": "./dist/conversations/conversationV2MigrationService.js"
+    },
+    "./conversations/conversationV2Types": {
+      "types": "./dist/conversations/conversationV2Types.d.ts",
+      "import": "./dist/conversations/conversationV2Types.js"
+    },
+    "./conversations/index": {
+      "types": "./dist/conversations/index.d.ts",
+      "import": "./dist/conversations/index.js"
+    },
+    "./conversations/journalWriter": {
+      "types": "./dist/conversations/journalWriter.d.ts",
+      "import": "./dist/conversations/journalWriter.js"
+    },
+    "./conversations/manager": {
+      "types": "./dist/conversations/manager.d.ts",
+      "import": "./dist/conversations/manager.js"
+    },
+    "./conversations/portablePath": {
+      "types": "./dist/conversations/portablePath.d.ts",
+      "import": "./dist/conversations/portablePath.js"
+    },
+    "./conversations/recoveryExport": {
+      "types": "./dist/conversations/recoveryExport.d.ts",
+      "import": "./dist/conversations/recoveryExport.js"
+    },
+    "./conversations/recoveryMessages": {
+      "types": "./dist/conversations/recoveryMessages.d.ts",
+      "import": "./dist/conversations/recoveryMessages.js"
+    },
+    "./conversations/store": {
+      "types": "./dist/conversations/store.d.ts",
+      "import": "./dist/conversations/store.js"
+    },
+    "./conversations/types": {
+      "types": "./dist/conversations/types.d.ts",
+      "import": "./dist/conversations/types.js"
+    },
+    "./events/conversationEventLog": {
+      "types": "./dist/events/conversationEventLog.d.ts",
+      "import": "./dist/events/conversationEventLog.js"
+    },
+    "./events/conversationEventNormalizer": {
+      "types": "./dist/events/conversationEventNormalizer.d.ts",
+      "import": "./dist/events/conversationEventNormalizer.js"
+    },
+    "./events/index": {
+      "types": "./dist/events/index.d.ts",
+      "import": "./dist/events/index.js"
+    },
+    "./privacy/computerPrivacy": {
+      "types": "./dist/privacy/computerPrivacy.d.ts",
+      "import": "./dist/privacy/computerPrivacy.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/agent-runtime": "*",
+    "@turboflux/contracts": "*",
+    "@turboflux/models": "*",
+    "@turboflux/platform": "*",
+    "@turboflux/presentation": "*"
+  }
+}

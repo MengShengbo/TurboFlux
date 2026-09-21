@@ -7,6 +7,7 @@ Documentation for Agent Core and the Desktop application, including its remote-c
 - [Getting started](../README.md) / [中文](../README.zh.md)
 - [项目介绍](project-introduction.zh.md)
 - [Architecture overview](architecture/project-overview.md)
+- [内核优化执行计划](plans/kernel-optimization.md)
 - [Repository and release boundary](architecture/repository-boundary.md)
 - [Local plugin lifecycle](architecture/local-plugin-lifecycle.md)
 - [Workflow Surface extension contract](architecture/workflow-surfaces.md)

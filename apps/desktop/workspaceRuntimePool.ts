@@ -14,12 +14,12 @@ import type {
   AutomationApprovalRequest,
   WorkbenchEvent,
   WorkbenchRuntime,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import {
   captureAutomationWorkspaceIdentity,
   createAutomationCheckpoint,
   automationToolEffectNeedsReview,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 
 export interface WorkspaceRuntimePoolOptions {
   automationService: AutomationService

@@ -1,8 +1,4 @@
-import type {
-  McpClient,
-  McpLocalServerDefinition,
-  McpLocalToolDefinition,
-} from '@turboflux/agent-core/extensions'
+import type { McpClient, McpLocalServerDefinition, McpLocalToolDefinition } from '@turboflux/extensions'
 
 export const COMPUTER_AGENT_INSTRUCTIONS = [
   'Use specialized MCP/API tools first, the built-in browser for websites and local web apps second, and Computer only for native or otherwise unreachable application UI.',

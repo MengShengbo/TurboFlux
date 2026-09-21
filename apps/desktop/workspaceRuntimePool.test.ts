@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AutomationService, type WorkbenchEvent, type WorkbenchRuntime } from '@turboflux/agent-core/workbench'
+import { AutomationService, type WorkbenchEvent, type WorkbenchRuntime } from '@turboflux/workbench'
 import { WorkspaceRuntimePool } from './workspaceRuntimePool'
 
 const directories: string[] = []

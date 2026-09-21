@@ -3,7 +3,7 @@ import type {
   ComputerAppSnapshot,
   ComputerBounds,
   ComputerWindowSnapshot,
-} from '@turboflux/agent-core/contracts'
+} from '@turboflux/contracts'
 
 export interface ComputerNativeSnapshot {
   accessibilityTrusted: boolean

@@ -1,4 +1,4 @@
-import type { AgentTurn, TokenUsage } from '@turboflux/agent-core/workbench'
+import type { AgentTurn, TokenUsage } from '@turboflux/workbench'
 
 function finiteTokenCount(value: number | undefined): number {
   return Number.isFinite(value) ? Math.max(0, Number(value)) : 0

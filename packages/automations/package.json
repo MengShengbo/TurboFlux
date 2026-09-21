@@ -1,0 +1,78 @@
+{
+  "name": "@turboflux/automations",
+  "version": "1.0.1",
+  "description": "Automation scheduling, persistence, routing and recovery",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./automationApplicationService": {
+      "types": "./dist/automationApplicationService.d.ts",
+      "import": "./dist/automationApplicationService.js"
+    },
+    "./automationCheckpoint": {
+      "types": "./dist/automationCheckpoint.d.ts",
+      "import": "./dist/automationCheckpoint.js"
+    },
+    "./automationCoordinator": {
+      "types": "./dist/automationCoordinator.d.ts",
+      "import": "./dist/automationCoordinator.js"
+    },
+    "./automationFailure": {
+      "types": "./dist/automationFailure.d.ts",
+      "import": "./dist/automationFailure.js"
+    },
+    "./automationMigration": {
+      "types": "./dist/automationMigration.d.ts",
+      "import": "./dist/automationMigration.js"
+    },
+    "./automationRecovery": {
+      "types": "./dist/automationRecovery.d.ts",
+      "import": "./dist/automationRecovery.js"
+    },
+    "./automationRepository": {
+      "types": "./dist/automationRepository.d.ts",
+      "import": "./dist/automationRepository.js"
+    },
+    "./automationRouting": {
+      "types": "./dist/automationRouting.d.ts",
+      "import": "./dist/automationRouting.js"
+    },
+    "./automationService": {
+      "types": "./dist/automationService.d.ts",
+      "import": "./dist/automationService.js"
+    },
+    "./automationSideEffects": {
+      "types": "./dist/automationSideEffects.d.ts",
+      "import": "./dist/automationSideEffects.js"
+    },
+    "./automationStateMachine": {
+      "types": "./dist/automationStateMachine.d.ts",
+      "import": "./dist/automationStateMachine.js"
+    },
+    "./automationTypes": {
+      "types": "./dist/automationTypes.d.ts",
+      "import": "./dist/automationTypes.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/contracts": "*",
+    "@turboflux/platform": "*"
+  }
+}

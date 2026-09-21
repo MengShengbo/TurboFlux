@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { WorkRun, WorkStep } from '@turboflux/agent-core/workbench'
-import { workPlanSummary, workPlanVersion } from './workPlanPresentation'
+import type { WorkRun, WorkStep } from '@turboflux/workbench'
+import { workPlanSummary, workPlanVersion } from '@turboflux/renderer/workPlanPresentation'
 
 function step(id: string, order: number, status: WorkStep['status']): WorkStep {
   return {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { RuntimeTask } from '@turboflux/agent-core/contracts'
+import type { RuntimeTask } from '@turboflux/contracts'
 import { describeRuntimeTask, normalizeRuntimePreviewUrl, runtimeTaskStatusLabel } from './runtimeTaskPresentation'
 
 function task(overrides: Partial<RuntimeTask> = {}): RuntimeTask {

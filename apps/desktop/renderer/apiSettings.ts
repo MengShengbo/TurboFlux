@@ -1,5 +1,5 @@
-import type { WorkbenchApiConfigInput, WorkbenchModelOption, WorkbenchSettingsSnapshot, WorkbenchSettingsUpdate } from '@turboflux/agent-core/workbench'
-import { maskedApiKey } from '@turboflux/agent-core/renderer'
+import type { WorkbenchApiConfigInput, WorkbenchModelOption, WorkbenchSettingsSnapshot, WorkbenchSettingsUpdate } from '@turboflux/workbench'
+import { maskedApiKey } from '@turboflux/presentation'
 import { Check, ChevronDown, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Search, Server, Trash2, X, createElement, type IconNode } from 'lucide'
 import { presentDesktopError } from './conversationRendering'
 import { modelProviderMark, normalizedModelProvider } from './modelPresentation'

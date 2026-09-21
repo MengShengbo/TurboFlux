@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { AgentTurn, ToolCall, ToolResult } from '@turboflux/agent-core/contracts'
+import type { AgentTurn, ToolCall, ToolResult } from '@turboflux/contracts'
 import {
   classifyExecutionStep,
   executionOutcomeFromWorkRunStatus,
@@ -8,7 +8,7 @@ import {
   shouldFinalizeAssistantTurnInTask,
   shouldFinalizeExecutionGroup,
   shouldSplitExecutionGroup,
-} from './executionPresentation'
+} from '@turboflux/renderer/executionPresentation'
 
 const call = (id: string, name: string, args: Record<string, unknown> = {}): ToolCall => ({ id, name, arguments: args })
 const result = (toolCallId: string, overrides: Partial<ToolResult> = {}): ToolResult => ({

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, Menu, net, Notification, powerMonitor, protocol, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain as electronIpcMain, Menu, nativeImage, net, Notification, powerMonitor, protocol, safeStorage, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { copyFile, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
@@ -7,6 +7,7 @@ import { basename, dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isPathInside } from './pathContainment.js'
 import { DesktopRuntimeHost } from './runtimeHost.ts'
+import { DesktopUserProfileStore } from './desktopUserProfile.ts'
 import { BrowserSystem } from './browser/browserSystem.ts'
 import { ComputerSystem } from './computer/computerSystem.ts'
 import { ComputerActivityOverlay, classifyComputerOverlayRuntimeEvent } from './computer/computerActivityOverlay.ts'
@@ -24,6 +25,7 @@ import {
 } from './desktopHostPreferences.ts'
 import { countVisibleProfileConversations, countVisibleProfileWorkspaces, filterVisibleProfileWorkspaces, listVisibleProfileConversations, summarizeProfileDirectory } from './profileSummary.ts'
 import { profileQaPathOverride } from './profileQaPathOverrides.ts'
+import { resolveWorkspaceFolder } from './workspaceFolders.ts'
 import { switchDesktopProfile } from './profileSwitchCoordinator.ts'
 import {
   ARCHIVE_COMPONENT_DEFINITIONS,
@@ -48,7 +50,7 @@ import {
   reprotectCredentialDocument,
   serializeCredentialSnapshot,
   setCredentialProtection,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 
 protocol.registerSchemesAsPrivileged([{
   scheme: 'turboflux-media',
@@ -85,6 +87,7 @@ if (app.isPackaged) {
 let mainWindow
 let runtimeHost
 let runtimeHostPromise
+let desktopUserProfilePromise
 let runtimeHostGeneration = 0
 let runtimeHostResetPromise = Promise.resolve()
 let shutdownPromise
@@ -740,6 +743,24 @@ async function localProfileSummaries() {
   }))
 }
 
+function recordDesktopUserActivity(event) {
+  if (event.type !== 'conversation-event' || event.event.provenance !== 'live') return
+  if (event.event.type !== 'usage.updated' && !(event.event.type === 'runtime.event' && event.event.payload.kind === 'subagent:progress')) return
+  void getDesktopUserProfileStore().then(store => store.activity.record(event)).catch(error => {
+    console.error('Unable to record personal token activity:', error)
+  })
+}
+
+async function getDesktopUserProfileStore() {
+  if (!desktopUserProfilePromise) {
+    desktopUserProfilePromise = DesktopUserProfileStore.open(join(app.getPath('userData'), 'personal')).catch(error => {
+      desktopUserProfilePromise = undefined
+      throw error
+    })
+  }
+  return desktopUserProfilePromise
+}
+
 async function getRuntimeHost() {
   while (true) {
     await runtimeHostResetPromise
@@ -753,6 +774,7 @@ async function getRuntimeHost() {
         .then(([, profileContext]) => DesktopRuntimeHost.create(unscopedWorkspacePath(), {
           registerSystemPlugins,
           profileStorage: profileContext.storage,
+          onUsageEvent: recordDesktopUserActivity,
           unscopedWorkspacePath: unscopedWorkspacePath(),
         }))
         .then(async host => {
@@ -1091,6 +1113,7 @@ async function shutdownDesktopApplication() {
     disposeDesktopPowerLifecycle?.()
     disposeDesktopPowerLifecycle = undefined
     await resetRuntimeHost()
+    await desktopUserProfilePromise?.then(store => store.activity.snapshot())
   } finally {
     terminalSystem?.destroy()
     terminalSystem = null
@@ -1455,6 +1478,26 @@ ipcMain.handle('desktop:profiles-list', async () => {
     profiles: await localProfileSummaries(),
     transitionBlocker: profileLifecycleTransitionBlocker(),
   }
+})
+ipcMain.handle('desktop:user-profile-get', async () => (await getDesktopUserProfileStore()).snapshot())
+ipcMain.handle('desktop:user-profile-name', async (_event, displayName) => (await getDesktopUserProfileStore()).saveName(displayName))
+ipcMain.handle('desktop:user-activity', async () => (await getDesktopUserProfileStore()).activity.snapshot())
+ipcMain.handle('desktop:user-profile-avatar', async () => {
+  const store = await getDesktopUserProfileStore()
+  const selected = await dialog.showOpenDialog(mainWindow, {
+    title: '选择头像', buttonLabel: '使用此头像', properties: ['openFile'],
+    filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
+  })
+  if (selected.canceled || !selected.filePaths[0]) return null
+  const source = selected.filePaths[0]
+  if ((await stat(source)).size > 10 * 1024 * 1024) throw new Error('请选择小于 10 MB 的图片')
+  const image = nativeImage.createFromPath(source)
+  if (image.isEmpty()) throw new Error('无法读取这张图片，请选择 PNG、JPG 或 WebP 图片')
+  const { width, height } = image.getSize()
+  const side = Math.min(width, height)
+  const avatar = image.crop({ x: Math.floor((width - side) / 2), y: Math.floor((height - side) / 2), width: side, height: side })
+    .resize({ width: 256, height: 256, quality: 'best' }).toPNG()
+  return store.saveAvatar(`data:image/png;base64,${avatar.toString('base64')}`)
 })
 ipcMain.handle('desktop:profile-create', async (_event, input) => {
   requireProfileFeature('profileCenterV2', '本地资料管理已由发布配置关闭。')
@@ -2022,11 +2065,28 @@ ipcMain.handle('desktop:git-diff', async (_event, path, scope) => (
     ['working', 'staged', 'all'].includes(scope) ? scope : 'working',
   )
 ))
-ipcMain.handle('desktop:add-project', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, { title: '添加项目文件夹', properties: ['openDirectory', 'createDirectory'] })
+ipcMain.handle('desktop:choose-project-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择工作区文件夹',
+    buttonLabel: '选择文件夹',
+    properties: ['openDirectory', 'createDirectory'],
+  })
   if (result.canceled || !result.filePaths[0]) return null
-  return (await getRuntimeHost()).addProject(result.filePaths[0])
+  return resolveWorkspaceFolder(result.filePaths[0])
 })
+ipcMain.handle('desktop:add-project', async (_event, input) => {
+  if (!input || typeof input !== 'object') throw new Error('请填写工作区名称并选择文件夹。')
+  const name = requireText(input.name, '工作区名称').trim()
+  if (name.length > 120) throw new Error('工作区名称不能超过 120 个字符。')
+  const folder = await resolveWorkspaceFolder(requireText(input.path, '工作区文件夹'))
+  return (await getRuntimeHost()).addProject(folder.path, name)
+})
+ipcMain.handle('desktop:rename-project', async (_event, id, name) => (
+  (await getRuntimeHost()).renameProject(requireText(id, '工作区 ID'), requireText(name, '工作区名称'))
+))
+ipcMain.handle('desktop:remove-project', async (_event, id) => (
+  (await getRuntimeHost()).removeProject(requireText(id, '工作区 ID'))
+))
 ipcMain.handle('desktop:create-automation', async (_event, input) => {
   if (!input || typeof input !== 'object') throw new Error('Invalid automation input')
   return (await getRuntimeHost()).createAutomation(input)

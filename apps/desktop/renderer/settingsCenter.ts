@@ -1,3 +1,4 @@
+import { RenderLifetime } from '@turboflux/renderer'
 import type {
   WorkbenchApiConfigInput,
   WorkbenchMcpServerInput,
@@ -10,7 +11,7 @@ import type {
   WorkbenchSnapshot,
   AgentCapabilityReference,
   NativeReasoningConfig,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import {
   buildReasoningOptions,
   effectiveReasoningConfig,
@@ -44,14 +45,11 @@ import {
   type BackgroundMediaFit,
   type BackgroundMediaSettings,
 } from './backgroundMedia'
-import { createProfileExportWizard } from './profileExportWizard'
-import { createProfileImportWizard } from './profileImportWizard'
-import { createProfileCenter, type ProfileCenterController } from './profileCenter'
 import { createApiSettingsPage } from './apiSettings'
 import { applyApiModel, applyApiModelCapabilities } from './apiSettingsModel'
 import { renderLocalExtensions } from './localExtensionsView'
 
-type SettingsSection = 'appearance' | 'api' | 'mcp' | 'computer' | 'remote' | 'workpacks' | 'memory' | 'persona' | 'permissions' | 'data' | 'advanced'
+type SettingsSection = 'appearance' | 'api' | 'mcp' | 'computer' | 'remote' | 'workpacks' | 'memory' | 'persona' | 'permissions' | 'advanced'
 type SettingsGroup = 'basics' | 'capabilities' | 'system'
 
 interface SettingsSectionMeta {
@@ -66,7 +64,6 @@ interface SettingsSectionMeta {
 interface SettingsCenterOptions {
   showToast(message: string): void
   onSnapshot(snapshot: WorkbenchSnapshot): void
-  onOpenConversation(conversationId: string): Promise<void>
   onUseCapability(capability: AgentCapabilityReference): Promise<void>
   onOpen?(): Promise<void> | void
   onClose?(): void
@@ -76,12 +73,12 @@ interface SettingsCenterOptions {
 
 export interface SettingsCenterController {
   open(section?: SettingsSection): Promise<void>
-  openProfiles(mode?: 'library' | 'create' | 'import'): Promise<void>
   openModelPicker(anchor: HTMLElement): Promise<void>
   openReasoningPicker(anchor: HTMLElement): Promise<void>
   repositionComposerPicker(): void
   close(): void
   isOpen(): boolean
+  dispose(): void
   handleSettingsUpdate(settings: WorkbenchSettingsSnapshot): void
 }
 
@@ -92,7 +89,7 @@ const sectionGroups: Array<[SettingsGroup, string]> = [
 ]
 
 const sectionLabels: SettingsSectionMeta[] = [
-  { id: 'api', title: '模型与 API', subtitle: '连接、模型与推理', group: 'basics', icon: 'model', keywords: '供应商 密钥 base url provider reasoning' },
+  { id: 'api', title: '模型API管理', subtitle: '连接、模型与推理', group: 'basics', icon: 'model', keywords: '供应商 密钥 base url provider reasoning' },
   { id: 'appearance', title: '外观', subtitle: '主题与背景', group: 'basics', icon: 'appearance', keywords: '外观 主题 深色 浅色 dark light system appearance' },
   { id: 'persona', title: '人设与语言', subtitle: '行为风格与全局指令', group: 'basics', icon: 'persona', keywords: '语言 风格 persona prompt instructions' },
   { id: 'permissions', title: '权限与审批', subtitle: '工具边界与确认策略', group: 'basics', icon: 'shield', keywords: 'approval policy git sandbox 安全' },
@@ -101,7 +98,6 @@ const sectionLabels: SettingsSectionMeta[] = [
   { id: 'computer', title: '电脑操控', subtitle: '系统权限与接管边界', group: 'capabilities', icon: 'computer', keywords: 'computer use accessibility screen recording 辅助功能 屏幕录制' },
   { id: 'remote', title: '手机远程', subtitle: '端到端加密与设备确认', group: 'capabilities', icon: 'remote', keywords: 'remote mobile p2p 手机 远程 配对 https 二维码 设备' },
   { id: 'memory', title: '长期记忆', subtitle: '审核、编辑与遗忘', group: 'capabilities', icon: 'memory', keywords: 'memory 记忆 规则 偏好 审核 固定 删除' },
-  { id: 'data', title: '用户资料', subtitle: '本机用户、迁移与恢复', group: 'system', icon: 'advanced', keywords: 'profile export archive backup migrate 用户 资料 导出 迁移 备份' },
   { id: 'advanced', title: '高级', subtitle: '模型元数据与运行参数', group: 'system', icon: 'advanced', keywords: 'metadata runtime context tokens' },
 ]
 
@@ -120,7 +116,7 @@ function settingsSystemIcon(name: string): string {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4.5v4M16 4.5v4M6 8.5h12v2a6 6 0 0 1-6 6v3"/><path d="M9 19.5h6"/></svg>'
 }
 
-function settingsInlineIcon(name: 'plus' | 'minus' | 'close' | 'search' | 'back' | 'check' | 'info'): string {
+function settingsInlineIcon(name: 'plus' | 'minus' | 'close' | 'search' | 'back' | 'check' | 'info' | 'settings'): string {
   const paths: Record<typeof name, string> = {
     plus: '<path d="M12 5v14M5 12h14"/>',
     minus: '<path d="M5 12h14"/>',
@@ -128,6 +124,7 @@ function settingsInlineIcon(name: 'plus' | 'minus' | 'close' | 'search' | 'back'
     search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4"/>',
     back: '<path d="m15 18-6-6 6-6"/>',
     check: '<path d="m5 12 4.5 4.5L19 7"/>',
+    settings: '<path d="M4 6h4m4 0h8M4 12h10m4 0h2M4 18h7m4 0h5"/><circle cx="10" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="13" cy="18" r="2"/>',
     info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>',
   }
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`
@@ -244,6 +241,7 @@ export function createSettingsCenter(
   bridge: TurboFluxDesktopBridge,
   options: SettingsCenterOptions,
 ): SettingsCenterController {
+  const lifetime = new RenderLifetime()
   const overlay = document.createElement('div')
   overlay.className = 'settings-overlay'
   overlay.setAttribute('aria-hidden', 'true')
@@ -256,7 +254,7 @@ export function createSettingsCenter(
         <div class="settings-nav-scroll">${settingsNavigationMarkup()}<div class="settings-nav-empty" id="settings-nav-empty" hidden>没有匹配的设置</div></div>
       </aside>
       <main class="settings-main">
-        <header class="settings-header"><div class="settings-header-inner"><h2 id="settings-title">模型与 API</h2></div></header>
+        <header class="settings-header"><div class="settings-header-inner"><h2 id="settings-title">模型API管理</h2></div></header>
         <div class="settings-content" id="settings-content"><div class="settings-loading">正在读取设置…</div></div>
         <footer class="settings-footer"><div class="settings-footer-inner"><span id="settings-state">修改后需要保存</span><div><button class="settings-secondary" id="settings-cancel">取消</button><button class="settings-primary" id="settings-save">保存更改</button></div></div></footer>
       </main>
@@ -267,16 +265,6 @@ export function createSettingsCenter(
   popover.className = 'model-popover'
   popover.setAttribute('aria-hidden', 'true')
   app.append(popover)
-  let profileCenter: ProfileCenterController | null = null
-  const archiveWizardVisibility = (open: boolean, state?: { profileChanged: boolean; restoreFocus(): void }) => {
-    overlay.setAttribute('aria-hidden', open ? 'true' : 'false')
-    if (!open && state?.profileChanged && section === 'data') {
-      void profileCenter?.refresh().finally(state.restoreFocus)
-    }
-  }
-  const profileExportWizard = createProfileExportWizard(app, bridge, { showToast: options.showToast, onVisibilityChange: archiveWizardVisibility })
-  const profileImportWizard = createProfileImportWizard(app, bridge, { showToast: options.showToast, onVisibilityChange: archiveWizardVisibility })
-
   const content = overlay.querySelector<HTMLDivElement>('#settings-content')!
   const settingsWindow = overlay.querySelector<HTMLElement>('.settings-window')!
   const desktopShell = app.querySelector<HTMLElement>('.desktop-shell')
@@ -314,29 +302,6 @@ export function createSettingsCenter(
   let remoteRefreshTimer: ReturnType<typeof setTimeout> | null = null
   let hostPreferences: DesktopHostPreferences | null = null
   const apiSettings = createApiSettingsPage(bridge, { onChange: updateDirtyState, showToast: options.showToast })
-  profileCenter = createProfileCenter(bridge, {
-    showToast: options.showToast,
-    onSnapshot: options.onSnapshot,
-    openExport: () => profileExportWizard.open(),
-    openImport: () => profileImportWizard.open(),
-    openRebind: profileId => profileImportWizard.openRebind(profileId),
-    openConversation: async conversationId => {
-      close()
-      await options.onOpenConversation(conversationId)
-    },
-    close: () => close(),
-    async onProfileSwitched() {
-      settings = await bridge.getSettings(true)
-      draft = createSettingsUpdate(settings)
-      baseline = serializedDraft()
-      workPacks = null
-      memorySnapshot = null
-      remoteStatus = null
-      remotePairing = null
-      if (section === 'data') profileCenter?.render(content)
-    },
-  })
-
   function filterNavigation(value: string): void {
     const query = value.trim().toLocaleLowerCase()
     let visibleCount = 0
@@ -717,10 +682,6 @@ export function createSettingsCenter(
       options.showToast('后台运行设置已保存')
       renderAdvanced()
     }).catch(error => options.showToast(presentDesktopError(error))))
-  }
-
-  function renderData(): void {
-    profileCenter?.render(content)
   }
 
   function memoryScopeLabel(scope: string): string {
@@ -1441,7 +1402,6 @@ export function createSettingsCenter(
     if (section === 'memory') renderMemory()
     if (section === 'persona') renderPersona()
     if (section === 'permissions') renderPermissions()
-    if (section === 'data') renderData()
     if (section === 'advanced') renderAdvanced()
     updateDirtyState()
     if (changed) animateSectionChange()
@@ -1490,22 +1450,16 @@ export function createSettingsCenter(
     desktopShell?.setAttribute('inert', '')
     if (section === 'appearance') {
       renderSection()
-      requestAnimationFrame(() => backButton.focus({ preventScroll: true }))
+      lifetime.frame(() => backButton.focus({ preventScroll: true }))
       return
     }
     try {
       await ensureSettings(false)
       renderSection()
-      requestAnimationFrame(() => backButton.focus({ preventScroll: true }))
+      lifetime.frame(() => backButton.focus({ preventScroll: true }))
     } catch (error) {
       content.innerHTML = `<div class="settings-empty"><strong>设置读取失败</strong><p>${escapeHtml(presentDesktopError(error))}</p></div>`
     }
-  }
-
-  async function openProfiles(mode: 'library' | 'create' | 'import' = 'library'): Promise<void> {
-    await open('data')
-    if (mode === 'create') profileCenter?.showCreate()
-    if (mode === 'import') await profileImportWizard.open()
   }
 
   function close(): void {
@@ -1529,7 +1483,7 @@ export function createSettingsCenter(
     const focusTarget = previousFocus
     previousFocus = null
     if (focusTarget?.isConnected && overlay.contains(document.activeElement)) {
-      requestAnimationFrame(() => focusTarget.focus({ preventScroll: true }))
+      lifetime.frame(() => focusTarget.focus({ preventScroll: true }))
     }
   }
 
@@ -1543,7 +1497,7 @@ export function createSettingsCenter(
       rect,
       { width: window.innerWidth, height: window.innerHeight },
       mainWidth,
-      options.getComposerPopoverPlacement?.() || 'above',
+      popover.classList.contains('model-only-popover') ? 'above' : options.getComposerPopoverPlacement?.() || 'above',
     )
     activePickerAnchor = anchor
     activePickerWidth = mainWidth
@@ -1600,9 +1554,9 @@ export function createSettingsCenter(
       hidePicker()
       return
     }
-    positionModelPicker(anchor, 276)
-    app.querySelectorAll<HTMLElement>('#model-pill, #reasoning-tab').forEach(item => item.setAttribute('aria-expanded', String(item === anchor)))
     popover.className = 'model-popover model-only-popover'
+    positionModelPicker(anchor, 264)
+    app.querySelectorAll<HTMLElement>('#model-pill, #reasoning-tab').forEach(item => item.setAttribute('aria-expanded', String(item === anchor)))
     popover.innerHTML = '<div class="model-quick-menu model-picker-loading" role="status" aria-live="polite"><span class="model-picker-spinner"></span><span>正在读取模型…</span></div>'
     popover.classList.add('visible')
     popover.setAttribute('aria-hidden', 'false')
@@ -1618,19 +1572,18 @@ export function createSettingsCenter(
     if (!settings || !draft) return
     const profile = selectedProfile(draft)
     if (!profile) return void open('api')
-    const currentModel = modelFor(settings, profile.model)
     const candidates = settings.models.filter(item => profile.provider === 'custom' || profile.provider === 'openrouter' || item.provider === profile.provider)
     const current = candidates.find(item => item.model === profile.model)
     const ordered = current ? [current, ...candidates.filter(item => item !== current)] : candidates
     const modelIdentity = (item: WorkbenchModelOption) => {
       const provider = item.provider
-      return `<span class="model-selection-icon" data-provider="${escapeHtml(normalizedModelProvider(provider, item.model))}">${modelProviderMark(provider, item.model)}</span><span class="model-selection-copy"><strong>${escapeHtml(item.name)}</strong>${item.name !== item.model ? `<small>${escapeHtml(item.model)}</small>` : ''}</span>`
+      return `<span class="model-selection-icon" data-provider="${escapeHtml(normalizedModelProvider(provider, item.model))}">${modelProviderMark(provider, item.model)}</span><span class="model-selection-copy"><strong>${escapeHtml(item.name)}</strong></span>`
     }
     popover.innerHTML = `
       <div class="model-only-menu">
-        <header><span>模型</span><strong>${escapeHtml(currentModel?.name || profile.model || '未配置')}</strong></header>
-        <div class="model-submenu-list model-selection-list ${ordered.length > 6 ? 'scrollable' : ''}">${ordered.map(item => `<button data-quick-model="${escapeHtml(item.model)}" class="${item.model === profile.model ? 'selected' : ''}">${modelIdentity(item)}<i aria-hidden="true">${item.model === profile.model ? settingsInlineIcon('check') : ''}</i></button>`).join('') || '<div class="model-submenu-empty">没有发现可用模型</div>'}</div>
-        <button class="model-popover-footer" data-model-settings>模型与 API 设置 <i><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></i></button>
+        <header><span>选择模型</span></header>
+        <div class="model-submenu-list model-selection-list" role="menu" aria-label="选择模型">${ordered.map(item => `<button type="button" role="menuitemradio" aria-checked="${item.model === profile.model}" title="${escapeHtml(item.model)}" data-quick-model="${escapeHtml(item.model)}" class="${item.model === profile.model ? 'selected' : ''}">${modelIdentity(item)}<i aria-hidden="true">${item.model === profile.model ? settingsInlineIcon('check') : ''}</i></button>`).join('') || '<div class="model-submenu-empty">没有发现可用模型</div>'}</div>
+        <button class="model-popover-footer" type="button" data-model-settings><span class="model-manage-icon" aria-hidden="true">${settingsInlineIcon('settings')}</span><span>模型API管理</span></button>
       </div>`
     popover.querySelectorAll<HTMLButtonElement>('[data-quick-model]').forEach(button => button.addEventListener('click', async () => {
       const chosen = modelFor(settings!, button.dataset.quickModel || '')
@@ -1642,6 +1595,24 @@ export function createSettingsCenter(
       applySettingsModelSelection(profile, chosen)
       await persistQuickChange()
     }))
+    popover.onkeydown = event => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        hidePicker()
+        anchor.focus({ preventScroll: true })
+        return
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+      const buttons = [...popover.querySelectorAll<HTMLButtonElement>('[data-quick-model], [data-model-settings]')]
+      if (!buttons.length) return
+      event.preventDefault()
+      const current = buttons.indexOf(document.activeElement as HTMLButtonElement)
+      const index = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+        : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length
+      buttons[index].focus({ preventScroll: true })
+      buttons[index].scrollIntoView({ block: 'nearest' })
+    }
     popover.querySelector('[data-model-settings]')?.addEventListener('click', () => {
       hidePicker()
       void open('api')
@@ -1653,9 +1624,10 @@ export function createSettingsCenter(
       hidePicker()
       return
     }
+    popover.className = 'model-popover reasoning-popover'
     positionModelPicker(anchor, 340)
     app.querySelectorAll<HTMLElement>('#model-pill, #reasoning-tab').forEach(item => item.setAttribute('aria-expanded', String(item === anchor)))
-    popover.className = 'model-popover reasoning-popover'
+    popover.onkeydown = null
     popover.innerHTML = '<div class="reasoning-choice-card model-picker-loading" role="status" aria-live="polite"><span class="model-picker-spinner"></span><span>正在读取推理能力…</span></div>'
     popover.classList.add('visible')
     popover.setAttribute('aria-hidden', 'false')
@@ -1688,27 +1660,40 @@ export function createSettingsCenter(
     const defaultIndex = reasoningOptionIndex(reasoningOptions, defaultReasoning)
     const activeProgress = reasoningSliderProgress(activeIndex, reasoningOptions.length) / 100
     const lastReasoningIndex = reasoningOptions.length - 1
-    const matrixColumns = 72
-    const matrixRows = 5
-    const matrixCells = Array.from({ length: matrixColumns * matrixRows }, (_, index) => {
-      const column = index % matrixColumns
-      const row = Math.floor(index / matrixColumns)
-      const horizontalProgress = column / (matrixColumns - 1)
-      const rowTaper = 0.78 + (1 - Math.abs(2 - row) / 2) * 0.22
-      const noise = ((((column * 7) + (row * 11)) % 9) - 4) * 0.018
-      const opacity = Math.max(0.16, Math.min(0.94, (0.2 + horizontalProgress * 0.7 + noise) * rowTaper))
-      const tint = Math.round(18 + horizontalProgress * 78)
-      return `<i class="reasoning-slider-matrix-cell" style="--matrix-opacity:${opacity.toFixed(2)};--matrix-tint:${tint}%;--matrix-delay:${matrixColumns - column + Math.abs(2 - row)}"></i>`
+    const starLayers = [
+      { name: 'far', count: 12, size: 0.8 },
+      { name: 'middle', count: 20, size: 1.1 },
+      { name: 'near', count: 12, size: 1.5 },
+      { name: 'dust', count: 28, size: 0.6 },
+    ].map((layer, layerIndex) => {
+      const stars = Array.from({ length: layer.count }, (_, index) => {
+        const seed = index + layerIndex * 19
+        const x = ((seed * 73.39 + 11.23) % 100).toFixed(2)
+        const y = (8 + ((seed * seed * 13.73 + 7.17) % 84)).toFixed(2)
+        const opacity = (0.38 + ((seed * 17) % 10) * 0.06).toFixed(2)
+        const size = (layer.size * (index % 4 === 0 ? 1.25 : 1)).toFixed(2)
+        return `<i class="reasoning-star" style="--star-x:${x}%;--star-y:${y}%;--star-size:${size}px;--star-opacity:${opacity}"></i>`
+      }).join('')
+      // Matching tiles make the flow seamless; only the four layers animate.
+      return `<span class="reasoning-star-layer is-${layer.name}"><span class="reasoning-star-tile">${stars}</span><span class="reasoning-star-tile">${stars}</span></span>`
+    }).join('')
+    const depthStars = Array.from({ length: 18 }, (_, index) => {
+      const angle = index * 2.39996
+      const x = 180 + Math.abs(Math.cos(angle)) * 130
+      const y = Math.sin(angle) * 25
+      const direction = Math.atan2(y, x) * 180 / Math.PI
+      return `<i class="reasoning-depth-star" style="--flight-x:${x.toFixed(2)}px;--flight-y:${y.toFixed(2)}px;--flight-angle:${direction.toFixed(2)}deg;--flight-delay:${(-index * 0.29).toFixed(2)}s"></i>`
     }).join('')
     popover.innerHTML = `
-      <div class="reasoning-choice-card${active.tone === 'max' ? ' is-peak' : ''}" data-reasoning-tone="${active.tone}" style="--reasoning-progress:${activeProgress};--reasoning-particle-clip:${(1 - activeProgress) * 100}%;--reasoning-particle-start:${activeProgress * 100}%;--reasoning-count:${reasoningOptions.length}">
+      <div class="reasoning-choice-card" data-reasoning-tone="${active.tone}" style="--reasoning-progress:${activeProgress}">
         <header><strong>推理强度 <span id="reasoning-choice-name">${escapeHtml(active.label)}</span></strong><span aria-hidden="true">更快 <i></i> 更深入</span></header>
         <div class="reasoning-slider-shell">
           <div class="reasoning-slider-rail" aria-hidden="true">
             <div class="reasoning-slider-track">
               <span class="reasoning-slider-fill"></span>
-              <span class="reasoning-slider-matrix">${matrixCells}</span>
-              <span class="reasoning-slider-flow"></span>
+              <span class="reasoning-nebula"></span>
+              <span class="reasoning-starfield">${starLayers}</span>
+              <span class="reasoning-depth">${depthStars}</span>
             </div>
             <div class="reasoning-slider-marks">${reasoningOptions.map((_, index) => `<i class="reasoning-slider-mark${index <= activeIndex ? ' filled' : ''}${index === activeIndex ? ' current' : ''}${index === lastReasoningIndex ? ' peak' : ''}"></i>`).join('')}</div>
             <span class="reasoning-slider-thumb"></span>
@@ -1726,7 +1711,6 @@ export function createSettingsCenter(
     if (reasoningTab) reasoningTab.dataset.reasoningTone = active.tone
     let displayedReasoningIndex = activeIndex
     let notchAnimationTimer: number | null = null
-    let particleSweepTimer: number | null = null
     const preview = (rawValue: number, selectNearest = false) => {
       const index = selectNearest
         ? reasoningSliderIndex(rawValue, reasoningOptions.length)
@@ -1736,10 +1720,7 @@ export function createSettingsCenter(
       const detentValue = reasoningSliderDetentValue(rawValue, reasoningOptions.length, index)
       const detentProgress = reasoningSliderProgress(detentValue, reasoningOptions.length) / 100
       card.style.setProperty('--reasoning-progress', String(detentProgress))
-      card.style.setProperty('--reasoning-particle-clip', `${(1 - detentProgress) * 100}%`)
-      card.style.setProperty('--reasoning-particle-start', `${detentProgress * 100}%`)
       card.dataset.reasoningTone = option.tone
-      card.classList.toggle('is-peak', option.tone === 'max')
       if (index !== displayedReasoningIndex) {
         card.classList.remove('is-shifting')
         void card.offsetWidth
@@ -1748,19 +1729,14 @@ export function createSettingsCenter(
         detail.textContent = option.detail
         defaultLabel.hidden = index !== defaultIndex
         displayedReasoningIndex = index
-        if (notchAnimationTimer !== null) window.clearTimeout(notchAnimationTimer)
-        if (particleSweepTimer !== null) window.clearTimeout(particleSweepTimer)
-        card.classList.remove('is-notching', 'is-particle-sweeping')
+        if (notchAnimationTimer !== null) lifetime.clearTimeout(notchAnimationTimer)
+        card.classList.remove('is-notching')
         void card.offsetWidth
-        card.classList.add('is-notching', 'is-particle-sweeping')
-        notchAnimationTimer = window.setTimeout(() => {
+        card.classList.add('is-notching')
+        notchAnimationTimer = lifetime.timeout(() => {
           card.classList.remove('is-notching')
           notchAnimationTimer = null
         }, 190)
-        particleSweepTimer = window.setTimeout(() => {
-          card.classList.remove('is-particle-sweeping')
-          particleSweepTimer = null
-        }, 460)
       }
       slider.setAttribute('aria-valuenow', String(index))
       slider.setAttribute('aria-valuetext', `${option.label}，${option.detail}${index === defaultIndex ? '，模型默认' : ''}`)
@@ -1825,21 +1801,21 @@ export function createSettingsCenter(
       applyApiModelCapabilities(currentProfile, model)
       latestReasoningIndex = index
       reasoningRevision += 1
-      if (reasoningPersistTimer !== null) window.clearTimeout(reasoningPersistTimer)
-      reasoningPersistTimer = window.setTimeout(() => {
+      if (reasoningPersistTimer !== null) lifetime.clearTimeout(reasoningPersistTimer)
+      reasoningPersistTimer = lifetime.timeout(() => {
         reasoningPersistTimer = null
         void persistLatestReasoning()
       }, 80)
     }
     const settleAt = (index: number) => {
       slider.value = String(index)
-      if (notchAnimationTimer !== null) window.clearTimeout(notchAnimationTimer)
+      if (notchAnimationTimer !== null) lifetime.clearTimeout(notchAnimationTimer)
       notchAnimationTimer = null
       card.classList.remove('is-dragging')
       card.classList.remove('is-notching')
       card.classList.add('is-settling')
       preview(index, true)
-      window.setTimeout(() => card.classList.remove('is-settling'), 420)
+      lifetime.timeout(() => card.classList.remove('is-settling'), 420)
     }
     const finishDragging = () => {
       if (!card.classList.contains('is-dragging')) return
@@ -1930,13 +1906,13 @@ export function createSettingsCenter(
       first.focus()
     }
   })
-  document.addEventListener('keydown', event => {
+  lifetime.listen(document, 'keydown', event => {
     if (!isOpen() || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'f') return
     event.preventDefault()
     searchInput.focus()
     searchInput.select()
   })
-  document.addEventListener('pointerdown', event => {
+  lifetime.listen(document, 'pointerdown', event => {
     if (!popover.classList.contains('visible')) return
     const target = event.target as Node
     if (!popover.contains(target) && !(target instanceof Element && target.closest('#model-pill, #reasoning-tab'))) {
@@ -1946,15 +1922,15 @@ export function createSettingsCenter(
       app.querySelectorAll<HTMLElement>('#model-pill, #reasoning-tab').forEach(anchor => anchor.setAttribute('aria-expanded', 'false'))
     }
   })
-  window.addEventListener('resize', repositionComposerPicker)
-  window.addEventListener('turboflux:background-media-change', () => {
+  lifetime.listen(window, 'resize', repositionComposerPicker)
+  lifetime.listen(window, 'turboflux:background-media-change', () => {
     if (isOpen() && section === 'appearance') renderAppearance()
   })
-  window.addEventListener('turboflux:workbench-mode-change', () => {
+  lifetime.listen(window, 'turboflux:workbench-mode-change', () => {
     if (isOpen() && section === 'appearance') renderAppearance()
   })
 
 
 
-  return { open, openProfiles, openModelPicker, openReasoningPicker, repositionComposerPicker, close, isOpen, handleSettingsUpdate }
+  return { dispose: () => { lifetime.dispose(); close(); overlay.remove(); popover.remove() }, open, openModelPicker, openReasoningPicker, repositionComposerPicker, close, isOpen, handleSettingsUpdate }
 }

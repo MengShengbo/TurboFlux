@@ -1,0 +1,134 @@
+{
+  "name": "@turboflux/profiles",
+  "version": "1.0.1",
+  "description": "Profile isolation, archives, import, export and migration",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./legacyProfileMigration": {
+      "types": "./dist/legacyProfileMigration.d.ts",
+      "import": "./dist/legacyProfileMigration.js"
+    },
+    "./legacyProfileRecoveryExport": {
+      "types": "./dist/legacyProfileRecoveryExport.d.ts",
+      "import": "./dist/legacyProfileRecoveryExport.js"
+    },
+    "./profileArchive/archiveCrypto": {
+      "types": "./dist/profileArchive/archiveCrypto.d.ts",
+      "import": "./dist/profileArchive/archiveCrypto.js"
+    },
+    "./profileArchive/archivePath": {
+      "types": "./dist/profileArchive/archivePath.d.ts",
+      "import": "./dist/profileArchive/archivePath.js"
+    },
+    "./profileArchive/archiveScanner": {
+      "types": "./dist/profileArchive/archiveScanner.d.ts",
+      "import": "./dist/profileArchive/archiveScanner.js"
+    },
+    "./profileArchive/blobStore": {
+      "types": "./dist/profileArchive/blobStore.d.ts",
+      "import": "./dist/profileArchive/blobStore.js"
+    },
+    "./profileArchive/canonicalJson": {
+      "types": "./dist/profileArchive/canonicalJson.d.ts",
+      "import": "./dist/profileArchive/canonicalJson.js"
+    },
+    "./profileArchive/componentMigrations": {
+      "types": "./dist/profileArchive/componentMigrations.d.ts",
+      "import": "./dist/profileArchive/componentMigrations.js"
+    },
+    "./profileArchive/container": {
+      "types": "./dist/profileArchive/container.d.ts",
+      "import": "./dist/profileArchive/container.js"
+    },
+    "./profileArchive/exportComponents": {
+      "types": "./dist/profileArchive/exportComponents.d.ts",
+      "import": "./dist/profileArchive/exportComponents.js"
+    },
+    "./profileArchive/exportPlanner": {
+      "types": "./dist/profileArchive/exportPlanner.d.ts",
+      "import": "./dist/profileArchive/exportPlanner.js"
+    },
+    "./profileArchive/index": {
+      "types": "./dist/profileArchive/index.d.ts",
+      "import": "./dist/profileArchive/index.js"
+    },
+    "./profileArchive/manifest": {
+      "types": "./dist/profileArchive/manifest.d.ts",
+      "import": "./dist/profileArchive/manifest.js"
+    },
+    "./profileArchive/profileArchiveImporter": {
+      "types": "./dist/profileArchive/profileArchiveImporter.d.ts",
+      "import": "./dist/profileArchive/profileArchiveImporter.js"
+    },
+    "./profileArchive/profileArchiveService": {
+      "types": "./dist/profileArchive/profileArchiveService.d.ts",
+      "import": "./dist/profileArchive/profileArchiveService.js"
+    },
+    "./profileArchive/redaction": {
+      "types": "./dist/profileArchive/redaction.d.ts",
+      "import": "./dist/profileArchive/redaction.js"
+    },
+    "./profileArchive/types": {
+      "types": "./dist/profileArchive/types.d.ts",
+      "import": "./dist/profileArchive/types.js"
+    },
+    "./profileFeatureFlags": {
+      "types": "./dist/profileFeatureFlags.d.ts",
+      "import": "./dist/profileFeatureFlags.js"
+    },
+    "./profileLifecycleCoordinator": {
+      "types": "./dist/profileLifecycleCoordinator.d.ts",
+      "import": "./dist/profileLifecycleCoordinator.js"
+    },
+    "./profileRegistry": {
+      "types": "./dist/profileRegistry.d.ts",
+      "import": "./dist/profileRegistry.js"
+    },
+    "./profileSettingsCopyService": {
+      "types": "./dist/profileSettingsCopyService.d.ts",
+      "import": "./dist/profileSettingsCopyService.js"
+    },
+    "./profileStorageLayout": {
+      "types": "./dist/profileStorageLayout.d.ts",
+      "import": "./dist/profileStorageLayout.js"
+    },
+    "./profileWorkspaceRebindService": {
+      "types": "./dist/profileWorkspaceRebindService.d.ts",
+      "import": "./dist/profileWorkspaceRebindService.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./workspaceBindingService": {
+      "types": "./dist/workspaceBindingService.d.ts",
+      "import": "./dist/workspaceBindingService.js"
+    },
+    "./workspaceOverlayMigration": {
+      "types": "./dist/workspaceOverlayMigration.d.ts",
+      "import": "./dist/workspaceOverlayMigration.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/conversations": "*",
+    "@turboflux/platform": "*"
+  }
+}

@@ -11,7 +11,7 @@ import {
   type AutomationRuntimeBoundaryHandler,
   type WorkbenchEvent,
   type WorkbenchRuntime,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import { WorkspaceRuntimePool } from './workspaceRuntimePool'
 
 const directories: string[] = []

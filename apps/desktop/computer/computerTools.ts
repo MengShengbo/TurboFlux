@@ -1,4 +1,4 @@
-import type { McpLocalToolDefinition } from '@turboflux/agent-core/extensions'
+import type { McpLocalToolDefinition } from '@turboflux/extensions'
 
 export const MAX_DRAG_POINTS = 24
 

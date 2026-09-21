@@ -12,14 +12,14 @@ describe('browser interaction contract', () => {
   it('scopes element refs to the latest observation', () => {
     expect(source).toContain('const observationPrefix = this.nextObservationPrefix(tab)')
     expect(source).toContain("throw new Error('Element ref is stale; observe the page again')")
-    expect(source).toContain("contents.on('did-navigate', (_event, url) => { this.invalidateObservation(tab)")
-    expect(source).toContain('target.frame.detached')
+    expect(source.slice(source.indexOf("contents.on('did-navigate'"), source.indexOf("contents.on('did-navigate-in-page'"))).toContain('this.invalidateObservation(tab)')
+    expect(source).toContain('!this.isFrameAvailable(target.frame)')
     expect(source).toContain('tab.elementRefs.clear()')
   })
 
   it('observes and acts inside reachable frames without pretending frame coordinates are top-viewport coordinates', () => {
     expect(source).toContain('mainFrame.framesInSubtree')
-    expect(source).toContain('browserFrameRefPrefix(tab.observationEpoch, frameIndex)')
+    expect(source).toContain('browserFrameRefPrefix(epoch, frameIndex, tab.refScope)')
     expect(source).toContain("mode = 'dom-frame'")
     expect(source).toContain("coordinateSpace: observedFrame.snapshot.isMainFrame ? 'viewport' as const : 'frame' as const")
     expect(source).toContain("throw new Error('File upload inside an iframe is not supported")
@@ -64,7 +64,8 @@ describe('browser interaction contract', () => {
     expect(clickMethod).toContain("type: 'mousePressed'")
     expect(clickMethod).toContain("type: 'mouseReleased'")
     expect(clickMethod).toContain('this.dispatchMouseSequence')
-    expect(clickMethod).toContain("mode = 'dom-fallback'")
+    expect(clickMethod).not.toContain("dom-fallback")
+    expect(clickMethod).toContain("verification: 'required'")
     expect(clickMethod).toContain('openedTab: opened ? this.tabSnapshot(opened) : undefined')
   })
 
@@ -74,12 +75,12 @@ describe('browser interaction contract', () => {
   })
 
   it('captures visual evidence without reparenting the visible native view', () => {
-    expect(source).toContain("captureBrowserViewport(tab, this.storageRoot ?? join(this.workspacePath, '.turboflux'), this.emit, signal)")
-    expect(capture).toContain("debuggerApi.sendCommand('Page.getLayoutMetrics')")
-    expect(capture).toContain("debuggerApi.sendCommand('Page.captureScreenshot'")
+    expect(source).toContain("captureBrowserViewport(tab, this.storageRoot ?? join(this.workspacePath, '.turboflux'), this.emit, signal, this.runtime)")
+    expect(capture).toContain("send('Page.getLayoutMetrics')")
+    expect(capture).toContain("send('Page.captureScreenshot'")
     expect(capture).not.toContain('captureWindow.contentView.addChildView(tab.view)')
     expect(capture).not.toContain('capturePage()')
-    expect(capture).toContain("requestAnimationFrame(() => requestAnimationFrame(resolve))")
+    expect(capture).not.toContain("requestAnimationFrame(() => requestAnimationFrame(resolve))")
     expect(capture).toContain("throw new Error('Browser viewport capture produced no image data')")
   })
 
@@ -108,7 +109,7 @@ describe('browser interaction contract', () => {
     expect(source).toContain('new SerializedOperationCoordinator(BROWSER_OPERATION_ABORT_MESSAGE)')
     expect(source).toContain('this.operations.enqueue(async signal =>')
     expect(source).toContain('this.operations.invalidate()')
-    expect(source).toContain('const cancelled = options?.signal?.aborted || isOperationAbort(error)')
+    expect(source).toContain('const cancelled = isOperationAbort(error)')
     expect(coordinator).toContain('private queue: Promise<void> = Promise.resolve()')
     expect(coordinator).toContain('if (epoch !== this.epoch) throw createOperationAbortError(this.abortMessage)')
     expect(coordinator).toContain("error.name = 'AbortError'")
@@ -120,7 +121,7 @@ describe('browser interaction contract', () => {
     expect(source).toContain('const MAX_BROWSER_EXECUTIONS = 200')
     expect(source).toContain('executionContext.conversationId !== this.conversationId')
     expect(source).toContain('this.visible = true')
-    expect(source).toContain("this.finishExecution(execution, 'completed', result)")
+    expect(source).toContain("?.isError ? 'failed' : 'completed', result)")
     expect(source).toContain("this.finishExecution(execution, cancelled ? 'cancelled' : 'failed')")
     expect(source).not.toContain('JSON.parse(result')
   })

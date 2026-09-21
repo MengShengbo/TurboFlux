@@ -1,1 +1,1 @@
-export * from '@turboflux/agent-core/renderer'
+export * from '@turboflux/presentation'

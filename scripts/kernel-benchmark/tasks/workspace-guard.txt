@@ -1,0 +1,12 @@
+请完整实现一个真实可交付的 Node.js 工程 workspace-guard，用于 TurboFlux 拆包后的 npm workspace 依赖审计和改动影响分析。当前工作目录就是该工程，已提供 fixtures/turboflux 中的真实仓库 manifests 快照；除此之外请自行设计和实现。
+
+交付要求：
+1. 使用 Node.js >=22.12、ESM、零运行时第三方依赖；分开 manifest 发现、依赖图计算、格式输出和 CLI，提供 package.json、bin/workspace-guard.mjs、src、tests、README.md。可直接 node 运行。
+2. audit 子命令：node bin/workspace-guard.mjs audit --root <目录> --format json|markdown。支持根 package.json 的 workspaces 数组及 {packages:[]} 两种形式；支持确切目录、单层 *、递归 ** 和 !排除，路径按 / 归一化。不进入 node_modules/.git，不跟随逃逸 root 的符号链接。
+3. 从所有 workspace manifests 建图。dependencies、devDependencies、peerDependencies、optionalDependencies 中指向已有 workspace 的依赖都算内部边；workspace: 协议缺目标须报 MISSING_WORKSPACE_DEPENDENCY。去重包名、重复路径和重复边；重复包名报 DUPLICATE_PACKAGE_NAME，坏 JSON 报 INVALID_MANIFEST，循环报 DEPENDENCY_CYCLE。检测真实完整循环（包括自环），仍返回可诊断的部分图，不能静默跳过。
+4. audit JSON 契约：{schemaVersion:1,packages:[{name,path,version,dependencies:string[]}],layers:string[][],cycles:string[][],issues:[{code,message,path?}]}。path 相对 root，根包不当 workspace 成员；layers 依赖先于使用方，每层与 packages/依赖/问题的输出顺序稳定；重复运行 JSON 可比较，无时间戳。Markdown 清楚呈现包、层级、问题。
+5. impact 子命令：node bin/workspace-guard.mjs impact --root <目录> --changed <相对文件路径> [--changed <另一文件>] --format json|markdown。按最长包含路径判定直接变更的 workspace，逆向遍历所有传递消费者；JSON 至少有 {schemaVersion:1,changedPackages:string[],affectedPackages:string[],layers:string[][],issues:[]}，affected 包含 changed。根 package.json 变化影响全部成员；不属于任何包的普通文档不影响包；拒绝 ../ 逃逸 root 的输入，不能把 foo 误匹配成 foobar。包目录有空格也正常。
+6. CLI 帮助、参数错误、错误 root、无 workspaces 都要有明确行为和文档。audit 无错误返回 0，有依赖/manifest错误返回 1；非法 CLI 参数返回 2。JSON 输出模式 stdout 必须是可解析的纯 JSON，提示或错误放 stderr 或 issues。使用 node --test 建立有意义的集成与边界测试，覆盖正常 DAG、环、自环、重复名、坏 JSON、缺失 workspace 依赖、路径边界、空工作区、排除和递归发现。
+7. 实际运行测试，修复失败；对 fixtures/turboflux 和 {{REPOSITORY_ROOT}} 分别执行审计，将 JSON/Markdown 报告及真实运行结果保存 results/，并演示某个真实包文件变化的影响分析。README 说明设计、输入输出、退出码、命令示例和已知边界。
+
+这是完整工程任务，请自主安排步骤，实际创建和编辑代码，执行命令，阅读报错后修复，直到交付并验证完成。只能在当前 workspace-guard 工程目录写文件；外面的 TurboFlux 源码只读。不要读取凭据或个人配置，不联网安装依赖，不推送、不提交 Git、不启动子 Agent。不要做固定次数的重复调用，不读取缓存测试日志，不讨论缓存优化；只完成工程。最终简明报告交付、实际测试数量和结果、发现的真实仓库问题。

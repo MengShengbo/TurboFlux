@@ -60,6 +60,7 @@ function writeReports(root: string, conversationRunId = '123456'): void {
     command: 'npm run perf:conversations-v2:stable',
     environment: { platform: 'linux', arch: 'x64' },
     replay: { passed: true, eventCount: 100_000 },
+    runtimeRestore: { passed: true, turnCount: 8_000, elapsedMs: 100, budgetMs: 2_000 },
     catalog: { passed: true, conversationCount: 10_000, profileEventCount: 1_000_000 },
     firstPage: { passed: true, itemCount: 10_000, bytesRead: 64, journalBytes: 128 },
   }))
@@ -82,6 +83,18 @@ afterEach(() => {
 })
 
 describe('Profile Stable benchmark evidence verifier', () => {
+  it('rejects runtime restoration that exceeds the budget even when marked passed', async () => {
+    const root = temporaryRoot()
+    writeReports(root)
+    const path = join(root, 'conversation-v2-stable-linux-x64.json')
+    const report = JSON.parse(readFileSync(path, 'utf8'))
+    report.runtimeRestore.elapsedMs = 2_001
+    writeFileSync(path, JSON.stringify(report))
+    const result = await verifyProfileStableBenchmarkEvidence({ evidenceRoot: root, environment: workflowEnvironment })
+    expect(result.status).toBe('failed')
+    expect(result.errors).toContain('conversation-v2 runtime restoration evidence is incomplete or exceeds its budget')
+  })
+
   it('accepts all three same-run Linux Stable reports', async () => {
     const root = temporaryRoot()
     writeReports(root)

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ComputerSystemSnapshot } from '@turboflux/agent-core/contracts'
+import type { ComputerSystemSnapshot } from '@turboflux/contracts'
 
 const electronMock = vi.hoisted(() => {
   const windows: Array<{

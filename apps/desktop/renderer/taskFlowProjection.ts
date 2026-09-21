@@ -1,8 +1,8 @@
 import {
   projectWorkProjection,
   type TaskFlowProjectionState,
-} from '@turboflux/agent-core/renderer'
-import type { WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+} from '@turboflux/presentation'
+import type { WorkbenchSnapshot } from '@turboflux/workbench'
 
 export {
   applyTaskFlowEvent,
@@ -15,13 +15,13 @@ export {
   syncTaskFlowLiveText,
   taskFlowNodeIdForTool,
   taskFlowNodeIdForTurn,
-} from '@turboflux/agent-core/renderer'
+} from '@turboflux/presentation'
 export type {
   TaskFlowNode,
   TaskFlowNodeKind,
   TaskFlowNodeStatus,
   TaskFlowProjectionState,
-} from '@turboflux/agent-core/renderer'
+} from '@turboflux/presentation'
 
 export function projectTaskFlowSnapshot(snapshot: WorkbenchSnapshot): TaskFlowProjectionState {
   return projectWorkProjection(snapshot.work.projection)

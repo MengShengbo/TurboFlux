@@ -1,4 +1,4 @@
-import type { RuntimeTask, RuntimeTaskPresentationKind, RuntimeTaskStatus } from '@turboflux/agent-core/contracts'
+import type { RuntimeTask, RuntimeTaskPresentationKind, RuntimeTaskStatus } from '@turboflux/contracts'
 
 export interface RuntimeTaskViewModel {
   category: RuntimeTaskPresentationKind

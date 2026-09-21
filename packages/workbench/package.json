@@ -1,0 +1,106 @@
+{
+  "name": "@turboflux/workbench",
+  "version": "1.0.1",
+  "description": "Platform-neutral application composition and workbench services",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./artifacts/artifactService": {
+      "types": "./dist/artifacts/artifactService.d.ts",
+      "import": "./dist/artifacts/artifactService.js"
+    },
+    "./commands/catalog": {
+      "types": "./dist/commands/catalog.d.ts",
+      "import": "./dist/commands/catalog.js"
+    },
+    "./commands/index": {
+      "types": "./dist/commands/index.d.ts",
+      "import": "./dist/commands/index.js"
+    },
+    "./commands/registry": {
+      "types": "./dist/commands/registry.d.ts",
+      "import": "./dist/commands/registry.js"
+    },
+    "./flow/agentFlowController": {
+      "types": "./dist/flow/agentFlowController.d.ts",
+      "import": "./dist/flow/agentFlowController.js"
+    },
+    "./flow/flowReducer": {
+      "types": "./dist/flow/flowReducer.d.ts",
+      "import": "./dist/flow/flowReducer.js"
+    },
+    "./flow/flowSelectors": {
+      "types": "./dist/flow/flowSelectors.d.ts",
+      "import": "./dist/flow/flowSelectors.js"
+    },
+    "./flow/flowStore": {
+      "types": "./dist/flow/flowStore.d.ts",
+      "import": "./dist/flow/flowStore.js"
+    },
+    "./flow/index": {
+      "types": "./dist/flow/index.d.ts",
+      "import": "./dist/flow/index.js"
+    },
+    "./projects/projectService": {
+      "types": "./dist/projects/projectService.d.ts",
+      "import": "./dist/projects/projectService.js"
+    },
+    "./work/index": {
+      "types": "./dist/work/index.d.ts",
+      "import": "./dist/work/index.js"
+    },
+    "./work/workSession": {
+      "types": "./dist/work/workSession.d.ts",
+      "import": "./dist/work/workSession.js"
+    },
+    "./workbench/commands": {
+      "types": "./dist/workbench/commands.d.ts",
+      "import": "./dist/workbench/commands.js"
+    },
+    "./workbench/index": {
+      "types": "./dist/workbench/index.d.ts",
+      "import": "./dist/workbench/index.js"
+    },
+    "./workbench/runCompletion": {
+      "types": "./dist/workbench/runCompletion.d.ts",
+      "import": "./dist/workbench/runCompletion.js"
+    },
+    "./workbench/types": {
+      "types": "./dist/workbench/types.d.ts",
+      "import": "./dist/workbench/types.js"
+    },
+    "./workbench/workbenchRuntime": {
+      "types": "./dist/workbench/workbenchRuntime.d.ts",
+      "import": "./dist/workbench/workbenchRuntime.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/agent-runtime": "*",
+    "@turboflux/automations": "*",
+    "@turboflux/contracts": "*",
+    "@turboflux/conversations": "*",
+    "@turboflux/extensions": "*",
+    "@turboflux/models": "*",
+    "@turboflux/platform": "*",
+    "@turboflux/presentation": "*",
+    "@turboflux/profiles": "*",
+    "@turboflux/tools": "*"
+  }
+}

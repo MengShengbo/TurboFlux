@@ -3,6 +3,10 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron')
 contextBridge.exposeInMainWorld('turbofluxDesktop', {
   getSnapshot: () => ipcRenderer.invoke('desktop:get-snapshot'),
   listLocalProfiles: () => ipcRenderer.invoke('desktop:profiles-list'),
+  getUserProfile: () => ipcRenderer.invoke('desktop:user-profile-get'),
+  saveUserProfileName: displayName => ipcRenderer.invoke('desktop:user-profile-name', displayName),
+  chooseUserAvatar: () => ipcRenderer.invoke('desktop:user-profile-avatar'),
+  getUserActivity: () => ipcRenderer.invoke('desktop:user-activity'),
   createLocalProfile: input => ipcRenderer.invoke('desktop:profile-create', input),
   renameLocalProfile: (profileId, displayName) => ipcRenderer.invoke('desktop:profile-rename', profileId, displayName),
   switchLocalProfile: profileId => ipcRenderer.invoke('desktop:profile-switch', profileId),
@@ -91,7 +95,10 @@ contextBridge.exposeInMainWorld('turbofluxDesktop', {
   gitRestore: (paths, source) => ipcRenderer.invoke('desktop:git-restore', paths, source),
   gitPush: (remote, branch, setUpstream) => ipcRenderer.invoke('desktop:git-push', remote, branch, setUpstream),
   gitDiff: (path, scope) => ipcRenderer.invoke('desktop:git-diff', path, scope),
-  addProject: () => ipcRenderer.invoke('desktop:add-project'),
+  chooseProjectFolder: () => ipcRenderer.invoke('desktop:choose-project-folder'),
+  addProject: input => ipcRenderer.invoke('desktop:add-project', input),
+  renameProject: (id, name) => ipcRenderer.invoke('desktop:rename-project', id, name),
+  removeProject: id => ipcRenderer.invoke('desktop:remove-project', id),
   createAutomation: input => ipcRenderer.invoke('desktop:create-automation', input),
   previewAutomationSchedule: (schedule, timezone, count) => ipcRenderer.invoke('desktop:preview-automation-schedule', schedule, timezone, count),
   listAutomationDefinitions: query => ipcRenderer.invoke('desktop:list-automation-definitions', query),
@@ -147,21 +154,26 @@ contextBridge.exposeInMainWorld('turbofluxDesktop', {
   onRuntimeEvent: listener => {
     const handler = (_event, payload) => listener(payload)
     ipcRenderer.on('desktop:runtime-event', handler)
+    return () => ipcRenderer.removeListener('desktop:runtime-event', handler)
   },
   onNavigationIntent: listener => {
     const handler = (_event, payload) => listener(payload)
     ipcRenderer.on('desktop:navigation-intent', handler)
+    return () => ipcRenderer.removeListener('desktop:navigation-intent', handler)
   },
   onBrowserEvent: listener => {
     const handler = (_event, payload) => listener(payload)
     ipcRenderer.on('desktop:browser-event', handler)
+    return () => ipcRenderer.removeListener('desktop:browser-event', handler)
   },
   onTerminalEvent: listener => {
     const handler = (_event, payload) => listener(payload)
     ipcRenderer.on('desktop:terminal-event', handler)
+    return () => ipcRenderer.removeListener('desktop:terminal-event', handler)
   },
   onComputerEvent: listener => {
     const handler = (_event, payload) => listener(payload)
     ipcRenderer.on('desktop:computer-event', handler)
+    return () => ipcRenderer.removeListener('desktop:computer-event', handler)
   },
 })

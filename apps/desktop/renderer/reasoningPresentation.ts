@@ -1,5 +1,5 @@
-import type { NativeReasoningConfig, ReasoningEffort } from '@turboflux/agent-core/contracts'
-import type { WorkbenchModelOption } from '@turboflux/agent-core/workbench'
+import type { NativeReasoningConfig, ReasoningEffort } from '@turboflux/contracts'
+import type { WorkbenchModelOption } from '@turboflux/workbench'
 
 export type ReasoningTone = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 

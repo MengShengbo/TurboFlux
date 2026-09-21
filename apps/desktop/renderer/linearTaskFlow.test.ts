@@ -15,10 +15,10 @@ import {
   reasoningFollowStateFromScroll,
   shouldDeferCanonicalTaskFlowRender,
   shouldUpdateLinearAnswerInPlace,
-} from './linearTaskFlow'
+} from '@turboflux/renderer/linearTaskFlow'
 import type { TaskFlowNode, TaskFlowProjectionState } from './taskFlowProjection'
 
-const linearTaskFlowSource = readFileSync(new URL('./linearTaskFlow.ts', import.meta.url), 'utf8')
+const linearTaskFlowSource = readFileSync(new URL('../../../packages/renderer/src/linearTaskFlow.ts', import.meta.url), 'utf8')
 const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
 
 function node(id: string, kind: TaskFlowNode['kind'], content: string, runId = 'run-1'): TaskFlowNode {
@@ -285,10 +285,28 @@ describe('linear task flow', () => {
     expect(linearTaskFlowItems(state(completed))[0]?.key).toBe('tool-group:observe')
     const activeGroup = linearTaskFlowItems(state(completed))[0]
     expect(activeGroup).toMatchObject({ active: true })
-    expect(activeGroup?.kind === 'tool-group' ? groupedToolStatus(activeGroup) : null).toBe('running')
+    expect(activeGroup?.kind === 'tool-group' ? groupedToolStatus(activeGroup) : null).toBe('completed')
     const settledGroup = linearTaskFlowItems({ ...state(completed), activeRunId: undefined })[0]
     expect(settledGroup?.kind === 'tool-group' ? groupedToolStatus(settledGroup) : null).toBe('completed')
   })
+
+  it.each(['browser__observe', 'browser__press', 'browser__scroll', 'read_file', 'search_content', 'vendor__operation'])(
+    'settles %s groups while the task continues, without hiding a subsequent active call', name => {
+      const completed = { ...node('completed', 'tool', name), detail: 'same output' }
+      const failed = { ...node('failed', 'tool', name), status: 'failed' as const, detail: 'same output' }
+      const state: TaskFlowProjectionState = {
+        conversationId: 'conversation-1', source: 'work', revision: 2, activeRunId: 'run-1', lastSeq: 2,
+        nodes: { completed, failed }, order: ['completed', 'failed'], sequenceGaps: [],
+      }
+      const groups = linearTaskFlowItems(state).filter(item => item.kind === 'tool-group')
+      expect(groups).toHaveLength(1)
+      expect(groupedToolStatus(groups[0]!)).toBe('failed')
+      expect(groupedToolStatus({ ...groups[0]!, active: false })).toBe('failed')
+      const running = { ...failed, id: 'retry', status: 'running' as const, settled: false }
+      expect(groupedToolStatus({ ...groups[0]!, nodes: [...groups[0]!.nodes, running] })).toBe('running')
+      expect(groupedToolStatus({ ...groups[0]!, nodes: [completed] })).toBe('completed')
+    },
+  )
 
   it('collapses exact consecutive duplicate tool results', () => {
     const first = { ...node('search-1', 'tool', 'web_search'), toolName: 'web_search', detail: 'same result' }
@@ -321,6 +339,26 @@ describe('linear task flow', () => {
   it('localizes pause and resume runtime phases', () => {
     expect(phaseTitle({ content: 'Paused by user', status: 'running' })).toBe('工作已暂停')
     expect(phaseTitle({ content: 'Resuming run', status: 'running' })).toBe('正在继续工作')
+  })
+
+  it.each(['Planning the next step', 'Preparing the next step', 'thinking', 'tool_running', 'Running 1 tool', 'Running set_response_mode'])(
+    'keeps the request label stable during %s', content => {
+      expect(phaseTitle({ content, status: 'running' })).toBe('正在请求中')
+    },
+  )
+
+  it.each(['running', 'waiting', 'completed'] as const)('keeps waiting visible while the hidden mode declaration is %s', status => {
+    const input = node('input', 'input', '你好')
+    const phase = { ...node('phase', 'phase', 'Running 1 tool'), status: 'running' as const, settled: false }
+    const internal = { ...node('internal', 'tool', 'set_response_mode'), toolName: 'set_response_mode', status, settled: status === 'completed' }
+    const state: TaskFlowProjectionState = {
+      conversationId: 'conversation-1', source: 'work', revision: 3, lastSeq: 3, activeRunId: 'run-1',
+      nodes: { input, phase, internal }, order: ['input', 'phase', 'internal'], sequenceGaps: [],
+    }
+    expect(linearTaskFlowItems(state).map(item => item.key)).toEqual(['node:input', 'node:phase'])
+    const visible = { ...node('visible', 'tool', 'read_file'), status: 'running' as const, settled: false }
+    const working = { ...state, nodes: { ...state.nodes, visible }, order: [...state.order, 'visible'] }
+    expect(linearTaskFlowItems(working).map(item => item.key)).toEqual(['node:input', 'tool-group:visible'])
   })
 
   it('keeps running reasoning collapsed until the user opens a bounded scroll region', () => {

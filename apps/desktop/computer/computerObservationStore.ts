@@ -1,4 +1,7 @@
-import type { ComputerControlMode, ComputerObservation } from '@turboflux/agent-core/extensions'
+import type {
+  ComputerControlMode,
+  ComputerObservation,
+} from '@turboflux/contracts'
 import { assertFreshObservation } from './computerPolicy'
 
 export class ComputerObservationStore {

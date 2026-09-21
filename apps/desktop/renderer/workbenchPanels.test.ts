@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 describe('workbench task panel product boundary', () => {
   const source = readFileSync(new URL('./workbenchPanels.ts', import.meta.url), 'utf8')
-  const workbenchSource = readFileSync(new URL('./workbench.ts', import.meta.url), 'utf8')
+  const workbenchSource = ['./workbench.ts', './workbenchShell.ts', './workbenchIcons.ts'].map(file => readFileSync(new URL(file, import.meta.url), 'utf8')).join('\n')
   const terminalPanelSource = readFileSync(new URL('./terminalPanel.ts', import.meta.url), 'utf8')
   const styles = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
 
@@ -23,7 +23,7 @@ describe('workbench task panel product boundary', () => {
   })
 
   it('keeps task surfaces independent from the work drawer', () => {
-    expect(workbenchSource).toContain('id="task-companion"')
+    expect(workbenchSource).not.toContain('task-companion')
     expect(workbenchSource).toContain('id="work-plan-dock"')
     expect(workbenchSource.match(/id="inspector-toggle"/g) ?? []).toHaveLength(1)
     expect(workbenchSource).toContain('class="icon-button work-drawer-toggle" id="inspector-toggle"')
@@ -31,15 +31,10 @@ describe('workbench task panel product boundary', () => {
     expect(workbenchSource).not.toContain('id="inspector-close"')
     expect(workbenchSource).not.toContain("icon('summary')")
     expect(workbenchSource).not.toContain('task-panel-toggle')
-    expect(styles).toContain('.task-companion { position: absolute;')
+    expect(styles).not.toContain('.task-companion')
     expect(workbenchSource).toContain('createComputerControls(app, bridge')
-    expect(workbenchSource).toContain('presentTaskCompanion({')
-    expect(workbenchSource).not.toContain('task-companion-live')
-    expect(workbenchSource).toContain("taskCompanion.classList.toggle('running', presentation.visible && running)")
-    expect(styles).toContain('.task-companion.visible.running::before')
     expect(styles).toContain('.conversation.running time::after')
     expect(styles).not.toContain('runtime-status-pulse')
-    expect(workbenchSource).toContain("if (item.kind === 'preview' && preview?.url) void openBrowserInInspector(preview.url)")
     expect(workbenchSource).not.toContain('inspectorDismissedConversationIds')
     expect(workbenchSource).toContain('<div class="workbench-surface">')
     expect(workbenchSource.indexOf('<main class="main-panel"')).toBeLessThan(workbenchSource.indexOf('<aside class="inspector"'))
@@ -58,12 +53,12 @@ describe('workbench task panel product boundary', () => {
     expect(workbenchSource.match(/id="sidebar-toggle"/g) ?? []).toHaveLength(1)
     expect(workbenchSource).not.toContain('id="sidebar-reopen-toggle"')
     expect(workbenchSource).not.toContain('class="sidebar-heading"')
-    expect(styles).toContain('width: 41px; height: 41px; place-items: center; pointer-events: auto; -webkit-app-region: no-drag;')
+    expect(styles).toContain('width: 41px; height: var(--titlebar-height); padding-bottom: 1px; place-items: center; pointer-events: auto; -webkit-app-region: no-drag;')
     expect(styles).toContain('.platform-macos .sidebar { -webkit-app-region: no-drag; }')
     expect(styles).toContain('.platform-macos .sidebar-titlebar-drag-region { position: absolute; top: 0; right: 0; left: 131px;')
-    expect(styles).toContain('.platform-macos .window-sidebar-control { top: 4px; left: 90px; }')
+    expect(styles).toContain('.platform-macos .window-sidebar-control { left: 90px; }')
     expect(styles).toContain('.platform-macos .desktop-shell.sidebar-collapsed .topbar { padding-left: 142px; }')
-    expect(styles).toContain('justify-content: flex-start; padding: 0 139px 0 24px;')
+    expect(styles).toContain('justify-content: flex-start; gap: 8px; padding: 0 var(--window-actions-inset) 0 24px;')
     expect(workbenchSource).toContain("const sidebarCollapsedStorageKey = 'turboflux.sidebar.collapsed:v1'")
     expect(workbenchSource).toContain("event.key.toLowerCase() === 'b'")
     expect(styles).toContain('.desktop-shell.sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }')
@@ -84,7 +79,7 @@ describe('workbench task panel product boundary', () => {
     expect(styles).toContain('.workspace-task-group-conversations.expanded { grid-template-rows: 1fr;')
     expect(styles).toContain('.workspace-task-group-conversations-inner { min-height: 0; overflow: hidden; }')
     expect(workbenchSource).toContain("const workbenchSurface = app.querySelector<HTMLDivElement>('.workbench-surface')!")
-    expect(workbenchSource).toContain('return workbenchSurface.getBoundingClientRect().width')
+    expect(workbenchSource).toContain('return workbenchSurface.clientWidth')
     expect(styles).not.toContain('.desktop-shell.inspector-open .main-panel { margin-right:')
   })
 
@@ -169,6 +164,19 @@ describe('workbench task panel product boundary', () => {
     expect(styles).toContain('.run-button:disabled { color: #a6a6a1; background: #e3e3df;')
     expect(styles).toContain('@keyframes run-button-icon-enter')
     expect(styles).not.toContain('runtime-button-breathe')
+  })
+
+  it('keeps approval switching on the composer input shortcut', () => {
+    const inputHandler = workbenchSource.slice(
+      workbenchSource.indexOf("taskInput.addEventListener('keydown'"),
+      workbenchSource.indexOf("taskInput.addEventListener('paste'"),
+    )
+    expect(inputHandler).toContain("event.key === 'Tab'")
+    expect(inputHandler).toContain('event.shiftKey')
+    expect(inputHandler).toContain('event.preventDefault()')
+    expect(inputHandler).toContain('event.stopPropagation()')
+    expect(inputHandler).toContain('void selectApprovalPolicy(nextPolicy)')
+    expect(workbenchSource).not.toContain('keyboardTarget instanceof Node && composerCard.contains(keyboardTarget)')
   })
 
   it('folds terminal task internals behind the final delivery', () => {
@@ -263,7 +271,7 @@ describe('workbench task panel product boundary', () => {
     expect(styles).toContain('transition: width var(--motion-panel) var(--ease-panel)')
     expect(styles).toContain('opacity var(--motion-panel) var(--ease-panel)')
     expect(styles).toContain('.inspector-frame { position: absolute;')
-    expect(styles).toContain('width: var(--work-panel-width); min-width: var(--work-panel-width);')
+    expect(styles).toContain('width: 100%; min-width: 0; min-height: 0; flex-direction: column;')
     expect(styles).not.toContain('.desktop-shell.inspector-open .inspector { transform:')
     expect(styles).toContain('.desktop-shell.inspector-full-width .inspector-edge-shadow')
     expect(styles).not.toContain('inspector-fast-closing')
@@ -282,7 +290,7 @@ describe('workbench task panel product boundary', () => {
     expect(workbenchSource).not.toContain("back.className = 'inspector-back'")
     expect(styles).toContain('.inspector-tab-slot { position: relative;')
     expect(styles).toContain('width 180ms cubic-bezier(.23,1,.32,1)')
-    expect(styles).toContain('.inspector-header { position: relative; display: flex; min-height: 46px; flex: 0 0 46px;')
+    expect(styles).toContain('.inspector-header { position: relative; z-index: 2; display: flex; min-height: var(--titlebar-height); flex: 0 0 var(--titlebar-height);')
     expect(workbenchSource).toContain('class="inspector-resize-handle" id="inspector-resize-handle" role="separator" tabindex="0"')
   })
 
@@ -291,16 +299,11 @@ describe('workbench task panel product boundary', () => {
     expect(workbenchSource).toContain("agent: icon('approvalAgent')")
     expect(workbenchSource).toContain("full: icon('approvalFull')")
     expect(workbenchSource).toContain('approvalFull: \'<svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.2c0 4.1-2.5 7.6-7 9.3-4.5-1.7-7-5.2-7-9.3V6z"/><path d="M12 8v5"/><path d="M12 16.5h.01"/></svg>\'')
-    expect(workbenchSource).toContain("${icon('pluginNav')}<span id=\"capability-name\">插件</span>")
+    expect(workbenchSource).not.toContain('id="capability-tab"')
     expect(workbenchSource).toContain('class="approval-policy-icon" id="approval-icon"')
     expect(workbenchSource).toContain('approvalIcon.innerHTML = approvalPolicyIcon(snapshot.runtime.approvalPolicy)')
     expect(workbenchSource).not.toContain('approval-status-dot')
     expect(workbenchSource).not.toContain('♢')
-  })
-
-  it('keeps the expanded conversation plugin icon at the neutral icon color', () => {
-    expect(styles).toContain('.conversation-plugins-toggle[aria-expanded="true"] { border-color: var(--line-strong); color: var(--muted); background: var(--surface-hover); }')
-    expect(styles).toContain('.conversation-plugins-toggle:hover { border-color: var(--line-strong); color: var(--muted); background: var(--surface-hover); }')
   })
 
   it('marks full execution as a red danger state in the pill and selector', () => {
@@ -340,6 +343,6 @@ describe('workbench task panel product boundary', () => {
     expect(workbenchSource).not.toContain('function updateExecutionGroup(')
     expect(workbenchSource).toContain('createLinearTaskFlowRenderer(transcript, {')
     expect(workbenchSource).toContain('renderCanonicalTaskFlow(true)')
-    expect(workbenchSource).toContain('applyTaskFlowEvent(taskFlowProjection, event.event)')
+    expect(workbenchSource).toContain('applyConversationViewEvent(previousView, event.event)')
   })
 })

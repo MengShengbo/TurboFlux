@@ -1,3 +1,3 @@
-import { getRuntimeInfo } from '../packages/agent-core/src/platform/runtime'
+import { getRuntimeInfo } from '@turboflux/platform/runtime'
 
 console.log(JSON.stringify(getRuntimeInfo(), null, 2))

@@ -7,10 +7,8 @@ import type {
   ComputerAccessibilityElement,
   ComputerAppSnapshot,
   ComputerWindowSnapshot,
-  McpClient,
-  McpLocalServerDefinition,
-  McpLocalToolResult,
-} from '@turboflux/agent-core/extensions'
+} from '@turboflux/contracts'
+import type { McpClient, McpLocalServerDefinition, McpLocalToolResult } from '@turboflux/extensions'
 import type {
   ComputerDriver,
   ComputerExpectedTarget,

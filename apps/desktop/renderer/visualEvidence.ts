@@ -1,4 +1,4 @@
-import type { WorkbenchArtifactPreview, WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import type { WorkbenchArtifactPreview, WorkbenchSnapshot } from '@turboflux/workbench'
 
 type ArtifactRecord = WorkbenchSnapshot['artifacts']['artifacts'][number]
 

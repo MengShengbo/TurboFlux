@@ -20,11 +20,14 @@
     "package:win": "npm run build && electron-builder --config electron-builder.yml --win",
     "package:linux": "npm run build && electron-builder --config electron-builder.yml --linux",
     "type-check": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run --config vitest.config.mjs renderer computer browser terminal remote desktop-contract.test.ts conversationPolicy.test.ts desktopPackaging.test.ts desktopPackageEvidenceVerifier.test.ts desktopPowerLifecycle.test.ts desktopHostPreferences.test.ts packagedBootstrapRuntime.test.ts automationNotificationNavigation.test.ts automationRemoteApprovalPolicy.test.ts profileCrossPlatformEvidenceVerifier.test.ts profileHiddenEvidenceVerifier.test.ts profileHiddenQa.contract.test.ts profileStableBenchmarkEvidenceVerifier.test.ts pathContainment.test.ts profileSummary.test.ts profileQaPathOverrides.test.ts profileSwitchCoordinator.test.ts profileSwitchBenchmark.contract.test.ts workspaceRuntimePool.test.ts automationDesktopCoordinator.test.ts automationProductFlow.test.ts automationNotifications.test.ts"
+    "test": "vitest run --config vitest.config.mjs renderer computer browser terminal remote desktop-contract.test.ts desktopUserProfile.test.ts userActivity.test.ts conversationPolicy.test.ts desktopPackaging.test.ts desktopPackageEvidenceVerifier.test.ts desktopPowerLifecycle.test.ts desktopHostPreferences.test.ts packagedBootstrapRuntime.test.ts automationNotificationNavigation.test.ts automationRemoteApprovalPolicy.test.ts profileCrossPlatformEvidenceVerifier.test.ts profileHiddenEvidenceVerifier.test.ts profileHiddenQa.contract.test.ts profileStableBenchmarkEvidenceVerifier.test.ts pathContainment.test.ts profileSummary.test.ts profileQaPathOverrides.test.ts profileSwitchCoordinator.test.ts profileSwitchBenchmark.contract.test.ts workspaceFolders.test.ts workspaceRuntimePool.test.ts automationDesktopCoordinator.test.ts automationProductFlow.test.ts automationNotifications.test.ts"
   },
   "dependencies": {
-    "@turboflux/agent-core": "*",
+    "@turboflux/contracts": "*",
+    "@turboflux/extensions": "*",
+    "@turboflux/presentation": "*",
     "@turboflux/remote-protocol": "*",
+    "@turboflux/workbench": "*",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "highlight.js": "^11.11.1",
@@ -32,7 +35,9 @@
     "marked": "^18.0.4",
     "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
-    "tsx": "^4.22.2"
+    "tsx": "^4.22.2",
+    "@turboflux/renderer": "*",
+    "@turboflux/agent-runtime": "*"
   },
   "devDependencies": {
     "@electron/notarize": "^3.1.1",

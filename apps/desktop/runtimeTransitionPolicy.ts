@@ -1,4 +1,4 @@
-import type { WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import type { WorkbenchSnapshot } from '@turboflux/workbench'
 
 export function runtimeTransitionBlocker(
   snapshot: Pick<WorkbenchSnapshot, 'conversationRuntimes'>,

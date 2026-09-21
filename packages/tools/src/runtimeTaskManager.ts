@@ -1,0 +1,590 @@
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { dirname } from 'node:path'
+import type {
+  RuntimeRestartPolicy,
+  RuntimeTask,
+  RuntimeTaskEvent,
+  RuntimeTaskFilter,
+  RuntimeTaskKind,
+  RuntimeTaskPresentation,
+  RuntimeTaskStatus,
+} from '@turboflux/contracts/runtimeTaskTypes'
+import { getRuntimeInfo, type RuntimeInfo } from '@turboflux/platform/runtime'
+
+export interface RuntimeTaskControl {
+  stop?: () => Promise<void> | void
+  write?: (data: string) => Promise<void> | void
+}
+
+export interface RuntimeTaskOutput {
+  taskId: string
+  offset: number
+  nextOffset: number
+  content: string
+  eof: boolean
+}
+
+export interface RuntimeTaskManagerOptions {
+  defaultOwnerSessionId?: string
+  now?: () => number
+  journalPath?: string
+  recover?: boolean
+  isProcessAlive?: (pid: number) => boolean
+  journalSyncIntervalMs?: number
+  journalMaxBytes?: number
+  maxRetainedTerminalTasks?: number
+}
+
+export interface CreateRuntimeTaskInput {
+  id?: string
+  kind: RuntimeTaskKind
+  ownerSessionId?: string
+  parentTaskId?: string
+  status?: 'starting' | 'running'
+  command?: string
+  cwd?: string
+  pid?: number
+  logPath?: string
+  outputOffset?: number
+  outputBytes?: number
+  startedAt?: number
+  interactive?: boolean
+  restartPolicy?: RuntimeRestartPolicy
+  presentation?: RuntimeTaskPresentation
+  metadata?: Record<string, unknown>
+}
+
+export type RuntimeTaskUpdate = Partial<Pick<
+  RuntimeTask,
+  'command' | 'cwd' | 'pid' | 'exitCode' | 'logPath' | 'outputOffset' | 'outputBytes' | 'error' | 'presentation' | 'metadata'
+>>
+
+const TERMINAL_STATUSES = new Set<RuntimeTaskStatus>(['completed', 'failed', 'stopped', 'interrupted', 'orphaned'])
+const DEFAULT_JOURNAL_MAX_BYTES = 4 * 1024 * 1024
+const DEFAULT_RETAINED_TERMINAL_TASKS = 512
+
+interface JournalRecord {
+  version: 1
+  sequence: number
+  recordedAt: number
+  runtime: RuntimeInfo
+  event?: RuntimeTaskEvent
+  repair?: string
+}
+
+function cloneTask(task: RuntimeTask): RuntimeTask {
+  return {
+    ...task,
+    presentation: task.presentation ? { ...task.presentation } : undefined,
+    metadata: task.metadata ? { ...task.metadata } : undefined,
+  }
+}
+
+export class RuntimeTaskManager {
+  private tasks = new Map<string, RuntimeTask>()
+  private controls = new Map<string, RuntimeTaskControl>()
+  private readonly pendingStops = new Map<string, Promise<RuntimeTask>>()
+  private listeners = new Set<(event: RuntimeTaskEvent) => void>()
+  private sequence = 0
+  private readonly now: () => number
+  private journalPath?: string
+  private readonly runtimeInfo: RuntimeInfo
+  private readonly isProcessAlive: (pid: number) => boolean
+  private readonly journalSyncIntervalMs: number
+  private readonly journalMaxBytes: number
+  private readonly maxRetainedTerminalTasks: number
+  private lastJournalSyncAt = 0
+  private journalBytes = 0
+  private nextJournalCompactionAt: number
+  private executionContext: { runId?: string; stepId?: string } = {}
+
+  constructor(private options: RuntimeTaskManagerOptions = {}) {
+    this.now = options.now || Date.now
+    this.journalPath = options.journalPath
+    this.runtimeInfo = getRuntimeInfo()
+    this.isProcessAlive = options.isProcessAlive || processIsAlive
+    this.journalSyncIntervalMs = Number.isFinite(options.journalSyncIntervalMs)
+      ? Math.max(0, Math.floor(options.journalSyncIntervalMs!))
+      : 1_000
+    this.journalMaxBytes = Number.isFinite(options.journalMaxBytes)
+      ? Math.max(1, Math.floor(options.journalMaxBytes!))
+      : DEFAULT_JOURNAL_MAX_BYTES
+    this.maxRetainedTerminalTasks = Number.isFinite(options.maxRetainedTerminalTasks)
+      ? Math.max(1, Math.floor(options.maxRetainedTerminalTasks!))
+      : DEFAULT_RETAINED_TERMINAL_TASKS
+    this.journalBytes = this.journalPath && existsSync(this.journalPath)
+      ? statSync(this.journalPath).size
+      : 0
+    this.nextJournalCompactionAt = this.journalMaxBytes
+    if (options.recover !== false) this.recoverFromJournal()
+  }
+
+  setDefaultOwnerSessionId(ownerSessionId: string): void {
+    this.options.defaultOwnerSessionId = ownerSessionId
+  }
+
+  getDefaultOwnerSessionId(): string | undefined {
+    return this.options.defaultOwnerSessionId
+  }
+
+  hasActiveTasks(ownerSessionId = this.options.defaultOwnerSessionId): boolean {
+    return Array.from(this.tasks.values()).some(task =>
+      (!ownerSessionId || task.ownerSessionId === ownerSessionId)
+      && (!TERMINAL_STATUSES.has(task.status) || this.pendingStops.has(task.id))
+    )
+  }
+
+  switchSession(ownerSessionId: string, journalPath?: string): void {
+    if (this.hasActiveTasks() || this.pendingStops.size) throw new Error('Cannot switch conversations while runtime tasks are active')
+    this.options.defaultOwnerSessionId = ownerSessionId
+    this.journalPath = journalPath
+    this.tasks.clear()
+    this.controls.clear()
+    this.sequence = 0
+    this.lastJournalSyncAt = 0
+    this.journalBytes = this.journalPath && existsSync(this.journalPath)
+      ? statSync(this.journalPath).size
+      : 0
+    this.nextJournalCompactionAt = this.journalMaxBytes
+    if (this.options.recover !== false) this.recoverFromJournal()
+  }
+
+  setExecutionContext(context: { runId?: string; stepId?: string } | null): void {
+    this.executionContext = context ? { ...context } : {}
+  }
+
+  createTask(input: CreateRuntimeTaskInput, control?: RuntimeTaskControl): RuntimeTask {
+    const now = input.startedAt ?? this.now()
+    const id = input.id || this.generateId(input.kind, now)
+    if (this.tasks.has(id)) throw new Error(`Runtime task already exists: ${id}`)
+
+    const task: RuntimeTask = {
+      id,
+      kind: input.kind,
+      ownerSessionId: input.ownerSessionId || this.options.defaultOwnerSessionId,
+      parentTaskId: input.parentTaskId,
+      status: input.status || 'starting',
+      command: input.command,
+      cwd: input.cwd,
+      pid: input.pid,
+      logPath: input.logPath,
+      outputOffset: input.outputOffset,
+      outputBytes: input.outputBytes,
+      startedAt: now,
+      updatedAt: now,
+      interactive: input.interactive ?? input.kind === 'terminal',
+      restartPolicy: input.restartPolicy || 'never',
+      presentation: input.presentation ? { ...input.presentation } : undefined,
+      metadata: Object.keys(this.executionContext).length > 0 || input.metadata
+        ? { ...this.executionContext, ...input.metadata }
+        : undefined,
+    }
+    this.tasks.set(id, task)
+    if (control) this.controls.set(id, control)
+    this.emit({ type: 'runtime-task:created', task: cloneTask(task) })
+    return cloneTask(task)
+  }
+
+  getTask(taskId: string): RuntimeTask | null {
+    const task = this.tasks.get(taskId)
+    return task ? cloneTask(task) : null
+  }
+
+  readTaskOutput(taskId: string, offset = 0, maxBytes = 256 * 1024): RuntimeTaskOutput {
+    const task = this.tasks.get(taskId)
+    if (!task) throw new Error(`Runtime task not found: ${taskId}`)
+    if (!task.logPath || !existsSync(task.logPath)) {
+      return { taskId, offset: Math.max(0, offset), nextOffset: Math.max(0, offset), content: '', eof: true }
+    }
+    const fileSize = statSync(task.logPath).size
+    const requestedStart = Math.max(0, Math.min(Math.floor(offset), fileSize))
+    const limit = Math.max(1, Math.min(Math.floor(maxBytes), 2 * 1024 * 1024))
+    const readLength = Math.min(fileSize - requestedStart, limit + 8)
+    const buffer = Buffer.allocUnsafe(readLength)
+    const fd = openSync(task.logPath, 'r')
+    let bytesRead = 0
+    try {
+      bytesRead = readSync(fd, buffer, 0, readLength, requestedStart)
+    } finally {
+      closeSync(fd)
+    }
+    const value = buffer.subarray(0, bytesRead)
+    let localStart = 0
+    while (localStart < bytesRead && isUtf8ContinuationByte(value[localStart])) localStart += 1
+    let localEnd = Math.min(localStart + limit, bytesRead)
+    while (localEnd < bytesRead && !isValidUtf8(value.subarray(localStart, localEnd))) localEnd += 1
+    const start = requestedStart + localStart
+    const nextOffset = requestedStart + localEnd
+    const content = value.subarray(localStart, localEnd).toString('utf8')
+    return { taskId, offset: start, nextOffset, content, eof: nextOffset >= fileSize }
+  }
+
+  listTasks(filter: RuntimeTaskFilter = {}): RuntimeTask[] {
+    return Array.from(this.tasks.values())
+      .filter(task => !filter.kind || task.kind === filter.kind)
+      .filter(task => !filter.status || task.status === filter.status)
+      .filter(task => !filter.ownerSessionId || task.ownerSessionId === filter.ownerSessionId)
+      .filter(task => !filter.parentTaskId || task.parentTaskId === filter.parentTaskId)
+      .sort((left, right) => left.startedAt - right.startedAt)
+      .map(cloneTask)
+  }
+
+  updateTask(taskId: string, patch: RuntimeTaskUpdate): RuntimeTask | null {
+    const task = this.tasks.get(taskId)
+    if (!task) return null
+    Object.assign(task, patch, {
+      presentation: patch.presentation ? { ...task.presentation, ...patch.presentation } : task.presentation,
+      metadata: patch.metadata ? { ...task.metadata, ...patch.metadata } : task.metadata,
+      updatedAt: this.now(),
+    })
+    this.emit({ type: 'runtime-task:updated', task: cloneTask(task) })
+    return cloneTask(task)
+  }
+
+  markRunning(taskId: string, patch: RuntimeTaskUpdate = {}): RuntimeTask | null {
+    const task = this.tasks.get(taskId)
+    if (!task) return null
+    if (task.status !== 'starting' && task.status !== 'running') {
+      throw new Error(`Cannot mark runtime task ${taskId} as running from ${task.status}`)
+    }
+    return this.setStatus(task, 'running', patch)
+  }
+
+  markStopping(taskId: string): RuntimeTask | null {
+    const task = this.tasks.get(taskId)
+    if (!task) return null
+    if (TERMINAL_STATUSES.has(task.status)) return cloneTask(task)
+    if (task.status === 'stopping') return cloneTask(task)
+    return this.setStatus(task, 'stopping')
+  }
+
+  completeTask(taskId: string, patch: RuntimeTaskUpdate = {}): RuntimeTask | null {
+    return this.finishTask(taskId, 'completed', patch)
+  }
+
+  failTask(taskId: string, error: string, patch: RuntimeTaskUpdate = {}): RuntimeTask | null {
+    return this.finishTask(taskId, 'failed', { ...patch, error })
+  }
+
+  markStopped(taskId: string, reason?: string, patch: RuntimeTaskUpdate = {}): RuntimeTask | null {
+    return this.finishTask(taskId, 'stopped', {
+      ...patch,
+      metadata: reason ? { ...patch.metadata, stopReason: reason } : patch.metadata,
+    })
+  }
+
+  interruptTask(taskId: string, reason: string, patch: RuntimeTaskUpdate = {}): RuntimeTask | null {
+    return this.finishTask(taskId, 'interrupted', { ...patch, error: reason })
+  }
+
+  setControl(taskId: string, control: RuntimeTaskControl): void {
+    if (!this.tasks.has(taskId)) throw new Error(`Runtime task not found: ${taskId}`)
+    this.controls.set(taskId, control)
+  }
+
+  async stopTask(taskId: string, reason = 'Stopped by request'): Promise<RuntimeTask> {
+    const pending = this.pendingStops.get(taskId)
+    if (pending) return pending
+    const task = this.tasks.get(taskId)
+    if (!task) throw new Error(`Runtime task not found: ${taskId}`)
+    if (TERMINAL_STATUSES.has(task.status)) return cloneTask(task)
+    const control = this.controls.get(taskId)
+    if (!control?.stop) throw new Error(`Runtime task cannot be stopped: ${taskId}`)
+
+    // Publish ownership before controls or task events can request another stop.
+    let resolveStop!: (task: RuntimeTask) => void
+    let rejectStop!: (error: unknown) => void
+    const stopping = new Promise<RuntimeTask>((resolve, reject) => {
+      resolveStop = resolve
+      rejectStop = reject
+    })
+    this.pendingStops.set(taskId, stopping)
+    void this.stopControlledTask(task, control, reason).then(resolveStop, rejectStop)
+    try {
+      return await stopping
+    } finally {
+      this.pendingStops.delete(taskId)
+      this.pruneTerminalTasks()
+    }
+  }
+
+  private async stopControlledTask(task: RuntimeTask, control: RuntimeTaskControl, reason: string): Promise<RuntimeTask> {
+    if (TERMINAL_STATUSES.has(task.status)) return cloneTask(task)
+    const taskId = task.id
+    this.markStopping(taskId)
+    try {
+      const stopResult = control.stop!()
+      if (stopResult && typeof (stopResult as Promise<void>).then === 'function') {
+        await stopResult
+      }
+      return this.markStopped(taskId, reason) || cloneTask(task)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const current = this.tasks.get(taskId)
+      if (!current) return cloneTask(task)
+      const failed = this.setStatus(current, 'failed', { error: message }, true)
+      this.controls.delete(taskId)
+      this.pruneTerminalTasks()
+      return failed
+    }
+  }
+
+  async writeTask(taskId: string, data: string): Promise<RuntimeTask> {
+    const task = this.tasks.get(taskId)
+    if (!task) throw new Error(`Runtime task not found: ${taskId}`)
+    if (TERMINAL_STATUSES.has(task.status)) throw new Error(`Runtime task is ${task.status}: ${taskId}`)
+    const control = this.controls.get(taskId)
+    if (!control?.write) throw new Error(`Runtime task does not accept input: ${taskId}`)
+    await control.write(data)
+    return this.updateTask(taskId, {
+      metadata: { lastInputAt: this.now() },
+    }) || cloneTask(task)
+  }
+
+  async stopAll(reason = 'Runtime stopped'): Promise<Array<{ taskId: string; error: string }>> {
+    const results = await Promise.all([...this.tasks.values()].map(async task => {
+      if (TERMINAL_STATUSES.has(task.status) && !this.pendingStops.has(task.id)) return undefined
+      const control = this.controls.get(task.id)
+      if (!control?.stop && !this.pendingStops.has(task.id)) {
+        this.interruptTask(task.id, reason)
+        return undefined
+      }
+      const stopped = await this.stopTask(task.id, reason)
+      return stopped.status === 'failed' ? { taskId: task.id, error: stopped.error || 'Stop failed' } : undefined
+    }))
+    return results.filter((error): error is { taskId: string; error: string } => error !== undefined)
+  }
+
+  removeTask(taskId: string): boolean {
+    const task = this.tasks.get(taskId)
+    if (!task || !TERMINAL_STATUSES.has(task.status) || this.pendingStops.has(taskId)) return false
+    this.tasks.delete(taskId)
+    this.controls.delete(taskId)
+    this.emit({ type: 'runtime-task:removed', taskId })
+    return true
+  }
+
+  subscribe(listener: (event: RuntimeTaskEvent) => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+
+  private finishTask(taskId: string, status: Extract<RuntimeTaskStatus, 'completed' | 'failed' | 'stopped' | 'interrupted'>, patch: RuntimeTaskUpdate): RuntimeTask | null {
+    const task = this.tasks.get(taskId)
+    if (!task) return null
+    const nextStatus = task.status === 'stopping' ? 'stopped' : TERMINAL_STATUSES.has(task.status) ? task.status : status
+    const finished = this.setStatus(task, nextStatus, patch, true)
+    this.controls.delete(taskId)
+    this.pruneTerminalTasks()
+    return finished
+  }
+
+  private setStatus(task: RuntimeTask, status: RuntimeTaskStatus, patch: RuntimeTaskUpdate = {}, terminal = false): RuntimeTask {
+    const now = this.now()
+    const wasTerminal = TERMINAL_STATUSES.has(task.status)
+    Object.assign(task, patch, {
+      status,
+      updatedAt: now,
+      endedAt: terminal || TERMINAL_STATUSES.has(status) ? task.endedAt || now : undefined,
+      metadata: patch.metadata ? { ...task.metadata, ...patch.metadata } : task.metadata,
+    })
+    const snapshot = cloneTask(task)
+    this.emit({ type: 'runtime-task:updated', task: snapshot })
+    if (!wasTerminal && TERMINAL_STATUSES.has(status)) {
+      this.emit({ type: 'runtime-task:finished', task: cloneTask(task) })
+    }
+    return snapshot
+  }
+
+  private generateId(kind: RuntimeTaskKind, now: number): string {
+    this.sequence += 1
+    return `runtime_${kind}_${now.toString(36)}_${this.sequence.toString(36)}`
+  }
+
+  private emit(event: RuntimeTaskEvent): void {
+    this.appendJournal(event)
+    for (const listener of this.listeners) listener(event)
+  }
+
+  private appendJournal(event: RuntimeTaskEvent): void {
+    if (!this.journalPath) return
+    const record: JournalRecord = {
+      version: 1,
+      sequence: ++this.sequence,
+      recordedAt: this.now(),
+      runtime: this.runtimeInfo,
+      event,
+    }
+    mkdirSync(dirname(this.journalPath), { recursive: true })
+    const line = `${JSON.stringify(record)}\n`
+    const fd = openSync(this.journalPath, 'a')
+    try {
+      writeSync(fd, line, undefined, 'utf8')
+      this.journalBytes += Buffer.byteLength(line)
+      const forceSync = event.type !== 'runtime-task:updated'
+      if (forceSync || record.recordedAt - this.lastJournalSyncAt >= this.journalSyncIntervalMs) {
+        fsyncSync(fd)
+        this.lastJournalSyncAt = record.recordedAt
+      }
+    } finally {
+      closeSync(fd)
+    }
+    this.maybeCompactJournal()
+  }
+
+  private pruneTerminalTasks(emitEvents = true): number {
+    const terminalTasks = Array.from(this.tasks.values())
+      .filter(task => TERMINAL_STATUSES.has(task.status) && !this.pendingStops.has(task.id))
+      .sort((left, right) => (
+        (left.endedAt ?? left.updatedAt) - (right.endedAt ?? right.updatedAt)
+        || left.startedAt - right.startedAt
+        || left.id.localeCompare(right.id)
+      ))
+    const overflow = terminalTasks.length - this.maxRetainedTerminalTasks
+    if (overflow <= 0) return 0
+    for (const task of terminalTasks.slice(0, overflow)) {
+      this.tasks.delete(task.id)
+      this.controls.delete(task.id)
+      if (emitEvents) this.emit({ type: 'runtime-task:removed', taskId: task.id })
+    }
+    return overflow
+  }
+
+  private maybeCompactJournal(): void {
+    if (this.journalBytes < this.nextJournalCompactionAt) return
+    this.compactJournal()
+  }
+
+  private compactJournal(): void {
+    if (!this.journalPath) return
+    const recordedAt = this.now()
+    const records: JournalRecord[] = [{
+      version: 1,
+      sequence: ++this.sequence,
+      recordedAt,
+      runtime: this.runtimeInfo,
+      repair: 'compacted',
+    }]
+    for (const task of this.tasks.values()) {
+      records.push({
+        version: 1,
+        sequence: ++this.sequence,
+        recordedAt,
+        runtime: this.runtimeInfo,
+        event: {
+          type: TERMINAL_STATUSES.has(task.status) ? 'runtime-task:finished' : 'runtime-task:created',
+          task: cloneTask(task),
+        },
+      })
+    }
+    const content = `${records.map(record => JSON.stringify(record)).join('\n')}\n`
+    this.replaceJournalContent(content, 'compact', recordedAt)
+    this.nextJournalCompactionAt = this.journalBytes + this.journalMaxBytes
+  }
+
+  private replaceJournalContent(content: string, operation: string, recordedAt: number): boolean {
+    if (!this.journalPath) return false
+    const tempPath = `${this.journalPath}.${process.pid}.${this.sequence}.${operation}.tmp`
+    let fd: number | undefined
+    try {
+      fd = openSync(tempPath, 'wx')
+      writeSync(fd, content, undefined, 'utf8')
+      fsyncSync(fd)
+      closeSync(fd)
+      fd = undefined
+      renameSync(tempPath, this.journalPath)
+      this.journalBytes = Buffer.byteLength(content)
+      this.lastJournalSyncAt = recordedAt
+      return true
+    } catch {
+      if (fd !== undefined) closeSync(fd)
+      if (existsSync(tempPath)) unlinkSync(tempPath)
+      return false
+    }
+  }
+
+  private recoverFromJournal(): void {
+    if (!this.journalPath || !existsSync(this.journalPath)) return
+    const lines = readFileSync(this.journalPath, 'utf8').split(/\r?\n/)
+    const validLines: string[] = []
+    let invalidTail = false
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const record = JSON.parse(line) as Partial<JournalRecord>
+        if (record.version !== 1 || typeof record.sequence !== 'number' || (!record.event && !record.repair)) throw new Error('invalid journal record')
+        this.sequence = Math.max(this.sequence, record.sequence)
+        if (record.event) this.applyRecoveredEvent(record.event)
+        validLines.push(line)
+      } catch {
+        invalidTail = true
+        break
+      }
+    }
+    if (invalidTail) {
+      const recordedAt = this.now()
+      const repairRecord = JSON.stringify({
+        version: 1,
+        sequence: ++this.sequence,
+        recordedAt,
+        runtime: this.runtimeInfo,
+        repair: 'truncated-tail',
+      })
+      this.replaceJournalContent(`${[...validLines, repairRecord].join('\n')}\n`, 'repair', recordedAt)
+    }
+    const prunedTasks = this.pruneTerminalTasks(false)
+    const recoveredTasks: RuntimeTask[] = []
+    for (const task of this.tasks.values()) {
+      if (!TERMINAL_STATUSES.has(task.status)) {
+        const processAlive = typeof task.pid === 'number' && task.pid > 0 && this.isProcessAlive(task.pid)
+        task.status = processAlive ? 'running' : 'orphaned'
+        task.error = processAlive ? undefined : 'Recovered process is no longer running'
+        task.updatedAt = this.now()
+        task.endedAt = processAlive ? undefined : task.updatedAt
+        task.metadata = {
+          ...task.metadata,
+          recovered: true,
+          controlAvailable: false,
+        }
+        recoveredTasks.push(cloneTask(task))
+      }
+    }
+    for (const task of recoveredTasks) {
+      this.appendJournal({
+        type: task.status === 'orphaned' ? 'runtime-task:finished' : 'runtime-task:updated',
+        task,
+      })
+    }
+    if (prunedTasks > 0 || this.journalBytes >= this.nextJournalCompactionAt) this.compactJournal()
+  }
+
+  private applyRecoveredEvent(event: RuntimeTaskEvent): void {
+    if (event.type === 'runtime-task:created' || event.type === 'runtime-task:updated' || event.type === 'runtime-task:finished') {
+      this.tasks.set(event.task.id, cloneTask(event.task))
+      return
+    }
+    this.tasks.delete(event.taskId)
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+function isUtf8ContinuationByte(byte: number): boolean {
+  return (byte & 0b1100_0000) === 0b1000_0000
+}
+
+function isValidUtf8(value: Buffer): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(value)
+    return true
+  } catch {
+    return false
+  }
+}

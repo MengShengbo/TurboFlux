@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import type {
   WorkbenchCommandDefinition,
   WorkbenchCommandId,
@@ -44,8 +45,10 @@ import type {
   ProfileArchivePreview,
   ProfileExportEstimate,
   ProfileImportPlan,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import type {
+  DesktopUserActivity,
+  DesktopUserProfile,
   DesktopWorkbenchConversationResult,
   DesktopWorkbenchEvent,
   DesktopWorkbenchSettingsSaveResult,
@@ -191,6 +194,10 @@ declare global {
   interface TurboFluxDesktopBridge {
     getSnapshot(): Promise<DesktopWorkbenchSnapshot>
     listLocalProfiles(): Promise<DesktopLocalProfilesSnapshot>
+    getUserProfile(): Promise<DesktopUserProfile>
+    saveUserProfileName(displayName: string): Promise<DesktopUserProfile>
+    chooseUserAvatar(): Promise<DesktopUserProfile | null>
+    getUserActivity(): Promise<DesktopUserActivity>
     createLocalProfile(input: { displayName: string; avatar?: { kind: 'color'; value: string }; copyCurrentSettings: boolean; switchToNew: boolean }): Promise<DesktopLocalProfileMutationResult>
     renameLocalProfile(profileId: string, displayName: string): Promise<DesktopLocalProfileMutationResult>
     switchLocalProfile(profileId: string): Promise<DesktopLocalProfileMutationResult & { snapshot: DesktopWorkbenchSnapshot }>
@@ -293,14 +300,17 @@ declare global {
     gitRestore(paths: string[], source?: string): Promise<WorkbenchGitActionResult>
     gitPush(remote?: string, branch?: string, setUpstream?: boolean): Promise<WorkbenchGitActionResult>
     gitDiff(path?: string, scope?: 'working' | 'staged' | 'all'): Promise<WorkbenchGitDiffResult>
-    addProject(): Promise<ProjectSnapshot | null>
+    chooseProjectFolder(): Promise<{ path: string; name: string } | null>
+    addProject(input: { path: string; name: string }): Promise<ProjectSnapshot>
+    renameProject(id: string, name: string): Promise<DesktopWorkbenchSnapshot>
+    removeProject(id: string): Promise<DesktopWorkbenchSnapshot>
     createAutomation(input: {
       name: string
       prompt: string
-      objective?: Partial<import('@turboflux/agent-core/workbench').AutomationObjective>
+      objective?: Partial<import('@turboflux/workbench').AutomationObjective>
       schedule: AutomationSchedule
-      mode?: import('@turboflux/agent-core/workbench').AutomationRunMode
-      capabilityPolicy?: Partial<import('@turboflux/agent-core/workbench').AutomationCapabilityPolicy>
+      mode?: import('@turboflux/workbench').AutomationRunMode
+      capabilityPolicy?: Partial<import('@turboflux/workbench').AutomationCapabilityPolicy>
       timezone?: string
       enabled?: boolean
       approvalPolicy?: ApprovalPolicy
@@ -360,16 +370,14 @@ declare global {
     pathForFile(file: File): string
     chooseWorkspace(): Promise<DesktopWorkbenchSnapshot | null>
     chooseAutomationWorkspace(): Promise<string | null>
-    onRuntimeEvent(listener: (event: DesktopWorkbenchEvent) => void): void
-    onNavigationIntent(listener: (intent: AutomationNotificationNavigationIntent) => void): void
-    onBrowserEvent(listener: (event: BrowserSystemEvent) => void): void
-    onTerminalEvent(listener: (event: DesktopTerminalEvent) => void): void
-    onComputerEvent(listener: (event: ComputerSystemEvent) => void): void
+    onRuntimeEvent(listener: (event: DesktopWorkbenchEvent) => void): () => void
+    onNavigationIntent(listener: (intent: AutomationNotificationNavigationIntent) => void): () => void
+    onBrowserEvent(listener: (event: BrowserSystemEvent) => void): () => void
+    onTerminalEvent(listener: (event: DesktopTerminalEvent) => void): () => void
+    onComputerEvent(listener: (event: ComputerSystemEvent) => void): () => void
   }
 
   interface Window {
     turbofluxDesktop?: TurboFluxDesktopBridge
   }
 }
-
-export {}

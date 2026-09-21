@@ -1,9 +1,15 @@
+import { workbenchShellMarkup } from './workbenchShell'
+import { RenderScheduler, RenderLifetime } from '@turboflux/renderer'
+import { TranscriptIndex } from '@turboflux/presentation'
 import {
   isBuiltInBrowserTool,
   isBuiltInComputerTool,
   stripTextToolCallMarkup,
+  applyConversationViewEvent,
+  applyConversationViewSnapshot,
+  type ConversationViewState,
   type ThinkingTrace,
-} from '@turboflux/agent-core/renderer'
+} from '@turboflux/presentation'
 import type {
   AgentAttachment,
   AgentCapabilityReference,
@@ -24,7 +30,7 @@ import type {
   WorkbenchSnapshot,
   WorkStepControlAction,
   WorkflowSurfaceSpec,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import type { DesktopWorkbenchEvent as WorkbenchEvent, DesktopWorkbenchSnapshot } from '../desktopTypes'
 import type { AutomationNotificationNavigationIntent } from '../automationNotificationNavigation'
 import { projectHistoryRewrite } from '../historyRewrite'
@@ -34,11 +40,13 @@ import {
   isInternalRuntimeTool,
   renderDiffPreview,
   renderMarkdown,
-} from './richContent'
+} from '@turboflux/renderer/richContent'
 import { describeRuntimeTask } from './runtimeTaskPresentation'
 import { createSettingsCenter, createSettingsUpdate } from './settingsCenter'
 import { createAutomationsView } from './automationsView'
-import { createProfileSwitcher, profileColor } from './profileSwitcher'
+import { createUserProfile } from './userProfile'
+import type { DesktopUserProfile } from '../desktopTypes'
+import { profileAvatarMarkup, profileColor, profileGreeting } from './profileIdentity'
 import { reasoningBudgetLabel, reasoningEffortLabel, reasoningTone } from './reasoningPresentation'
 import { createCommandPalette } from './commandPalette'
 import { createComputerControls } from './computerControls'
@@ -52,19 +60,14 @@ import {
   isHistoryRewriteUserTurn,
   isLegacyRecoveryPlaceholder,
   isInternalRequestErrorTurn,
-  latestUserTurnId,
   latestConversationFailure,
   presentDesktopError,
-  requestStatusTerminalFenceApplies,
-  shouldIgnoreSnapshotAfterRequestTerminal,
-  type RequestStatusTerminalFence,
 } from './conversationRendering'
 import {
   executionOutcomeFromWorkRunStatus,
-} from './executionPresentation'
+} from '@turboflux/renderer/executionPresentation'
 import { completedTaskTurnDuration, presentWorkRun, selectProjectedWorkRun } from './workExecutionPresentation'
 import {
-  applyTaskFlowEvent,
   createTaskFlowProjection,
   projectTaskFlowSnapshot,
   taskFlowNodeIdForTool,
@@ -78,6 +81,7 @@ import {
   clampInspectorWidth as clampInspectorWidthValue,
   defaultInspectorWidth as defaultInspectorWidthValue,
   inspectorDismissTriggerX,
+  inspectorDragWidthMode,
   inspectorWidthFromKey,
   inspectorWidthFromRatio,
   inspectorWidthRatio,
@@ -96,7 +100,6 @@ import {
   renderContextPanel,
   renderGitPanel,
 } from './workbenchPanels'
-import { presentTaskCompanion, type TaskCompanionItemKind } from './taskCompanion'
 import {
   createTranscriptFollowState,
   forceTranscriptFollow,
@@ -109,13 +112,14 @@ import {
 import {
   createFallbackLinearMessage,
   createLinearTaskFlowRenderer,
-} from './linearTaskFlow'
-import { createWorkPlanDockRenderer } from './workPlanPresentation'
+} from '@turboflux/renderer/linearTaskFlow'
+import { createWorkPlanDockRenderer } from '@turboflux/renderer/workPlanPresentation'
 import { SerializedAsyncQueue, SingleFlightGuard } from './interactionConcurrency'
 import { projectWorkspaceConversationGroups, UNGROUPED_WORKSPACE_KEY } from './workspaceConversationProjection'
 import { composerPopoverPlacement } from './composerPopoverPlacement'
 import { createTerminalPanel } from './terminalPanel'
 import { presentComposerRunButton, type ComposerRunButtonPresentation } from './composerRunButton'
+import { openWorkspaceDialog } from './workspaceDialog'
 import {
   activeConversationNavigatorIndices,
   compactConversationNavigatorText,
@@ -123,7 +127,7 @@ import {
   conversationNavigatorMarkerVisual,
   pairConversationNavigatorTasks,
 } from './conversationNavigator'
-import { createElement as createLucideElement, Ellipsis, Folder, FolderClosed, FolderOpen, Monitor, PanelLeftClose, PanelLeftOpen, Plus, Puzzle, Settings2, SquarePen, Workflow, type IconNode } from 'lucide'
+import { icon, approvalPolicyIcon } from './workbenchIcons'
 
 type InspectorTab = 'activity' | 'outputs' | 'browser' | 'context' | 'git'
 type InspectorPanelTab = {
@@ -137,7 +141,6 @@ type InspectorPanelTab = {
   artifactId?: string
   change?: ChangeSummary
 }
-type ProductTitlePhase = 'typing' | 'holding' | 'deleting' | 'switching'
 
 const INSPECTOR_PRIMARY_NAVIGATION: ReadonlyArray<{ tab: InspectorTab; label: string; iconName: string }> = [
   { tab: 'browser', label: '浏览器', iconName: 'browser' },
@@ -148,11 +151,6 @@ const INSPECTOR_UTILITY_NAVIGATION: ReadonlyArray<{ tab: InspectorTab; label: st
   { tab: 'git', label: '版本', iconName: 'git' },
 ]
 
-const productTitleVariants = [
-  { word: '工作', className: 'is-work' },
-  { word: '开发', className: 'is-code' },
-] as const
-
 const capabilityNameOverrides: Readonly<Record<string, string>> = {
   'office-workagent': '办公任务总控',
 }
@@ -160,112 +158,6 @@ const capabilityNameOverrides: Readonly<Record<string, string>> = {
 function capabilityDisplayName(capability: AgentCapabilityReference): string {
   return capabilityNameOverrides[capability.id] || capability.name || capability.id
 }
-const PRODUCT_TITLE_TYPE_DELAY = 120
-const PRODUCT_TITLE_DELETE_DELAY = 78
-const PRODUCT_TITLE_HOLD_DELAY = 1550
-const PRODUCT_TITLE_SWITCH_DELAY = 260
-
-const navigationIconNodes: Record<string, IconNode> = {
-  newConversation: SquarePen,
-  parallel: Workflow,
-  pluginNav: Puzzle,
-  settings: Settings2,
-  sidebarCollapse: PanelLeftClose,
-  sidebarExpand: PanelLeftOpen,
-  folder: Folder,
-  computer: Monitor,
-  plus: Plus,
-  more: Ellipsis,
-}
-const navigationIconMarkup = new Map<string, string>()
-
-function lucideSvg(node: IconNode, className = ''): string {
-  return createLucideElement(node, {
-    class: `lucide-icon ${className}`.trim(),
-    'aria-hidden': 'true',
-    focusable: 'false',
-    'stroke-width': 1.75,
-  }).outerHTML
-}
-
-const icon = (name: string) => {
-  const cached = navigationIconMarkup.get(name)
-  if (cached) return cached
-  const node = navigationIconNodes[name]
-  if (node || name === 'workspace') {
-    const svg = name === 'workspace'
-      ? lucideSvg(FolderClosed, 'workspace-folder-closed') + lucideSvg(FolderOpen, 'workspace-folder-open')
-      : lucideSvg(node)
-    const markup = `<span class="icon icon-${name}" aria-hidden="true">${svg}</span>`
-    navigationIconMarkup.set(name, markup)
-    return markup
-  }
-  const icons: Record<string, string> = {
-    grid: '<svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>',
-    chat: '<svg viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5H12l-4.5 4v-4H7.5A2.5 2.5 0 0 1 5 12.5z"/></svg>',
-    spark: '<svg viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z"/><path d="m19 16 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z"/></svg>',
-    list: '<svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r=".8"/><circle cx="4.5" cy="12" r=".8"/><circle cx="4.5" cy="18" r=".8"/></svg>',
-    history: '<svg viewBox="0 0 24 24"><path d="M4 7v5h5"/><path d="M5.5 17.5A8 8 0 1 0 4 12"/><path d="M12 8v4l3 2"/></svg>',
-    search: '<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4"/></svg>',
-    globe: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>',
-    back: '<svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>',
-    forward: '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
-    reload: '<svg viewBox="0 0 24 24"><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 0-2 5"/></svg>',
-    external: '<svg viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8"/><path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>',
-    paperclip: '<svg viewBox="0 0 24 24"><path d="m8.5 12.5 6.8-6.8a3.2 3.2 0 0 1 4.5 4.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.2-8.2"/></svg>',
-    paste: '<svg viewBox="0 0 24 24"><rect x="5" y="5.5" width="14" height="15" rx="2.5"/><path d="M9 5.5V4.2A1.7 1.7 0 0 1 10.7 2.5h2.6A1.7 1.7 0 0 1 15 4.2v1.3M8.5 10h7M8.5 13.5h7M8.5 17h4.5"/></svg>',
-    plug: '<svg viewBox="0 0 24 24"><path d="M8 3v5m8-5v5M6 8h12v2a6 6 0 0 1-6 6v5m-3 0h6"/></svg>',
-    check: '<svg viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7"/></svg>',
-    changeAdd: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/><circle cx="12" cy="12" r="8.5" opacity=".18"/></svg>',
-    changeDelete: '<svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/><circle cx="12" cy="12" r="8.5" opacity=".18"/></svg>',
-    changeModify: '<svg viewBox="0 0 24 24"><path d="m5 17.8 9.9-9.9 3.2 3.2-9.9 9.9H5z"/><path d="m13.8 8.9 1.7-1.7a2 2 0 0 1 2.8 0l.5.5a2 2 0 0 1 0 2.8l-1.7 1.7"/></svg>',
-    arrow: '<svg viewBox="0 0 24 24"><path d="M21 3 10.6 13.4"/><path d="m21 3-6.7 18-3.7-7.6L3 9.7Z"/></svg>',
-    sendUp: '<svg viewBox="0 0 24 24"><path d="m6.5 10.5 5.5-5.5 5.5 5.5M12 5v14"/></svg>',
-    chevron: '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
-    chevronDown: '<svg viewBox="0 0 24 24"><path d="m6.5 9 5.5 5.5L17.5 9"/></svg>',
-    command: '<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m9 9 2.5 3L9 15m4.5 0H16"/></svg>',
-    terminal: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="m7.5 9 3 3-3 3M13 15h3.5"/></svg>',
-    panel: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="3"/><path d="M15 4v16"/></svg>',
-    overview: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="7" height="7" rx="1.5"/><rect x="13.5" y="4" width="7" height="4" rx="1.5"/><rect x="13.5" y="11" width="7" height="9" rx="1.5"/><rect x="3.5" y="14" width="7" height="6" rx="1.5"/></svg>',
-    activity: '<svg viewBox="0 0 24 24"><path d="M3.5 12h4l2.2-5.5 4.1 11 2.3-5.5h4.4"/><path d="M4 5.5h16M4 18.5h16" opacity=".35"/></svg>',
-    browser: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M3.5 9h17"/><circle cx="7" cy="6.75" r=".65"/><circle cx="10" cy="6.75" r=".65"/></svg>',
-    outputs: '<svg viewBox="0 0 24 24"><path d="M7 3.5h7l4 4V20H7z"/><path d="M14 3.5V8h4M9.5 12h5M9.5 15.5h5"/></svg>',
-    file: '<svg viewBox="0 0 24 24"><path d="M7 3.5h7l4 4V20H7z"/><path d="M14 3.5V8h4"/></svg>',
-    image: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="9.5" r="1.5"/><path d="m5.5 17 4.2-4 2.8 2.4 2.7-2.7 3.3 3.3"/></svg>',
-    code: '<svg viewBox="0 0 24 24"><path d="m8.5 7-5 5 5 5M15.5 7l5 5-5 5M14 4l-4 16"/></svg>',
-    archive: '<svg viewBox="0 0 24 24"><path d="M5 8h14v11H5zM4 4h16v4H4z"/><path d="M10 12h4"/></svg>',
-    table: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M10 4.5v15"/></svg>',
-    slides: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="13" rx="2.5"/><path d="M12 17v3M8.5 20h7M8 8h8M8 12h5"/></svg>',
-    context: '<svg viewBox="0 0 24 24"><path d="m12 3.5 8 4-8 4-8-4z"/><path d="m4 12 8 4 8-4M4 16.5l8 4 8-4"/></svg>',
-    git: '<svg viewBox="0 0 24 24"><circle cx="7" cy="5" r="2"/><circle cx="17" cy="7" r="2"/><circle cx="7" cy="19" r="2"/><path d="M7 7v10M9 12h3a5 5 0 0 0 5-5"/></svg>',
-    preview: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="12" rx="2.5"/><path d="M8 20h8M12 16.5V20"/><path d="m10 8.5 5 2.5-5 2.5z"/></svg>',
-    expand: '<svg viewBox="0 0 24 24"><path d="M8 4H4v4M16 20h4v-4M4 8l5-5M20 16l-5 5"/></svg>',
-    contract: '<svg viewBox="0 0 24 24"><path d="M9 9H4V4M15 15h5v5M4 4l6 6M20 20l-6-6"/></svg>',
-    stop: '<svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
-    pause: '<svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg>',
-    pauseBlock: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" stroke="none"/></svg>',
-    play: '<svg viewBox="0 0 24 24"><path d="m9 6 9 6-9 6z"/></svg>',
-    trash: '<svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2m-8 0 1 12h8l1-12M10 10v6m4-6v6"/></svg>',
-    copy: '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
-    edit: '<svg viewBox="0 0 24 24"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></svg>',
-    close: '<svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg>',
-    account: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>',
-    approvalAsk: '<svg viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v6a2.5 2.5 0 0 1-2.5 2.5H12l-4.5 4v-4h-.5A2.5 2.5 0 0 1 5 12.5z"/><path d="M10 9a2 2 0 1 1 3.3 1.5c-.8.6-1.3 1-1.3 2"/><path d="M12 15h.01"/></svg>',
-    approvalAgent: '<svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.2c0 4.1-2.5 7.6-7 9.3-4.5-1.7-7-5.2-7-9.3V6z"/><path d="m8.8 11.8 2.1 2.1 4.5-4.6"/></svg>',
-    approvalFull: '<svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.2c0 4.1-2.5 7.6-7 9.3-4.5-1.7-7-5.2-7-9.3V6z"/><path d="M12 8v5"/><path d="M12 16.5h.01"/></svg>',
-  }
-  return `<span class="icon icon-${name}">${icons[name] || icons.grid}</span>`
-}
-
-function approvalPolicyIcon(policy: ApprovalPolicy): string {
-  const icons: Record<ApprovalPolicy, string> = {
-    ask: icon('approvalAsk'),
-    agent: icon('approvalAgent'),
-    full: icon('approvalFull'),
-  }
-  return icons[policy]
-}
-
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, character => ({
     '&': '&amp;',
@@ -276,130 +168,13 @@ function escapeHtml(value: string): string {
   })[character]!)
 }
 
-export function mountWorkbench(app: HTMLDivElement): void {
+export function mountWorkbench(app: HTMLDivElement): () => void {
+  const lifetime = new RenderLifetime()
+  const renderer = new RenderScheduler(undefined, error => console.error('Workbench render failed', error))
+  lifetime.add(() => renderer.dispose())
   const platform = navigator.platform || navigator.userAgent
   document.documentElement.classList.toggle('platform-macos', /Mac/i.test(platform))
-  app.innerHTML = `
-    <div class="background-media-layer" aria-hidden="true">
-      <img class="background-media-visual background-media-image" alt="" hidden>
-      <video class="background-media-visual background-media-video" autoplay loop muted playsinline hidden></video>
-      <div class="background-media-veil"></div>
-    </div>
-    <div class="desktop-shell">
-      <div class="window-sidebar-control">
-        <button class="icon-button window-sidebar-toggle" id="sidebar-toggle" type="button" title="折叠侧栏" aria-label="折叠侧栏" aria-pressed="false">${icon('sidebarCollapse')}</button>
-      </div>
-      <aside class="sidebar">
-        <div class="sidebar-titlebar-drag-region" aria-hidden="true"></div>
-        <button class="new-task" id="new-task">${icon('newConversation')}<span>新建任务</span></button>
-
-        <nav class="sidebar-nav" aria-label="工作区导航">
-          <button class="sidebar-nav-item automation-entry" data-view="automations">${icon('parallel')}<span>自动化</span></button>
-          <button class="sidebar-nav-item work-packs-entry" data-view="skills">${icon('pluginNav')}<span>插件</span></button>
-        </nav>
-
-        <div class="sidebar-section sidebar-history">
-          <div class="workspace-task-header">
-            <span>工作区</span>
-            <span class="workspace-task-actions">
-              <button class="tiny-button" id="workspace-task-add" title="添加工作区" aria-label="添加工作区">${icon('plus')}</button>
-            </span>
-          </div>
-          <div id="conversation-list"></div>
-        </div>
-
-        <div class="sidebar-footer">
-          <button class="sidebar-profile-identity" id="profile-center-button" type="button" title="切换用户资料" aria-label="切换用户资料" aria-haspopup="menu" aria-expanded="false">
-            <span class="sidebar-profile-avatar" id="sidebar-profile-avatar" aria-hidden="true">资</span>
-            <span class="sidebar-profile-copy"><strong id="sidebar-profile-name">用户资料</strong><small id="sidebar-profile-state">正在读取…</small></span>
-            <span class="sidebar-profile-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m7 14 5-5 5 5"/></svg></span>
-          </button>
-          <div class="sidebar-utilities">
-            <button class="sidebar-nav-item sidebar-settings" id="settings-button" title="设置">${icon('settings')}<span>设置</span></button>
-          </div>
-        </div>
-      </aside>
-
-      <div class="workbench-surface">
-        <main class="main-panel" id="main-panel">
-        <header class="topbar">
-          <div class="breadcrumb" id="breadcrumb"><strong id="breadcrumb-title">工作台</strong></div>
-          <section class="task-companion" id="task-companion" aria-live="polite" aria-hidden="true"></section>
-          <button class="icon-button conversation-plugins-toggle" id="conversation-plugins-toggle" title="本对话插件" aria-label="本对话插件" aria-haspopup="menu" aria-expanded="false">${icon('pluginNav')}<b id="conversation-plugins-count" aria-hidden="true"></b></button>
-          <div class="conversation-plugins-menu" id="conversation-plugins-menu" role="menu" aria-hidden="true"></div>
-        </header>
-
-        <section class="work-plan-dock" id="work-plan-dock" aria-live="polite" hidden></section>
-
-        <div class="main-scroll" id="main-scroll">
-          <section class="recovery-banner" id="recovery-banner"></section>
-          <section class="welcome-block" id="welcome-block">
-            <h1 class="workbench-prompt-title" aria-label="TurboFlux 工作与开发"><span class="workbench-title-brand">TurboFlux</span><span class="workbench-title-product is-work" id="workbench-title-product" aria-hidden="true"><span id="workbench-title-text"></span><span class="workbench-title-caret" id="workbench-title-caret"></span></span></h1>
-          </section>
-          <nav class="conversation-navigator" id="conversation-navigator" aria-label="对话导航" aria-hidden="true">
-            <div class="conversation-navigator-markers" id="conversation-navigator-markers"></div>
-            <div class="conversation-navigator-popover" id="conversation-navigator-popover" aria-hidden="true">
-              <strong id="conversation-navigator-popover-title"></strong>
-              <small id="conversation-navigator-popover-summary"></small>
-            </div>
-          </nav>
-          <section class="transcript" id="transcript" aria-live="polite"></section>
-
-          <div class="composer-stack">
-            <section class="composer-card" id="composer-card">
-              <div class="draft-tray" id="draft-tray"></div>
-              <div class="composer-capability-tray" id="composer-capability-tray"></div>
-              <textarea id="task-input" placeholder="交代一项工作，或粘贴需要处理的内容" rows="1"></textarea>
-              <div class="composer-bottom">
-                <div class="composer-tools"><button class="composer-add-button" id="composer-add" title="添加文件" aria-haspopup="menu" aria-expanded="false">${icon('plus')}</button><button class="composer-slant-tab capability-tab" id="capability-tab" title="选择插件" aria-haspopup="menu" aria-expanded="false">${icon('pluginNav')}<span id="capability-name">插件</span><b id="capability-count" aria-hidden="true"></b>${icon('chevronDown')}</button><button class="approval-pill" id="approval-pill" aria-haspopup="menu" aria-expanded="false"><span class="approval-policy-icon" id="approval-icon" aria-hidden="true">${approvalPolicyIcon('ask')}</span><span id="approval-name">审批策略</span>${icon('chevronDown')}</button></div>
-                <div class="composer-submit"><button class="composer-context" id="composer-context" type="button" aria-label="查看上下文使用情况"><span class="composer-context-ring" aria-hidden="true"></span></button><button class="composer-slant-tab reasoning-tab" id="reasoning-tab" title="选择推理强度" aria-haspopup="menu" aria-expanded="false"><span>推理</span><strong id="reasoning-name">加载中</strong>${icon('chevronDown')}</button><button class="model-pill" id="model-pill" aria-haspopup="menu" aria-expanded="false"><span class="model-pill-icon" id="model-icon" aria-hidden="true"></span><span id="model-name">加载中</span>${icon('chevronDown')}</button><button class="run-button" id="run-button" type="button" data-action="send" title="输入内容后发送" aria-label="输入内容后发送" disabled>${icon('sendUp')}</button></div>
-              </div>
-            </section>
-            <div class="composer-start-context" id="composer-start-context" aria-hidden="false">
-              <span class="composer-start-runtime">${icon('computer')}<span>本机执行</span></span>
-              <button class="composer-start-workspace" id="composer-start-workspace" title="选择工作区">${icon('folder')}<span id="composer-start-workspace-name">选择工作区</span><small id="composer-start-workspace-action">选择</small>${icon('chevronDown')}</button>
-            </div>
-            <div class="composer-menu" id="composer-menu" aria-hidden="true"></div>
-            <div class="capability-menu" id="capability-menu" aria-hidden="true"></div>
-            <div class="approval-menu" id="approval-menu" aria-hidden="true"></div>
-          </div>
-
-        </div>
-
-        <section class="product-view" id="product-view" aria-hidden="true"></section>
-
-        <section class="terminal-panel" id="terminal-panel" aria-label="终端" aria-hidden="true"></section>
-
-        </main>
-
-        <button class="icon-button terminal-toggle" id="terminal-toggle" title="打开终端" aria-label="打开终端" aria-controls="terminal-panel" aria-pressed="false">${icon('terminal')}</button>
-        <button class="icon-button work-drawer-toggle" id="inspector-toggle" title="打开工作抽屉" aria-label="打开工作抽屉" aria-pressed="false">${icon('panel')}</button>
-        <button class="inspector-scrim" id="inspector-scrim" aria-label="关闭侧栏"></button>
-        <aside class="inspector" id="inspector-panel" aria-hidden="true">
-          <span class="inspector-edge-shadow" aria-hidden="true"></span>
-          <div class="inspector-resize-handle" id="inspector-resize-handle" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整右侧面板宽度" aria-describedby="inspector-resize-help" aria-keyshortcuts="ArrowLeft ArrowRight Home End" title="拖动调整宽度；方向键可微调，Home/End 跳到边界，双击恢复默认宽度"></div>
-          <span class="visually-hidden" id="inspector-resize-help">拖动调整宽度。方向键每次调整 10 像素，Home/End 移到最小或最大宽度，双击恢复默认宽度。</span>
-          <div class="inspector-viewport">
-            <div class="inspector-frame">
-              <div class="inspector-header">
-                <nav class="inspector-nav" aria-label="工作抽屉">
-                  <div class="inspector-tabs" id="inspector-tabs" role="tablist"></div>
-                  <span class="browser-activity-pill compact inspector-browser-activity" id="inspector-browser-activity" hidden>${icon('spark')}<span>浏览器运行中</span></span>
-                  <button class="inspector-header-action" id="inspector-browser-new-tab" type="button" title="新建浏览器标签页" aria-label="新建浏览器标签页" hidden>${icon('plus')}</button>
-                  <button class="inspector-header-action" id="inspector-module-menu-toggle" type="button" title="打开其他面板" aria-label="打开其他面板" aria-haspopup="menu" aria-expanded="false">${icon('plus')}</button>
-                  <button class="inspector-header-action" id="inspector-expand" type="button" title="展开面板" aria-label="展开面板" aria-pressed="false">${icon('expand')}</button>
-                </nav>
-                <div class="inspector-module-menu" id="inspector-module-menu" role="menu" aria-hidden="true">${[...INSPECTOR_PRIMARY_NAVIGATION, ...INSPECTOR_UTILITY_NAVIGATION].map(item => `<button class="inspector-module-option" type="button" role="menuitemradio" aria-checked="false" data-tab="${item.tab}">${icon(item.iconName)}<span>${item.label}</span><span class="inspector-module-check" aria-hidden="true">${icon('check')}</span></button>`).join('')}</div>
-              </div>
-              <div class="inspector-content" id="inspector-content"></div>
-              <span class="visually-hidden" id="runtime-policy">正在准备</span>
-            </div>
-          </div>
-        </aside>
-      </div>
-    </div>
-    <div class="toast" id="toast" role="status"></div>
-  `
+  app.innerHTML = workbenchShellMarkup(INSPECTOR_UTILITY_NAVIGATION)
 
   const bridge = window.turbofluxDesktop
   const shell = app.querySelector<HTMLDivElement>('.desktop-shell')!
@@ -407,8 +182,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
   const workbenchSurface = app.querySelector<HTMLDivElement>('.workbench-surface')!
   const breadcrumb = app.querySelector<HTMLElement>('#breadcrumb')!
   const breadcrumbTitle = app.querySelector<HTMLElement>('#breadcrumb-title')!
-  const conversationPluginsToggle = app.querySelector<HTMLButtonElement>('#conversation-plugins-toggle')!
-  const conversationPluginsMenu = app.querySelector<HTMLElement>('#conversation-plugins-menu')!
   const mainScroll = app.querySelector<HTMLDivElement>('#main-scroll')!
   const productView = app.querySelector<HTMLElement>('#product-view')!
   const newTaskButton = app.querySelector<HTMLButtonElement>('#new-task')!
@@ -420,6 +193,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   const conversationNavigatorPopoverTitle = app.querySelector<HTMLElement>('#conversation-navigator-popover-title')!
   const conversationNavigatorPopoverSummary = app.querySelector<HTMLElement>('#conversation-navigator-popover-summary')!
   const workPlanDock = app.querySelector<HTMLElement>('#work-plan-dock')!
+  const workPlanToggle = app.querySelector<HTMLButtonElement>('#work-plan-toggle')!
   const toast = app.querySelector<HTMLDivElement>('#toast')!
   const runButton = app.querySelector<HTMLButtonElement>('#run-button')!
   const recoveryBanner = app.querySelector<HTMLElement>('#recovery-banner')!
@@ -427,7 +201,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
   const capabilityTray = app.querySelector<HTMLElement>('#composer-capability-tray')!
   const composerCard = app.querySelector<HTMLElement>('#composer-card')!
   const composerAddButton = app.querySelector<HTMLButtonElement>('#composer-add')!
-  const capabilityTab = app.querySelector<HTMLButtonElement>('#capability-tab')!
   const capabilityMenu = app.querySelector<HTMLElement>('#capability-menu')!
   const reasoningTab = app.querySelector<HTMLButtonElement>('#reasoning-tab')!
   const approvalPill = app.querySelector<HTMLButtonElement>('#approval-pill')!
@@ -447,15 +220,14 @@ export function mountWorkbench(app: HTMLDivElement): void {
   const inspectorModuleMenuToggle = app.querySelector<HTMLButtonElement>('#inspector-module-menu-toggle')!
   const inspectorModuleMenu = app.querySelector<HTMLElement>('#inspector-module-menu')!
   const inspectorExpand = app.querySelector<HTMLButtonElement>('#inspector-expand')!
-  const taskCompanion = app.querySelector<HTMLElement>('#task-companion')!
-  const productTitle = app.querySelector<HTMLElement>('#workbench-title-product')!
-  const productTitleText = app.querySelector<HTMLElement>('#workbench-title-text')!
-  const productTitleCaret = app.querySelector<HTMLElement>('#workbench-title-caret')!
   const sidebarCollapsedStorageKey = 'turboflux.sidebar.collapsed:v1'
+  const workPlanHiddenStorageKey = 'turboflux.work-plan.hidden:v1'
   const composerActionGuard = new SingleFlightGuard()
   const draftRecordQueue = new SerializedAsyncQueue()
   const conversationNavigationGuard = new SingleFlightGuard()
   let currentSnapshot: WorkbenchSnapshot | null = null
+  let pendingSnapshotPaint: { conversationChanged: boolean; firstSnapshot: boolean; renderConversation: boolean } | null = null
+  let closeSidebarMenu: ((restoreFocus?: boolean) => void) | null = null
   let workflowSurface: HTMLElement | null = null
   let workflowSurfaceRequestId = ''
   let workflowSurfaceReturnFocus: HTMLElement | null = null
@@ -485,16 +257,15 @@ export function mountWorkbench(app: HTMLDivElement): void {
       }, { root: transcript, rootMargin: '240px 0px' })
   let artifactPreviewLoading = false
   let imageLightbox: ImageLightbox | null = null
-  let canonicalTaskFlowFrame: number | null = null
   let canonicalTaskFlowForce = false
   let submissionPending = false
   let submissionPauseRequested = false
-  let requestStatusTerminalFence: RequestStatusTerminalFence | null = null
-  let requestStatusAttemptTurnId = ''
   let activeTaskStartedAt = 0
   let projectedWorkRunId = ''
   let taskFlowProjection: TaskFlowProjectionState | null = null
-  const liveTurnCache = new Map<string, AgentTurn>()
+  let conversationView: ConversationViewState | null = null
+  const transcriptIndex = new TranscriptIndex()
+  const liveTurnCache = transcriptIndex.turns
   const workPlanDockRenderer = createWorkPlanDockRenderer(workPlanDock)
 
   function renderProjectedWorkPlan() {
@@ -528,12 +299,29 @@ export function mountWorkbench(app: HTMLDivElement): void {
           || createFallbackLinearMessage(node, 'assistant')
         : createFallbackLinearMessage(node, 'assistant')
     },
+    updateAnswer: (row, node, presentation) => {
+      const turn = (node.turnId ? liveTurnCache.get(node.turnId) : undefined)
+        || currentSnapshot?.conversation.turns.find(candidate => candidate.id === node.turnId)
+      if (turn && (isInternalRequestErrorTurn(turn) || turn.metadata?.attachments?.length)) return false
+      const content = row.querySelector<HTMLElement>('.message-content')
+      const visibleContent = stripTextToolCallMarkup(turn?.content ?? node.content, { stripIncomplete: true }).trim()
+      if (!content || !visibleContent) return false
+      row.classList.remove('streaming')
+      renderMarkdown(content, visibleContent)
+      if (!turn) return true
+      row.dataset.turnId = turn.id
+      row.dataset.timestamp = String(turn.timestamp)
+      const previousMeta = row.querySelector('.message-meta')
+      if (presentation.finalDelivery) {
+        const includeUsage = currentSnapshot?.activity.execution.runs.find(run => run.id === node.runId)?.responseMode !== 'task'
+        const meta = createMessageMeta(turn, visibleContent, row, includeUsage)
+        if (previousMeta) previousMeta.replaceWith(meta)
+        else row.append(meta)
+      } else previousMeta?.remove()
+      return true
+    },
     resolveTool: node => {
-      const turns = [...(currentSnapshot?.conversation.turns || []), ...liveTurnCache.values()]
-      const call = turns
-        .flatMap(turn => turn.toolCalls || [])
-        .find(candidate => candidate.id === node.callId)
-        || liveToolCalls.get(node.callId || '')
+      const call = liveToolCalls.get(node.callId || '')
         || {
           id: node.callId || node.id.replace(/^tool:/, ''),
           name: node.toolName || node.content || 'tool',
@@ -541,7 +329,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
             ? (() => { try { return JSON.parse(node.detail) as Record<string, unknown> } catch { return {} } })()
             : {},
         }
-      const result = collectToolResults(turns).get(call.id) || liveToolResults.get(call.id)
+      const result = liveToolResults.get(call.id)
       return {
         call,
         result,
@@ -555,31 +343,9 @@ export function mountWorkbench(app: HTMLDivElement): void {
     resolveTurn: turnId => liveTurnCache.get(turnId)
       || currentSnapshot?.conversation.turns.find(turn => turn.id === turnId),
     resolveRun: runId => currentSnapshot?.activity.execution.runs.find(run => run.id === runId),
-    nodeVersion: node => {
-      if ((node.kind === 'input' || node.kind === 'answer') && node.turnId) {
-        const turn = liveTurnCache.get(node.turnId)
-        if (!turn) return ''
-        return [
-          turn.timestamp,
-          turn.content.length,
-          turn.metadata?.attachments?.length || 0,
-          turn.metadata?.capabilities?.items.length || 0,
-          turn.metadata?.duration || 0,
-        ].join(':')
-      }
-      if (node.kind !== 'tool' || !node.callId) return ''
-      const call = liveToolCalls.get(node.callId)
-      const result = collectToolResults([
-        ...(currentSnapshot?.conversation.turns || []),
-        ...liveTurnCache.values(),
-      ]).get(node.callId) || liveToolResults.get(node.callId)
-      return [
-        call ? JSON.stringify(call.arguments).length : 0,
-        result ? result.isError ? 1 : 0 : '',
-        result?.output.length || 0,
-        result?.attachments?.length || 0,
-      ].join(':')
-    },
+    nodeVersion: node => String(node.callId
+      ? transcriptIndex.toolVersion(node.callId)
+      : node.turnId ? transcriptIndex.turnVersion(node.turnId) : 0),
   })
   let draftTimer: number | null = null
   let draftAttachments: AgentAttachment[] = []
@@ -610,8 +376,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
   let fullScreenSurfaceDepth = 0
   let browserBoundsFrame: number | null = null
   let inspectorChromeResizeFrame: number | null = null
-  const liveToolCalls = new Map<string, ToolCall>()
-  const liveToolResults = new Map<string, ToolResult>()
+  const liveToolCalls = transcriptIndex.calls
+  const liveToolResults = transcriptIndex.results
   let pendingOptimisticUserElement: HTMLElement | null = null
   let pendingOptimisticUserPrompt = ''
   let pendingOptimisticInputId = ''
@@ -634,7 +400,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
   let historyRewriteLeadingSpacer: HTMLElement | null = null
   let historyRewriteSpacer: HTMLElement | null = null
   let automationsView: ReturnType<typeof createAutomationsView> | undefined
-  let renderedTaskCompanionSignature = ''
   let transcriptFollowState = createTranscriptFollowState(transcript)
   let transcriptScrollFrame: number | null = null
   let transcriptPointerScrolling = false
@@ -676,58 +441,35 @@ export function mountWorkbench(app: HTMLDivElement): void {
   try { initialSidebarCollapsed = window.localStorage.getItem(sidebarCollapsedStorageKey) === 'true' } catch {}
   shell.classList.add('sidebar-state-initializing')
   setSidebarCollapsed(initialSidebarCollapsed, false)
-  window.requestAnimationFrame(() => shell.classList.remove('sidebar-state-initializing'))
+  lifetime.frame(() => shell.classList.remove('sidebar-state-initializing'))
 
-  function startProductTitleTypewriter() {
-    let variantIndex = 0
-    let visibleText = ''
-    let phase: ProductTitlePhase = 'typing'
-
-    const render = () => {
-      const variant = productTitleVariants[variantIndex]
-      productTitleText.textContent = visibleText
-      productTitle.classList.toggle('is-work', variant.className === 'is-work')
-      productTitle.classList.toggle('is-code', variant.className === 'is-code')
-      productTitleCaret.classList.toggle('is-holding', phase === 'holding')
-    }
-
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      visibleText = productTitleVariants[variantIndex].word
-      phase = 'holding'
-      render()
-      return
-    }
-
-    const schedule = () => {
-      const variant = productTitleVariants[variantIndex]
-      let delay = PRODUCT_TITLE_TYPE_DELAY
-      if (phase === 'holding') delay = PRODUCT_TITLE_HOLD_DELAY
-      if (phase === 'deleting') delay = PRODUCT_TITLE_DELETE_DELAY
-      if (phase === 'switching') delay = PRODUCT_TITLE_SWITCH_DELAY
-
-      window.setTimeout(() => {
-        if (phase === 'typing') {
-          visibleText = variant.word.slice(0, visibleText.length + 1)
-          if (visibleText === variant.word) phase = 'holding'
-        } else if (phase === 'holding') {
-          phase = 'deleting'
-        } else if (phase === 'deleting') {
-          visibleText = visibleText.slice(0, -1)
-          if (!visibleText) phase = 'switching'
-        } else {
-          variantIndex = (variantIndex + 1) % productTitleVariants.length
-          phase = 'typing'
-        }
-        render()
-        schedule()
-      }, delay)
-    }
-
-    render()
-    schedule()
+  function updateWorkPlanToggleState() {
+    const available = mainPanel.classList.contains('has-conversation')
+      && currentMainView === 'workbench'
+      && !shell.classList.contains('inspector-open')
+    const hidden = shell.classList.contains('work-plan-hidden')
+    const visible = available && !hidden
+    workPlanToggle.hidden = !available
+    workPlanToggle.classList.toggle('active', visible)
+    workPlanToggle.setAttribute('aria-pressed', String(visible))
+    workPlanToggle.title = hidden ? '显示任务列表' : '收起任务列表'
+    workPlanToggle.setAttribute('aria-label', workPlanToggle.title)
+    workPlanDock.inert = !visible
+    workPlanDock.setAttribute('aria-hidden', String(!visible))
   }
 
-  startProductTitleTypewriter()
+  function setWorkPlanHidden(hidden: boolean, persist = true) {
+    shell.classList.toggle('work-plan-hidden', hidden)
+    updateWorkPlanToggleState()
+    if (persist) {
+      try { window.localStorage.setItem(workPlanHiddenStorageKey, String(hidden)) } catch {}
+      scrollTranscript()
+    }
+  }
+
+  let initialWorkPlanHidden = false
+  try { initialWorkPlanHidden = window.localStorage.getItem(workPlanHiddenStorageKey) === 'true' } catch {}
+  setWorkPlanHidden(initialWorkPlanHidden, false)
 
   function inspectorWidthModeForTab(tab: InspectorTab): InspectorWidthMode {
     return inspectorUserFullWidth || (tab === 'browser' && browserLayoutMode === 'landscape')
@@ -740,7 +482,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function inspectorMainContentWidth(): number {
-    return workbenchSurface.getBoundingClientRect().width
+    return workbenchSurface.clientWidth
   }
 
   function maximumInspectorWidth(mode: InspectorWidthMode = currentInspectorWidthMode()): number {
@@ -759,10 +501,11 @@ export function mountWorkbench(app: HTMLDivElement): void {
     const width = clampInspectorWidth(value, mode)
     shell.style.setProperty('--work-panel-width', `${width}px`)
     shell.classList.toggle('inspector-full-width', mode === 'full')
+    mainPanel.inert = mode === 'full' && shell.classList.contains('inspector-open')
     inspectorResizeHandle.setAttribute('aria-valuemin', String(INSPECTOR_MINIMUM_WIDTH))
     inspectorResizeHandle.setAttribute('aria-valuemax', String(Math.round(maximumInspectorWidth(mode))))
     inspectorResizeHandle.setAttribute('aria-valuenow', String(width))
-    inspectorResizeHandle.setAttribute('aria-valuetext', `${width} 像素`)
+    inspectorResizeHandle.setAttribute('aria-valuetext', mode === 'full' ? '全屏，向右拖动可恢复分栏' : `${width} 像素`)
     if (persist && mode === 'regular') {
       regularInspectorWidthRatio = inspectorWidthRatio(width, inspectorMainContentWidth(), mode)
       try { window.localStorage.setItem(inspectorWidthStorageKey, String(regularInspectorWidthRatio)) } catch { /* storage may be unavailable */ }
@@ -798,9 +541,10 @@ export function mountWorkbench(app: HTMLDivElement): void {
   setInspectorWidth(inspectorWidthFromRatio(regularInspectorWidthRatio, inspectorMainContentWidth()), false, 'regular')
 
   function showToast(message: string) {
+    if (lifetime.disposed) return
     toast.textContent = message
     toast.classList.add('visible')
-    window.setTimeout(() => toast.classList.remove('visible'), 2400)
+    lifetime.timeout(() => toast.classList.remove('visible'), 2400)
   }
 
   function cachedValue<K, V>(cache: Map<K, V>, key: K): V | undefined {
@@ -982,6 +726,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     inspectorModuleMenu.classList.toggle('visible', open)
     inspectorModuleMenu.setAttribute('aria-hidden', String(!open))
     inspectorModuleMenuToggle.setAttribute('aria-expanded', String(open))
+    scheduleBrowserBoundsSync()
   }
 
   function toggleInspectorModuleMenu() {
@@ -1100,7 +845,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     }
     if (nextActiveTabId) activateInspectorPanelTab(nextActiveTabId)
     else renderInspectorChrome()
-    requestAnimationFrame(() => inspectorTabs.querySelector<HTMLButtonElement>('.inspector-tab-slot.active .inspector-tab')?.focus())
+    lifetime.frame(() => inspectorTabs.querySelector<HTMLButtonElement>('.inspector-tab-slot.active .inspector-tab')?.focus())
   }
 
   let inspectorDraggingTabId: string | null = null
@@ -1129,9 +874,9 @@ export function mountWorkbench(app: HTMLDivElement): void {
       inspectorDraggingTabId = null
       if (moved) renderInspectorChrome()
     }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', finish)
-    window.addEventListener('pointercancel', finish)
+    lifetime.listen(window, 'pointermove', move)
+    lifetime.listen(window, 'pointerup', finish)
+    lifetime.listen(window, 'pointercancel', finish)
   }
 
   function renderInspectorChrome() {
@@ -1201,7 +946,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
         if (!nextTab) return
         keyEvent.preventDefault()
         activateInspectorPanelTab(nextTab.id)
-        requestAnimationFrame(() => inspectorTabs.querySelector<HTMLButtonElement>(`.inspector-tab-slot[data-tab-id="${CSS.escape(nextTab.id)}"] .inspector-tab`)?.focus())
+        lifetime.frame(() => inspectorTabs.querySelector<HTMLButtonElement>(`.inspector-tab-slot[data-tab-id="${CSS.escape(nextTab.id)}"] .inspector-tab`)?.focus())
       })
       tab.addEventListener('auxclick', auxEvent => {
         if (auxEvent.button !== 1) return
@@ -1220,10 +965,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
       fragment.append(slot)
     }
     inspectorTabs.replaceChildren(fragment)
-    requestAnimationFrame(() => inspectorTabs.querySelector<HTMLElement>('.inspector-tab-slot.active')?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' }))
+    lifetime.frame(() => inspectorTabs.querySelector<HTMLElement>('.inspector-tab-slot.active')?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' }))
 
-    const browserTabActive = activePanelTab?.kind === 'browser'
-    inspectorBrowserNewTab.hidden = !browserTabActive
     if (browserSnapshot) updateBrowserActivity(inspectorBrowserActivity, browserSnapshot)
     else inspectorBrowserActivity.hidden = true
     const fullWidth = currentInspectorWidthMode() === 'full'
@@ -1232,7 +975,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     inspectorExpand.title = fullWidth ? '恢复面板宽度' : '展开面板'
     inspectorExpand.setAttribute('aria-label', inspectorExpand.title)
     inspectorExpand.innerHTML = icon(fullWidth ? 'contract' : 'expand')
-    inspectorModuleMenu.querySelectorAll<HTMLButtonElement>('.inspector-module-option').forEach(option => {
+    inspectorModuleMenu.querySelectorAll<HTMLButtonElement>('.inspector-module-option[data-tab]').forEach(option => {
       const selected = option.dataset.tab === currentInspectorTab
       option.classList.toggle('active', selected)
       option.setAttribute('aria-checked', String(selected))
@@ -1247,10 +990,13 @@ export function mountWorkbench(app: HTMLDivElement): void {
 
   function scheduleBrowserBoundsSync() {
     if (!bridge || !browserSnapshot?.visible) return
-    if (browserBoundsFrame !== null) cancelAnimationFrame(browserBoundsFrame)
-    browserBoundsFrame = requestAnimationFrame(() => {
+    if (browserBoundsFrame !== null) lifetime.cancelFrame(browserBoundsFrame)
+    browserBoundsFrame = lifetime.frame(() => {
       browserBoundsFrame = null
-      const surface = currentInspectorTab === 'browser' && shell.classList.contains('inspector-open')
+      // Native browser views sit above DOM menus, so clear their bounds while the menu is open.
+      const surface = currentInspectorTab === 'browser'
+        && shell.classList.contains('inspector-open')
+        && !inspectorModuleMenu.classList.contains('visible')
         ? inspectorContent.querySelector<HTMLElement>('.inspector-browser-surface')
         : null
       const rect = surface?.getBoundingClientRect()
@@ -1284,6 +1030,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function renderBrowserSnapshot(snapshot: BrowserSystemSnapshot) {
+    if (lifetime.disposed) return
     browserSnapshot = snapshot
     syncInspectorBrowserTabs(snapshot)
     const agentToolCallId = snapshot.activity?.toolCallId || ''
@@ -1299,7 +1046,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
     if (shell.classList.contains('inspector-open')) {
       if (activeInspectorPanelTab()?.kind !== 'browser' || !updateInspectorBrowser(snapshot)) renderInspector()
     }
-    renderTaskCompanion()
     if (snapshot.visible) scheduleBrowserBoundsSync()
   }
 
@@ -1382,104 +1128,9 @@ export function mountWorkbench(app: HTMLDivElement): void {
     }
   }
 
-  function taskCompanionPreview(snapshot: WorkbenchSnapshot): { title: string; detail: string; url: string } | undefined {
-    const service = snapshot.activity.runtimeTasks
-      .map(task => ({ task, view: describeRuntimeTask(task) }))
-      .filter(item => item.view?.category === 'service' && item.view.active && item.view.previewUrl)
-      .sort((left, right) => right.task.updatedAt - left.task.updatedAt)[0]
-    if (service?.view?.previewUrl) return { title: '本地预览', detail: service.view.title, url: service.view.previewUrl }
-    return undefined
-  }
-
-  function browserSiteLabel(url: string): string {
-    try {
-      return new URL(url).hostname.replace(/^www\./, '') || url
-    } catch {
-      return url
-    }
-  }
-
-  function browserResearchTabs() {
-    return (browserSnapshot?.tabs || []).filter(tab => tab.url && tab.url !== 'about:blank')
-  }
-
-  function taskCompanionBrowser(): { title: string; detail: string; tabId: string } | undefined {
-    const tabs = browserResearchTabs()
-    if (tabs.length === 0) return undefined
-    const active = tabs.find(tab => tab.id === browserSnapshot?.activeTabId) || tabs.at(-1)!
-    const site = browserSiteLabel(active.url)
-    const title = browserSnapshot?.activity ? browserActivityText(browserSnapshot) : '浏览现场'
-    const detail = active.loading
-      ? `${site} · 正在加载`
-      : tabs.length > 1
-        ? `${active.title || site} · ${tabs.length} 个页面`
-        : active.title || site
-    return { title, detail, tabId: active.id }
-  }
-
-  function renderTaskCompanion() {
-    const snapshot = currentSnapshot
-    const active = Boolean(snapshot && currentMainView === 'workbench' && ['running', 'paused', 'awaiting-action'].includes(snapshot.runtime.status))
-    const preview = snapshot ? taskCompanionPreview(snapshot) : undefined
-    const browser = taskCompanionBrowser()
-    const startedAt = snapshot?.runtime.runState.startedAt || activeTaskStartedAt
-    const subagents = (snapshot?.activity.subagents || []).filter(agent => !startedAt || agent.startedAt >= startedAt - 1_000)
-    const computer = computerControls?.getCompanionState()
-    const execution = snapshot?.activity.execution
-    const currentRun = execution?.currentRunId
-      ? execution.runs.find(run => run.id === execution.currentRunId && run.presentation === 'work')
-      : undefined
-    const work = currentRun?.presentation === 'work' ? presentWorkRun(currentRun) : undefined
-    const presentation = presentTaskCompanion({
-      active,
-      work: work && !work.terminal ? {
-        title: work.title,
-        detail: work.detail,
-        attention: work.attention,
-      } : undefined,
-      preview: preview ? { title: preview.title, detail: preview.detail } : undefined,
-      browser: browser ? { title: browser.title, detail: browser.detail, attention: Boolean(browserSnapshot?.lastError) } : undefined,
-      subagents: subagents.length > 0 ? {
-        total: subagents.length,
-        running: subagents.filter(agent => ['starting', 'running'].includes(agent.status)).length,
-        completed: subagents.filter(agent => agent.status === 'completed').length,
-      } : undefined,
-      computer: computer ? { title: computer.title, detail: computer.detail, attention: computer.attention } : undefined,
-    })
-    const running = Boolean(submissionPending || snapshot?.runtime.status === 'running')
-    const signature = JSON.stringify({ presentation, running, previewUrl: preview?.url || '', browserTabId: browser?.tabId || '' })
-    if (signature === renderedTaskCompanionSignature) return
-    renderedTaskCompanionSignature = signature
-    taskCompanion.replaceChildren()
-    taskCompanion.classList.toggle('visible', presentation.visible)
-    taskCompanion.classList.toggle('running', presentation.visible && running)
-    taskCompanion.setAttribute('aria-hidden', String(!presentation.visible))
-    if (!presentation.visible) return
-
-    const icons: Record<TaskCompanionItemKind, string> = {
-      work: 'activity', preview: 'preview', browser: 'browser', subagents: 'parallel', computer: 'computer',
-    }
-    for (const item of presentation.items) {
-      const button = document.createElement('button')
-      button.className = `task-companion-item kind-${item.kind}${item.attention ? ' attention' : ''}`
-      button.innerHTML = `${icon(icons[item.kind])}<span><strong></strong><small></small></span>`
-      button.querySelector('strong')!.textContent = item.title
-      button.querySelector('small')!.textContent = item.detail
-      button.title = `${item.title} · ${item.detail}`
-      button.addEventListener('click', () => {
-        if (item.kind === 'work') openInspector('activity')
-        else if (item.kind === 'preview' && preview?.url) void openBrowserInInspector(preview.url)
-        else if (item.kind === 'browser' && browser?.tabId) void openBrowserTabInInspector(browser.tabId)
-        else if (item.kind === 'subagents' || item.kind === 'computer') openInspector('activity')
-      })
-      taskCompanion.append(button)
-    }
-  }
-
   const computerControls = bridge ? createComputerControls(app, bridge, {
     showToast,
     onActivityChange: () => {
-      renderTaskCompanion()
       if (shell.classList.contains('inspector-open') && currentInspectorTab === 'activity') renderInspector()
     },
   }) : null
@@ -1541,7 +1192,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
     computerControls: computerControls || undefined,
     getComposerPopoverPlacement: () => composerPopoverPlacement(mainScroll.classList.contains('conversation-mode')),
     onSnapshot: snapshot => applySnapshot(snapshot),
-    onOpenConversation: conversationId => switchConversation(conversationId),
     onUseCapability: async capability => {
       if (capability.type === 'skill') {
         const skill = currentSnapshot?.skills.find(item => item.id === capability.id)
@@ -1562,38 +1212,52 @@ export function mountWorkbench(app: HTMLDivElement): void {
     },
   }) : null
 
-  const profileSwitcher = bridge ? createProfileSwitcher(app, bridge, {
+  let activeProfileIdentity: DesktopUserProfile | null = null
+  const userProfile = bridge ? createUserProfile(app, bridge, {
     showToast,
-    onSnapshot: snapshot => applySnapshot(snapshot),
-    async onProfileSwitched() {
-      await refreshSidebarProfileIdentity()
-    },
-    openLibrary: () => settingsCenter?.openProfiles('library'),
-    openCreate: () => settingsCenter?.openProfiles('create'),
-    openImport: () => settingsCenter?.openProfiles('import'),
+    onIdentityChanged: renderProfileIdentity,
+    onOpen: enterFullScreenSurface,
+    onClose: leaveFullScreenSurface,
   }) : null
+
+  function renderWelcomeGreeting(): void {
+    const greeting = app.querySelector<HTMLElement>('#welcome-greeting')
+    const text = `${activeProfileIdentity?.displayName || '你'}，${profileGreeting()}！`
+    if (greeting && greeting.textContent !== text) greeting.textContent = text
+  }
+
+  function renderProfileIdentity(active: DesktopUserProfile): void {
+    const avatarChanged = !activeProfileIdentity
+      || activeProfileIdentity.displayName !== active.displayName
+      || activeProfileIdentity.avatarDataUrl !== active.avatarDataUrl
+    activeProfileIdentity = active
+    const name = app.querySelector<HTMLElement>('#sidebar-profile-name')
+    const state = app.querySelector<HTMLElement>('#sidebar-profile-state')
+    if (name && name.textContent !== active.displayName) name.textContent = active.displayName
+    for (const id of ['sidebar-profile-avatar', 'welcome-profile-avatar']) {
+      const avatar = app.querySelector<HTMLElement>(`#${id}`)
+      if (!avatar || !avatarChanged) continue
+      avatar.innerHTML = profileAvatarMarkup(active)
+      avatar.style.setProperty('--profile-color', profileColor(active))
+    }
+    if (state && state.textContent !== '查看个人资料') state.textContent = '查看个人资料'
+    renderWelcomeGreeting()
+  }
 
   async function refreshSidebarProfileIdentity(): Promise<void> {
     if (!bridge) return
     try {
-      const profiles = await bridge.listLocalProfiles()
-      const active = profiles.profiles.find(profile => profile.id === profiles.activeProfileId || profile.active)
-      if (!active) return
-      const name = app.querySelector<HTMLElement>('#sidebar-profile-name')
-      const state = app.querySelector<HTMLElement>('#sidebar-profile-state')
-      const avatar = app.querySelector<HTMLElement>('#sidebar-profile-avatar')
-      if (name) name.textContent = active.displayName
-      if (avatar) {
-        avatar.textContent = active.displayName.trim().slice(0, 1).toLocaleUpperCase() || '用'
-        avatar.style.setProperty('--profile-color', profileColor(active))
-      }
-      if (state) state.textContent = active.unboundWorkspaceCount > 0 ? `${active.unboundWorkspaceCount} 个工作区待定位` : `本机用户 · ${active.conversationCount} 个会话`
+      renderProfileIdentity(await bridge.getUserProfile())
     } catch {
       const state = app.querySelector<HTMLElement>('#sidebar-profile-state')
-      if (state) state.textContent = '点击切换用户资料'
+      if (state) state.textContent = '查看个人资料'
     }
   }
+  renderWelcomeGreeting()
   void refreshSidebarProfileIdentity()
+  const greetingTimer = window.setInterval(renderWelcomeGreeting, 60_000)
+  lifetime.add(() => window.clearInterval(greetingTimer))
+  lifetime.listen(document, 'visibilitychange', () => { if (!document.hidden) renderWelcomeGreeting() })
 
   const commandPalette = bridge ? createCommandPalette(app, bridge, {
     showToast,
@@ -1699,7 +1363,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
         if (activeWorkbenchDialog === controller) activeWorkbenchDialog = null
         overlay.classList.remove('visible')
         overlay.style.pointerEvents = 'none'
-        window.setTimeout(() => {
+        lifetime.timeout(() => {
           overlay.remove()
           if (previousFocus?.isConnected) previousFocus.focus()
         }, 180)
@@ -1735,7 +1399,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
         }
       })
       focusDialog()
-      window.requestAnimationFrame(() => {
+      lifetime.frame(() => {
         overlay.classList.add('visible')
       })
     })
@@ -1749,7 +1413,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     workflowSurfaceRequestId = ''
     workflowSurfaceReturnFocus = null
     surface.classList.remove('visible')
-    window.setTimeout(() => {
+    lifetime.timeout(() => {
       surface.remove()
       returnFocus?.focus({ preventScroll: true })
     }, 240)
@@ -1978,7 +1642,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     workflowSurfaceReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     workflowSurface = overlay
     workflowSurfaceRequestId = event.requestId
-    window.requestAnimationFrame(() => overlay.classList.add('visible'))
+    lifetime.frame(() => overlay.classList.add('visible'))
     const firstControl = surface.querySelector<HTMLElement>('.workflow-surface-choice, .workflow-surface-select, input, .workflow-surface-close')
     firstControl?.focus()
     scrollTranscript()
@@ -1986,6 +1650,9 @@ export function mountWorkbench(app: HTMLDivElement): void {
 
   function setConversationMode(active: boolean) {
     mainScroll.classList.toggle('conversation-mode', active)
+    mainPanel.classList.toggle('has-conversation', active)
+    updateWorkPlanToggleState()
+    renderProjectedWorkPlan()
     app.querySelector('#composer-start-context')?.setAttribute('aria-hidden', String(active))
     syncComposerMenuPlacement()
     resizeTaskInput()
@@ -2014,8 +1681,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
     conversationTransitionKind = kind
     conversationTransitionTargetId = targetId
     conversationTransitionSource = source || (kind === 'new' ? newTaskButton : null)
-    if (conversationTransitionSettleTimer !== null) window.clearTimeout(conversationTransitionSettleTimer)
-    if (conversationTransitionFrame !== null) window.cancelAnimationFrame(conversationTransitionFrame)
+    if (conversationTransitionSettleTimer !== null) lifetime.clearTimeout(conversationTransitionSettleTimer)
+    if (conversationTransitionFrame !== null) lifetime.cancelFrame(conversationTransitionFrame)
     conversationTransitionSettleTimer = null
     conversationTransitionFrame = null
     closeComposerMenus()
@@ -2024,7 +1691,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     mainScroll.classList.remove('conversation-transition-entering', 'conversation-transition-recovering')
     mainScroll.setAttribute('aria-busy', 'true')
     refreshConversationTransitionTargets()
-    conversationTransitionFrame = window.requestAnimationFrame(() => {
+    conversationTransitionFrame = lifetime.frame(() => {
       conversationTransitionFrame = null
       if (activeConversationTransitionId === transitionId) mainScroll.classList.add('conversation-transition-leaving')
     })
@@ -2034,7 +1701,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   function finishConversationTransition(transitionId: number, succeeded: boolean) {
     if (activeConversationTransitionId !== transitionId) return
     activeConversationTransitionId = 0
-    if (conversationTransitionFrame !== null) window.cancelAnimationFrame(conversationTransitionFrame)
+    if (conversationTransitionFrame !== null) lifetime.cancelFrame(conversationTransitionFrame)
     conversationTransitionFrame = null
     shell.classList.remove('conversation-transitioning', 'conversation-transition-new')
     mainScroll.classList.remove('conversation-transition-leaving', 'conversation-transition-entering', 'conversation-transition-recovering')
@@ -2046,7 +1713,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     void mainScroll.offsetWidth
     const settleClass = succeeded ? 'conversation-transition-entering' : 'conversation-transition-recovering'
     mainScroll.classList.add(settleClass)
-    conversationTransitionSettleTimer = window.setTimeout(() => {
+    conversationTransitionSettleTimer = lifetime.timeout(() => {
       mainScroll.classList.remove(settleClass)
       conversationTransitionSettleTimer = null
     }, succeeded ? 320 : 220)
@@ -2064,7 +1731,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function cancelTranscriptScroll() {
-    if (transcriptScrollFrame !== null) window.cancelAnimationFrame(transcriptScrollFrame)
+    if (transcriptScrollFrame !== null) lifetime.cancelFrame(transcriptScrollFrame)
     transcriptScrollFrame = null
   }
 
@@ -2170,8 +1837,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
       behavior: reduceMotion ? 'auto' : behavior,
     })
     target.classList.remove('conversation-navigator-target')
-    window.requestAnimationFrame(() => target.classList.add('conversation-navigator-target'))
-    window.setTimeout(() => target.classList.remove('conversation-navigator-target'), reduceMotion ? 80 : 1_400)
+    lifetime.frame(() => target.classList.add('conversation-navigator-target'))
+    lifetime.timeout(() => target.classList.remove('conversation-navigator-target'), reduceMotion ? 80 : 1_400)
   }
 
   function syncConversationNavigator() {
@@ -2269,7 +1936,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     }
     if (scrub.moved) {
       conversationNavigatorSuppressClick = true
-      window.setTimeout(() => { conversationNavigatorSuppressClick = false }, 0)
+      lifetime.timeout(() => { conversationNavigatorSuppressClick = false }, 0)
     }
     const index = clientY === undefined ? undefined : conversationNavigatorIndexAt(clientY)
     previewConversationNavigatorEntry(index)
@@ -2347,7 +2014,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
 
   function scheduleConversationNavigatorSync() {
     if (conversationNavigatorSyncFrame !== null) return
-    conversationNavigatorSyncFrame = window.requestAnimationFrame(syncConversationNavigator)
+    conversationNavigatorSyncFrame = lifetime.frame(syncConversationNavigator)
   }
 
   function unwrapTaskTurnFoldRegions() {
@@ -2386,7 +2053,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     transcriptFollowState = suspendTranscriptFollow(transcriptFollowState)
     const disclosureViewportTop = disclosure.getBoundingClientRect().top
     setTaskTurnRegionExpanded(region, content, disclosure, label, expanded)
-    window.requestAnimationFrame(() => {
+    lifetime.frame(() => {
       if (!disclosure.isConnected) return
       transcript.scrollTop += disclosure.getBoundingClientRect().top - disclosureViewportTop
       transcriptFollowState = {
@@ -2494,7 +2161,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
         content.setAttribute('aria-hidden', 'true')
         content.setAttribute('inert', '')
         void region.offsetHeight
-        window.requestAnimationFrame(() => {
+        lifetime.frame(() => {
           if (region.isConnected) region.classList.remove('expanded')
         })
       }
@@ -2569,12 +2236,12 @@ export function mountWorkbench(app: HTMLDivElement): void {
   function scrollTranscript(force = false) {
     if (force) transcriptFollowState = forceTranscriptFollow(transcriptFollowState, transcript)
     if (!transcriptFollowState.following || transcriptScrollFrame !== null) return
-    transcriptScrollFrame = window.requestAnimationFrame(() => {
+    transcriptScrollFrame = lifetime.frame(() => {
       transcriptScrollFrame = null
       if (!transcriptFollowState.following) return
       transcript.scrollTo({ top: transcript.scrollHeight, behavior: 'auto' })
       transcriptFollowState = updateTranscriptFollowFromScroll(transcriptFollowState, transcript)
-      window.requestAnimationFrame(() => {
+      lifetime.frame(() => {
         if (transcriptFollowState.following && transcriptDistanceFromBottom(transcript) > 2) scrollTranscript()
       })
     })
@@ -2593,7 +2260,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   function restoreTranscriptViewportAnchor(anchor: { turnId: string; offset: number; scrollTop: number }) {
     cancelTranscriptScroll()
     transcriptFollowState = suspendTranscriptFollow(transcriptFollowState)
-    window.requestAnimationFrame(() => {
+    lifetime.frame(() => {
       const element = anchor.turnId
         ? transcript.querySelector<HTMLElement>(`[data-turn-id="${CSS.escape(anchor.turnId)}"]`)
         : null
@@ -2670,8 +2337,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function prepareForHistoryRewrite(retainedTurns: AgentTurn[]) {
-    liveToolCalls.clear()
-    liveToolResults.clear()
+    transcriptIndex.reset(retainedTurns)
     activeTaskStartedAt = 0
     projectedWorkRunId = ''
     expandedTaskRunIds.clear()
@@ -2887,7 +2553,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
         historyRewriteRevision += 1
         clearHistoryRewriteViewport()
         historyRewriteOptimisticTurn = rewrite.optimisticTurn
-        beginRequestStatusAttempt(turn.id)
+        beginRequestStatusAttempt()
         prepareForHistoryRewrite(rewrite.retainedTurns)
         projectedWorkRunId = turn.id
         renderProjectedWorkPlan()
@@ -3066,8 +2732,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
 
   function renderCanonicalTaskFlow(force = false) {
     if (!taskFlowProjection) return
-    if (canonicalTaskFlowFrame !== null) window.cancelAnimationFrame(canonicalTaskFlowFrame)
-    canonicalTaskFlowFrame = null
+    renderer.cancel('transcript')
     canonicalTaskFlowForce = false
     linearTaskFlowRenderer.render(taskFlowProjection, force)
     reconcileHistoryRewriteProjection()
@@ -3084,20 +2749,17 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function cancelCanonicalTaskFlowRender() {
-    if (canonicalTaskFlowFrame !== null) window.cancelAnimationFrame(canonicalTaskFlowFrame)
-    canonicalTaskFlowFrame = null
+    renderer.cancel('transcript')
     canonicalTaskFlowForce = false
   }
 
   function scheduleCanonicalTaskFlowRender(force = false) {
     canonicalTaskFlowForce ||= force
-    if (canonicalTaskFlowFrame !== null) return
-    canonicalTaskFlowFrame = window.requestAnimationFrame(() => {
-      canonicalTaskFlowFrame = null
+    renderer.schedule('transcript', () => {
       const shouldForce = canonicalTaskFlowForce
       canonicalTaskFlowForce = false
       renderCanonicalTaskFlow(shouldForce)
-    })
+    }, 10)
   }
 
   function reconcileHistoryRewriteUserTurn(turn: AgentTurn): HTMLElement | null {
@@ -3221,7 +2883,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
       pendingFailureRetry = snapshot.conversation.id
       row.remove()
       try {
-        beginRequestStatusAttempt(failure.turnId)
+        beginRequestStatusAttempt()
         await bridge.resendFromTurn(failure.turnId, failure.prompt)
       } catch (error) {
         showToast(errorMessage(error))
@@ -3323,11 +2985,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     historyRewriteLeadingSpacer = null
     historyRewriteSpacer = null
     editingTurnId = ''
-    liveToolCalls.clear()
-    liveToolResults.clear()
-    liveTurnCache.clear()
-    for (const turn of turns) liveTurnCache.set(turn.id, turn)
-    if (currentSnapshot) taskFlowProjection = projectTaskFlowSnapshot(currentSnapshot)
+    if (!taskFlowProjection && currentSnapshot) taskFlowProjection = projectTaskFlowSnapshot(currentSnapshot)
     if (!taskFlowProjection) throw new Error('规范任务流暂时不可用')
     renderCanonicalTaskFlow(true)
     if (currentSnapshot) {
@@ -3338,22 +2996,79 @@ export function mountWorkbench(app: HTMLDivElement): void {
     if (historyRewriteAnchorTurnId) mountHistoryRewriteViewportSpace()
     if (viewportAnchor) restoreTranscriptViewportAnchor(viewportAnchor)
     else scrollTranscript(true)
-    if (!animate) requestAnimationFrame(() => transcript.classList.remove('restoring'))
+    if (!animate) lifetime.frame(() => transcript.classList.remove('restoring'))
   }
-  function beginRequestStatusAttempt(turnId = requestStatusAttemptTurnId) {
+  function beginRequestStatusAttempt() {
     transcript.querySelector('.conversation-failure')?.remove()
-    requestStatusTerminalFence = null
-    requestStatusAttemptTurnId = turnId
   }
 
-  function markRequestStatusTerminal() {
-    const conversationId = currentSnapshot?.conversation.id
-    if (conversationId) {
-      requestStatusTerminalFence = {
-        conversationId,
-        latestUserTurnId: requestStatusAttemptTurnId || historyRewriteOptimisticTurn?.id || latestUserTurnId(currentSnapshot?.conversation.turns || []),
-      }
+  function sidebarAction(className: string, glyph: string, label: string, action: () => void | Promise<void>) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = `sidebar-action ${className}`
+    button.title = label
+    button.setAttribute('aria-label', label)
+    button.innerHTML = icon(glyph)
+    let pending = false
+    button.addEventListener('click', async event => {
+      event.stopPropagation()
+      if (pending) return
+      pending = true
+      button.setAttribute('aria-disabled', 'true')
+      try { await action() } catch (error) { showToast(errorMessage(error)) }
+      finally { pending = false; button.removeAttribute('aria-disabled') }
+    })
+    return button
+  }
+
+  function showSidebarMenu(trigger: HTMLButtonElement, actions: Array<{ label: string; glyph: string; run: () => void | Promise<void> }>) {
+    const wasOpen = trigger.getAttribute('aria-expanded') === 'true'
+    closeSidebarMenu?.()
+    if (wasOpen) return
+    const menu = document.createElement('div')
+    menu.className = 'conversation-menu'
+    menu.setAttribute('role', 'menu')
+    menu.setAttribute('aria-label', trigger.getAttribute('aria-label') || '更多操作')
+    const close = (restoreFocus = false) => {
+      menu.remove()
+      trigger.setAttribute('aria-expanded', 'false')
+      if (closeSidebarMenu === close) closeSidebarMenu = null
+      if (restoreFocus && trigger.isConnected) trigger.focus()
     }
+    closeSidebarMenu = close
+    trigger.setAttribute('aria-expanded', 'true')
+    for (const action of actions) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.setAttribute('role', 'menuitem')
+      button.innerHTML = `${icon(action.glyph)}<span>${escapeHtml(action.label)}</span>`
+      button.addEventListener('click', async event => {
+        event.stopPropagation()
+        close(true)
+        try { await action.run() } catch (error) { showToast(errorMessage(error)) }
+      })
+      menu.append(button)
+    }
+    menu.addEventListener('keydown', event => {
+      event.stopPropagation()
+      if (event.key === 'Escape' || event.key === 'Tab') {
+        if (event.key === 'Escape') event.preventDefault()
+        close(true)
+        return
+      }
+      const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button'))
+      const current = buttons.indexOf(document.activeElement as HTMLButtonElement)
+      const next = event.key === 'ArrowDown' ? (current + 1) % buttons.length
+        : event.key === 'ArrowUp' ? (current + buttons.length - 1) % buttons.length
+          : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : -1
+      if (next >= 0) { event.preventDefault(); buttons[next]?.focus() }
+    })
+    document.body.append(menu)
+    const anchor = trigger.getBoundingClientRect()
+    const bounds = menu.getBoundingClientRect()
+    menu.style.left = `${Math.max(8, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - 8))}px`
+    menu.style.top = `${Math.max(8, Math.min(anchor.bottom + 4, window.innerHeight - bounds.height - 8))}px`
+    menu.querySelector<HTMLButtonElement>('button')?.focus()
   }
 
   function renderConversationList(snapshot: WorkbenchSnapshot) {
@@ -3418,6 +3133,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     const listSignature = conversationListSignature()
     if (listSignature === renderedConversationListSignature) return
     renderedConversationListSignature = listSignature
+    closeSidebarMenu?.()
     list.replaceChildren()
 
     const appendConversation = (host: HTMLElement, conversation: typeof conversations[number]) => {
@@ -3446,18 +3162,11 @@ export function mountWorkbench(app: HTMLDivElement): void {
       button.append(copy)
       if (conversation.id === snapshot.conversation.id) button.setAttribute('aria-current', 'page')
       button.addEventListener('click', () => void switchConversation(conversation.id))
-      row.addEventListener('contextmenu', event => {
-        event.preventDefault()
-        event.stopPropagation()
-        document.querySelectorAll('.conversation-menu').forEach(menu => menu.remove())
-        const menu = document.createElement('div')
-        menu.className = 'conversation-menu'
-        menu.style.left = `${event.clientX}px`
-        menu.style.top = `${event.clientY}px`
-        const rename = document.createElement('button')
-        rename.textContent = '重命名'
-        rename.addEventListener('click', async () => {
-          menu.remove()
+      const actions = document.createElement('div')
+      actions.className = 'conversation-actions'
+      actions.append(
+        sidebarAction('conversation-rename', 'edit', `重命名 ${displayTitle}`, async () => {
+          if (!bridge) return
           const next = await openWorkbenchDialog({
             title: '重命名任务',
             message: '为这段工作选择一个更容易识别的名字。',
@@ -3465,18 +3174,11 @@ export function mountWorkbench(app: HTMLDivElement): void {
             inputValue: displayTitle,
           })
           if (typeof next !== 'string' || !next) return
-          try {
-            if (!await bridge?.renameConversation(conversation.id, next)) throw new Error('无法重命名任务')
-            if (bridge) applySnapshot(await bridge.getSnapshot(), false)
-          } catch (error) {
-            showToast(errorMessage(error))
-          }
-        })
-        const remove = document.createElement('button')
-        remove.className = 'danger'
-        remove.innerHTML = `${icon('trash')} 删除`
-        remove.addEventListener('click', async () => {
-          menu.remove()
+          if (!await bridge.renameConversation(conversation.id, next)) throw new Error('无法重命名任务')
+          applySnapshot(await bridge.getSnapshot(), false)
+        }),
+        sidebarAction('conversation-delete danger', 'trash', `删除 ${displayTitle}`, async () => {
+          if (!bridge) return
           const confirmed = await openWorkbenchDialog({
             title: '删除任务？',
             message: '会删除这段会话的本地记录，此操作无法撤销。',
@@ -3484,20 +3186,16 @@ export function mountWorkbench(app: HTMLDivElement): void {
             danger: true,
           })
           if (confirmed !== true) return
-          try {
-            if (!await bridge?.deleteConversation(conversation.id)) throw new Error('无法删除任务')
-            if (bridge) applySnapshot(await bridge.getSnapshot())
-          } catch (error) {
-            showToast(errorMessage(error))
-          }
-        })
-        menu.append(rename, remove)
-        document.body.append(menu)
-        const bounds = menu.getBoundingClientRect()
-        menu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - bounds.width - 8))}px`
-        menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - bounds.height - 8))}px`
-      })
-      row.append(button)
+          if (!await bridge.deleteConversation(conversation.id)) throw new Error('无法删除任务')
+          applySnapshot(await bridge.getSnapshot())
+        }),
+      )
+      if (runtime && ['running', 'paused', 'awaiting-action'].includes(runtime.status)) {
+        const remove = actions.querySelector<HTMLButtonElement>('.conversation-delete')!
+        remove.disabled = true
+        remove.title = '请先停止任务再删除'
+      }
+      row.append(button, actions)
       host.append(row)
     }
 
@@ -3523,7 +3221,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
 
       if (group.projectId) {
         const create = document.createElement('button')
-        create.className = 'workspace-task-group-create'
+        create.className = 'sidebar-action workspace-task-group-create'
         create.type = 'button'
         create.title = `在 ${group.name} 中新建任务`
         create.setAttribute('aria-label', `在 ${group.name} 中新建任务`)
@@ -3554,49 +3252,43 @@ export function mountWorkbench(app: HTMLDivElement): void {
           }
         })
 
-        const more = document.createElement('button')
-        more.className = 'workspace-task-group-more'
-        more.type = 'button'
-        more.title = `${group.name} 更多操作`
-        more.setAttribute('aria-label', `${group.name} 更多操作`)
-        more.setAttribute('aria-haspopup', 'menu')
-        more.innerHTML = icon('more')
-        let openMenu: HTMLElement | null = null
-        more.addEventListener('click', event => {
-          event.stopPropagation()
-          const wasOpen = openMenu?.isConnected === true
-          document.querySelectorAll('.conversation-menu').forEach(menu => menu.remove())
-          openMenu = null
-          if (wasOpen) return
-          const menu = document.createElement('div')
-          menu.className = 'conversation-menu'
-          const addTask = document.createElement('button')
-          addTask.innerHTML = `${icon('plus')} 新建任务`
-          addTask.addEventListener('click', () => {
-            menu.remove()
-            create.click()
-          })
-          menu.append(addTask)
-          if (group.path) {
-            const copyPath = document.createElement('button')
-            copyPath.innerHTML = `${icon('copy')} 复制工作区路径`
-            copyPath.addEventListener('click', () => {
-              menu.remove()
-              void copyMessageText(group.path!)
-            })
-            menu.append(copyPath)
-          }
-          const anchor = more.getBoundingClientRect()
-          menu.style.left = `${anchor.right}px`
-          menu.style.top = `${anchor.bottom + 4}px`
-          document.body.append(menu)
-          const bounds = menu.getBoundingClientRect()
-          menu.style.left = `${Math.max(8, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - 8))}px`
-          menu.style.top = `${Math.max(8, Math.min(anchor.bottom + 4, window.innerHeight - bounds.height - 8))}px`
-          openMenu = menu
+        const more = sidebarAction('workspace-task-group-more', 'more', `${group.name} 更多操作`, () => {
+          showSidebarMenu(more, [
+            {
+              label: '重命名', glyph: 'edit', run: async () => {
+                if (!bridge) return
+                const name = await openWorkbenchDialog({
+                  title: '重命名工作区', message: '更改侧栏中显示的名称。', confirmLabel: '保存', inputValue: group.name,
+                })
+                if (typeof name !== 'string' || !name) return
+                applySnapshot(await bridge.renameProject(group.projectId!, name), false)
+              },
+            },
+            ...(group.path ? [{ label: '复制路径', glyph: 'copy', run: async () => { await copyMessageText(group.path!) } }] : []),
+          ])
         })
+        more.setAttribute('aria-haspopup', 'menu')
+        more.setAttribute('aria-expanded', 'false')
 
-        header.append(more, create)
+        const remove = sidebarAction('workspace-task-group-remove danger', 'trash', `移除工作区 ${group.name}`, async () => {
+          if (!bridge) return
+          closeSidebarMenu?.()
+          const confirmed = await openWorkbenchDialog({
+            title: '移除工作区？',
+            message: `将“${group.name}”从侧栏移除。本地文件保留，历史对话归入“未分组”。`,
+            confirmLabel: '移除',
+            danger: true,
+          })
+          if (confirmed !== true) return
+          const nextSnapshot = await bridge.removeProject(group.projectId!)
+          delete workspaceGroupExpansion[group.key]
+          expandedWorkspaceTaskGroups.delete(group.key)
+          localStorage.setItem(workspaceGroupExpansionStorageKey, JSON.stringify(workspaceGroupExpansion))
+          applySnapshot(nextSnapshot, false)
+          showToast('已移除工作区')
+          app.querySelector<HTMLButtonElement>('#workspace-task-add')?.focus({ preventScroll: true })
+        })
+        header.append(create, more, remove)
       }
       section.append(header)
 
@@ -3604,6 +3296,13 @@ export function mountWorkbench(app: HTMLDivElement): void {
       taskHost.className = 'workspace-task-group-conversations'
       const taskHostInner = document.createElement('div')
       taskHostInner.className = 'workspace-task-group-conversations-inner'
+      if (group.projectId && group.conversations.length === 0) {
+        section.classList.add('is-empty')
+        const empty = document.createElement('p')
+        empty.className = 'workspace-task-group-empty'
+        empty.textContent = '暂无对话'
+        taskHostInner.append(empty)
+      }
       const showAll = workspaceTaskQuery !== '' || expandedWorkspaceTaskGroups.has(group.key)
       for (const conversation of group.conversations.slice(0, 5)) appendConversation(taskHostInner, conversation)
       let setOverflowExpanded: ((expanded: boolean) => void) | undefined
@@ -3688,12 +3387,12 @@ export function mountWorkbench(app: HTMLDivElement): void {
     })
     mainScroll.hidden = view !== 'workbench'
     workPlanDock.classList.toggle('view-hidden', view !== 'workbench')
+    updateWorkPlanToggleState()
     productView.classList.toggle('visible', view !== 'workbench')
     productView.setAttribute('aria-hidden', String(view === 'workbench'))
     renderBreadcrumb()
     if (view === 'workbench') productView.replaceChildren()
     else renderProductView()
-    renderTaskCompanion()
   }
 
   async function openAutomationConversation(conversationId: string) {
@@ -3828,6 +3527,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
 
   function updateInspectorToggleState() {
     const open = shell.classList.contains('inspector-open')
+    mainPanel.inert = open && currentInspectorWidthMode() === 'full'
+    updateWorkPlanToggleState()
     inspectorToggle.classList.toggle('active', open)
     inspectorToggle.setAttribute('aria-pressed', String(open))
     inspectorToggle.title = open ? '关闭工作抽屉' : '打开工作抽屉'
@@ -4338,8 +4039,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function scheduleDraftRecord() {
-    if (draftTimer !== null) window.clearTimeout(draftTimer)
-    draftTimer = window.setTimeout(() => {
+    if (draftTimer !== null) lifetime.clearTimeout(draftTimer)
+    draftTimer = lifetime.timeout(() => {
       draftTimer = null
       const draft = currentDraft()
       if (bridge) void draftRecordQueue.enqueue(() => bridge.recordDraft(draft)).catch(() => undefined)
@@ -4348,7 +4049,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
 
   async function persistDraftNow(): Promise<void> {
     if (draftTimer !== null) {
-      window.clearTimeout(draftTimer)
+      lifetime.clearTimeout(draftTimer)
       draftTimer = null
     }
     const draft = currentDraft()
@@ -4432,23 +4133,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
   function renderCapabilityTray() {
     capabilityTray.replaceChildren()
     capabilityTray.classList.toggle('visible', draftCapabilities.length > 0)
-    capabilityTab.classList.toggle('active', draftCapabilities.length > 0)
-    const preferredCapability = draftCapabilities.find(capability => capability.type === 'mcp' && capability.id === 'computer')
-      || draftCapabilities[0]
-    const capabilityLabel = app.querySelector<HTMLElement>('#capability-name')!
-    capabilityLabel.textContent = preferredCapability ? capabilityDisplayName(preferredCapability) : '插件'
-    const capabilityNames = draftCapabilities.map(capabilityDisplayName).join('、')
-    const capabilityTitle = draftCapabilities.length > 0
-      ? `${capabilityNames} · 已挂载到本对话，点击管理`
-      : '选择要挂载到本对话的插件；未挂载的能力不会被移除'
-    capabilityTab.title = capabilityTitle
-    capabilityTab.setAttribute('aria-label', capabilityTitle)
-    const capabilityCount = app.querySelector<HTMLElement>('#capability-count')!
-    capabilityCount.textContent = draftCapabilities.length > 1 ? String(draftCapabilities.length) : ''
-    capabilityCount.classList.toggle('visible', draftCapabilities.length > 1)
-    const mountedCount = app.querySelector<HTMLElement>('#conversation-plugins-count')!
-    mountedCount.textContent = draftCapabilities.length ? String(draftCapabilities.length) : ''
-    mountedCount.classList.toggle('visible', draftCapabilities.length > 0)
     for (const capability of draftCapabilities) {
       const chip = document.createElement('span')
       chip.className = `composer-capability ${capability.type}`
@@ -4467,79 +4151,11 @@ export function mountWorkbench(app: HTMLDivElement): void {
       remove.addEventListener('click', async () => {
         draftCapabilities = draftCapabilities.filter(item => !(item.type === capability.type && item.id === capability.id))
         renderCapabilityTray()
-        if (conversationPluginsMenu.classList.contains('visible')) renderConversationPluginsMenu()
         await persistDraftNow()
       })
       chip.append(label, remove)
       capabilityTray.append(chip)
     }
-  }
-
-  function closeConversationPluginsMenu() {
-    conversationPluginsMenu.classList.remove('visible')
-    conversationPluginsMenu.setAttribute('aria-hidden', 'true')
-    conversationPluginsToggle.setAttribute('aria-expanded', 'false')
-  }
-
-  function renderConversationPluginsMenu() {
-    conversationPluginsMenu.replaceChildren()
-    const heading = document.createElement('header')
-    const title = document.createElement('strong')
-    title.textContent = '本对话插件'
-    const detail = document.createElement('small')
-    detail.textContent = draftCapabilities.length ? '已挂载，可随时取消' : '还没有挂载插件'
-    heading.append(title, detail)
-    conversationPluginsMenu.append(heading)
-    if (draftCapabilities.length === 0) {
-      const empty = document.createElement('p')
-      empty.className = 'conversation-plugins-empty'
-      empty.textContent = '从输入框的“插件”菜单挂载能力。'
-      conversationPluginsMenu.append(empty)
-      return
-    }
-    const pluginRecords = currentSnapshot?.plugins.plugins || []
-    for (const capability of draftCapabilities) {
-      const row = document.createElement('div')
-      row.className = 'conversation-plugin-row'
-      const glyph = document.createElement('span')
-      glyph.className = 'conversation-plugin-glyph'
-      glyph.innerHTML = capability.type === 'skill' ? icon('spark') : icon('plug')
-      const copy = document.createElement('span')
-      const label = document.createElement('strong')
-      label.textContent = capabilityDisplayName(capability)
-      const plugin = pluginRecords.find(candidate => (
-        candidate.manifest.contributes?.skills?.some(skill => skill.id === capability.id)
-          || candidate.serverName === capability.id
-      ))
-      const pluginName = document.createElement('small')
-      pluginName.textContent = plugin?.manifest.name || (capability.type === 'skill' ? 'Skill' : '工具连接')
-      copy.append(label, pluginName)
-      const remove = document.createElement('button')
-      remove.type = 'button'
-      remove.className = 'conversation-plugin-remove'
-      remove.title = `取消挂载 ${capabilityDisplayName(capability)}`
-      remove.setAttribute('aria-label', `取消挂载 ${capabilityDisplayName(capability)}`)
-      remove.innerHTML = icon('close')
-      remove.addEventListener('click', async () => {
-        draftCapabilities = draftCapabilities.filter(item => !(item.type === capability.type && item.id === capability.id))
-        renderCapabilityTray()
-        renderConversationPluginsMenu()
-        await persistDraftNow()
-      })
-      row.append(glyph, copy, remove)
-      conversationPluginsMenu.append(row)
-    }
-  }
-
-  function toggleConversationPluginsMenu() {
-    const opening = !conversationPluginsMenu.classList.contains('visible')
-    closeComposerMenus()
-    closeConversationPluginsMenu()
-    if (!opening) return
-    renderConversationPluginsMenu()
-    conversationPluginsMenu.classList.add('visible')
-    conversationPluginsMenu.setAttribute('aria-hidden', 'false')
-    conversationPluginsToggle.setAttribute('aria-expanded', 'true')
   }
 
   function loadDraft(snapshot: WorkbenchSnapshot) {
@@ -4551,9 +4167,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
     draftCapabilities = snapshot.draft.capabilities.items.map(capability => ({ ...capability }))
     renderDraftTray()
     renderCapabilityTray()
-    const mountedCount = app.querySelector<HTMLElement>('#conversation-plugins-count')!
-    mountedCount.textContent = draftCapabilities.length ? String(draftCapabilities.length) : ''
-    mountedCount.classList.toggle('visible', draftCapabilities.length > 0)
   }
 
   function renderRecoveryState(snapshot: WorkbenchSnapshot) {
@@ -4629,24 +4242,20 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function applySnapshot(snapshot: WorkbenchSnapshot, renderConversation = true) {
-    if (resendingTurnId && snapshot.conversation.id === currentSnapshot?.conversation.id) return
-    const snapshotLatestUserTurnId = latestUserTurnId(snapshot.conversation.turns)
-    if (shouldIgnoreSnapshotAfterRequestTerminal({
-      fence: requestStatusTerminalFence,
-      conversationId: snapshot.conversation.id,
-      latestUserTurnId: snapshotLatestUserTurnId,
-      runtimeStatus: snapshot.runtime.status,
-      runPhase: snapshot.runtime.runState.phase,
-      activeRunId: snapshot.activity.execution.currentRunId || snapshot.work.projection.activeRunId,
-    })) return
-    if (requestStatusTerminalFence && !requestStatusTerminalFenceApplies({
-      fence: requestStatusTerminalFence,
-      conversationId: snapshot.conversation.id,
-      latestUserTurnId: snapshotLatestUserTurnId,
-    })) {
-      requestStatusTerminalFence = null
-      requestStatusAttemptTurnId = snapshotLatestUserTurnId || ''
-    }
+    if (lifetime.disposed) return
+    const rewriteCommitted = Boolean(resendingTurnId
+      && snapshot.conversation.id === currentSnapshot?.conversation.id
+      && (snapshot.work.projection.generation ?? 0) > (conversationView?.generation ?? 0))
+    if (resendingTurnId && snapshot.conversation.id === currentSnapshot?.conversation.id && !rewriteCommitted) return
+    const nextView = applyConversationViewSnapshot(conversationView, {
+      generation: snapshot.work.projection.generation,
+      flow: projectTaskFlowSnapshot(snapshot),
+      execution: snapshot.activity.execution,
+      runState: snapshot.runtime.runState,
+      status: snapshot.runtime.status,
+    })
+    if (nextView === conversationView) return
+    if (rewriteCommitted) resendingTurnId = ''
     const conversationChanged = currentSnapshot?.conversation.id !== snapshot.conversation.id
     const firstSnapshot = currentSnapshot === null
     if (conversationChanged) {
@@ -4655,11 +4264,13 @@ export function mountWorkbench(app: HTMLDivElement): void {
       projectedWorkRunId = ''
       clearHistoryRewriteViewport()
       resendingTurnId = ''
-      requestStatusTerminalFence = null
-      requestStatusAttemptTurnId = ''
     }
+    if (conversationChanged || rewriteCommitted) transcriptIndex.reset()
+    for (const turn of snapshot.conversation.turns) transcriptIndex.setTurn(turn)
     currentSnapshot = snapshot
-    taskFlowProjection = projectTaskFlowSnapshot(snapshot)
+    conversationView = nextView
+    taskFlowProjection = nextView.flow
+    snapshot.runtime.status = nextView.status
     if (snapshot.activity.execution.runs.some(run => run.responseMode === 'task')) scheduleCanonicalTaskFlowRender()
     const snapshotRunId = snapshot.activity.execution.currentRunId || ''
     if (firstSnapshot || conversationChanged) {
@@ -4668,9 +4279,31 @@ export function mountWorkbench(app: HTMLDivElement): void {
     } else if (snapshotRunId) {
       projectedWorkRunId = snapshotRunId
     }
+    pendingSnapshotPaint = {
+      conversationChanged: conversationChanged || pendingSnapshotPaint?.conversationChanged || false,
+      firstSnapshot: firstSnapshot || pendingSnapshotPaint?.firstSnapshot || false,
+      renderConversation: renderConversation || pendingSnapshotPaint?.renderConversation || false,
+    }
+    renderer.schedule('snapshot', () => {
+      const pending = pendingSnapshotPaint
+      pendingSnapshotPaint = null
+      if (pending && currentSnapshot) paintSnapshot(currentSnapshot, pending)
+    })
+  }
+
+  function paintSnapshot(snapshot: WorkbenchSnapshot, flags: { conversationChanged: boolean; firstSnapshot: boolean; renderConversation: boolean }) {
+    const { conversationChanged, firstSnapshot, renderConversation } = flags
     renderProjectedWorkPlan()
     const hasWorkspace = workspaceSpecified(snapshot)
     app.querySelector('#composer-start-workspace-name')!.textContent = hasWorkspace ? snapshot.workspace.name : '选择工作区'
+    const welcomePrompt = app.querySelector<HTMLElement>('#welcome-workspace-prompt')!
+    const welcomeWorkspace = hasWorkspace ? snapshot.workspace.name : ''
+    if (welcomePrompt.dataset.workspace !== welcomeWorkspace) {
+      welcomePrompt.innerHTML = hasWorkspace
+        ? `在 <strong>${escapeHtml(snapshot.workspace.name)}</strong> 做点什么呢？`
+        : '今天想做点什么呢？'
+      welcomePrompt.dataset.workspace = welcomeWorkspace
+    }
     app.querySelector('#composer-start-workspace-action')!.textContent = hasWorkspace ? '更改' : '选择'
     renderBreadcrumb()
     app.querySelector('#model-name')!.textContent = snapshot.runtime.model || '未配置模型'
@@ -4682,9 +4315,18 @@ export function mountWorkbench(app: HTMLDivElement): void {
     const approvalLabel = ({ ask: '需要确认', agent: '自动执行', full: '全权执行' } as Record<string, string>)[snapshot.runtime.approvalPolicy] || '按需确认'
     const accessLabel = ({ 'read-only': '只读', 'workspace-write': '工作区访问', 'danger-full-access': '完整访问' } as Record<string, string>)[snapshot.runtime.capabilityProfile || ''] || '默认权限'
     app.querySelector('#runtime-policy')!.textContent = `${approvalLabel} · ${accessLabel}`
-    app.querySelector('#approval-name')!.textContent = approvalLabel
+    const previousPolicy = approvalPill.dataset.policy
+    const approvalName = app.querySelector<HTMLElement>('#approval-name')!
+    approvalName.textContent = approvalLabel
     approvalIcon.innerHTML = approvalPolicyIcon(snapshot.runtime.approvalPolicy)
-    app.querySelector('#approval-pill')!.setAttribute('data-policy', snapshot.runtime.approvalPolicy)
+    approvalPill.dataset.policy = snapshot.runtime.approvalPolicy
+    approvalPill.setAttribute('aria-label', `更换审批模式，当前${approvalLabel}`)
+    if (previousPolicy && previousPolicy !== snapshot.runtime.approvalPolicy && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      for (const element of [approvalIcon, approvalName]) {
+        element.getAnimations().forEach(animation => animation.cancel())
+        element.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'translateY(0)' }], { duration: 200, easing: 'cubic-bezier(.2,.8,.2,1)' })
+      }
+    }
     if (firstSnapshot || conversationChanged) loadDraft(snapshot)
     else {
       renderCapabilityTray()
@@ -4698,7 +4340,11 @@ export function mountWorkbench(app: HTMLDivElement): void {
         pendingConversationRender = true
       } else {
         pendingConversationRender = false
-        renderTurns(snapshot.conversation.turns, conversationChanged && !firstSnapshot)
+        if (conversationChanged || firstSnapshot) {
+          renderTurns(snapshot.conversation.turns, conversationChanged && !firstSnapshot)
+        } else {
+          renderCanonicalTaskFlow()
+        }
         renderedConversationSignature = nextConversationSignature
       }
     }
@@ -4706,7 +4352,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
     refreshExecutionVisualEvidence(snapshot)
     if (shell.classList.contains('inspector-open')) renderInspector()
     updateRunButton(snapshot)
-    renderTaskCompanion()
     renderRecoveryState(snapshot)
     const workflowRequest = snapshot.runtime.pendingRequests.find(request => request.ui)
     if (workflowRequest?.ui && (
@@ -4744,7 +4389,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     if (!bridge) return
     snapshotRefreshPending = true
     if (snapshotRefreshTimer !== null || snapshotRefreshInFlight) return
-    snapshotRefreshTimer = window.setTimeout(() => {
+    snapshotRefreshTimer = lifetime.timeout(() => {
       snapshotRefreshTimer = null
       snapshotRefreshPending = false
       snapshotRefreshInFlight = true
@@ -4874,9 +4519,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
       case 'turn.started':
       case 'turn.completed': {
         const turn = event.payload.turn
-        liveTurnCache.set(turn.id, turn)
+        transcriptIndex.setTurn(turn)
         if (event.type === 'turn.started' && turn.role === 'user') {
-          requestStatusAttemptTurnId = turn.id
           reconcileOptimisticUserTurn(turn)
           if (isHistoryRewriteUserTurn({
             resendingTurnId,
@@ -4884,7 +4528,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
             turnId: turn.id,
             turnRole: turn.role,
           })) {
-            beginRequestStatusAttempt(turn.id)
+            beginRequestStatusAttempt()
             historyRewriteOptimisticTurn = turn
             resendingTurnId = ''
             reconcileHistoryRewriteUserTurn(turn)
@@ -4894,10 +4538,10 @@ export function mountWorkbench(app: HTMLDivElement): void {
         break
       }
       case 'tool.proposed':
-        liveToolCalls.set(event.payload.toolCall.id, event.payload.toolCall)
+        transcriptIndex.setCall(event.payload.toolCall)
         break
       case 'tool.completed':
-        liveToolResults.set(event.payload.toolResult.toolCallId, event.payload.toolResult)
+        transcriptIndex.setResult(event.payload.toolResult)
         break
       case 'approval.requested':
         showRequest({
@@ -4916,20 +4560,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
         transcript.querySelector(`[data-request-id="${CSS.escape(event.payload.requestId)}"]`)?.remove()
         break
       case 'run.state_changed':
-        if (currentSnapshot) {
-          currentSnapshot.runtime.runState = event.payload.state
-          const phase = event.payload.state.phase
-          currentSnapshot.runtime.status = phase === 'paused'
-            ? 'paused'
-            : phase === 'awaiting_approval' || phase === 'awaiting_input'
-              ? 'awaiting-action'
-              : ['thinking', 'compacting', 'tool_running', 'aborting'].includes(phase)
-                ? 'running'
-                : phase === 'recoverable_error'
-                  ? 'error'
-                  : 'ready'
-          updateRunButton(currentSnapshot)
-        }
+        if (currentSnapshot) updateRunButton(currentSnapshot)
         break
       case 'usage.updated':
         if (currentSnapshot) {
@@ -4945,7 +4576,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
         break
       case 'run.completed':
         activeTaskStartedAt = 0
-        markRequestStatusTerminal()
+        if (currentSnapshot) updateRunButton(currentSnapshot)
         scheduleSnapshotRefresh(32)
         break
       case 'runtime.event':
@@ -4955,6 +4586,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
   }
 
   function handleRuntimeEvent(event: WorkbenchEvent) {
+    if (lifetime.disposed) return
     if (resendingTurnId) {
       if (event.type === 'conversation-event' && event.conversationId === currentSnapshot?.conversation.id) {
         const rewrittenInput = event.event.type === 'turn.started'
@@ -4972,16 +4604,37 @@ export function mountWorkbench(app: HTMLDivElement): void {
     if (shouldPlayTaskCompletionSound(event)) void playTaskCompletionChime()
     if (event.type === 'conversation-event') {
       if (event.conversationId !== currentSnapshot?.conversation.id) return
-      if (!taskFlowProjection || taskFlowProjection.conversationId !== event.conversationId) {
-        taskFlowProjection = createTaskFlowProjection(event.conversationId)
+      const previousView = conversationView || {
+        generation: currentSnapshot.work.projection.generation,
+        flow: taskFlowProjection || createTaskFlowProjection(event.conversationId),
+        execution: currentSnapshot.activity.execution,
+        runState: currentSnapshot.runtime.runState,
+        status: currentSnapshot.runtime.status,
       }
-      taskFlowProjection = applyTaskFlowEvent(taskFlowProjection, event.event)
+      const nextView = applyConversationViewEvent(previousView, event.event)
+      if (nextView === previousView) {
+        if ((event.event.generation ?? 0) > (previousView.generation ?? 0)
+          || (event.event.generation ?? 0) === (previousView.generation ?? 0) && event.event.seq > previousView.flow.lastSeq) scheduleSnapshotRefresh(32)
+        return
+      }
+      conversationView = nextView
+      taskFlowProjection = nextView.flow
+      currentSnapshot.activity.execution = nextView.execution
+      currentSnapshot.runtime.runState = nextView.runState
+      currentSnapshot.runtime.status = nextView.status
+      if (previousView.status !== nextView.status) {
+        const runtime = currentSnapshot.conversationRuntimes.find(candidate => candidate.conversationId === event.conversationId)
+        if (runtime) {
+          runtime.status = nextView.status
+          runtime.runState = nextView.runState
+          runtime.updatedAt = event.event.at
+          renderConversationList(currentSnapshot)
+        }
+        updateRunButton(currentSnapshot)
+      }
       handleConversationEvent(event.event)
       scheduleCanonicalTaskFlowRender()
       return
-    }
-    if (event.type === 'conversation-run' && event.conversationId === currentSnapshot?.conversation.id) {
-      markRequestStatusTerminal()
     }
     if (event.type === 'snapshot') {
       applySnapshot(event.snapshot, event.snapshot.runtime.status === 'ready')
@@ -4998,7 +4651,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
         clearHistoryRewriteViewport()
         scheduleSnapshotRefresh(32)
       }
-      if (!event.conversationId || event.conversationId === currentSnapshot?.conversation.id) markRequestStatusTerminal()
       showToast(event.message)
     }
   }
@@ -5057,7 +4709,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
     composerAddButton.setAttribute('aria-expanded', 'false')
     capabilityMenu.classList.remove('visible')
     capabilityMenu.setAttribute('aria-hidden', 'true')
-    capabilityTab.setAttribute('aria-expanded', 'false')
     approvalMenu.classList.remove('visible')
     approvalMenu.setAttribute('aria-hidden', 'true')
     approvalPill.setAttribute('aria-expanded', 'false')
@@ -5150,117 +4801,102 @@ export function mountWorkbench(app: HTMLDivElement): void {
   function renderComposerMenu() {
     composerMenu.replaceChildren()
     composerMenu.setAttribute('role', 'menu')
-    const addSection = appendComposerMenuSection('添加')
-    addSection.append(
+    composerMenu.append(
       createComposerMenuRow({
         glyph: icon('paperclip'),
-        title: '文件和文件夹',
-        detail: '图片、文档或项目资料',
+        title: '添加文件',
         onClick: () => {
           closeComposerMenus()
           void chooseDraftFiles()
         },
       }),
       createComposerMenuRow({
-        glyph: icon('folder'),
-        title: currentSnapshot && workspaceSpecified(currentSnapshot) ? currentSnapshot.workspace.name : '选择工作区',
-        detail: currentSnapshot && workspaceSpecified(currentSnapshot) ? currentSnapshot.workspace.path : '为这项任务指定一个文件夹',
-        selected: currentSnapshot ? workspaceSpecified(currentSnapshot) : false,
-        onClick: () => {
-          closeComposerMenus()
-          void chooseTaskWorkspace()
-        },
+        glyph: icon('spark'),
+        title: '选择技能',
+        onClick: openSkillMenu,
       }),
     )
   }
 
-  function renderCapabilityMenu() {
+  let skillMenuRevision = 0
+  let skillSelectionPending = false
+
+  function renderSkillMenu() {
+    const revision = ++skillMenuRevision
     capabilityMenu.replaceChildren()
-    capabilityMenu.setAttribute('role', 'menu')
-    const pluginSection = appendComposerMenuSection('插件', capabilityMenu)
+    capabilityMenu.setAttribute('role', 'dialog')
+    capabilityMenu.setAttribute('aria-label', '选择技能')
+    const header = document.createElement('div')
+    header.className = 'composer-skill-header'
+    const back = document.createElement('button')
+    back.type = 'button'
+    back.className = 'composer-skill-back'
+    back.setAttribute('aria-label', '返回添加菜单')
+    back.innerHTML = `${icon('chevron')}<span>选择技能</span>`
+    back.onclick = toggleComposerMenu
+    header.append(back)
+    const search = document.createElement('input')
+    search.type = 'search'
+    search.className = 'composer-skill-search'
+    search.placeholder = '搜索技能'
+    search.setAttribute('aria-label', '搜索技能')
+    const list = document.createElement('div')
+    list.className = 'composer-skill-list'
+    list.setAttribute('role', 'group')
+    list.setAttribute('aria-label', '可用技能')
     const loading = document.createElement('p')
     loading.className = 'composer-menu-empty'
-    loading.textContent = '正在读取插件…'
-    pluginSection.append(loading)
-
-    if (!bridge) {
-      loading.textContent = '插件仅在桌面端可用'
-      return
-    }
-
-    void Promise.all([bridge.listPlugins(), bridge.getSettings(false)]).then(([registry, settings]) => {
-      if (!capabilityMenu.classList.contains('visible')) return
-      loading.remove()
-      let rowCount = 0
-      const projectedCapabilityKeys = new Set<string>()
-      const appendCapability = (capability: AgentCapabilityReference, title: string, detail: string, glyph: string, disabled = false) => {
-        const selected = draftCapabilities.some(item => item.type === capability.type && item.id === capability.id)
-        pluginSection.append(createComposerMenuRow({
-          glyph,
-          title,
-          detail: selected ? '已挂载到本对话，点击取消挂载' : detail,
-          selected,
-          disabled,
-          onClick: () => void (async () => {
-            draftCapabilities = selected
-              ? draftCapabilities.filter(item => !(item.type === capability.type && item.id === capability.id))
-              : capability.type === 'skill'
-                ? [capability, ...draftCapabilities.filter(item => item.type !== 'skill')]
-                : [...draftCapabilities, capability]
-            renderCapabilityTray()
-            await persistDraftNow()
-            renderCapabilityMenu()
-          })(),
-        }))
-        rowCount += 1
+    loading.textContent = '正在读取技能…'
+    list.append(loading)
+    capabilityMenu.append(header, search, list)
+    if (!bridge) { loading.textContent = '技能仅在桌面端可用'; return }
+    void bridge.getSnapshot().then(snapshot => {
+      if (revision !== skillMenuRevision || !capabilityMenu.classList.contains('visible')) return
+      const renderRows = () => {
+        list.replaceChildren()
+        const query = search.value.trim().toLocaleLowerCase()
+        const skills = snapshot.skills.filter(skill => `${skill.name} ${skill.command} ${skill.description}`.toLocaleLowerCase().includes(query))
+        for (const skill of skills) {
+          const selected = draftCapabilities.some(item => item.type === 'skill' && item.id === skill.id)
+          const row = createComposerMenuRow({
+            glyph: icon('spark'), title: skill.name, selected,
+            onClick: () => void (async () => {
+              if (skillSelectionPending) return
+              skillSelectionPending = true
+              const previous = draftCapabilities
+              draftCapabilities = selected
+                ? draftCapabilities.filter(item => !(item.type === 'skill' && item.id === skill.id))
+                : [{ type: 'skill', id: skill.id, name: skill.name }, ...draftCapabilities.filter(item => item.type !== 'skill')]
+              renderCapabilityTray()
+              list.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = true })
+              try {
+                await persistDraftNow()
+                closeComposerMenus()
+                taskInput.focus()
+              } catch (error) {
+                draftCapabilities = previous
+                renderCapabilityTray()
+                renderRows()
+                showToast(errorMessage(error))
+              } finally { skillSelectionPending = false }
+            })(),
+          })
+          row.dataset.skillId = skill.id
+          row.setAttribute('role', 'checkbox')
+          row.title = skill.description || skill.name
+          list.append(row)
+        }
+        if (!skills.length) {
+          const empty = document.createElement('p')
+          empty.className = 'composer-menu-empty'
+          empty.textContent = query ? '没有匹配的技能' : '暂无可用技能'
+          list.append(empty)
+        }
       }
-
-      for (const plugin of registry.plugins) {
-        if (!plugin.enabled || plugin.state !== 'enabled') continue
-        const skill = plugin.manifest.contributes?.skills?.[0]
-        const capability: AgentCapabilityReference | undefined = skill
-          ? { type: 'skill', id: skill.id, name: plugin.manifest.name }
-          : plugin.serverName
-            ? { type: 'mcp', id: plugin.serverName, name: plugin.manifest.name }
-            : undefined
-        if (!capability) continue
-        projectedCapabilityKeys.add(`${capability.type}:${capability.id}`)
-        const included = [
-          plugin.manifest.contributes?.skills?.length ? `${plugin.manifest.contributes.skills.length} 个技能` : '',
-          plugin.manifest.contributes?.tools?.length ? `${plugin.manifest.contributes.tools.length} 个工具` : '',
-          plugin.manifest.contributes?.commands?.length ? `${plugin.manifest.contributes.commands.length} 个命令` : '',
-        ].filter(Boolean).join(' · ')
-        appendCapability(
-          capability,
-          capabilityDisplayName(capability),
-          `插件${included ? ` · ${included}` : ''} · 始终可用`,
-          capability.type === 'skill' ? icon('spark') : icon('plug'),
-        )
-      }
-
-      for (const server of settings.mcpServers) {
-        if (projectedCapabilityKeys.has(`mcp:${server.name}`)) continue
-        const ready = server.enabled && server.status === 'connected'
-        const displayName = server.displayName || server.name
-        appendCapability(
-          { type: 'mcp', id: server.name, name: displayName },
-          displayName,
-          ready ? `${server.description || `${server.tools.length} 个可用工具`} · 始终可用` : server.enabled ? '等待连接' : '尚未启用',
-          server.name === 'browser' ? icon('globe') : server.name === 'computer' ? icon('computer') : icon('plug'),
-          !ready,
-        )
-      }
-
-      if (rowCount === 0) {
-        const empty = document.createElement('p')
-        empty.className = 'composer-menu-empty'
-        empty.textContent = '还没有可用的插件'
-        pluginSection.append(empty)
-      }
-    }).catch(error => {
-      loading.textContent = errorMessage(error)
-    })
-
+      renderRows()
+      search.addEventListener('input', renderRows)
+    }).catch(error => { loading.textContent = errorMessage(error) })
+    lifetime.frame(() => search.focus())
   }
 
   function toggleComposerMenu() {
@@ -5274,15 +4910,13 @@ export function mountWorkbench(app: HTMLDivElement): void {
     composerAddButton.setAttribute('aria-expanded', 'true')
   }
 
-  function toggleCapabilityMenu() {
-    const opening = !capabilityMenu.classList.contains('visible')
+  function openSkillMenu() {
     closeComposerMenus()
-    if (!opening) return
     syncComposerMenuPlacement()
-    renderCapabilityMenu()
+    renderSkillMenu()
     capabilityMenu.classList.add('visible')
     capabilityMenu.setAttribute('aria-hidden', 'false')
-    capabilityTab.setAttribute('aria-expanded', 'true')
+    composerAddButton.setAttribute('aria-expanded', 'true')
   }
 
   function approvalDescription(policy: ApprovalPolicy): string {
@@ -5291,8 +4925,11 @@ export function mountWorkbench(app: HTMLDivElement): void {
     return '允许完整主机能力'
   }
 
+  let approvalSelectionPending = false
   async function selectApprovalPolicy(policy: ApprovalPolicy) {
-    if (!bridge) return
+    if (!bridge || approvalSelectionPending || currentSnapshot?.runtime.approvalPolicy === policy) return
+    approvalSelectionPending = true
+    approvalPill.setAttribute('aria-busy', 'true')
     try {
       const settings = await bridge.getSettings(false)
       const update = createSettingsUpdate(settings)
@@ -5301,9 +4938,12 @@ export function mountWorkbench(app: HTMLDivElement): void {
       const result = await bridge.saveSettings(update)
       applySnapshot(result.snapshot, false)
       closeComposerMenus()
-      showToast(`审批策略已切换为${({ ask: '每次询问', agent: '低风险自动', full: '全权执行' } as const)[policy]}`)
+      showToast(`审批模式已切换为${({ ask: '每次询问', agent: '低风险自动', full: '全权执行' } as const)[policy]}`)
     } catch (error) {
       showToast(errorMessage(error))
+    } finally {
+      approvalSelectionPending = false
+      approvalPill.removeAttribute('aria-busy')
     }
   }
 
@@ -5315,7 +4955,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     approvalMenu.setAttribute('role', 'menu')
     const label = document.createElement('div')
     label.className = 'composer-menu-label'
-    label.textContent = '审批策略'
+    label.textContent = '审批模式'
     approvalMenu.append(label)
     const names: Record<ApprovalPolicy, string> = { ask: '每次询问', agent: '低风险自动', full: '全权执行' }
     for (const policy of ['ask', 'agent', 'full'] as ApprovalPolicy[]) {
@@ -5393,7 +5033,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
       const submittedCapabilities = draftCapabilities.length > 0
         ? { items: draftCapabilities.map(capability => ({ ...capability })) }
         : undefined
-      beginRequestStatusAttempt('')
+      beginRequestStatusAttempt()
       const optimisticElement = !active
         ? mountOptimisticUserTurn(
             expandedPrompt,
@@ -5402,7 +5042,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
           )
         : null
       if (draftTimer !== null) {
-        window.clearTimeout(draftTimer)
+        lifetime.clearTimeout(draftTimer)
         draftTimer = null
       }
       submissionPending = !active
@@ -5420,7 +5060,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
         submittedAttachments.length > 0 ? submittedAttachments : undefined,
         submittedCapabilities,
       )
-      if (result.status === 'started') requestStatusAttemptTurnId = result.inputId
       if (optimisticElement?.isConnected) {
         if (result.status === 'started') {
           pendingOptimisticInputId = result.inputId
@@ -5552,11 +5191,25 @@ export function mountWorkbench(app: HTMLDivElement): void {
   })
 
   app.querySelector('#workspace-task-add')?.addEventListener('click', async () => {
-    if (!bridge) return
+    if (!bridge) return showToast('桌面核心未连接')
     try {
-      const added = await bridge.addProject()
-      if (!added) return
-      applySnapshot(await bridge.getSnapshot(), false)
+      const project = await openWorkspaceDialog(bridge, () => currentSnapshot?.projects.projects || [])
+      if (!project || !currentSnapshot) return
+      applySnapshot({
+        ...currentSnapshot,
+        projects: {
+          ...currentSnapshot.projects,
+          projects: [project, ...currentSnapshot.projects.projects.filter(item => item.id !== project.id)],
+        },
+      }, false)
+      workspaceGroupExpansion = { ...workspaceGroupExpansion, [project.id]: true }
+      localStorage.setItem(workspaceGroupExpansionStorageKey, JSON.stringify(workspaceGroupExpansion))
+      renderConversationList(currentSnapshot)
+      const group = Array.from(app.querySelectorAll<HTMLElement>('[data-workspace-key]'))
+        .find(element => element.dataset.workspaceKey === project.id)
+      group?.scrollIntoView({ block: 'nearest' })
+      group?.querySelector<HTMLButtonElement>('.workspace-task-group-toggle')?.focus({ preventScroll: true })
+      showToast('工作区已就绪')
     } catch (error) {
       showToast(errorMessage(error))
     }
@@ -5592,37 +5245,42 @@ export function mountWorkbench(app: HTMLDivElement): void {
   })
   app.querySelector('#composer-start-workspace')?.addEventListener('click', () => void chooseTaskWorkspace())
   app.querySelector('#composer-add')?.addEventListener('click', toggleComposerMenu)
-  app.querySelector('#capability-tab')?.addEventListener('click', toggleCapabilityMenu)
-  conversationPluginsToggle.addEventListener('click', toggleConversationPluginsMenu)
   app.querySelector('#approval-pill')?.addEventListener('click', toggleApprovalMenu)
   app.querySelector('#settings-button')?.addEventListener('click', () => void settingsCenter?.open())
-  app.querySelector<HTMLElement>('#profile-center-button')?.addEventListener('click', event => void profileSwitcher?.toggle(event.currentTarget as HTMLElement))
+  for (const id of ['profile-center-button', 'welcome-profile-avatar']) {
+    app.querySelector<HTMLElement>(`#${id}`)?.addEventListener('click', event => void userProfile?.open(event.currentTarget as HTMLElement))
+  }
   app.querySelector('#composer-context')?.addEventListener('click', () => openInspector('context'))
   app.querySelector('#model-pill')?.addEventListener('click', event => void settingsCenter?.openModelPicker(event.currentTarget as HTMLElement))
   app.querySelector('#reasoning-tab')?.addEventListener('click', event => void settingsCenter?.openReasoningPicker(event.currentTarget as HTMLElement))
   inspectorToggle.addEventListener('click', () => shell.classList.contains('inspector-open') ? closeInspector() : reopenInspector())
+  workPlanToggle.addEventListener('click', () => setWorkPlanHidden(!shell.classList.contains('work-plan-hidden')))
   app.querySelector('#inspector-scrim')?.addEventListener('click', () => closeInspector())
-  inspectorExpand.addEventListener('click', () => {
-    const restoring = currentInspectorWidthMode() === 'full'
-    if (restoring) {
-      inspectorUserFullWidth = false
-      if (activeInspectorPanelTab()?.kind === 'browser') browserLayoutMode = 'portrait'
-    } else {
-      inspectorUserFullWidth = true
-    }
+  function setInspectorFullWidth(full: boolean) {
+    inspectorUserFullWidth = full
+    if (!full) browserLayoutMode = 'portrait'
     applyInspectorWidthForCurrentTab()
     renderInspectorChrome()
+  }
+
+  inspectorExpand.addEventListener('click', () => {
+    setInspectorFullWidth(currentInspectorWidthMode() !== 'full')
   })
   inspectorResizeHandle.addEventListener('pointerdown', event => {
-    if (!shell.classList.contains('inspector-open') || currentInspectorWidthMode() === 'full') return
+    if (!shell.classList.contains('inspector-open') || event.button !== 0) return
     event.preventDefault()
-    const startX = event.clientX
     const startRect = inspectorPanel.getBoundingClientRect()
+    const grabOffset = event.clientX - startRect.left
     const startWidth = startRect.width
-    const dismissTriggerX = inspectorDismissTriggerX(startRect.left, startWidth)
+    const startMode = currentInspectorWidthMode()
+    const startRatio = regularInspectorWidthRatio
+    const startUserFullWidth = inspectorUserFullWidth
+    const startBrowserLayout = browserLayoutMode
     const pointerId = event.pointerId
+    let mode = startMode
+    let snapWidth: number | null = null
     let dragging = true
-    inspectorResizeHandle.setPointerCapture(event.pointerId)
+    inspectorResizeHandle.setPointerCapture(pointerId)
     shell.classList.add('inspector-resizing')
     const cleanup = () => {
       if (!dragging) return
@@ -5630,35 +5288,81 @@ export function mountWorkbench(app: HTMLDivElement): void {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', finish)
+      inspectorResizeHandle.removeEventListener('lostpointercapture', finish)
       if (inspectorResizeHandle.hasPointerCapture(pointerId)) inspectorResizeHandle.releasePointerCapture(pointerId)
-      shell.classList.remove('inspector-resizing')
+      shell.classList.remove('inspector-resizing', 'inspector-snapping')
     }
     const move = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId || !dragging) return
+      const contentRect = workbenchSurface.getBoundingClientRect()
+      const contentLeft = contentRect.left + workbenchSurface.clientLeft
+      const contentWidth = inspectorMainContentWidth()
+      const nextMode = inspectorDragWidthMode(moveEvent.clientX, contentLeft, contentWidth, mode)
+      if (nextMode !== mode) {
+        // A snap changes layout, not the pointer gesture. Keep the same capture until release.
+        mode = nextMode
+        regularInspectorWidthRatio = 1
+        snapWidth = maximumInspectorWidth(mode)
+        shell.classList.add('inspector-snapping')
+        setInspectorFullWidth(mode === 'full')
+        return
+      }
+      if (mode === 'full') return
+      const dismissTriggerX = inspectorDismissTriggerX(contentLeft, contentWidth)
       if (shouldDismissInspectorAtPointer(moveEvent.clientX, dismissTriggerX)) {
         cleanup()
         closeInspector()
-        setInspectorWidth(startWidth)
+        setInspectorWidth(inspectorWidthFromRatio(regularInspectorWidthRatio, contentWidth), false, 'regular')
         return
       }
-      setInspectorWidth(startWidth + startX - moveEvent.clientX)
+      const width = clampInspectorWidth(contentLeft + contentWidth - moveEvent.clientX + grabOffset, 'regular')
+      // Let the snap settle until the pointer reaches the divider's regular-width range.
+      if (snapWidth === width) return
+      snapWidth = null
+      shell.classList.remove('inspector-snapping')
+      setInspectorWidth(width, false, 'regular')
     }
     const finish = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== pointerId || !dragging) return
+      const width = Number.parseFloat(shell.style.getPropertyValue('--work-panel-width'))
       cleanup()
-      if (upEvent.type === 'pointercancel') {
-        setInspectorWidth(startWidth)
+      if (upEvent.type === 'pointercancel' || upEvent.type === 'lostpointercapture') {
+        regularInspectorWidthRatio = startRatio
+        inspectorUserFullWidth = startUserFullWidth
+        browserLayoutMode = startBrowserLayout
+        setInspectorWidth(startWidth, false, startMode)
+        renderInspectorChrome()
         return
       }
-      setInspectorWidth(inspectorPanel.getBoundingClientRect().width, true)
+      if (mode === 'regular') setInspectorWidth(width, true, 'regular')
+      else {
+        try { window.localStorage.setItem(inspectorWidthStorageKey, String(regularInspectorWidthRatio)) } catch {}
+      }
     }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', finish)
-    window.addEventListener('pointercancel', finish)
+    lifetime.listen(window, 'pointermove', move)
+    lifetime.listen(window, 'pointerup', finish)
+    lifetime.listen(window, 'pointercancel', finish)
+    inspectorResizeHandle.addEventListener('lostpointercapture', finish)
   })
-  inspectorResizeHandle.addEventListener('dblclick', () => setInspectorWidth(defaultInspectorWidth(), true))
+  inspectorResizeHandle.addEventListener('dblclick', () => {
+    setInspectorFullWidth(false)
+    setInspectorWidth(defaultInspectorWidth(), true)
+  })
   inspectorResizeHandle.addEventListener('keydown', event => {
     if (!shell.classList.contains('inspector-open')) return
+    if (event.key === 'End') {
+      event.preventDefault()
+      setInspectorFullWidth(true)
+      return
+    }
+    if (currentInspectorWidthMode() === 'full') {
+      if (event.key === 'ArrowRight' || event.key === 'Home') {
+        event.preventDefault()
+        setInspectorFullWidth(false)
+        if (event.key === 'Home') setInspectorWidth(INSPECTOR_MINIMUM_WIDTH, true)
+      }
+      return
+    }
     const width = inspectorWidthFromKey(
       inspectorPanel.getBoundingClientRect().width,
       event.key,
@@ -5670,26 +5374,46 @@ export function mountWorkbench(app: HTMLDivElement): void {
     event.preventDefault()
     setInspectorWidth(width, true)
   })
-  window.addEventListener('resize', () => {
+  lifetime.listen(window, 'resize', () => {
     if (shell.classList.contains('inspector-open')) applyInspectorWidthForCurrentTab()
     syncComposerMenuPlacement()
     settingsCenter?.repositionComposerPicker()
   })
-  new ResizeObserver(() => {
+  const inspectorObserver = new ResizeObserver(() => {
     scheduleBrowserBoundsSync()
     if (!shell.classList.contains('inspector-open')) return
-    if (inspectorChromeResizeFrame !== null) cancelAnimationFrame(inspectorChromeResizeFrame)
-    inspectorChromeResizeFrame = requestAnimationFrame(() => {
+    if (inspectorChromeResizeFrame !== null) lifetime.cancelFrame(inspectorChromeResizeFrame)
+    inspectorChromeResizeFrame = lifetime.frame(() => {
       inspectorChromeResizeFrame = null
       renderInspectorChrome()
     })
-  }).observe(inspectorPanel)
+  })
+  inspectorObserver.observe(inspectorPanel)
+  lifetime.add(() => inspectorObserver.disconnect())
   taskInput.addEventListener('input', () => {
     resizeTaskInput()
     if (currentSnapshot) updateRunButton(currentSnapshot)
     scheduleDraftRecord()
   })
   taskInput.addEventListener('keydown', event => {
+    if (
+      event.key === 'Tab'
+      && event.shiftKey
+      && !event.metaKey
+      && !event.ctrlKey
+      && !event.altKey
+      && !event.isComposing
+      && currentSnapshot
+      && !event.defaultPrevented
+    ) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.repeat) return
+      const policies: ApprovalPolicy[] = ['ask', 'agent', 'full']
+      const nextPolicy = policies[(policies.indexOf(currentSnapshot.runtime.approvalPolicy) + 1) % policies.length]
+      void selectApprovalPolicy(nextPolicy)
+      return
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
       void submitCurrentPrompt()
@@ -5740,8 +5464,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
   transcript.addEventListener('wheel', event => {
     transcriptWheelScrolling = true
     if (event.deltaY < 0) cancelTranscriptScroll()
-    if (transcriptWheelTimer !== null) window.clearTimeout(transcriptWheelTimer)
-    transcriptWheelTimer = window.setTimeout(() => {
+    if (transcriptWheelTimer !== null) lifetime.clearTimeout(transcriptWheelTimer)
+    transcriptWheelTimer = lifetime.timeout(() => {
       transcriptWheelTimer = null
       transcriptWheelScrolling = false
     }, 160)
@@ -5749,8 +5473,8 @@ export function mountWorkbench(app: HTMLDivElement): void {
   transcript.addEventListener('pointerdown', event => {
     if (event.target === transcript) transcriptPointerScrolling = true
   })
-  window.addEventListener('pointerup', () => { transcriptPointerScrolling = false })
-  window.addEventListener('pointercancel', () => { transcriptPointerScrolling = false })
+  lifetime.listen(window, 'pointerup', () => { transcriptPointerScrolling = false })
+  lifetime.listen(window, 'pointercancel', () => { transcriptPointerScrolling = false })
   transcript.addEventListener('scroll', () => {
     transcriptFollowState = updateTranscriptFollowFromScroll(
       transcriptFollowState,
@@ -5768,7 +5492,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     void bridge?.openExternal(anchor.href).catch(error => showToast(errorMessage(error)))
   })
 
-  window.addEventListener('keydown', event => {
+  lifetime.listen(window, 'keydown', event => {
     if (settingsCenter?.isOpen()) {
       if (event.key === 'Escape') settingsCenter.close()
       return
@@ -5813,7 +5537,7 @@ export function mountWorkbench(app: HTMLDivElement): void {
     if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l' && browserSnapshot?.visible) {
       event.preventDefault()
       openInspector('browser')
-      window.requestAnimationFrame(() => {
+      lifetime.frame(() => {
         const address = inspectorContent.querySelector<HTMLInputElement>('.inspector-browser-address')
         address?.focus()
         address?.select()
@@ -5838,7 +5562,6 @@ export function mountWorkbench(app: HTMLDivElement): void {
     if (event.key === 'Escape') {
       if (commandPalette?.isOpen()) commandPalette.close()
       else if (workflowSurface) void resolveRequest(workflowSurfaceRequestId, 'cancelled', workflowSurface)
-      else if (conversationPluginsMenu.classList.contains('visible')) closeConversationPluginsMenu()
       else if (composerMenu.classList.contains('visible') || capabilityMenu.classList.contains('visible') || approvalMenu.classList.contains('visible')) closeComposerMenus()
       else if (inspectorModuleMenu.classList.contains('visible')) setInspectorModuleMenu(false)
       else if (terminalPanel?.isOpen()) terminalPanel.close()
@@ -5846,27 +5569,33 @@ export function mountWorkbench(app: HTMLDivElement): void {
     }
   })
 
-  document.addEventListener('click', event => {
+  lifetime.listen(document, 'click', event => {
     const target = event.target
-    if (!(target instanceof Element) || !target.closest('.conversation-menu')) document.querySelectorAll('.conversation-menu').forEach(menu => menu.remove())
-    if (target instanceof Element && !target.closest('#composer-menu, #composer-add, #capability-menu, #capability-tab, #approval-menu, #approval-pill')) closeComposerMenus()
-    if (target instanceof Element && !target.closest('#conversation-plugins-menu, #conversation-plugins-toggle')) closeConversationPluginsMenu()
+    if (!(target instanceof Element) || !target.closest('.conversation-menu')) closeSidebarMenu?.()
+    if (target instanceof Element && !target.closest('#composer-menu, #composer-add, #capability-menu, #approval-menu, #approval-pill')) closeComposerMenus()
     if (target instanceof Element && !target.closest('#inspector-module-menu, #inspector-module-menu-toggle')) setInspectorModuleMenu(false)
   })
+
+  app.querySelector('#conversation-list')?.addEventListener('scroll', () => closeSidebarMenu?.())
+  lifetime.listen(window, 'resize', () => closeSidebarMenu?.())
 
   const primeCompletionSound = () => {
     window.removeEventListener('pointerdown', primeCompletionSound, true)
     window.removeEventListener('keydown', primeCompletionSound, true)
     void primeTaskCompletionChime()
   }
-  window.addEventListener('pointerdown', primeCompletionSound, { capture: true, once: true })
-  window.addEventListener('keydown', primeCompletionSound, { capture: true, once: true })
+  lifetime.listen(window, 'pointerdown', primeCompletionSound, { capture: true, once: true })
+  lifetime.listen(window, 'keydown', primeCompletionSound, { capture: true, once: true })
 
   inspectorModuleMenuToggle.addEventListener('click', toggleInspectorModuleMenu)
   inspectorBrowserNewTab.addEventListener('click', () => {
-    void bridge?.browserNewTab().then(renderBrowserSnapshot).catch(error => showToast(errorMessage(error)))
+    setInspectorModuleMenu(false)
+    void bridge?.browserNewTab().then(snapshot => {
+      renderBrowserSnapshot(snapshot)
+      openInspector('browser')
+    }).catch(error => showToast(errorMessage(error)))
   })
-  inspectorModuleMenu.querySelectorAll<HTMLButtonElement>('.inspector-module-option').forEach(button => {
+  inspectorModuleMenu.querySelectorAll<HTMLButtonElement>('.inspector-module-option[data-tab]').forEach(button => {
     button.addEventListener('click', () => {
       setInspectorModuleMenu(false)
       openInspector(button.dataset.tab as InspectorTab)
@@ -5874,12 +5603,34 @@ export function mountWorkbench(app: HTMLDivElement): void {
   })
 
   if (bridge) {
-    bridge.onRuntimeEvent(handleRuntimeEvent)
-    bridge.onNavigationIntent(intent => void handleNavigationIntent(intent).catch(error => showToast(errorMessage(error))))
-    bridge.onBrowserEvent(handleBrowserEvent)
+    lifetime.add(bridge.onRuntimeEvent(handleRuntimeEvent))
+    lifetime.add(bridge.onNavigationIntent(intent => void handleNavigationIntent(intent).catch(error => showToast(errorMessage(error)))))
+    lifetime.add(bridge.onBrowserEvent(handleBrowserEvent))
     void bridge.getSnapshot().then(snapshot => applySnapshot(snapshot)).catch(error => showToast(errorMessage(error)))
     void bridge.browserGetState().then(renderBrowserSnapshot).catch(error => showToast(errorMessage(error)))
   } else {
     showToast('桌面核心桥接不可用')
   }
+  lifetime.add(() => {
+    linearTaskFlowRenderer.clear()
+    transcriptIndex.reset()
+    attachmentThumbnailObserver?.disconnect()
+    transcriptResizeObserver.disconnect()
+    conversationNavigatorResizeObserver.disconnect()
+    settingsCenter?.dispose()
+    userProfile?.dispose()
+    for (const timer of [snapshotRefreshTimer, draftTimer, conversationTransitionSettleTimer, transcriptWheelTimer]) {
+      if (timer !== null) lifetime.clearTimeout(timer)
+    }
+    for (const frame of [browserBoundsFrame, inspectorChromeResizeFrame, conversationTransitionFrame, conversationNavigatorSyncFrame, transcriptScrollFrame]) {
+      if (frame !== null) lifetime.cancelFrame(frame)
+    }
+    computerControls?.dispose()
+    terminalPanel?.dispose()
+    closeSidebarMenu?.(false)
+    closeWorkflowSurface()
+    imageLightbox?.dispose()
+  })
+  return () => lifetime.dispose()
+
 }

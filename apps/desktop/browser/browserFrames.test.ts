@@ -14,6 +14,12 @@ describe('browser frame refs', () => {
     expect(isBrowserRefForEpoch(ref, 38)).toBe(false)
   })
 
+  it('rejects refs from another tab even when epochs and frame indexes match', () => {
+    const ref = `${browserFrameRefPrefix(3, 0, 'tab-a')}-e1`
+    expect(isBrowserRefForEpoch(ref, 3, 'tab-a')).toBe(true)
+    expect(isBrowserRefForEpoch(ref, 3, 'tab-b')).toBe(false)
+  })
+
   it('keeps child frames represented under a global element cap', () => {
     const merged = interleaveBrowserFrameElements([
       { frameIndex: 0, elements: ['main-1', 'main-2', 'main-3'] },

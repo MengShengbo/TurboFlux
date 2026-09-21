@@ -1,4 +1,4 @@
-import type { McpLocalToolDefinition } from '@turboflux/agent-core/extensions'
+import type { McpLocalToolDefinition } from '@turboflux/extensions'
 
 export const MAX_OBSERVED_ELEMENTS = 160
 
@@ -52,7 +52,7 @@ export function browserTools(): McpLocalToolDefinition[] {
     },
     {
       name: 'click',
-      description: 'Click an element ref returned by observe or find. Top-frame targets use native input with DOM fallback; iframe targets use frame-scoped semantic activation. Supports double-clicking.',
+      description: 'Click an element ref returned by observe or find. Waits for visible, enabled, stable, unobscured targets. Top-frame targets use native input exactly once; iframe targets use frame-scoped semantic activation. A dispatched click still requires verification. Supports double-clicking.',
       inputSchema: { type: 'object', properties: { ref: { type: 'string' }, click_count: { type: 'integer', enum: [1, 2], default: 1 }, tab_id: { type: 'string' } }, required: ['ref'], additionalProperties: false },
       annotations: action,
     },
@@ -112,14 +112,20 @@ export function browserTools(): McpLocalToolDefinition[] {
     },
     {
       name: 'wait',
-      description: 'Wait for page loading, visible text, a URL fragment, or an observed element. Timeouts are bounded to 15 seconds.',
+      description: 'Wait for DOM readiness, visible text, a URL fragment, or an observed element. DOM readiness does not wait for every network request; prefer the expected text or element for app readiness. Timeouts are bounded to 15 seconds.',
       inputSchema: { type: 'object', properties: { condition: { type: 'string', enum: ['load', 'text', 'url', 'element'] }, value: { type: 'string' }, ref: { type: 'string' }, timeout_ms: { type: 'integer', minimum: 100, maximum: 15000, default: 5000 }, tab_id: { type: 'string' } }, required: ['condition'], additionalProperties: false },
       annotations: readOnly,
     },
     {
       name: 'assert',
-      description: 'Check visible text, URL, or an observed element state and return a structured pass/fail result without modifying the page.',
-      inputSchema: { type: 'object', properties: { condition: { type: 'string', enum: ['text_contains', 'url_contains', 'element_visible', 'element_enabled', 'element_checked'] }, value: { type: 'string' }, ref: { type: 'string' }, tab_id: { type: 'string' } }, required: ['condition'], additionalProperties: false },
+      description: 'Verify visible text, URL, field value, or element state with bounded retries. expected=false checks the inverse (for example unchecked or disabled). A failed assertion is a tool error. Refresh refs before checking changed elements.',
+      inputSchema: { type: 'object', properties: { condition: { type: 'string', enum: ['text_contains', 'url_contains', 'element_visible', 'element_enabled', 'element_checked', 'value_equals'] }, value: { type: 'string' }, ref: { type: 'string' }, expected: { type: 'boolean', default: true }, timeout_ms: { type: 'integer', minimum: 0, maximum: 15000, default: 2000 }, tab_id: { type: 'string' } }, required: ['condition'], additionalProperties: false },
+      annotations: readOnly,
+    },
+    {
+      name: 'inspect',
+      description: 'Inspect page readiness, viewport, horizontal overflow and renderer health. With a fresh ref, inspect its identity, bounds, visibility, enabled/editable state, hit-test obstruction and selected computed styles. Use with diagnostics and visual_observe to diagnose a UI defect; fix workspace source, reload, then assert and visually review the same scenario.',
+      inputSchema: { type: 'object', properties: { ref: { type: 'string' }, tab_id: { type: 'string' } }, additionalProperties: false },
       annotations: readOnly,
     },
     {

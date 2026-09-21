@@ -1,4 +1,4 @@
-import type { AutomationDraftInput, AutomationRecord, AutomationSchedule, WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import type { AutomationDraftInput, AutomationRecord, AutomationSchedule, WorkbenchSnapshot } from '@turboflux/workbench'
 import type { AutomationNotificationNavigationIntent } from '../automationNotificationNavigation'
 import { automationApprovalScopeRows } from './automationApprovalPresentation'
 import './automationsView.css'

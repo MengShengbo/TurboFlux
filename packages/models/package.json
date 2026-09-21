@@ -1,0 +1,104 @@
+{
+  "name": "@turboflux/models",
+  "version": "1.0.1",
+  "description": "Model configuration, credentials, discovery and streaming protocols",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./clientIdentity": {
+      "types": "./dist/clientIdentity.d.ts",
+      "import": "./dist/clientIdentity.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    },
+    "./credentialStore": {
+      "types": "./dist/credentialStore.d.ts",
+      "import": "./dist/credentialStore.js"
+    },
+    "./modelDiscovery": {
+      "types": "./dist/modelDiscovery.d.ts",
+      "import": "./dist/modelDiscovery.js"
+    },
+    "./modelMessages": {
+      "types": "./dist/modelMessages.d.ts",
+      "import": "./dist/modelMessages.js"
+    },
+    "./modelProtocol": {
+      "types": "./dist/modelProtocol.d.ts",
+      "import": "./dist/modelProtocol.js"
+    },
+    "./modelRegistry": {
+      "types": "./dist/modelRegistry.d.ts",
+      "import": "./dist/modelRegistry.js"
+    },
+    "./modelRequestBudget": {
+      "types": "./dist/modelRequestBudget.d.ts",
+      "import": "./dist/modelRequestBudget.js"
+    },
+    "./modelRequestOrchestrator": {
+      "types": "./dist/modelRequestOrchestrator.d.ts",
+      "import": "./dist/modelRequestOrchestrator.js"
+    },
+    "./modelStream": {
+      "types": "./dist/modelStream.d.ts",
+      "import": "./dist/modelStream.js"
+    },
+    "./modelSurface": {
+      "types": "./dist/modelSurface.d.ts",
+      "import": "./dist/modelSurface.js"
+    },
+    "./normalizeBaseUrl": {
+      "types": "./dist/normalizeBaseUrl.d.ts",
+      "import": "./dist/normalizeBaseUrl.js"
+    },
+    "./profile": {
+      "types": "./dist/profile.d.ts",
+      "import": "./dist/profile.js"
+    },
+    "./providers/anthropicStream": {
+      "types": "./dist/providers/anthropicStream.d.ts",
+      "import": "./dist/providers/anthropicStream.js"
+    },
+    "./providers/openAIChatStream": {
+      "types": "./dist/providers/openAIChatStream.d.ts",
+      "import": "./dist/providers/openAIChatStream.js"
+    },
+    "./providers/openAIResponsesStream": {
+      "types": "./dist/providers/openAIResponsesStream.d.ts",
+      "import": "./dist/providers/openAIResponsesStream.js"
+    },
+    "./requestCompatibility": {
+      "types": "./dist/requestCompatibility.d.ts",
+      "import": "./dist/requestCompatibility.js"
+    },
+    "./tokenCounter": {
+      "types": "./dist/tokenCounter.d.ts",
+      "import": "./dist/tokenCounter.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/contracts": "*",
+    "@turboflux/platform": "*",
+    "js-tiktoken": "^1.0.21",
+    "strip-ansi": "^7.2.0"
+  }
+}

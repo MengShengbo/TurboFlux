@@ -2,12 +2,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { createEmptyConfig } from '../packages/agent-core/src/core/config'
-import type { AgentEventType } from '../packages/agent-core/src/core/agentEngine'
-import type { ToolCall } from '../packages/agent-core/src/shared/agentTypes'
-import { AgentFlowController } from '../packages/agent-core/src/application/flow/agentFlowController'
-import { WorkSession } from '../packages/agent-core/src/application/work/workSession'
-import { WorkbenchRuntime } from '../packages/agent-core/src/application/workbench/workbenchRuntime'
+import { createEmptyConfig } from '@turboflux/models/config'
+import type { AgentEventType } from '@turboflux/agent-runtime/agentEngine'
+import type { ToolCall } from '@turboflux/contracts/agentTypes'
+import { AgentFlowController } from '@turboflux/workbench/flow/agentFlowController'
+import { WorkSession } from '@turboflux/workbench/work/workSession'
+import { WorkbenchRuntime } from '@turboflux/workbench/workbench/workbenchRuntime'
 
 interface BenchmarkOptions {
   name: string

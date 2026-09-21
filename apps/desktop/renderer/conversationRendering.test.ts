@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { AgentTurn, WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import type { AgentTurn, WorkbenchSnapshot } from '@turboflux/workbench'
 import {
   conversationRenderSignature,
   isHistoryRewriteUserTurn,
@@ -9,10 +9,8 @@ import {
   latestConversationFailure,
   presentDesktopError,
   presentFailureMessage,
-  requestStatusTerminalFenceApplies,
   resolveWorkTurnPresentation,
   shouldDeferWorkDelivery,
-  shouldIgnoreSnapshotAfterRequestTerminal,
   shouldAttachUserAnswerToLiveWork,
   shouldPublishPendingWorkDelivery,
   shouldPresentWorkMetadata,
@@ -93,35 +91,6 @@ describe('conversation presentation', () => {
     })).toBe(true)
   })
 
-  it('fences late active snapshots after the current run is terminal', () => {
-    const fence = { conversationId: 'conversation-1', latestUserTurnId: 'turn-2' }
-    expect(requestStatusTerminalFenceApplies({
-      fence,
-      conversationId: 'conversation-1',
-      latestUserTurnId: 'turn-2',
-    })).toBe(true)
-    expect(requestStatusTerminalFenceApplies({
-      fence,
-      conversationId: 'conversation-1',
-      latestUserTurnId: 'turn-3',
-    })).toBe(false)
-    expect(shouldIgnoreSnapshotAfterRequestTerminal({
-      fence,
-      conversationId: 'conversation-1',
-      latestUserTurnId: 'turn-2',
-      runtimeStatus: 'running',
-      runPhase: 'thinking',
-      activeRunId: 'run-2',
-    })).toBe(true)
-    expect(shouldIgnoreSnapshotAfterRequestTerminal({
-      fence,
-      conversationId: 'conversation-1',
-      latestUserTurnId: 'turn-2',
-      runtimeStatus: 'ready',
-      runPhase: 'completed',
-      activeRunId: null,
-    })).toBe(false)
-  })
 
   it('restores request progress only for a genuinely active run', () => {
     expect(shouldRestoreRequestStatus({

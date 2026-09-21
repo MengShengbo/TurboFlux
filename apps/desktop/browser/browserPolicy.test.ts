@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeBrowserAddress, validateBrowserNavigation } from './browserPolicy'
+import { normalizeBrowserAddress, validateBrowserNavigation, validateBrowserDestination } from './browserPolicy'
 
 describe('browser navigation policy', () => {
   it('normalizes searches, domains, and local previews', () => {
@@ -18,4 +18,12 @@ describe('browser navigation policy', () => {
     expect(() => validateBrowserNavigation('javascript:alert(1)')).toThrow('Blocked browser protocol')
     expect(() => validateBrowserNavigation('https://user:secret@example.com')).toThrow('embedded credentials')
   })
+  it('rejects page-generated external protocols instead of turning them into searches', () => {
+    for (const url of ['mailto:test@example.test', 'tel:123', 'intent:launch', 'file:///tmp/secret', 'data:text/html,hello']) {
+      expect(() => validateBrowserDestination(url)).toThrow('Blocked browser protocol')
+    }
+    expect(validateBrowserDestination('about:srcdoc', true).href).toBe('about:srcdoc')
+    expect(() => validateBrowserDestination('about:srcdoc')).toThrow('Blocked browser protocol')
+  })
+
 })

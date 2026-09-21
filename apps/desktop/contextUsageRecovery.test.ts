@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { AgentTurn } from '@turboflux/agent-core/workbench'
+import type { AgentTurn } from '@turboflux/workbench'
 import { contextUsageTokenCount, recoverContextUsage } from './contextUsageRecovery'
 
 const assistantTurn = (id: string, input: number, output: number): AgentTurn => ({

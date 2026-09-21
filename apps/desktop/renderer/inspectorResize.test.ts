@@ -5,6 +5,7 @@ import {
   clampInspectorWidth,
   defaultInspectorWidth,
   inspectorDismissTriggerX,
+  inspectorDragWidthMode,
   inspectorWidthFromRatio,
   inspectorWidthFromKey,
   inspectorWidthRatio,
@@ -34,6 +35,18 @@ describe('inspector resize interaction', () => {
     expect(shouldDismissInspectorAtPointer(trigger - 1, trigger)).toBe(false)
     expect(shouldDismissInspectorAtPointer(trigger, trigger)).toBe(true)
     expect(shouldDismissInspectorAtPointer(trigger + 120, trigger)).toBe(true)
+  })
+
+  it('snaps across the compressed conversation midpoint in either direction', () => {
+    const left = 304
+    const contentWidth = 1176
+    const midpoint = left + 352 / 2
+    expect(inspectorDragWidthMode(midpoint - 7, left, contentWidth, 'regular')).toBe('regular')
+    expect(inspectorDragWidthMode(midpoint - 9, left, contentWidth, 'regular')).toBe('full')
+    expect(inspectorDragWidthMode(midpoint + 7, left, contentWidth, 'full')).toBe('full')
+    expect(inspectorDragWidthMode(midpoint + 9, left, contentWidth, 'full')).toBe('regular')
+    expect(inspectorDragWidthMode(167, 0, contentWidth, 'regular')).toBe('full')
+    expect(inspectorDragWidthMode(185, 0, contentWidth, 'full')).toBe('regular')
   })
 
   it('widens left and narrows right in ten pixel steps', () => {

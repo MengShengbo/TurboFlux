@@ -9,7 +9,7 @@ import type {
   ComputerAppSnapshot,
   ComputerBounds,
   ComputerWindowSnapshot,
-} from '@turboflux/agent-core/contracts'
+} from '@turboflux/contracts'
 import type {
   ComputerDriver,
   ComputerExpectedTarget,
@@ -353,7 +353,7 @@ export class MacOSComputerDriver implements ComputerDriver {
       return await this.requireExecutableHelper(bundled, 'Bundled Computer helper')
     } catch (error) {
       if (app.isPackaged) {
-        throw new Error(`Computer control is unavailable because the signed helper is missing or invalid: ${error instanceof Error ? error.message : String(error)}`)
+        throw new Error(`Computer control is unavailable because the signed helper is missing or invalid: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
     }
 

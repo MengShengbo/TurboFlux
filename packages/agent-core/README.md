@@ -1,7 +1,5 @@
 # @turboflux/agent-core
 
-The versioned TurboFlux execution kernel used by the Desktop workbench.
+Compatibility exports for existing TurboFlux clients. This package no longer owns runtime or application implementation. New consumers import `@turboflux/contracts`, `@turboflux/agent-runtime`, `@turboflux/workbench`, `@turboflux/presentation` and the relevant domain package.
 
-The package owns Agent execution, conversations, task flow, tools, Skills, MCP contracts, Work Packs, and platform-neutral application services. Its source lives in this package's `src/` directory. It does not contain Electron, accounts, billing, cloud services, updates, product telemetry, or product UI.
-
-Consumers must use the exported entrypoints instead of importing internal `dist/core`, `dist/application`, or `dist/shared` files.
+The six legacy entrypoints remain available. See [package architecture](../../docs/architecture/packages.md) for the migration map and dependency rules.

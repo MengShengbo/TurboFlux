@@ -1,25 +1,26 @@
-# 贡献指南 Contributing
+# Contributing
 
-感谢你对 TurboFlux 的兴趣！
+English | [中文](CONTRIBUTING.zh.md)
 
-我们坚信开源社区的力量，这一信念从项目诞生之初就塑造了它。
+TurboFlux is maintained by its repository owner. We currently do not accept external pull requests; the repository policy workflow closes them automatically. Please use [Issues](https://github.com/MengShengbo/TurboFlux/issues) for reproducible bugs, feature requests, research, and feedback. You can also build plugins, Skills, integrations, and work packs in your own repositories.
 
-TurboFlux 目前处于早期阶段，正在快速迭代。**我们暂时无法接受外部 Pull Request。** 然而，向这个仓库贡献代码远不是提供帮助的唯一方式，还有很多其他方式可以参与：
+## Source and branches
 
-- **提交 Issue 与反馈**：
-  - 在 [Issues](https://github.com/MengShengbo/TurboFlux/issues) 中报告问题或提出建议。
-  - 对你想让团队关注的问题点赞（👍）。我们是一个非常小的团队，可能无法回复每一条消息，但我们会持续关注，并在分配资源时优先考虑它们。
-- **贡献生态**：
-  - 创建一个让你兴奋的插件（Plugin）或能力包，并与他人分享。
-  - 撰写关于 TurboFlux 的博客文章和教程。
-  - 在社区中回答问题，帮助其他成员。
+This repository publishes Desktop and the packages and remote-control client it needs. Orbit is not part of this source release. `main` is the only long-lived remote branch. Maintainer verification branches are temporary and are deleted after integration. Dependency upgrades are handled manually; automatic version-update pull requests are disabled.
 
-TurboFlux 被设计为高度可定制。我们不认为官方仓库中的包天生就比社区创建的包更重要。你可以把这个仓库看作一个想法、一个官方展示、一个灵感来源，而不是来自我们的指令。
+## Maintainer checks
 
-我们已经看到了社区中涌现出的令人兴奋的项目，并希望生态能够继续朝着自己的方向发展。
+Use Node.js 22.12 or newer, npm, and ripgrep. Run these commands at the repository root:
 
-走向未知。
+```sh
+npm ci
+npm run ci
+```
 
----
+The local check sequence covers lint, package and application builds, all workspace type checks, package tests, Desktop tests, remote-control tests, and publication and architecture boundaries. Lefthook runs staged lint and whitespace checks before commits, and source checks before pushes. Confirm hooks with `npx lefthook install` if your installation skipped dependency lifecycle scripts.
 
-*English version: We deeply believe in the power of open source communities. TurboFlux is still at an early stage and under active development. We are sorry that we cannot accept external pull requests at the moment. However, contributing code to this repository is far from the only way to help. You can report issues, upvote what matters to you, create plugins, write guides, and answer questions in the community.*
+GitHub Actions also validates Linux and Windows package tests, macOS and Windows Desktop tests, and macOS, Windows, and Linux packaging and acceptance evidence. The required **Quality gate** succeeds only when every dependency job succeeds. Main protection applies to administrators and disallows force pushes and deletion. Before updating `main`, publish a temporary verification branch and run the CI workflow on that exact commit. Advance `main` only after it passes, then delete the verification branch.
+
+The external-PR policy runs from the trusted default branch with permission to close pull requests from forks. It never checks out or executes pull-request code. Issue triage labels incoming reports, and failures are surfaced instead of being silently ignored.
+
+Do not commit credentials, local profiles, generated evidence, build output, or research archives. Platform signing and distribution remain separate from source validation.

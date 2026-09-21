@@ -1,4 +1,4 @@
-import type { WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import type { WorkbenchSnapshot } from '@turboflux/workbench'
 
 type Conversation = WorkbenchSnapshot['conversationCatalog'][number]
 type Project = WorkbenchSnapshot['projects']['projects'][number]
@@ -31,6 +31,8 @@ export function projectWorkspaceConversationGroups(input: {
   query?: string
 }): WorkspaceConversationGroup[] {
   const query = input.query?.trim().toLocaleLowerCase() || ''
+  const currentConversation = input.conversations.find(conversation => conversation.id === input.currentConversationId)
+  const currentPath = currentConversation ? normalizedPath(currentConversation.workspacePath, input.platform) : undefined
   const conversationsByPath = new Map<string, Conversation[]>()
   for (const conversation of input.conversations.filter(conversation => conversation.turnCount > 0)) {
     const key = normalizedPath(conversation.workspacePath, input.platform)
@@ -46,7 +48,6 @@ export function projectWorkspaceConversationGroups(input: {
     if (registeredPaths.has(pathKey)) continue
     registeredPaths.add(pathKey)
     const conversations = [...(conversationsByPath.get(pathKey) || [])].sort(byRecency)
-    if (conversations.length === 0) continue
     const visible = query === '' || project.name.toLocaleLowerCase().includes(query)
       ? conversations
       : conversations.filter(conversation => conversation.title.toLocaleLowerCase().includes(query))
@@ -56,7 +57,7 @@ export function projectWorkspaceConversationGroups(input: {
       projectId: project.id,
       name: project.name,
       path: project.path,
-      containsCurrent: conversations.some(conversation => conversation.id === input.currentConversationId),
+      containsCurrent: pathKey === currentPath,
       conversations: visible,
     })
   }

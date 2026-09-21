@@ -1,0 +1,72 @@
+{
+  "name": "@turboflux/renderer",
+  "version": "1.0.1",
+  "description": "Browser rendering engine for TurboFlux transcripts, rich content, tools and work plans",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./linearTaskFlow": {
+      "types": "./dist/linearTaskFlow.d.ts",
+      "import": "./dist/linearTaskFlow.js"
+    },
+    "./richContent": {
+      "types": "./dist/richContent.d.ts",
+      "import": "./dist/richContent.js"
+    },
+    "./toolResultView": {
+      "types": "./dist/toolResultView.d.ts",
+      "import": "./dist/toolResultView.js"
+    },
+    "./toolResultDisclosure": {
+      "types": "./dist/toolResultDisclosure.d.ts",
+      "import": "./dist/toolResultDisclosure.js"
+    },
+    "./sourceView": {
+      "types": "./dist/sourceView.d.ts",
+      "import": "./dist/sourceView.js"
+    },
+    "./retrievalView": {
+      "types": "./dist/retrievalView.d.ts",
+      "import": "./dist/retrievalView.js"
+    },
+    "./toolActivityPresentation": {
+      "types": "./dist/toolActivityPresentation.d.ts",
+      "import": "./dist/toolActivityPresentation.js"
+    },
+    "./taskRunPresentation": {
+      "types": "./dist/taskRunPresentation.d.ts",
+      "import": "./dist/taskRunPresentation.js"
+    },
+    "./executionPresentation": {
+      "types": "./dist/executionPresentation.d.ts",
+      "import": "./dist/executionPresentation.js"
+    },
+    "./workPlanPresentation": {
+      "types": "./dist/workPlanPresentation.d.ts",
+      "import": "./dist/workPlanPresentation.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/presentation": "*",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.4",
+    "lucide": "^1.45.0"
+  }
+}

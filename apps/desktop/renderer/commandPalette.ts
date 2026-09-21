@@ -1,4 +1,4 @@
-import type { WorkbenchCommandDefinition, WorkbenchCommandResult } from '@turboflux/agent-core/workbench'
+import type { WorkbenchCommandDefinition, WorkbenchCommandResult } from '@turboflux/workbench'
 import { presentDesktopError } from './conversationRendering'
 
 interface CommandPaletteOptions {

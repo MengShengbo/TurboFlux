@@ -1,0 +1,92 @@
+{
+  "name": "@turboflux/extensions",
+  "version": "1.0.1",
+  "description": "MCP, Skills, local plugins and work packs",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./agents/loader": {
+      "types": "./dist/agents/loader.d.ts",
+      "import": "./dist/agents/loader.js"
+    },
+    "./mcp/client": {
+      "types": "./dist/mcp/client.d.ts",
+      "import": "./dist/mcp/client.js"
+    },
+    "./mcp/paginatedClient": {
+      "types": "./dist/mcp/paginatedClient.d.ts",
+      "import": "./dist/mcp/paginatedClient.js"
+    },
+    "./mcp/settings": {
+      "types": "./dist/mcp/settings.d.ts",
+      "import": "./dist/mcp/settings.js"
+    },
+    "./mcp/toolBridge": {
+      "types": "./dist/mcp/toolBridge.d.ts",
+      "import": "./dist/mcp/toolBridge.js"
+    },
+    "./mcp/types": {
+      "types": "./dist/mcp/types.d.ts",
+      "import": "./dist/mcp/types.js"
+    },
+    "./plugins/bundledPlugins": {
+      "types": "./dist/plugins/bundledPlugins.d.ts",
+      "import": "./dist/plugins/bundledPlugins.js"
+    },
+    "./plugins/designAtlasPrompts": {
+      "types": "./dist/plugins/designAtlasPrompts.d.ts",
+      "import": "./dist/plugins/designAtlasPrompts.js"
+    },
+    "./plugins/pluginHost": {
+      "types": "./dist/plugins/pluginHost.d.ts",
+      "import": "./dist/plugins/pluginHost.js"
+    },
+    "./plugins/pluginManifestValidation": {
+      "types": "./dist/plugins/pluginManifestValidation.d.ts",
+      "import": "./dist/plugins/pluginManifestValidation.js"
+    },
+    "./plugins/pluginService": {
+      "types": "./dist/plugins/pluginService.d.ts",
+      "import": "./dist/plugins/pluginService.js"
+    },
+    "./skills/loader": {
+      "types": "./dist/skills/loader.d.ts",
+      "import": "./dist/skills/loader.js"
+    },
+    "./skills/runtime": {
+      "types": "./dist/skills/runtime.d.ts",
+      "import": "./dist/skills/runtime.js"
+    },
+    "./workPacks/workPackCatalog": {
+      "types": "./dist/workPacks/workPackCatalog.d.ts",
+      "import": "./dist/workPacks/workPackCatalog.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist && node ../../scripts/copy-runtime-assets.mjs",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@turboflux/contracts": "*",
+    "@turboflux/platform": "*"
+  },
+  "turboflux": {
+    "runtimeAssets": [
+      "plugins/pluginHostChild.mjs"
+    ]
+  }
+}

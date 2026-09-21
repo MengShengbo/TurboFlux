@@ -1,3 +1,4 @@
+import { readWorkspaces } from './workspace-packages.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, watch, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -10,7 +11,7 @@ const repositoryRoot = resolve(scriptsDirectory, '..')
 const publicRepositoryRoot = resolve(process.env.TURBOFLUX_PUBLIC_REPO || repositoryRoot)
 const desktopRoot = join(repositoryRoot, 'apps', 'desktop')
 const desktopRequire = createRequire(join(desktopRoot, 'package.json'))
-const viteBinary = join(dirname(desktopRequire.resolve('vite/package.json')), 'bin', 'vite.js')
+const viteEntry = join(dirname(desktopRequire.resolve('vite/package.json')), 'bin', 'vite.js')
 const electronBinary = desktopRequire('electron')
 const mainEntry = join(desktopRoot, 'main.mjs')
 const builtMainEntry = join(desktopRoot, 'generated', 'main.mjs')
@@ -18,10 +19,10 @@ const buildMainScript = join(repositoryRoot, 'scripts', 'build-desktop-main.mjs'
 const preloadEntry = join(desktopRoot, 'preload.cjs')
 const desktopPathsEntry = join(desktopRoot, 'desktopPaths.ts')
 const runtimeHostEntry = join(desktopRoot, 'runtimeHost.ts')
-const builtCoreRoot = join(publicRepositoryRoot, 'packages', 'agent-core')
+const builtCoreRoot = join(publicRepositoryRoot, 'packages', 'workbench')
 const remoteProtocolRoot = join(repositoryRoot, 'packages', 'remote-protocol')
-const installedCoreEntry = fileURLToPath(import.meta.resolve('@turboflux/agent-core'))
-const installedCoreRoot = resolve(dirname(installedCoreEntry), '..', '..')
+const installedCoreEntry = fileURLToPath(import.meta.resolve('@turboflux/workbench'))
+const installedCoreRoot = resolve(dirname(installedCoreEntry), '..')
 const viteConfig = join(desktopRoot, 'vite.config.mjs')
 const desktopServer = resolveDesktopDevServer(process.env)
 const desktopUrl = desktopServer.url
@@ -39,8 +40,8 @@ const electronArguments = [
   builtMainEntry,
 ]
 
-if (!existsSync(viteBinary) || !existsSync(electronBinary)) {
-  throw new Error('Desktop dependencies are missing. Run npm install in the desktop directory.')
+if (!existsSync(viteEntry) || !existsSync(electronBinary)) {
+  throw new Error('Desktop dependencies are missing. Run npm install in the repository root.')
 }
 
 if (!existsSync(join(publicRepositoryRoot, 'packages', 'agent-core', 'package.json'))) {
@@ -94,8 +95,12 @@ function buildSharedCore() {
   })
   if (result.status !== 0) throw new Error('Unable to build @turboflux/agent-core before starting Desktop.')
   if (resolve(installedCoreRoot) === resolve(builtCoreRoot)) return
-  rmSync(join(installedCoreRoot, 'dist'), { recursive: true, force: true })
-  cpSync(join(builtCoreRoot, 'dist'), join(installedCoreRoot, 'dist'), { recursive: true, force: true })
+  for (const { directory, manifest } of readWorkspaces(publicRepositoryRoot).filter(entry => entry.kind === 'packages')) {
+    const installedDirectory = join(repositoryRoot, 'node_modules', ...manifest.name.split('/'))
+    if (!existsSync(installedDirectory)) throw new Error(`Missing workspace ${manifest.name}; run npm install at the root.`)
+    rmSync(join(installedDirectory, 'dist'), { recursive: true, force: true })
+    cpSync(join(directory, 'dist'), join(installedDirectory, 'dist'), { recursive: true, force: true })
+  }
 }
 
 function buildRemoteProtocol() {
@@ -120,7 +125,7 @@ buildRemoteProtocol()
 buildSharedCore()
 buildDesktopMain()
 
-const viteProcess = spawn(process.execPath, [viteBinary, '--config', viteConfig], {
+const viteProcess = spawn(process.execPath, [viteEntry, '--config', viteConfig], {
   cwd: repositoryRoot,
   stdio: 'inherit',
   env: { ...process.env, BROWSER: 'none' },
@@ -238,8 +243,8 @@ const closeWatchers = [mainEntry, preloadEntry, desktopPathsEntry, runtimeHostEn
 for (const directory of ['browser', 'computer', 'systems', 'terminal', 'remote']) {
   closeWatchers.push(watch(join(desktopRoot, directory), { recursive: true }, restartElectron))
 }
-for (const directory of ['application', 'core', 'kernel', 'platform', 'shared', 'state', 'tools']) {
-  closeWatchers.push(watch(join(publicRepositoryRoot, 'packages', 'agent-core', 'src', directory), { recursive: true }, rebuildCoreAndRestart))
+for (const { directory } of readWorkspaces(publicRepositoryRoot).filter(entry => entry.kind === 'packages')) {
+  closeWatchers.push(watch(join(directory, 'src'), { recursive: true }, rebuildCoreAndRestart))
 }
 closeWatchers.push(watch(join(remoteProtocolRoot, 'src'), { recursive: true }, rebuildRemoteProtocolAndRestart))
 startElectron()

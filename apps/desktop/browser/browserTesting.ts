@@ -40,7 +40,7 @@ export function redactDiagnosticUrl(value: string): string {
 }
 
 export function sanitizeBrowserRef(value: string): string {
-  const ref = value.replace(/[^a-zA-Z0-9_-]/g, '')
-  if (!ref) throw new Error('Element ref is required')
+  const ref = value.trim()
+  if (!ref || !/^[a-zA-Z0-9_-]{1,160}$/.test(ref)) throw new Error('Invalid element ref; observe the page again')
   return ref
 }

@@ -3,13 +3,11 @@ name: Issue policy
 on:
   issues:
     types: [opened, edited, reopened]
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, ready_for_review]
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 env:
   GH_REPO: ${{ github.repository }}
@@ -17,7 +15,11 @@ env:
 jobs:
   pr-policy:
     name: External PR policy
-    if: github.event_name == 'pull_request'
+    # Use trusted default-branch code only. Never check out or execute PR code here.
+    permissions:
+      contents: read
+      pull-requests: write
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - name: Check authorship
@@ -27,8 +29,8 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
-          # 技术团队成员名单（GitHub 用户名）
-          TEAM_MEMBERS="$REPOSITORY_OWNER dependabot[bot]"
+          # Only the repository owner maintains source changes.
+          TEAM_MEMBERS="$REPOSITORY_OWNER"
           AUTHOR="$(echo "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')"
           IS_MEMBER=0
           for member in $TEAM_MEMBERS; do
@@ -50,6 +52,9 @@ jobs:
 
   issue-triage:
     name: Issue triage
+    permissions:
+      contents: read
+      issues: write
     if: github.event_name == 'issues'
     runs-on: ubuntu-latest
     steps:
@@ -70,7 +75,7 @@ jobs:
             *"实施与验收"*) LABEL="kind/task" ;;
           esac
           if [ -n "$LABEL" ]; then
-            gh issue edit "$ISSUE_NUMBER" --add-label "$LABEL" || true
+            gh issue edit "$ISSUE_NUMBER" --add-label "$LABEL"
           fi
           echo "label=$LABEL" >> "$GITHUB_OUTPUT"
 
@@ -79,4 +84,4 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          gh issue edit "$ISSUE_NUMBER" --add-label "status/inbox" || true
+          gh issue edit "$ISSUE_NUMBER" --add-label "status/inbox"

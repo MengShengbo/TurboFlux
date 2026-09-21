@@ -29,7 +29,7 @@ describe('desktop theme preference', () => {
     expect(darkRule('.tool-activity {')).toContain('background: #1c1c1c')
     expect(darkRule('.visual-evidence-thumbnail {')).toContain('background: #1e1e1e')
     expect(darkRule('.artifact-preview pre {')).toContain('background: #181818')
-    expect(darkRule('.model-only-menu,')).toContain('background: rgba(30,30,30,.97)')
+    expect(darkRule('.model-only-menu {')).toContain('background: #1b1b1b')
   })
 
   it('defines dark semantic aliases used by Work panels', () => {
@@ -40,10 +40,10 @@ describe('desktop theme preference', () => {
 
   it('preserves the neutral graphite hierarchy', () => {
     const rootRule = darkRule('{')
-    expect(rootRule).toContain('--surface: #171717')
+    expect(rootRule).toContain('--surface: #111111')
     expect(rootRule).toContain('--composer-surface: #242424')
-    expect(darkRule('.sidebar {')).toContain('background: #202020')
-    expect(darkRule('.main-panel,')).toContain('background: #171717')
+    expect(darkRule('.sidebar {')).toContain('background: #373737')
+    expect(darkRule('.main-panel,')).toContain('background: #111111')
   })
 
   it('renders ordinary controls with a high-contrast white foreground', () => {
@@ -52,7 +52,6 @@ describe('desktop theme preference', () => {
     expect(darkRule('.sidebar-nav-item.active .icon {')).toContain('color: #f1f1f1')
     expect(darkRule('.workspace-task-group.contains-current .workspace-task-group-toggle > .icon-workspace {')).toContain('color: #a2c4b0')
     expect(darkRule('.composer-slant-tab,')).toContain('color: #f1f1f1')
-    expect(darkRule('.capability-tab > .icon-pluginNav {')).toContain('color: #f1f1f1')
     expect(darkRule('.composer-menu-glyph,')).toContain('color: #f1f1f1')
     expect(darkRule('.inspector-tab-slot.active .inspector-tab-icon {')).toContain('color: #f1f1f1')
     expect(darkRule('.settings-nav-icon,')).toContain('color: #f1f1f1')
@@ -74,8 +73,6 @@ describe('desktop theme preference', () => {
     expect(darkRule('.approval-menu .composer-menu-row[data-policy="full"] {')).toContain('color: #ff746c')
     expect(darkRule('.approval-menu .composer-menu-row[data-policy="full"] {')).toContain('background: transparent')
     expect(styles).not.toContain('.conversation.running time::before')
-    expect(styles).not.toContain('.task-companion-live')
-    expect(darkRule('.task-companion-item.attention > .icon {')).toContain('color: #d7a45e')
     const automationStyles = readFileSync(new URL('./automationsView.css', import.meta.url), 'utf8')
     expect(automationStyles).toContain('.av-status-completed { color: var(--success); }')
     expect(darkRule('{')).toContain('--success: #68bd8d')

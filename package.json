@@ -12,7 +12,7 @@
   "private": true,
   "turbofluxCoreVersion": "1.0.1",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
@@ -25,9 +25,9 @@
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "prepack": "npm run verify:boundary && npm run verify:architecture && npm run verify:workspace && npm run clean && npm run build",
     "build": "npm run build:desktop",
-    "build:core": "npm run build --prefix packages/agent-core",
-    "type-check:core": "npm run type-check --prefix packages/agent-core",
-    "type-check:all": "npm run type-check && npm run type-check:core",
+    "build:core": "npm run build:packages",
+    "type-check:core": "npm run type-check",
+    "type-check:all": "npm run type-check && npm run type-check:desktop && npm run type-check --workspace @turboflux/remote-mobile && npm run type-check --workspace @turboflux/model-proxy",
     "pack:core": "npm pack --dry-run ./packages/agent-core",
     "verify:boundary": "node scripts/verify-public-boundary.mjs",
     "verify:architecture": "node scripts/verify-architecture.mjs",
@@ -40,6 +40,7 @@
     "perf:conversations-v2:stable": "tsx scripts/conversation-v2-benchmark.ts --stable",
     "perf:profile-switch:stable": "npm run build:core && node scripts/desktop-profile-switch-benchmark.mjs",
     "smoke:profiles": "tsx scripts/profile-archive-cross-platform-smoke.ts",
+    "qa:browser": "npm run build:core && electron --use-mock-keychain scripts/browser-runtime-smoke.mjs",
     "qa:profiles:hidden": "node scripts/desktop-profile-hidden-qa.mjs",
     "qa:remote:hidden": "npm run build --workspace @turboflux/remote-protocol && npm run build:remote && tsx scripts/remote-mobile-hidden-qa.ts",
     "verify:profiles:evidence": "node scripts/verify-profile-cross-platform-evidence.mjs --require-platforms=darwin,win32,linux --expected-source-job=desktop-package --report=apps/desktop/generated/profile-smoke/profile-evidence-report.json",
@@ -49,7 +50,7 @@
     "verify:desktop:package:evidence": "node scripts/verify-desktop-package-evidence.mjs apps/desktop/generated/package-evidence --require-platforms=darwin,win32,linux --expected-source-job=desktop-package --report=apps/desktop/generated/package-verification/package-evidence-report.json",
     "verify:desktop:mac-release": "node scripts/verify-desktop-macos-release.mjs",
     "verify:remote:evidence": "node scripts/verify-remote-mobile-evidence.mjs --require-platforms=darwin,win32 --expected-source-job=desktop-package --require-package-correlation --package-evidence-root=apps/desktop/generated/package-evidence --report=apps/remote-mobile/generated/automation-qa/remote-mobile-evidence-report.json",
-    "test:flow": "vitest run packages/agent-core/src/application/flow packages/agent-core/src/application/conversations packages/agent-core/src/core/agentEngine.approval.test.ts packages/agent-core/src/core/agentEngine.input.test.ts packages/agent-core/src/core/runtime/approvalCoordinator.test.ts packages/agent-core/src/core/runtime/capabilityBoundary.test.ts packages/agent-core/src/core/runtime/sessionRegistry.test.ts",
+    "test:flow": "vitest run packages/workbench/src/flow packages/conversations/src packages/agent-runtime/src/agentEngine.approval.test.ts packages/agent-runtime/src/agentEngine.input.test.ts packages/agent-runtime/src/runtime/approvalCoordinator.test.ts packages/tools/src/capabilityBoundary.test.ts packages/agent-runtime/src/runtime/sessionRegistry.test.ts",
     "ci:flow": "npm run type-check && npm test && npm run build",
     "bun:type-check": "bunx tsc --noEmit",
     "bun:test": "bunx vitest run",
@@ -63,7 +64,7 @@
     "build:desktop:app": "npm run build:app --workspace @turboflux/desktop",
     "build:desktop": "npm run build:core && npm run build:desktop:app",
     "build:remote": "npm run build --workspace @turboflux/remote-mobile",
-    "build:all": "npm run build:core && npm run build:desktop:app && npm run build:remote",
+    "build:all": "npm run build:core && npm run build:desktop:app && npm run build:remote && npm run build:proxy",
     "type-check:desktop": "npm run type-check --workspace @turboflux/desktop",
     "test:desktop": "npm run test --workspace @turboflux/desktop",
     "test:remote": "npm run test --workspace @turboflux/remote-protocol && npm run test --workspace @turboflux/remote-mobile",
@@ -72,7 +73,15 @@
     "lint:staged": "oxlint --config .oxlintrc.staged.json",
     "knip": "knip",
     "check:duplicates": "jscpd --config .jscpd.json",
-    "ci": "npm run lint && npm run type-check && npm test && npm run test:remote && npm run build && npm run verify:boundary && npm run verify:architecture && npm run verify:workspace && npm run type-check:desktop && npm run test:desktop"
+    "ci": "npm run lint && npm run build:packages && npm run type-check:all && npm test --ignore-scripts && npm run test:remote && npm run build:desktop:app && npm run build:proxy && npm run verify:boundary && npm run verify:architecture && npm run verify:workspace && npm run test:desktop",
+    "build:packages": "node scripts/build-packages.mjs",
+    "pack:packages": "npm pack --dry-run --workspaces --include-workspace-root=false",
+    "pretest": "npm run build:packages",
+    "qa:desktop:renderer": "npm run build:desktop && node scripts/desktop-renderer-smoke.mjs",
+    "qa:renderer": "npm run build:packages && node scripts/qa-renderer.mjs",
+    "build:proxy": "npm run build --workspace @turboflux/model-proxy",
+    "bench:kernel": "tsx --tsconfig tsconfig.open-source.json scripts/kernel-benchmark.ts",
+    "bench:kernel:live": "electron scripts/kernel-benchmark/electron.mjs"
   },
   "devDependencies": {
     "@electron/asar": "^3.4.1",
@@ -86,17 +95,9 @@
     "pngjs": "^5.0.0",
     "typescript": "^5.3.3",
     "vitest": "^4.1.7",
-    "ws": "^8.21.3"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "diff": "^9.0.0",
-    "highlight.js": "^11.11.1",
-    "js-tiktoken": "^1.0.21",
-    "react": "^19.2.6",
-    "strip-ansi": "^7.2.0",
+    "ws": "^8.21.3",
     "tsx": "^4.22.2",
-    "undici": "^7.29.0"
+    "esbuild": "^0.28.2"
   },
   "workspaces": [
     "packages/*",

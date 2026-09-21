@@ -1,7 +1,12 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
-import type { AgentAttachment, BrowserSystemEvent } from '@turboflux/agent-core/extensions'
+import type {
+  AgentAttachment,
+  BrowserSystemEvent,
+} from '@turboflux/contracts'
 import { assertOperationActive } from '../systems/operationCoordinator'
+import { withBrowserDebugger } from './browserDebugger'
+import { BrowserRuntime } from './browserRuntime'
 import type { BrowserTab } from './browserTypes'
 
 const BROWSER_OPERATION_ABORT_MESSAGE = 'Browser operation aborted'
@@ -20,12 +25,13 @@ export async function captureBrowserViewport(
   storageRoot: string,
   emit: (event: BrowserSystemEvent) => void,
   signal?: AbortSignal,
+  runtime = new BrowserRuntime(),
 ): Promise<BrowserViewportCapture> {
   assertOperationActive(signal, BROWSER_OPERATION_ABORT_MESSAGE)
   const directory = join(storageRoot, 'captures', 'browser')
   await mkdir(directory, { recursive: true })
   assertOperationActive(signal, BROWSER_OPERATION_ABORT_MESSAGE)
-  const { bytes, viewport } = await captureRenderedViewport(tab, signal)
+  const { bytes, viewport } = await captureRenderedViewport(tab, runtime, signal)
   const capturedAt = Date.now()
   const filename = `browser-${capturedAt}-${safeFilename(tab.id)}.png`
   const path = join(directory, filename)
@@ -43,27 +49,18 @@ export async function captureBrowserViewport(
   return { tabId: tab.id, path, title: tab.title, url: tab.url, viewport, attachment }
 }
 
-async function captureRenderedViewport(tab: BrowserTab, signal?: AbortSignal): Promise<{
+async function captureRenderedViewport(tab: BrowserTab, runtime: BrowserRuntime, signal?: AbortSignal): Promise<{
   bytes: Buffer
   viewport: { width: number; height: number; deviceScaleFactor: number }
 }> {
   assertOperationActive(signal, BROWSER_OPERATION_ABORT_MESSAGE)
   const debuggerApi = tab.view.webContents.debugger
-  const attachedHere = !debuggerApi.isAttached()
-  try {
-    if (attachedHere) debuggerApi.attach('1.3')
-    await tab.view.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`, true)
-    assertOperationActive(signal, BROWSER_OPERATION_ABORT_MESSAGE)
-    const metrics = await debuggerApi.sendCommand('Page.getLayoutMetrics') as {
+  return withBrowserDebugger(debuggerApi, runtime, async send => {
+    const viewport = await waitForRenderedViewport(tab, runtime, signal)
+    const metrics = await send('Page.getLayoutMetrics') as {
       cssVisualViewport?: { pageX: number; pageY: number; clientWidth: number; clientHeight: number }
     }
     const visualViewport = metrics.cssVisualViewport
-    const viewport = await tab.view.webContents.executeJavaScript(`({
-        width: window.innerWidth,
-        height: window.innerHeight,
-        deviceScaleFactor: window.devicePixelRatio || 1,
-      })`, true) as { width: number; height: number; deviceScaleFactor: number }
-    if (viewport.width < 2 || viewport.height < 2) throw new Error('Browser viewport is not ready for visual capture')
     const clip = visualViewport && visualViewport.clientWidth >= 2 && visualViewport.clientHeight >= 2
       ? {
           x: visualViewport.pageX,
@@ -73,7 +70,7 @@ async function captureRenderedViewport(tab: BrowserTab, signal?: AbortSignal): P
           scale: 1,
         }
       : undefined
-    const capture = await debuggerApi.sendCommand('Page.captureScreenshot', {
+    const capture = await send('Page.captureScreenshot', {
       format: 'png',
       fromSurface: true,
       captureBeyondViewport: false,
@@ -83,9 +80,28 @@ async function captureRenderedViewport(tab: BrowserTab, signal?: AbortSignal): P
     const bytes = capture.data ? Buffer.from(capture.data, 'base64') : Buffer.alloc(0)
     if (bytes.length === 0) throw new Error('Browser viewport capture produced no image data')
     return { bytes, viewport }
-  } finally {
-    if (attachedHere && debuggerApi.isAttached()) debuggerApi.detach()
+  })
+}
+
+async function waitForRenderedViewport(tab: BrowserTab, runtime: BrowserRuntime, signal?: AbortSignal): Promise<BrowserViewportCapture['viewport']> {
+  let previous: BrowserViewportCapture['viewport'] | undefined
+  // Opening or resizing the native view can briefly report a zero or changing viewport.
+  // Poll from the host: animation frames can be suspended while the view is hidden.
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    assertOperationActive(signal, BROWSER_OPERATION_ABORT_MESSAGE)
+    const viewport = await runtime.call(() => tab.view.webContents.executeJavaScript(`({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      deviceScaleFactor: window.devicePixelRatio || 1,
+    })`, true)) as BrowserViewportCapture['viewport']
+    assertOperationActive(signal, BROWSER_OPERATION_ABORT_MESSAGE)
+    if (viewport.width >= 2 && viewport.height >= 2
+      && viewport.width === previous?.width && viewport.height === previous.height
+      && viewport.deviceScaleFactor === previous.deviceScaleFactor) return viewport
+    previous = viewport
+    await runtime.delay(50)
   }
+  throw new Error('Browser viewport did not become ready for visual capture within 2 seconds')
 }
 
 function safeFilename(value: string): string {

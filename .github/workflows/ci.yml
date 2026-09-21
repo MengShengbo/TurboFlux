@@ -33,7 +33,7 @@ jobs:
         run: npx oxlint --config .oxlintrc.json
 
   typecheck:
-    name: Type check (kernel)
+    name: Type check (packages)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,11 +44,13 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - name: Type check
-        run: npm run type-check
+      - name: Build workspace packages
+        run: npm run build:packages
+      - name: Type check all workspaces
+        run: npm run type-check:all
 
   test:
-    name: Test kernel (${{ matrix.os }})
+    name: Test packages (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -82,10 +84,30 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - name: Build agent-core
+      - name: Build workspace packages
         run: npm run build:core
-      - name: Build desktop
-        run: npm run build
+      - name: Build applications
+        run: npm run build:desktop:app && npm run build:proxy
+
+  remote-test:
+    name: Test remote control (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace @turboflux/remote-protocol
+      - run: npm run test:remote
 
   desktop-typecheck:
     name: Type check (desktop)
@@ -99,7 +121,7 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - name: Build agent-core
+      - name: Build workspace packages
         run: npm run build:core
       - name: Build desktop remote protocol
         run: npm run build --workspace @turboflux/remote-protocol
@@ -123,12 +145,22 @@ jobs:
           node-version: ${{ env.PRIMARY_NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - name: Build agent-core
+      - name: Build workspace packages
         run: npm run build:core
       - name: Build desktop remote protocol
         run: npm run build --workspace @turboflux/remote-protocol
       - name: Test desktop
         run: npm run test:desktop
+      - name: Verify native browser operations
+        if: runner.os == 'macOS'
+        run: npm run qa:browser
+      - name: Upload browser verification evidence
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-qa-${{ matrix.os }}
+          path: apps/desktop/generated/browser-qa/
+          if-no-files-found: warn
 
   desktop-package:
     name: Package desktop (${{ matrix.os }})
@@ -364,3 +396,35 @@ jobs:
         run: node scripts/verify-architecture.mjs
       - name: Verify workspace
         run: node scripts/verify-workspace-topology.mjs
+
+  quality-gate:
+    name: Quality gate
+    if: always()
+    needs:
+      - lint
+      - typecheck
+      - test
+      - build
+      - remote-test
+      - desktop-typecheck
+      - desktop-test
+      - desktop-package
+      - profile-evidence
+      - desktop-package-evidence
+      - desktop-remote-evidence
+      - boundary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every quality check to pass
+        env:
+          CHECK_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module <<'NODE'
+          const checks = JSON.parse(process.env.CHECK_RESULTS)
+          const failures = Object.entries(checks).filter(([, check]) => check.result !== 'success')
+          if (failures.length) {
+            for (const [name, check] of failures) console.error(`${name}: ${check.result}`)
+            process.exit(1)
+          }
+          console.log(`All ${Object.keys(checks).length} quality checks passed.`)
+          NODE

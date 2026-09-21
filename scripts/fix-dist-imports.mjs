@@ -1,21 +1,15 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 const distRoot = path.resolve(process.argv[2] || 'dist')
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const relativeImportPattern = /((?:from\s*|import\s*\(\s*)['"])(\.[^'"]+)(['"])/g
-const runtimeAssets = process.argv.includes('--skip-runtime-assets')
-  ? []
-  : ['application/plugins/pluginHostChild.mjs']
-
 function walk(directory) {
   const files = []
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const fullPath = path.join(directory, entry.name)
     if (entry.isDirectory()) files.push(...walk(fullPath))
-    else if (fullPath.endsWith('.js')) files.push(fullPath)
+    else if (fullPath.endsWith('.js') || fullPath.endsWith('.d.ts')) files.push(fullPath)
   }
   return files
 }
@@ -44,12 +38,4 @@ for (const filePath of walk(distRoot)) {
   }
 }
 
-for (const asset of runtimeAssets) {
-  const source = path.join(repositoryRoot, 'packages', 'agent-core', 'src', asset)
-  if (!fs.existsSync(source)) throw new Error(`Runtime asset is missing: ${source}`)
-  const target = path.join(distRoot, asset)
-  fs.mkdirSync(path.dirname(target), { recursive: true })
-  fs.copyFileSync(source, target)
-}
-
-console.log(`Rewrote ${rewrittenImports} relative imports in ${rewrittenFiles} files and copied ${runtimeAssets.length} runtime assets`)
+console.log(`Rewrote ${rewrittenImports} relative imports in ${rewrittenFiles} JavaScript and declaration files`)

@@ -1,27 +1,15 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "./src",
-    "outDir": "./dist",
+    "rootDir": "src",
+    "outDir": "dist",
     "declaration": true,
-    "sourceMap": true,
-    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+    "sourceMap": true
   },
   "include": [
-    "src/kernel/**/*",
-    "src/application/**/*",
-    "src/core/**/*",
-    "src/platform/**/*",
-    "src/shared/**/*",
-    "src/state/**/*",
-    "src/tools/**/*"
+    "src/**/*.ts"
   ],
   "exclude": [
-    "../../node_modules",
-    "../../dist",
-    "../../dist-desktop",
-    "src/desktop/**/*",
-    "src/**/*.test.ts",
-    "src/**/*.test.tsx"
+    "src/**/*.test.ts"
   ]
 }

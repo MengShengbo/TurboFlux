@@ -9,6 +9,19 @@ const expectedWorkspaces = new Map([
   ['apps/remote-mobile', '@turboflux/remote-mobile'],
   ['packages/agent-core', '@turboflux/agent-core'],
   ['packages/remote-protocol', '@turboflux/remote-protocol'],
+  ['apps/model-proxy', '@turboflux/model-proxy'],
+  ['packages/contracts', '@turboflux/contracts'],
+  ['packages/platform', '@turboflux/platform'],
+  ['packages/models', '@turboflux/models'],
+  ['packages/tools', '@turboflux/tools'],
+  ['packages/extensions', '@turboflux/extensions'],
+  ['packages/agent-runtime', '@turboflux/agent-runtime'],
+  ['packages/conversations', '@turboflux/conversations'],
+  ['packages/profiles', '@turboflux/profiles'],
+  ['packages/automations', '@turboflux/automations'],
+  ['packages/presentation', '@turboflux/presentation'],
+  ['packages/renderer', '@turboflux/renderer'],
+  ['packages/workbench', '@turboflux/workbench'],
 ])
 const failures = []
 const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
@@ -53,5 +66,5 @@ if (failures.length > 0) {
   console.error(`Workspace topology check failed:\n${failures.map(failure => `- ${failure}`).join('\n')}`)
   process.exitCode = 1
 } else {
-  console.log('Core and Desktop workspace topology is consistent.')
+  console.log('TurboFlux application and package topology is consistent.')
 }

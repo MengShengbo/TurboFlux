@@ -5,7 +5,7 @@ import type {
   ComputerControlMode,
   ComputerSystemEvent,
   ComputerSystemSnapshot,
-} from '@turboflux/agent-core/contracts'
+} from '@turboflux/contracts'
 import { desktopAppRoot } from '../desktopPaths'
 
 const OVERLAY_HEIGHT = 66

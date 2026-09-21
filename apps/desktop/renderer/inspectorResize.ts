@@ -42,6 +42,20 @@ export function shouldDismissInspectorAtPointer(pointerX: number, triggerX: numb
   return pointerX >= triggerX
 }
 
+export function inspectorDragWidthMode(
+  pointerX: number,
+  contentLeft: number,
+  contentWidth: number,
+  currentMode: InspectorWidthMode,
+): InspectorWidthMode {
+  const reservedWidth = Math.max(0, contentWidth - maximumInspectorWidth(contentWidth))
+  const midpoint = contentLeft + reservedWidth / 2
+  // Separate the two thresholds so a pointer near the midpoint cannot flicker between modes.
+  if (currentMode === 'regular' && pointerX < midpoint - 8) return 'full'
+  if (currentMode === 'full' && pointerX > midpoint + 8) return 'regular'
+  return currentMode
+}
+
 export function inspectorWidthFromKey(
   currentWidth: number,
   key: string,

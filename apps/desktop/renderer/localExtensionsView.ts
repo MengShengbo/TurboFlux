@@ -1,5 +1,5 @@
 import { ArrowLeft, BookOpen, Boxes, ChevronRight, FolderPlus, Plug, RefreshCw, Trash2, createElement } from 'lucide'
-import type { WorkPackEntry } from '@turboflux/agent-core/workbench'
+import type { WorkPackEntry } from '@turboflux/workbench'
 
 export interface LocalExtensionsViewOptions {
   entries: WorkPackEntry[]

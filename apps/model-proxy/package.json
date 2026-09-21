@@ -1,0 +1,20 @@
+{
+  "name": "@turboflux/model-proxy",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "type-check": "tsc --noEmit -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@turboflux/models": "*",
+    "@turboflux/platform": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.2",
+    "typescript": "^5.7.3"
+  }
+}

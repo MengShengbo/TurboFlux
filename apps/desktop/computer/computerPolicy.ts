@@ -4,7 +4,7 @@ import type {
   ComputerBounds,
   ComputerObservation,
   ComputerPoint,
-} from '@turboflux/agent-core/contracts'
+} from '@turboflux/contracts'
 
 const PROTECTED_BUNDLE_IDS = new Map<string, string>([
   ['com.apple.Terminal', 'Terminal cannot be controlled through Computer Use'],

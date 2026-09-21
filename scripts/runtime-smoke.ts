@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { NodeToolExecutor } from '../packages/agent-core/src/core/runtime/nodeToolExecutor'
+import { NodeToolExecutor } from '@turboflux/tools/nodeToolExecutor'
 
 const workspace = mkdtempSync(join(tmpdir(), 'turboflux-runtime-smoke-'))
 try {

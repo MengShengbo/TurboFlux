@@ -16,5 +16,5 @@ pre-commit:
 
 pre-push:
   jobs:
-    - name: typecheck
-      run: npm run type-check
+    - name: source checks
+      run: npm run lint && npm run type-check && npm run verify:boundary && npm run verify:architecture && npm run verify:workspace

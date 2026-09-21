@@ -1,4 +1,4 @@
-import type { TurboFluxConfig } from '@turboflux/agent-core/workbench'
+import type { TurboFluxConfig } from '@turboflux/workbench'
 import { fallbackTaskTitle, isPlaceholderTaskTitle } from './conversationPolicy'
 
 export interface TaskTitleGenerationInput {

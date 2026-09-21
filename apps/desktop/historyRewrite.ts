@@ -1,4 +1,4 @@
-import type { AgentTurn } from '@turboflux/agent-core/workbench'
+import type { AgentTurn } from '@turboflux/workbench'
 
 export interface HistoryRewriteProjection {
   retainedTurns: AgentTurn[]

@@ -15,9 +15,8 @@ import {
   computerActionRequiresHandoff,
   inferComputerActionSafetyClass,
   type AgentAttachment,
-  type McpClient,
-  type McpLocalToolResult,
-} from '@turboflux/agent-core/extensions'
+} from '@turboflux/contracts'
+import { type McpClient, type McpLocalToolResult } from '@turboflux/extensions'
 import type {
   ComputerActivitySnapshot,
   ComputerAppSnapshot,
@@ -37,7 +36,7 @@ import type {
   ComputerSystemSnapshot,
   ComputerToolOperation,
   ComputerWindowSnapshot,
-} from '@turboflux/agent-core/extensions'
+} from '@turboflux/contracts'
 import type {
   ComputerDriver,
   ComputerMouseButton,

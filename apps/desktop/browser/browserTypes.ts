@@ -36,6 +36,8 @@ export interface BrowserTab {
   crashed: boolean
   consoleEntries: BrowserConsoleEntry[]
   networkIssues: BrowserNetworkIssue[]
+  refScope: string
+  unresponsive: boolean
   observationEpoch: number
   elementRefs: Map<string, BrowserElementRefTarget>
   retention: BrowserTabRetention

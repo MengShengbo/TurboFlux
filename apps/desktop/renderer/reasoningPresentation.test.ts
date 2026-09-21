@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { WorkbenchModelOption } from '@turboflux/agent-core/workbench'
+import type { WorkbenchModelOption } from '@turboflux/workbench'
 import {
   buildReasoningOptions,
   effectiveReasoningConfig,

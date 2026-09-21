@@ -2,10 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { cpus, platform, arch, totalmem, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { projectConversationEvents } from '../packages/agent-core/src/application/conversations/conversationProjections'
-import { ConversationRepositoryV2 } from '../packages/agent-core/src/application/conversations/conversationRepositoryV2'
-import { stableConversationV2Id } from '../packages/agent-core/src/application/conversations/conversationV2Ids'
-import type { AnyConversationEventV2, ConversationRecordV2 } from '../packages/agent-core/src/application/conversations/conversationV2Types'
+import { projectConversationEvents } from '@turboflux/conversations/conversations/conversationProjections'
+import { ConversationRepositoryV2 } from '@turboflux/conversations/conversations/conversationRepositoryV2'
+import { persistedConversationFromProjectionV2 } from '@turboflux/conversations/conversations/conversationRuntimeRepositoryV2'
+import { stableConversationV2Id } from '@turboflux/conversations/conversations/conversationV2Ids'
+import type { AnyConversationEventV2, ConversationRecordV2, ConversationTranscriptProjectionV2 } from '@turboflux/conversations/conversations/conversationV2Types'
 import { captureGithubActionsProvenance } from './github-actions-provenance.mjs'
 import { sanitizeSourceEvidenceReport, writeSourceEvidenceReportAtomically } from './source-evidence-report.mjs'
 
@@ -16,6 +17,8 @@ const REPLAY_BUDGET_MS = 5_000
 const CATALOG_BUDGET_MS = 150
 const FIRST_PAGE_ITEM_COUNT = 10_000
 const FIRST_PAGE_BUDGET_MS = 500
+const RESTORE_TURN_COUNT = 8_000
+const RESTORE_BUDGET_MS = 2_000
 const qualification = process.argv.includes('--stable') ? 'stable' : 'development'
 
 function record(id: string, at: number): ConversationRecordV2 {
@@ -87,6 +90,35 @@ function replayFixture(): AnyConversationEventV2[] {
 
 function catalogFixture(): ConversationRecordV2[] {
   return Array.from({ length: CONVERSATION_COUNT }, (_, index) => record(`conversation-${String(index).padStart(5, '0')}`, index))
+}
+
+function runtimeRestoreFixture(): ConversationTranscriptProjectionV2 {
+  const conversationId = 'conversation-restore-benchmark'
+  const runId = 'run-restore-benchmark'
+  const projection: ConversationTranscriptProjectionV2 = {
+    conversation: record(conversationId, 0),
+    runs: [{ id: runId, conversationId, workspaceId: null, objective: 'Restore tool history', status: 'completed', startedAt: 0, updatedAt: RESTORE_TURN_COUNT * 5 }],
+    turns: [], items: [], timeline: [], artifacts: [], workspace: null, queuedInputIds: [], throughSeq: RESTORE_TURN_COUNT * 5,
+  }
+  for (let index = 0; index < RESTORE_TURN_COUNT; index += 1) {
+    const turnId = `turn-${index}`
+    const toolCallId = `tool-${index}`
+    const at = index * 5
+    projection.turns.push({ id: turnId, conversationId, runId, role: 'assistant', status: 'completed', createdAt: at, completedAt: at + 4 })
+    const base = { schemaVersion: 1 as const, conversationId, runId, turnId, status: 'completed' as const, createdAt: at + 1, updatedAt: at + 3 }
+    const items = [
+      { ...base, id: `message-${index}`, kind: 'assistant_message' as const, payload: { text: 'Recorded response' } },
+      { ...base, id: `call-${index}`, kind: 'tool_call' as const, payload: { toolCallId, toolName: 'read_file', arguments: { path: 'README.md' } } },
+      { ...base, id: `result-${index}`, kind: 'tool_result' as const, payload: { toolCallId, toolName: 'read_file', output: 'Recorded content', isError: false } },
+    ]
+    projection.items.push(...items)
+    projection.timeline.push(
+      { eventId: `${turnId}-start`, seq: at + 1, at, type: 'turn.started', turnId, runId },
+      ...items.map((item, offset) => ({ eventId: `${item.id}-created`, seq: at + offset + 2, at: at + offset + 1, type: 'item.created' as const, itemId: item.id, turnId, runId })),
+      { eventId: `${turnId}-end`, seq: at + 5, at: at + 4, type: 'turn.completed', turnId, runId },
+    )
+  }
+  return projection
 }
 
 function numericUuid(namespace: number, value: number): string {
@@ -202,6 +234,16 @@ try {
     throw new Error('Conversation V2 replay benchmark produced an inconsistent projection')
   }
 
+  const restoreProjection = runtimeRestoreFixture()
+  const restoreStartedAt = performance.now()
+  const restored = persistedConversationFromProjectionV2(restoreProjection, '/benchmark-workspace')
+  const restoreMs = performance.now() - restoreStartedAt
+  if (restored?.turns.length !== RESTORE_TURN_COUNT
+    || restored.canonicalEvents?.length !== RESTORE_TURN_COUNT * 5 + 2
+    || Object.keys(restored.workExecution?.runs[0]?.activities ?? {}).length !== RESTORE_TURN_COUNT) {
+    throw new Error('Conversation V2 runtime restoration lost recorded turns or tools')
+  }
+
   const records = qualification === 'stable' ? stableCatalogFixture() : catalogFixture()
   writeFileSync(join(temporaryRoot, 'catalog.json'), JSON.stringify({ schemaVersion: 1, records, updatedAt: Date.now() }))
   const eventsRoot = join(temporaryRoot, 'events')
@@ -255,6 +297,14 @@ try {
       budgetMs: REPLAY_BUDGET_MS,
       passed: replayMs < REPLAY_BUDGET_MS,
     },
+    runtimeRestore: {
+      turnCount: RESTORE_TURN_COUNT,
+      itemCount: restoreProjection.items.length,
+      eventCount: restored.canonicalEvents.length,
+      elapsedMs: Number(restoreMs.toFixed(2)),
+      budgetMs: RESTORE_BUDGET_MS,
+      passed: restoreMs < RESTORE_BUDGET_MS,
+    },
     catalog: {
       conversationCount: CONVERSATION_COUNT,
       profileEventCount: profileScale.eventCount,
@@ -276,6 +326,7 @@ try {
       passed: firstPageMs < FIRST_PAGE_BUDGET_MS && eventPageBytesRead < journalBytes,
     },
     passed: replayMs < REPLAY_BUDGET_MS
+      && restoreMs < RESTORE_BUDGET_MS
       && catalogMs < CATALOG_BUDGET_MS
       && firstPageMs < FIRST_PAGE_BUDGET_MS
       && eventPageBytesRead < journalBytes,
@@ -287,7 +338,7 @@ try {
     )
     : sanitizeSourceEvidenceReport(report)
   process.stdout.write(`${JSON.stringify(sanitizedReport, null, 2)}\n`)
-  if (!report.replay.passed || !report.catalog.passed || !report.firstPage.passed) process.exitCode = 1
+  if (!report.passed) process.exitCode = 1
 } catch {
   process.stderr.write('Conversation V2 benchmark failed\n')
   process.exitCode = 1

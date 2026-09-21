@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { WorkbenchApiConfigInput, WorkbenchModelOption, WorkbenchSettingsSnapshot } from '@turboflux/agent-core/workbench'
+import type { WorkbenchApiConfigInput, WorkbenchModelOption, WorkbenchSettingsSnapshot } from '@turboflux/workbench'
 import { apiConnectionFingerprint, apiModelsForProfile, apiProviderPreset, applyApiModel } from './apiSettingsModel'
 
 const profile: WorkbenchApiConfigInput = { id: 'main', name: 'Gateway', provider: 'custom', baseUrl: 'https://gateway.example/v1', model: 'gpt-current', contextWindow: 200_000, maxTokens: 16_384 }

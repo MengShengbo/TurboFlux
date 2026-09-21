@@ -1,28 +1,119 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "rootDir": "./packages/agent-core/src",
-    "outDir": "./dist",
-    "jsx": "react-jsx",
-    "sourceMap": true
+    "noEmit": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "paths": {
+      "@turboflux/agent-runtime": [
+        "./packages/agent-runtime/src/index.ts"
+      ],
+      "@turboflux/agent-runtime/*": [
+        "./packages/agent-runtime/src/*"
+      ],
+      "@turboflux/automations": [
+        "./packages/automations/src/index.ts"
+      ],
+      "@turboflux/automations/*": [
+        "./packages/automations/src/*"
+      ],
+      "@turboflux/contracts": [
+        "./packages/contracts/src/index.ts"
+      ],
+      "@turboflux/contracts/*": [
+        "./packages/contracts/src/*"
+      ],
+      "@turboflux/conversations": [
+        "./packages/conversations/src/index.ts"
+      ],
+      "@turboflux/conversations/*": [
+        "./packages/conversations/src/*"
+      ],
+      "@turboflux/extensions": [
+        "./packages/extensions/src/index.ts"
+      ],
+      "@turboflux/extensions/*": [
+        "./packages/extensions/src/*"
+      ],
+      "@turboflux/models": [
+        "./packages/models/src/index.ts"
+      ],
+      "@turboflux/models/*": [
+        "./packages/models/src/*"
+      ],
+      "@turboflux/platform": [
+        "./packages/platform/src/index.ts"
+      ],
+      "@turboflux/platform/*": [
+        "./packages/platform/src/*"
+      ],
+      "@turboflux/presentation": [
+        "./packages/presentation/src/index.ts"
+      ],
+      "@turboflux/presentation/*": [
+        "./packages/presentation/src/*"
+      ],
+      "@turboflux/profiles": [
+        "./packages/profiles/src/index.ts"
+      ],
+      "@turboflux/profiles/*": [
+        "./packages/profiles/src/*"
+      ],
+      "@turboflux/remote-protocol": [
+        "./packages/remote-protocol/src/index.ts"
+      ],
+      "@turboflux/remote-protocol/*": [
+        "./packages/remote-protocol/src/*"
+      ],
+      "@turboflux/renderer": [
+        "./packages/renderer/src/index.ts"
+      ],
+      "@turboflux/renderer/*": [
+        "./packages/renderer/src/*"
+      ],
+      "@turboflux/tools": [
+        "./packages/tools/src/index.ts"
+      ],
+      "@turboflux/tools/*": [
+        "./packages/tools/src/*"
+      ],
+      "@turboflux/workbench": [
+        "./packages/workbench/src/index.ts"
+      ],
+      "@turboflux/workbench/*": [
+        "./packages/workbench/src/*"
+      ],
+      "@turboflux/agent-core": [
+        "./packages/agent-core/src/kernel/index.ts"
+      ],
+      "@turboflux/agent-core/contracts": [
+        "./packages/agent-core/src/kernel/contracts.ts"
+      ],
+      "@turboflux/agent-core/runtime": [
+        "./packages/agent-core/src/kernel/runtime.ts"
+      ],
+      "@turboflux/agent-core/renderer": [
+        "./packages/agent-core/src/kernel/renderer.ts"
+      ],
+      "@turboflux/agent-core/workbench": [
+        "./packages/agent-core/src/kernel/workbench.ts"
+      ],
+      "@turboflux/agent-core/extensions": [
+        "./packages/agent-core/src/kernel/extensions.ts"
+      ]
+    }
   },
   "include": [
-    "packages/agent-core/src/kernel/**/*",
-    "packages/agent-core/src/application/**/*",
-    "packages/agent-core/src/core/**/*",
-    "packages/agent-core/src/platform/**/*",
-    "packages/agent-core/src/server/**/*",
-    "packages/agent-core/src/shared/**/*",
-    "packages/agent-core/src/state/**/*",
-    "packages/agent-core/src/tools/**/*"
+    "packages/*/src/**/*.ts",
+    "apps/model-proxy/src/**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    "dist",
-    "dist-desktop",
-    "packages/agent-core/src/desktop/**/*",
-    "packages/agent-core/src/**/*.test.ts",
-    "packages/agent-core/src/**/*.test.tsx",
-    "claude-code-reference"
+    "**/dist/**",
+    "**/*.test.ts",
+    "**/*.test.tsx"
   ]
 }

@@ -13,12 +13,12 @@ export interface BrowserRetainedTab {
   retention: 'transient' | 'deliverable' | 'handoff'
 }
 
-export function browserFrameRefPrefix(observationEpoch: number, frameIndex: number): string {
-  return `o${observationEpoch.toString(36)}-r${frameIndex.toString(36)}`
+export function browserFrameRefPrefix(observationEpoch: number, frameIndex: number, scope = ''): string {
+  return `o${observationEpoch.toString(36)}-${scope ? `${scope}-` : ''}r${frameIndex.toString(36)}`
 }
 
-export function isBrowserRefForEpoch(ref: string, observationEpoch: number): boolean {
-  return ref.startsWith(`o${observationEpoch.toString(36)}-`)
+export function isBrowserRefForEpoch(ref: string, observationEpoch: number, scope = ''): boolean {
+  return ref.startsWith(`o${observationEpoch.toString(36)}-${scope ? `${scope}-` : ''}`)
 }
 
 export function interleaveBrowserFrameElements<T>(

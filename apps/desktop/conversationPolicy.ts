@@ -1,4 +1,4 @@
-import { generatedConversationTitle } from '@turboflux/agent-core/renderer'
+import { generatedConversationTitle } from '@turboflux/presentation'
 
 export const NEW_TASK_TITLE = '新任务'
 

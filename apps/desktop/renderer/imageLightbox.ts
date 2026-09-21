@@ -1,3 +1,4 @@
+import { RenderLifetime } from '@turboflux/renderer'
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 3
 const ZOOM_STEP = 0.25
@@ -19,6 +20,7 @@ export interface ImageLightbox {
   open(items: ImageLightboxItem[], initialIndex?: number): void
   close(): void
   isOpen(): boolean
+  dispose(): void
 }
 
 export function clampImageZoom(value: number): number {
@@ -43,6 +45,7 @@ function lightboxIcon(name: 'back' | 'forward' | 'download' | 'close' | 'minus' 
 }
 
 export function createImageLightbox(options: ImageLightboxOptions): ImageLightbox {
+  const lifetime = new RenderLifetime()
   const root = document.createElement('section')
   root.className = 'image-lightbox'
   root.hidden = true
@@ -130,7 +133,7 @@ export function createImageLightbox(options: ImageLightboxOptions): ImageLightbo
     if (root.hidden) return
     root.classList.remove('visible')
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    window.setTimeout(() => {
+    lifetime.timeout(() => {
       root.hidden = true
       canvas.replaceChildren()
       items = []
@@ -159,7 +162,7 @@ export function createImageLightbox(options: ImageLightboxOptions): ImageLightbo
     event.preventDefault()
     setZoom(zoom + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP))
   }, { passive: false })
-  window.addEventListener('keydown', event => {
+  lifetime.listen(window, 'keydown', event => {
     if (root.hidden) return
     if (event.key === 'Escape') close()
     else if (event.key === 'ArrowLeft') move(-1)
@@ -178,11 +181,12 @@ export function createImageLightbox(options: ImageLightboxOptions): ImageLightbo
       items = [...nextItems]
       index = Math.min(items.length - 1, Math.max(0, initialIndex))
       root.hidden = false
-      requestAnimationFrame(() => root.classList.add('visible'))
+      lifetime.frame(() => root.classList.add('visible'))
       closeButton.focus()
       void render()
     },
     close,
     isOpen: () => !root.hidden,
+    dispose: () => { lifetime.dispose(); close(); root.remove() },
   }
 }

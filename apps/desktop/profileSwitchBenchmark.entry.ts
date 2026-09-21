@@ -7,7 +7,7 @@ import {
   configureActiveProfilePaths,
   InstallationProfileRegistry,
   type ProfileContext,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import { DesktopRuntimeHost } from './runtimeHost'
 import { switchDesktopProfile } from './profileSwitchCoordinator'
 import { captureGithubActionsProvenance } from '../../scripts/github-actions-provenance.mjs'

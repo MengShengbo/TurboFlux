@@ -53,10 +53,13 @@ function validateArchive(report, errors) {
 function validateConversations(report, errors) {
   rejectUnexpectedKeys(report, [
     'schemaVersion', 'provenance', 'qualification', 'generatedAt', 'command', 'environment',
-    'replay', 'catalog', 'firstPage', 'passed',
+    'replay', 'runtimeRestore', 'catalog', 'firstPage', 'passed',
   ], errors, 'conversation-v2 report')
   check(report.command === 'npm run perf:conversations-v2:stable', errors, 'conversation-v2 command is invalid')
   check(report.replay?.passed === true && report.replay?.eventCount === 100_000, errors, 'conversation-v2 replay evidence is incomplete')
+  check(report.runtimeRestore?.passed === true && report.runtimeRestore?.turnCount === 8_000
+    && Number.isFinite(report.runtimeRestore?.elapsedMs) && report.runtimeRestore.elapsedMs >= 0 && report.runtimeRestore.elapsedMs < 2_000,
+  errors, 'conversation-v2 runtime restoration evidence is incomplete or exceeds its budget')
   check(report.catalog?.passed === true && report.catalog?.conversationCount === 10_000 && report.catalog?.profileEventCount === 1_000_000, errors, 'conversation-v2 catalog evidence is below the Stable scale')
   check(report.firstPage?.passed === true && report.firstPage?.itemCount === 10_000 && report.firstPage?.bytesRead < report.firstPage?.journalBytes, errors, 'conversation-v2 first-page evidence is incomplete')
 }

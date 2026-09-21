@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { realpath, stat } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
@@ -24,11 +25,9 @@ import type {
   BrowserSystemSnapshot,
   BrowserTabSnapshot,
   BrowserViewportMode,
-  McpClient,
-  McpLocalToolResult,
-  McpToolCallOptions,
-} from '@turboflux/agent-core/extensions'
-import { validateBrowserNavigation } from './browserPolicy'
+} from '@turboflux/contracts'
+import type { McpClient, McpLocalToolResult, McpToolCallOptions } from '@turboflux/extensions'
+import { validateBrowserDestination, validateBrowserNavigation } from './browserPolicy'
 import {
   normalizeBrowserKey,
   normalizeBrowserTimeout,
@@ -53,7 +52,10 @@ import {
   isBrowserRefForEpoch,
   transientBrowserTabIds,
 } from './browserFrames'
-import { navigateBrowserDocument } from './browserNavigation'
+import { navigateBrowserDocument, waitForBrowserNavigation } from './browserNavigation'
+import { withBrowserDebugger } from './browserDebugger'
+import { browserDOMScript } from './browserDom'
+import { BrowserRuntime, BrowserOperationError, browserFailure } from './browserRuntime'
 
 const BACKGROUND_BROWSER_BOUNDS = { x: 0, y: 0, width: 1280, height: 800 }
 const MAX_OBSERVED_TEXT = 10_000
@@ -70,6 +72,11 @@ interface FrameObservationResult {
   elements: BrowserObservedElement[]
   viewport: { width: number; height: number; scrollX: number; scrollY: number }
   truncated: boolean
+}
+
+interface BrowserTargetProbe {
+  name: string; role: string; visible: boolean; enabled: boolean; editable: boolean; receivesEvents: boolean
+  blocker?: string; href?: string; value?: string; checked: boolean; x: number; y: number; bounds: BrowserBounds
 }
 
 interface ObservedFrame {
@@ -115,6 +122,7 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
   private readonly operations = new SerializedOperationCoordinator(BROWSER_OPERATION_ABORT_MESSAGE)
   private stateEmitTimer: NodeJS.Timeout | null = null
   private destroyed = false
+  private readonly runtime = new BrowserRuntime()
 
   constructor(
     private readonly window: BrowserWindow,
@@ -183,13 +191,18 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
   }
 
   setBounds(bounds: BrowserBounds): BrowserSystemSnapshot {
+    if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) throw new Error('Browser bounds must be finite numbers')
     const contentBounds = this.window.getContentBounds()
+    const x = Math.max(0, Math.min(contentBounds.width, Math.round(bounds.x)))
+    const y = Math.max(0, Math.min(contentBounds.height, Math.round(bounds.y)))
     const nextBounds = {
-      x: Math.max(0, Math.min(contentBounds.width, Math.round(bounds.x))),
-      y: Math.max(0, Math.min(contentBounds.height, Math.round(bounds.y))),
-      width: Math.max(0, Math.min(contentBounds.width, Math.round(bounds.width))),
-      height: Math.max(0, Math.min(contentBounds.height, Math.round(bounds.height))),
+      x,
+      y,
+      width: Math.max(0, Math.min(contentBounds.width - x, Math.round(bounds.width))),
+      height: Math.max(0, Math.min(contentBounds.height - y, Math.round(bounds.height))),
     }
+    nextBounds.width = Math.min(nextBounds.width, contentBounds.width - nextBounds.x)
+    nextBounds.height = Math.min(nextBounds.height, contentBounds.height - nextBounds.y)
     if (sameBounds(this.bounds, nextBounds)) return this.getSnapshot()
     this.bounds = nextBounds
     this.layoutActiveView()
@@ -197,8 +210,42 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
   }
 
   async createTab(address = 'about:blank', signal?: AbortSignal): Promise<BrowserSystemSnapshot> {
+    this.runtime.assertActive()
+    assertBrowserOperationActive(signal)
+    if (this.destroyed) throw new Error('Browser system has been destroyed')
+    validateBrowserNavigation(address)
+    if (this.tabs.size >= 32) throw new BrowserOperationError('tab-limit', 'Browser tab limit reached (32); close unused tabs first')
     this.ensureSession()
+    const previousActiveTabId = this.activeTabId
     const id = `browser-tab-${this.nextTabId++}`
+    const view = this.createView()
+    const tab: BrowserTab = {
+      id,
+      view,
+      title: '新标签页',
+      url: 'about:blank',
+      loading: false,
+      crashed: false,
+      consoleEntries: [],
+      networkIssues: [],
+      refScope: randomUUID().replaceAll('-', ''),
+      unresponsive: false,
+      observationEpoch: 0,
+      elementRefs: new Map(),
+      retention: 'transient',
+    }
+    this.tabs.set(id, tab)
+    this.bindTab(tab)
+    this.activeTabId = id
+    if (this.visible && this.presentationEnabled) this.attachActiveView()
+    try { await this.navigate(address, id, signal) } catch (error) {
+      if ((isOperationAbort(error) || signal?.aborted) && this.tabs.has(id)) this.removeTab(tab, previousActiveTabId || undefined)
+      throw error
+    }
+    return this.getSnapshot()
+  }
+
+  private createView(): WebContentsView {
     const view = new WebContentsView({
       webPreferences: {
         partition: this.partition,
@@ -214,25 +261,29 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     })
     view.setBackgroundColor('#ffffff')
     view.setBounds(BACKGROUND_BROWSER_BOUNDS)
-    const tab: BrowserTab = {
-      id,
-      view,
-      title: '新标签页',
-      url: 'about:blank',
-      loading: false,
-      crashed: false,
-      consoleEntries: [],
-      networkIssues: [],
-      observationEpoch: 0,
-      elementRefs: new Map(),
-      retention: 'transient',
-    }
-    this.tabs.set(id, tab)
+    return view
+  }
+
+  private rebuildTabView(tab: BrowserTab) {
+    this.runtime.assertActive()
+    const oldView = tab.view
+    const history = oldView.webContents.navigationHistory
+    // Preserve URL history, not serialized POST/form state that could resubmit data.
+    const entries = history.getAllEntries().map(({ url, title }) => ({ url, title }))
+    const index = history.getActiveIndex()
+    const bounds = oldView.getBounds()
+    const replacement = this.createView()
+    replacement.setBounds(bounds)
+    this.detachView(oldView)
+    tab.view = replacement
+    tab.refScope = randomUUID().replaceAll('-', '')
+    tab.crashed = false
+    tab.unresponsive = false
+    this.invalidateObservation(tab)
     this.bindTab(tab)
-    this.activeTabId = id
-    if (this.visible && this.presentationEnabled) this.attachActiveView()
-    await this.navigate(address, id, signal)
-    return this.getSnapshot()
+    if (this.visible && this.presentationEnabled && this.activeTabId === tab.id) this.attachActiveView()
+    if (!oldView.webContents.isDestroyed()) oldView.webContents.close({ waitForBeforeUnload: false })
+    return { entries, index }
   }
 
   activateTab(tabId: string): BrowserSystemSnapshot {
@@ -245,15 +296,20 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
 
   async closeTab(tabId?: string): Promise<BrowserSystemSnapshot> {
     const target = this.requireTab(tabId)
+    this.removeTab(target)
+    return this.getSnapshot()
+  }
+
+  private removeTab(target: BrowserTab, preferredActiveTabId?: string): void {
     const wasActive = target.id === this.activeTabId
     this.detachView(target.view)
     this.tabs.delete(target.id)
-    target.view.webContents.close({ waitForBeforeUnload: false })
-    if (wasActive) this.activeTabId = this.tabs.keys().next().value || null
+    this.invalidateObservation(target)
+    if (!target.view.webContents.isDestroyed()) target.view.webContents.close({ waitForBeforeUnload: false })
+    if (wasActive) this.activeTabId = preferredActiveTabId && this.tabs.has(preferredActiveTabId) ? preferredActiveTabId : this.tabs.keys().next().value || null
     if (!this.activeTabId) this.visible = false
     else if (this.visible && this.presentationEnabled) this.attachActiveView()
     this.emitState()
-    return this.getSnapshot()
   }
 
   async navigate(address: string, tabId?: string, signal?: AbortSignal): Promise<BrowserSystemSnapshot> {
@@ -267,81 +323,70 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
       this.emit({ type: 'blocked-navigation', url: address, reason })
       throw error
     }
+    this.invalidateObservation(tab)
+    if (tab.crashed || tab.unresponsive) {
+      const history = this.rebuildTabView(tab)
+      const entries = [...history.entries.slice(0, history.index + 1), { url: target.href, title: target.href }]
+      await waitForBrowserNavigation(tab.view.webContents, () => tab.view.webContents.navigationHistory.restore({ entries }), signal ?? this.runtime.signal)
+    } else {
+      await navigateBrowserDocument(tab.view.webContents, target.href, signal ?? this.runtime.signal)
+    }
     tab.crashed = false
-    await navigateBrowserDocument(tab.view.webContents, target.href, signal)
+    tab.unresponsive = false
+    this.updateTab(tab)
     this.lastError = undefined
     this.emitState()
     return this.getSnapshot()
   }
 
-  goBack(tabId?: string): BrowserSystemSnapshot {
+  async goBack(tabId?: string): Promise<BrowserSystemSnapshot> {
     const tab = this.requireTab(tabId)
-    if (tab.view.webContents.navigationHistory.canGoBack()) tab.view.webContents.navigationHistory.goBack()
+    if (tab.view.webContents.navigationHistory.canGoBack()) {
+      this.invalidateObservation(tab)
+      await waitForBrowserNavigation(tab.view.webContents, () => tab.view.webContents.navigationHistory.goBack(), this.runtime.signal)
+    }
+    this.updateTab(tab)
     return this.getSnapshot()
   }
 
-  goForward(tabId?: string): BrowserSystemSnapshot {
+  async goForward(tabId?: string): Promise<BrowserSystemSnapshot> {
     const tab = this.requireTab(tabId)
-    if (tab.view.webContents.navigationHistory.canGoForward()) tab.view.webContents.navigationHistory.goForward()
+    if (tab.view.webContents.navigationHistory.canGoForward()) {
+      this.invalidateObservation(tab)
+      await waitForBrowserNavigation(tab.view.webContents, () => tab.view.webContents.navigationHistory.goForward(), this.runtime.signal)
+    }
+    this.updateTab(tab)
     return this.getSnapshot()
   }
 
-  reload(tabId?: string): BrowserSystemSnapshot {
-    this.requireTab(tabId).view.webContents.reload()
+  async reload(tabId?: string): Promise<BrowserSystemSnapshot> {
+    const tab = this.requireTab(tabId)
+    this.invalidateObservation(tab)
+    if (tab.crashed || tab.unresponsive) {
+      const history = this.rebuildTabView(tab)
+      if (history.entries.length) {
+        await waitForBrowserNavigation(tab.view.webContents, () => tab.view.webContents.navigationHistory.restore(history), this.runtime.signal)
+      } else await navigateBrowserDocument(tab.view.webContents, tab.url, this.runtime.signal)
+    } else await waitForBrowserNavigation(tab.view.webContents, () => tab.view.webContents.reload(), this.runtime.signal)
+    tab.crashed = false
+    tab.unresponsive = false
+    this.updateTab(tab)
     return this.getSnapshot()
   }
 
   async observe(tabId?: string, maxElements = MAX_OBSERVED_ELEMENTS): Promise<BrowserObservation> {
     const tab = this.requireTab(tabId)
+    return this.retryObservation(() => this.observeOnce(tab.id, maxElements))
+  }
+
+  private async observeOnce(tabId?: string, maxElements = MAX_OBSERVED_ELEMENTS): Promise<BrowserObservation> {
+    const tab = this.requireTab(tabId)
     const observationPrefix = this.nextObservationPrefix(tab)
     const cap = Math.max(1, Math.min(MAX_OBSERVED_ELEMENTS, Math.floor(maxElements)))
-    const observedFrames = await this.observeFrames(tab, (frame, frameIndex) => {
-      const refPrefix = browserFrameRefPrefix(tab.observationEpoch, frameIndex)
-      return frame.executeJavaScript(`(() => {
-        const visible = element => {
-          const style = getComputedStyle(element)
-          const rect = element.getBoundingClientRect()
-          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0
-        }
-        const roleFor = element => element.getAttribute('role') || ({ A: 'link', BUTTON: 'button', INPUT: element.type || 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', SUMMARY: 'button' }[element.tagName] || element.tagName.toLowerCase())
-        const nameFor = element => (element.getAttribute('aria-label') || element.getAttribute('title') || element.innerText || element.getAttribute('placeholder') || element.getAttribute('alt') || element.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 240)
-        const descriptionFor = element => {
-          if (element.tagName === 'A') return element.href || ''
-          if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA') return [element.type, element.placeholder].filter(Boolean).join(' · ')
-          return ''
-        }
-        const selector = 'a[href],button,input,textarea,select,summary,canvas,[role="button"],[role="link"],[role="textbox"],[role="application"],[contenteditable="true"]'
-        const candidates = [...document.querySelectorAll(selector)].filter(visible)
-        const elements = candidates.slice(0, ${cap}).map((element, index) => {
-          const ref = ${JSON.stringify(refPrefix)} + '-e' + (index + 1)
-          element.dataset.turbofluxRef = ref
-          const rect = element.getBoundingClientRect()
-          const isPassword = element instanceof HTMLInputElement && element.type === 'password'
-          const value = isPassword ? undefined : element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement ? String(element.value || '').slice(0, 240) : undefined
-          const options = element instanceof HTMLSelectElement ? [...element.options].slice(0, 80).map(option => option.value || option.text).filter(Boolean) : undefined
-          return {
-            ref,
-            role: roleFor(element),
-            name: nameFor(element),
-            description: descriptionFor(element).slice(0, 300),
-            disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true'),
-            checked: element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(element.type) ? element.checked : undefined,
-            value,
-            options,
-            bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-          }
-        })
-        const rawText = (document.body?.innerText || '').replace(/\\n{3,}/g, '\\n\\n').trim()
-        return {
-          title: document.title || '',
-          url: location.href,
-          text: rawText.slice(0, ${MAX_OBSERVED_TEXT}),
-          elements,
-          viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY },
-          truncated: rawText.length > ${MAX_OBSERVED_TEXT} || candidates.length > ${cap},
-        }
-      })()`, true) as Promise<FrameObservationResult>
-    })
+    const epoch = tab.observationEpoch
+    const observedFrames = await this.observeFrames(tab, (frame, frameIndex) => this.evaluateDOM<FrameObservationResult>(tab, frame,
+      `return dom.observe(${JSON.stringify(browserFrameRefPrefix(epoch, frameIndex, tab.refScope))}, ${cap})`))
+    if (tab.observationEpoch !== epoch) throw new BrowserOperationError('page-changed', 'Page changed while observing; observe the page again')
     const selected = interleaveBrowserFrameElements(
       observedFrames.filter(frame => frame.result).map(frame => ({ frameIndex: frame.frameIndex, elements: frame.result!.elements })),
       cap,
@@ -376,69 +421,38 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     }
   }
 
-  async find(query: string, role?: string, maxResults = 12, tabId?: string): Promise<{ tabId: string; observationId: string; query: string; matches: BrowserObservation['elements']; frames: BrowserFrameSnapshot[]; truncated: boolean }> {
+  async find(query: string, role?: string, maxResults = 12, tabId?: string) {
+    const tab = this.requireTab(tabId)
+    return this.retryObservation(() => this.findOnce(query, role, maxResults, tab.id), result => result.matches.length === 0)
+  }
+
+  private async retryObservation<T>(read: () => Promise<T>, incomplete?: (result: T) => boolean): Promise<T> {
+    const deadline = Date.now() + 2_000
+    for (;;) {
+      this.runtime.assertActive()
+      try {
+        const result = await read()
+        if (!incomplete?.(result) || Date.now() >= deadline) return result
+      } catch (error) {
+        this.runtime.assertActive()
+        const retryable = error instanceof BrowserOperationError && error.code === 'page-changed'
+          || /frame.*(disposed|detached)|execution context.*destroyed|document.*loading/i.test(error instanceof Error ? error.message : '')
+        if (!retryable || Date.now() >= deadline) throw error
+      }
+      await this.runtime.delay(80)
+    }
+  }
+
+  private async findOnce(query: string, role?: string, maxResults = 12, tabId?: string): Promise<{ tabId: string; observationId: string; query: string; matches: BrowserObservation['elements']; frames: BrowserFrameSnapshot[]; truncated: boolean }> {
     const tab = this.requireTab(tabId)
     const normalizedQuery = query.trim()
     if (!normalizedQuery) throw new Error('Browser find requires a query')
     const observationPrefix = this.nextObservationPrefix(tab)
     const cap = Math.max(1, Math.min(30, Math.floor(maxResults)))
-    const observedFrames = await this.observeFrames(tab, (frame, frameIndex) => {
-      const refPrefix = browserFrameRefPrefix(tab.observationEpoch, frameIndex)
-      return frame.executeJavaScript(`(() => {
-      const visible = element => {
-        const style = getComputedStyle(element)
-        const rect = element.getBoundingClientRect()
-        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0
-      }
-      const roleFor = element => element.getAttribute('role') || ({ A: 'link', BUTTON: 'button', INPUT: element.type || 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', SUMMARY: 'button' }[element.tagName] || element.tagName.toLowerCase())
-      const nameFor = element => (element.getAttribute('aria-label') || element.getAttribute('title') || element.innerText || element.getAttribute('placeholder') || element.getAttribute('alt') || element.getAttribute('name') || '').replace(/\\s+/g, ' ').trim().slice(0, 240)
-      const selector = 'a[href],button,input,textarea,select,summary,canvas,[role="button"],[role="link"],[role="textbox"],[role="application"],[contenteditable="true"]'
-      const query = ${JSON.stringify(normalizedQuery.toLocaleLowerCase())}
-      const terms = query.split(/\\s+/).filter(Boolean)
-      const requestedRole = ${JSON.stringify(role?.trim().toLocaleLowerCase() || '')}
-      const candidates = [...document.querySelectorAll(selector)].filter(visible)
-      const rankedMatches = candidates.map(element => {
-          const elementRole = roleFor(element)
-          const name = nameFor(element)
-          const description = element.tagName === 'A' ? element.href || '' : element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? [element.type, element.placeholder].filter(Boolean).join(' · ') : ''
-          const haystack = [name, description, elementRole, element.getAttribute('aria-describedby') || ''].join(' ').toLocaleLowerCase()
-          const rect = element.getBoundingClientRect()
-          const inViewport = rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth
-          const exact = name.toLocaleLowerCase() === query
-          const starts = name.toLocaleLowerCase().startsWith(query)
-          return { element, elementRole, name, description, rect, inViewport, exact, starts, matches: terms.every(term => haystack.includes(term)) }
-        })
-        .filter(item => item.matches && (!requestedRole || item.elementRole.toLocaleLowerCase() === requestedRole))
-        .sort((left, right) => Number(right.exact) - Number(left.exact) || Number(right.starts) - Number(left.starts) || Number(right.inViewport) - Number(left.inViewport))
-      const matches = rankedMatches.slice(0, ${cap})
-        .map((item, index) => {
-          const ref = ${JSON.stringify(refPrefix)} + '-f' + (index + 1)
-          item.element.dataset.turbofluxRef = ref
-          const isPassword = item.element instanceof HTMLInputElement && item.element.type === 'password'
-          const value = isPassword ? undefined : item.element instanceof HTMLInputElement || item.element instanceof HTMLTextAreaElement || item.element instanceof HTMLSelectElement ? String(item.element.value || '').slice(0, 240) : undefined
-          const options = item.element instanceof HTMLSelectElement ? [...item.element.options].slice(0, 80).map(option => option.value || option.text).filter(Boolean) : undefined
-          return {
-            ref,
-            role: item.elementRole,
-            name: item.name,
-            description: item.description.slice(0, 300),
-            disabled: Boolean(item.element.disabled || item.element.getAttribute('aria-disabled') === 'true'),
-            checked: item.element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(item.element.type) ? item.element.checked : undefined,
-            value,
-            options,
-            bounds: { x: Math.round(item.rect.x), y: Math.round(item.rect.y), width: Math.round(item.rect.width), height: Math.round(item.rect.height) },
-          }
-        })
-      return {
-        title: document.title || '',
-        url: location.href,
-        text: '',
-        elements: matches,
-        viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY },
-        truncated: rankedMatches.length > matches.length,
-      }
-    })()`, true) as Promise<FrameObservationResult>
-    })
+    const epoch = tab.observationEpoch
+    const observedFrames = await this.observeFrames(tab, (frame, frameIndex) => this.evaluateDOM<FrameObservationResult>(tab, frame,
+      `return dom.observe(${JSON.stringify(browserFrameRefPrefix(epoch, frameIndex, tab.refScope))}, ${cap}, ${JSON.stringify(normalizedQuery)}, ${JSON.stringify(role || '')})`))
+    if (tab.observationEpoch !== epoch) throw new BrowserOperationError('page-changed', 'Page changed while finding elements; observe the page again')
     const selected = interleaveBrowserFrameElements(
       observedFrames.filter(frame => frame.result).map(frame => ({ frameIndex: frame.frameIndex, elements: frame.result!.elements })),
       cap,
@@ -465,221 +479,170 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     }
   }
 
-  async click(ref: string, clickCount = 1, tabId?: string): Promise<{ clicked: string; clickCount: number; delivered: boolean; mode: 'native' | 'dom-fallback' | 'dom-frame'; frame: BrowserFrameSnapshot; targetUrl?: string; openedTab?: BrowserTabSnapshot; before: { title: string; url: string }; after: { title: string; url: string; loading: boolean }; changed: boolean }> {
+  async click(ref: string, clickCount = 1, tabId?: string) {
     const tab = this.requireTab(tabId)
+    const target = await this.prepareTarget(tab, ref, { pointer: true })
     const targetRef = this.requireCurrentRef(tab, ref)
-    const safeRef = targetRef.ref
     const targetFrame = this.frameSnapshot(targetRef.frame, targetRef.isMainFrame, true, 1)
     const count = clickCount === 2 ? 2 : 1
     const before = { title: tab.title, url: tab.url }
     const tabsBefore = new Set(this.tabs.keys())
-    const probeKey = `__turbofluxClickProbe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`
-    let mode: 'native' | 'dom-fallback' | 'dom-frame'
-    let delivered: boolean
-    let target: { label: string; href?: string; x?: number; y?: number }
+    let mode: 'native' | 'dom-frame' = 'native'
+    // A dispatched action is never replayed through a second backend.
+    this.invalidateObservation(tab)
     if (!targetRef.isMainFrame) {
       mode = 'dom-frame'
-      target = await targetRef.frame.executeJavaScript(`(() => {
-        const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-        if (!element) throw new Error('Element ref is stale; observe the page again')
-        if (element.disabled || element.getAttribute('aria-disabled') === 'true') throw new Error('Element is disabled')
-        element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
-        const label = (element.getAttribute('aria-label') || element.innerText || element.getAttribute('title') || element.tagName).trim().slice(0, 240)
-        const href = element instanceof HTMLAnchorElement ? element.href || undefined : undefined
+      await this.evaluateDOM(tab, targetRef.frame, `
+        const element = dom.resolve(${JSON.stringify(targetRef.ref)})
+        if (!dom.probe(${JSON.stringify(targetRef.ref)}).enabled) throw new Error('Element is disabled')
         element.click()
-        if (${count} === 2) {
+        if (${count} === 2 && element.isConnected) {
           element.click()
           element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window, detail: 2 }))
         }
-        return { label, href }
-      })()`, true) as { label: string; href?: string }
-      await new Promise(resolveWait => setTimeout(resolveWait, 260))
-      delivered = true
+      `)
     } else {
-      mode = 'native'
-      target = await targetRef.frame.executeJavaScript(`(() => {
-        const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-        if (!element) throw new Error('Element ref is stale; observe the page again')
-        if (element.disabled || element.getAttribute('aria-disabled') === 'true') throw new Error('Element is disabled')
-        element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
-        window[${JSON.stringify(probeKey)}] = false
-        element.addEventListener('click', () => { window[${JSON.stringify(probeKey)}] = true }, { capture: true, once: true })
-        const rect = element.getBoundingClientRect()
-        return {
-          label: (element.getAttribute('aria-label') || element.innerText || element.getAttribute('title') || element.tagName).trim().slice(0, 240),
-          href: element instanceof HTMLAnchorElement ? element.href || undefined : undefined,
-          x: Math.round(rect.x + rect.width / 2),
-          y: Math.round(rect.y + rect.height / 2),
+      const point = await this.validatePoint(tab, target.x, target.y)
+      const events: Array<Record<string, unknown>> = [{ type: 'mouseMoved', ...point }]
+      for (let index = 1; index <= count; index++) {
+        events.push({ type: 'mousePressed', button: 'left', clickCount: index, ...point },
+          { type: 'mouseReleased', button: 'left', clickCount: index, ...point })
+      }
+      await this.dispatchMouseSequence(tab, events, async () => {
+        const current = await this.evaluateDOM<BrowserTargetProbe>(tab, targetRef.frame, `return dom.probe(${JSON.stringify(targetRef.ref)})`)
+        if (!current.visible || !current.enabled || !current.receivesEvents || Math.abs(current.x - target.x) > 0.5 || Math.abs(current.y - target.y) > 0.5) {
+          throw new BrowserOperationError('not-actionable', 'Target changed after pointer movement; inspect the current page before clicking')
         }
-      })()`, true) as { label: string; href?: string; x: number; y: number }
-      const point = this.validatePoint(tab, target.x!, target.y!)
-      await this.dispatchMouseSequence(tab, [
-        { type: 'mouseMoved', ...point },
-        { type: 'mousePressed', button: 'left', clickCount: count, ...point },
-        { type: 'mouseReleased', button: 'left', clickCount: count, ...point },
-      ])
-      await new Promise(resolveWait => setTimeout(resolveWait, 180))
-      try {
-        delivered = await targetRef.frame.executeJavaScript(`Boolean(window[${JSON.stringify(probeKey)}])`, true) as boolean
-      } catch {
-        delivered = tab.loading || tab.view.webContents.getURL() !== before.url
-      }
-      if (!delivered) {
-        mode = 'dom-fallback'
-        await targetRef.frame.executeJavaScript(`(() => {
-          const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-          if (!element) throw new Error('Element ref is stale; observe the page again')
-          element.click()
-        })()`, true)
-        await new Promise(resolveWait => setTimeout(resolveWait, 260))
-        delivered = true
-      }
+      })
     }
     this.updateTab(tab)
     const opened = [...this.tabs.values()].find(candidate => !tabsBefore.has(candidate.id))
     if (opened) this.updateTab(opened)
     const followedTab = opened || tab
     const after = { title: followedTab.title, url: followedTab.url, loading: followedTab.loading }
-    try {
-      if (targetRef.isMainFrame) await targetRef.frame.executeJavaScript(`delete window[${JSON.stringify(probeKey)}]`, true)
-    } catch {}
-    this.invalidateObservation(tab)
     return {
-      clicked: target.label,
-      clickCount: count,
-      delivered,
-      mode,
-      frame: targetFrame,
-      targetUrl: target.href,
-      openedTab: opened ? this.tabSnapshot(opened) : undefined,
-      before,
-      after,
+      clicked: target.name, clickCount: count, dispatched: true, mode, frame: targetFrame,
+      targetUrl: target.href, openedTab: opened ? this.tabSnapshot(opened) : undefined, before, after,
       changed: before.url !== after.url || before.title !== after.title || after.loading || Boolean(opened),
+      verification: 'required', next: 'Wait for the expected response, then observe or assert it. Dispatch alone does not prove completion.',
     }
   }
 
   async type(ref: string, text: string, submit = false, tabId?: string): Promise<{ filled: string; submitted: boolean }> {
     const tab = this.requireTab(tabId)
+    await this.prepareTarget(tab, ref, { editable: true })
     const targetRef = this.requireCurrentRef(tab, ref)
     const safeRef = targetRef.ref
-    const result = await (targetRef.frame.executeJavaScript(`(() => {
-      const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-      if (!element) throw new Error('Element ref is stale; observe the page again')
-      if (element instanceof HTMLInputElement && element.type === 'password') throw new Error('Password fields must be filled manually')
-      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element.isContentEditable)) throw new Error('Element is not editable')
-      element.focus()
-      const value = ${JSON.stringify(text)}
-      if (element.isContentEditable) element.textContent = value
-      else {
-        const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
-        const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
-        if (setter) setter.call(element, value)
-        else element.value = value
+    try {
+      const result = await (this.evaluateDOM(tab, targetRef.frame, `
+        const element = dom.resolve(${JSON.stringify(safeRef)})
+        if (!element) throw new Error('Element ref is stale; observe the page again')
+        if (element instanceof HTMLInputElement && element.type === 'password') throw new Error('Password fields must be filled manually')
+        if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element.isContentEditable)) throw new Error('Element is not editable')
+        const state = dom.probe(${JSON.stringify(safeRef)})
+        if (!state.enabled || !state.editable) throw new Error('Element is disabled or not editable')
+        element.focus()
+        const value = ${JSON.stringify(text)}
+        if (element.isContentEditable) element.textContent = value
+        else {
+          const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+          const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
+          if (setter) setter.call(element, value)
+          else element.value = value
+        }
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }))
+        element.dispatchEvent(new Event('change', { bubbles: true }))
+        if ((element.isContentEditable ? element.textContent : element.value) !== value) throw new Error('Page did not retain the requested value; inspect before retrying')
+        const form = ${submit === true} ? element.closest('form') : null
+        if (form instanceof HTMLFormElement) form.requestSubmit()
+        return { filled: element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.getAttribute('name') || element.tagName, submitted: Boolean(form) }
+      `) as Promise<{ filled: string; submitted: boolean }>)
+      if (submit && !result.submitted) {
+        await this.press('Enter', safeRef, [], tabId)
+        result.submitted = true
       }
-      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }))
-      element.dispatchEvent(new Event('change', { bubbles: true }))
-      const form = ${submit === true} ? element.closest('form') : null
-      if (form instanceof HTMLFormElement) form.requestSubmit()
-      return { filled: element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.getAttribute('name') || element.tagName, submitted: Boolean(form) }
-    })()`, true) as Promise<{ filled: string; submitted: boolean }>)
-    if (submit && !result.submitted) {
-      await this.press('Enter', safeRef, [], tabId)
-      result.submitted = true
+      return result
+    } finally {
+      this.invalidateObservation(tab)
     }
-    this.invalidateObservation(tab)
-    return result
   }
 
   async press(key: string, ref?: string, modifiers: string[] = [], tabId?: string): Promise<{ key: string; modifiers: string[] }> {
     const tab = this.requireTab(tabId)
-    let keyFrame = tab.view.webContents.mainFrame
-    if (ref) {
-      const targetRef = this.requireCurrentRef(tab, ref)
-      const safeRef = targetRef.ref
-      keyFrame = targetRef.frame
-      await keyFrame.executeJavaScript(`(() => {
-        const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-        if (!element) throw new Error('Element ref is stale; observe the page again')
-        element.focus()
-      })()`, true)
-    }
     const keyCode = normalizeBrowserKey(key)
-    const normalizedModifiers = [...new Set(modifiers.filter(value => ['shift', 'control', 'alt', 'meta'].includes(value)))]
-      .slice(0, 4) as Array<'shift' | 'control' | 'alt' | 'meta'>
-    const modifierMask = normalizedModifiers.reduce((mask, modifier) => mask | ({ alt: 1, control: 2, meta: 4, shift: 8 } as const)[modifier], 0)
-    const keyMetadata = ({
-      Up: { key: 'ArrowUp', code: 'ArrowUp', windowsVirtualKeyCode: 38 },
-      Down: { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 },
-      Left: { key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 },
-      Right: { key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 },
-      Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 },
-      Space: { key: ' ', code: 'Space', windowsVirtualKeyCode: 32 },
-    } as Record<string, { key: string; code: string; windowsVirtualKeyCode?: number }>)[keyCode] || { key: keyCode, code: keyCode }
-    tab.view.webContents.focus()
-    await new Promise(resolveWait => setTimeout(resolveWait, 20))
-    const probeKey = `__turbofluxKeyProbe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`
-    await keyFrame.executeJavaScript(`window[${JSON.stringify(probeKey)}] = false; window.addEventListener('keydown', () => { window[${JSON.stringify(probeKey)}] = true }, { capture: true, once: true })`, true)
-    const debuggerApi = tab.view.webContents.debugger
-    const attachedHere = !debuggerApi.isAttached()
-    try {
-      if (attachedHere) debuggerApi.attach('1.3')
-      await debuggerApi.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...keyMetadata, modifiers: modifierMask })
-      await debuggerApi.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...keyMetadata, modifiers: modifierMask })
-    } catch {
-      tab.view.webContents.focus()
-      tab.view.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers: normalizedModifiers })
-      tab.view.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers: normalizedModifiers })
-    } finally {
-      if (attachedHere && debuggerApi.isAttached()) debuggerApi.detach()
+    const normalizedModifiers = [...new Set(modifiers.filter(value => ['shift', 'control', 'alt', 'meta'].includes(value)))].slice(0, 4)
+    if (ref) {
+      await this.prepareTarget(tab, ref)
+      const target = this.requireCurrentRef(tab, ref)
+      await this.evaluateDOM(tab, target.frame, `
+        const element = dom.resolve(${JSON.stringify(target.ref)})
+        element.focus()
+        if (element.getRootNode().activeElement !== element) throw new Error('Element could not receive keyboard focus')
+      `)
     }
-    const delivered = await keyFrame.executeJavaScript(`Boolean(window[${JSON.stringify(probeKey)}])`, true) as boolean
-    if (!delivered) {
-      await keyFrame.executeJavaScript(`(() => {
-        const target = document.activeElement || document
-        const init = { key: ${JSON.stringify(keyMetadata.key)}, code: ${JSON.stringify(keyMetadata.code)}, bubbles: true, cancelable: true }
-        target.dispatchEvent(new KeyboardEvent('keydown', init))
-        target.dispatchEvent(new KeyboardEvent('keyup', init))
-      })()`, true)
+    const keys: Record<string, [string, number]> = {
+      Up: ['ArrowUp', 38], Down: ['ArrowDown', 40], Left: ['ArrowLeft', 37], Right: ['ArrowRight', 39],
+      Enter: ['Enter', 13], Space: [' ', 32], Tab: ['Tab', 9], Escape: ['Escape', 27],
+      Home: ['Home', 36], End: ['End', 35], PageUp: ['PageUp', 33], PageDown: ['PageDown', 34], Backspace: ['Backspace', 8], Delete: ['Delete', 46],
     }
-    await keyFrame.executeJavaScript(`delete window[${JSON.stringify(probeKey)}]`, true)
+    const [nativeKey, keyNumber] = keys[keyCode]
+    const modifierMask = normalizedModifiers.reduce((mask, modifier) => mask | ({ alt: 1, control: 2, meta: 4, shift: 8 }[modifier] || 0), 0)
+    const metadata = { key: nativeKey, code: keyCode === 'Space' ? 'Space' : nativeKey, windowsVirtualKeyCode: keyNumber, modifiers: modifierMask }
+    const text = modifierMask & 7 ? undefined : keyCode === 'Enter' ? '\r' : keyCode === 'Space' ? ' ' : undefined
     this.invalidateObservation(tab)
+    tab.view.webContents.focus()
+    await withBrowserDebugger(tab.view.webContents.debugger, this.runtime, async send => {
+      let releaseAttempted = false
+      try {
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', ...metadata, ...(text ? { text, unmodifiedText: text } : {}) })
+        this.runtime.assertActive()
+        releaseAttempted = true
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', ...metadata })
+      } finally {
+        // Only release if keyUp was never attempted; an ambiguous keyUp is not replayed.
+        if (!releaseAttempted) await this.releaseInput(tab, 'Input.dispatchKeyEvent', { type: 'keyUp', ...metadata })
+      }
+    })
     return { key: keyCode, modifiers: normalizedModifiers }
   }
 
-  async selectOption(ref: string, values: string[], tabId?: string): Promise<{ selected: string[] }> {
+  async selectOption(ref: string, values: string[], tabId?: string): Promise<{ selected: string[]; verified: boolean }> {
     const tab = this.requireTab(tabId)
-    const targetRef = this.requireCurrentRef(tab, ref)
-    const safeRef = targetRef.ref
-    const selected = await targetRef.frame.executeJavaScript(`(() => {
-      const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
+    await this.prepareTarget(tab, ref)
+    const target = this.requireCurrentRef(tab, ref)
+    this.invalidateObservation(tab)
+    return this.evaluateDOM(tab, target.frame, `
+      const element = dom.resolve(${JSON.stringify(target.ref)})
       if (!(element instanceof HTMLSelectElement)) throw new Error('Element is not a native select')
-      if (element.disabled) throw new Error('Element is disabled')
-      const requested = new Set(${JSON.stringify(values.slice(0, 20))})
-      for (const option of element.options) option.selected = requested.has(option.value) || requested.has(option.text)
+      if (!dom.probe(${JSON.stringify(target.ref)}).enabled) throw new Error('Element is disabled')
+      const values = ${JSON.stringify(values)}
+      if (!values.length || values.length > 20 || (!element.multiple && values.length !== 1)) throw new Error('Invalid number of select options')
+      const requested = values.map(value => [...element.options].find(option => option.value === value) || [...element.options].find(option => option.text === value))
+      if (requested.some(option => !option || option.disabled || option.parentElement?.disabled)) throw new Error('No matching enabled select option was found')
+      for (const option of element.options) option.selected = requested.includes(option)
       element.dispatchEvent(new Event('input', { bubbles: true }))
       element.dispatchEvent(new Event('change', { bubbles: true }))
-      return [...element.selectedOptions].map(option => option.value || option.text)
-    })()`, true) as string[]
-    if (selected.length === 0) throw new Error('No matching select option was found')
-    this.invalidateObservation(tab)
-    return { selected }
+      const selected = [...element.selectedOptions].map(option => option.value)
+      if (requested.some(option => !option.selected)) throw new Error('Page rejected the selected options; inspect before retrying')
+      return { selected, verified: true }
+    `)
   }
 
-  async setChecked(ref: string, checked = true, tabId?: string): Promise<{ checked: boolean }> {
+  async setChecked(ref: string, checked = true, tabId?: string): Promise<{ checked: boolean; verified: boolean }> {
     const tab = this.requireTab(tabId)
-    const targetRef = this.requireCurrentRef(tab, ref)
-    const safeRef = targetRef.ref
-    const result = await targetRef.frame.executeJavaScript(`(() => {
-      const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-      if (!(element instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(element.type)) throw new Error('Element is not a checkbox or radio input')
-      if (element.disabled) throw new Error('Element is disabled')
-      element.checked = ${checked === true}
-      element.dispatchEvent(new Event('input', { bubbles: true }))
-      element.dispatchEvent(new Event('change', { bubbles: true }))
-      return { checked: element.checked }
-    })()`, true) as { checked: boolean }
+    await this.prepareTarget(tab, ref, { pointer: true })
+    const target = this.requireCurrentRef(tab, ref)
     this.invalidateObservation(tab)
-    return result
+    return this.evaluateDOM(tab, target.frame, `
+      const element = dom.resolve(${JSON.stringify(target.ref)})
+      if (!(element instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(element.type)) throw new Error('Element is not a checkbox or radio input')
+      if (!dom.probe(${JSON.stringify(target.ref)}).enabled) throw new Error('Element is disabled')
+      const checked = ${checked === true}
+      if (element.type === 'radio' && !checked) throw new Error('A radio input cannot be unchecked directly; select another option')
+      if (element.checked !== checked) element.click()
+      if (element.checked !== checked) throw new Error('Page rejected the checked state; inspect before retrying')
+      return { checked: element.checked, verified: true }
+    `)
   }
 
   async uploadFile(ref: string, requestedPath: string, tabId?: string): Promise<{ filename: string; size: number; ref: string }> {
@@ -697,63 +660,49 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     if (!info.isFile()) throw new Error('Browser upload source must be a regular file')
     if (info.size > 250 * 1024 * 1024) throw new Error('Browser upload source exceeds the 250 MB limit')
 
-    const debuggerApi = tab.view.webContents.debugger
-    const attachedHere = !debuggerApi.isAttached()
-    if (attachedHere) debuggerApi.attach('1.3')
-    try {
-      const document = await debuggerApi.sendCommand('DOM.getDocument', { depth: 1, pierce: true }) as { root?: { nodeId?: number } }
-      const rootNodeId = document.root?.nodeId
-      if (!rootNodeId) throw new Error('Unable to inspect the current page')
-      const match = await debuggerApi.sendCommand('DOM.querySelector', {
-        nodeId: rootNodeId,
-        selector: `[data-turboflux-ref="${safeRef}"]`,
-      }) as { nodeId?: number }
-      if (!match.nodeId) throw new Error('Element ref is stale; observe the page again')
-      const description = await debuggerApi.sendCommand('DOM.describeNode', { nodeId: match.nodeId }) as {
-        node?: { nodeName?: string; attributes?: string[] }
+    await this.prepareTarget(tab, ref)
+    this.requireCurrentRef(tab, ref)
+    return withBrowserDebugger(tab.view.webContents.debugger, this.runtime, async send => {
+      const handle = await send('Runtime.evaluate', {
+        expression: browserDOMScript(tab.refScope, `
+          const element = dom.resolve(${JSON.stringify(safeRef)})
+          if (!(element instanceof HTMLInputElement) || element.type !== 'file') throw new Error('Observed element is not a native file input')
+          if (!dom.probe(${JSON.stringify(safeRef)}).enabled) throw new Error('Element is disabled')
+          return element
+        `),
+      }) as { result?: { objectId?: string }; exceptionDetails?: unknown }
+      if (handle.exceptionDetails || !handle.result?.objectId) throw new Error('File input is stale or unavailable; observe the page again')
+      try {
+        this.requireCurrentRef(tab, ref)
+        this.invalidateObservation(tab)
+        await send('DOM.setFileInputFiles', { files: [filePath], objectId: handle.result.objectId })
+        return { filename: basename(filePath), size: info.size, ref: safeRef }
+      } finally {
+        await this.releaseInput(tab, 'Runtime.releaseObject', { objectId: handle.result.objectId })
       }
-      const attributes = description.node?.attributes || []
-      const typeIndex = attributes.findIndex((value, index) => index % 2 === 0 && value.toLowerCase() === 'type')
-      const inputType = typeIndex >= 0 ? String(attributes[typeIndex + 1] || '').toLowerCase() : ''
-      if (description.node?.nodeName?.toUpperCase() !== 'INPUT' || inputType !== 'file') {
-        throw new Error('Observed element is not a native file input')
-      }
-      await debuggerApi.sendCommand('DOM.setFileInputFiles', { files: [filePath], nodeId: match.nodeId })
-      this.invalidateObservation(tab)
-      return { filename: basename(filePath), size: info.size, ref: safeRef }
-    } finally {
-      if (attachedHere && debuggerApi.isAttached()) debuggerApi.detach()
-    }
+    })
   }
 
   async hover(ref: string, tabId?: string): Promise<{ hovered: string; mode: 'native' | 'dom-frame' }> {
     const tab = this.requireTab(tabId)
-    const targetRef = this.requireCurrentRef(tab, ref)
-    const safeRef = targetRef.ref
-    const target = await targetRef.frame.executeJavaScript(`(() => {
-      const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-      if (!element) throw new Error('Element ref is stale; observe the page again')
-      element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
-      element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, view: window }))
-      const rect = element.getBoundingClientRect()
-      return {
-        hovered: (element.getAttribute('aria-label') || element.innerText || element.getAttribute('title') || element.tagName).trim().slice(0, 240),
-        x: Math.round(rect.x + rect.width / 2),
-        y: Math.round(rect.y + rect.height / 2),
-      }
-    })()`, true) as { hovered: string; x: number; y: number }
-    if (targetRef.isMainFrame) {
-      const point = this.validatePoint(tab, target.x, target.y)
-      tab.view.webContents.focus()
-      tab.view.webContents.sendInputEvent({ type: 'mouseMove', ...point })
-    }
+    const probe = await this.prepareTarget(tab, ref, { pointer: true })
+    const target = this.requireCurrentRef(tab, ref)
     this.invalidateObservation(tab)
-    return { hovered: target.hovered, mode: targetRef.isMainFrame ? 'native' : 'dom-frame' }
+    if (target.isMainFrame) {
+      await this.dispatchMouseSequence(tab, [{ type: 'mouseMoved', ...await this.validatePoint(tab, probe.x, probe.y) }])
+    } else {
+      await this.evaluateDOM(tab, target.frame, `
+        const element = dom.resolve(${JSON.stringify(target.ref)})
+        element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, view: window }))
+        element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, view: window }))
+      `)
+    }
+    return { hovered: probe.name, mode: target.isMainFrame ? 'native' : 'dom-frame' }
   }
 
   async clickAt(x: number, y: number, tabId?: string): Promise<{ x: number; y: number }> {
     const tab = this.requireTab(tabId)
-    const point = this.validatePoint(tab, x, y)
+    const point = await this.validatePoint(tab, x, y)
     await this.dispatchMouseSequence(tab, [
       { type: 'mouseMoved', ...point },
       { type: 'mousePressed', button: 'left', clickCount: 1, ...point },
@@ -765,8 +714,8 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
 
   async drag(fromX: number, fromY: number, toX: number, toY: number, tabId?: string): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
     const tab = this.requireTab(tabId)
-    const from = this.validatePoint(tab, fromX, fromY)
-    const to = this.validatePoint(tab, toX, toY)
+    const from = await this.validatePoint(tab, fromX, fromY)
+    const to = await this.validatePoint(tab, toX, toY)
     const events: Array<Record<string, unknown>> = [
       { type: 'mouseMoved', ...from },
       { type: 'mousePressed', button: 'left', clickCount: 1, ...from },
@@ -784,31 +733,31 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     return { from, to }
   }
 
-  private async dispatchMouseSequence(tab: BrowserTab, events: Array<Record<string, unknown>>): Promise<void> {
-    const debuggerApi = tab.view.webContents.debugger
-    const attachedHere = !debuggerApi.isAttached()
-    try {
-      if (attachedHere) debuggerApi.attach('1.3')
-      for (const event of events) {
-        await debuggerApi.sendCommand('Input.dispatchMouseEvent', event)
-        if (event.type === 'mouseMoved') await new Promise(resolveWait => setTimeout(resolveWait, 16))
+  private async dispatchMouseSequence(tab: BrowserTab, events: Array<Record<string, unknown>>, beforePress?: () => Promise<void>): Promise<void> {
+    await withBrowserDebugger(tab.view.webContents.debugger, this.runtime, async send => {
+      let pressed = false
+      let point: Record<string, unknown> = {}
+      try {
+        for (const event of events) {
+          this.runtime.assertActive()
+          point = { x: event.x, y: event.y }
+          if (event.type === 'mousePressed') {
+            await beforePress?.()
+            pressed = true
+          }
+          if (event.type === 'mouseReleased') { this.runtime.assertActive(); pressed = false }
+          await send('Input.dispatchMouseEvent', event)
+          if (beforePress && event.type === 'mouseMoved') await this.runtime.delay(32)
+        }
+      } finally {
+        if (pressed) await this.releaseInput(tab, 'Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point })
       }
-    } catch {
-      tab.view.webContents.focus()
-      for (const event of events) {
-        const type = event.type === 'mousePressed' ? 'mouseDown' : event.type === 'mouseReleased' ? 'mouseUp' : 'mouseMove'
-        tab.view.webContents.sendInputEvent({
-          type,
-          x: Number(event.x),
-          y: Number(event.y),
-          button: event.button === 'left' ? 'left' : undefined,
-          clickCount: typeof event.clickCount === 'number' ? event.clickCount : undefined,
-          modifiers: event.buttons === 1 ? ['leftbuttondown'] : undefined,
-        })
-      }
-    } finally {
-      if (attachedHere && debuggerApi.isAttached()) debuggerApi.detach()
-    }
+    })
+  }
+
+  private async releaseInput(tab: BrowserTab, method: string, params: Record<string, unknown>): Promise<void> {
+    // Cleanup has its own short deadline and never replays keyDown/mouseDown.
+    try { await new BrowserRuntime().call(() => tab.view.webContents.debugger.sendCommand(method, params), 500) } catch {}
   }
 
   async scroll(direction: string, amount = 700, tabId?: string): Promise<{ direction: string; amount: number }> {
@@ -816,80 +765,74 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     const distance = Math.max(100, Math.min(3000, Math.floor(amount)))
     const axis = direction === 'left' || direction === 'right' ? 'x' : 'y'
     const signed = direction === 'up' || direction === 'left' ? -distance : distance
-    await tab.view.webContents.executeJavaScript(`window.scrollBy({ ${axis === 'x' ? 'left' : 'top'}: ${signed}, behavior: 'smooth' })`, true)
+    if (!['up', 'down', 'left', 'right'].includes(direction) || !Number.isFinite(amount)) throw new Error('Invalid browser scroll direction or amount')
+    await this.evaluate(tab.view.webContents.mainFrame, `window.scrollBy({ ${axis === 'x' ? 'left' : 'top'}: ${signed}, behavior: 'instant' })`)
     this.invalidateObservation(tab)
     return { direction, amount: distance }
   }
 
-  async waitFor(
-    condition: string,
-    value: string | undefined,
-    ref: string | undefined,
-    timeoutMs: unknown,
-    tabId?: string,
-    signal?: AbortSignal,
-  ): Promise<{ condition: string; matched: true; elapsedMs: number }> {
-    const tab = this.requireTab(tabId)
+  async waitFor(condition: string, value: string | undefined, ref: string | undefined, timeoutMs: unknown, tabId?: string, signal?: AbortSignal): Promise<{ condition: string; matched: true; elapsedMs: number }> {
     const timeout = normalizeBrowserTimeout(timeoutMs)
-    const startedAt = Date.now()
-    const targetRef = ref ? this.requireCurrentRef(tab, ref) : undefined
-    const safeRef = targetRef?.ref
     if (!['load', 'text', 'url', 'element'].includes(condition)) throw new Error(`Unsupported wait condition: ${condition}`)
     if ((condition === 'text' || condition === 'url') && !value) throw new Error(`${condition} wait requires value`)
-    if (condition === 'element' && !safeRef) throw new Error('element wait requires ref')
-
-    while (Date.now() - startedAt <= timeout) {
-      if (signal?.aborted) throw browserOperationAbortError()
-      let matched = false
-      if (condition === 'load') matched = !tab.loading
+    if (condition === 'element' && !ref) throw new Error('element wait requires ref')
+    const startedAt = Date.now()
+    const tab = this.requireTab(tabId)
+    do {
+      this.runtime.assertActive()
+      assertBrowserOperationActive(signal)
+      this.requireTab(tab.id)
+      if (tab.crashed) throw new BrowserOperationError('renderer-crashed', 'Browser renderer has crashed; reload the tab')
+      let matched: boolean
+      if (condition === 'load') matched = await this.evaluate<boolean>(tab.view.webContents.mainFrame, `document.readyState !== 'loading'`)
       else if (condition === 'url') matched = tab.view.webContents.getURL().includes(value!)
       else if (condition === 'text') matched = await this.frameTextContains(tab, value!)
-      else matched = await targetRef!.frame.executeJavaScript(`(() => {
-        const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-        if (!element) return false
-        const style = getComputedStyle(element)
-        const rect = element.getBoundingClientRect()
-        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0
-      })()`, true) as boolean
+      else {
+        const target = this.requireCurrentRef(tab, ref!)
+        matched = await this.evaluateDOM<boolean>(tab, target.frame, `return dom.probe(${JSON.stringify(target.ref)}).visible`)
+      }
       if (matched) return { condition, matched: true, elapsedMs: Date.now() - startedAt }
-      await new Promise(resolve => setTimeout(resolve, 100))
-    }
-    throw new Error(`Timed out after ${timeout}ms waiting for browser ${condition}`)
+      await this.runtime.delay(Math.min(100, Math.max(0, timeout - (Date.now() - startedAt))))
+    } while (Date.now() - startedAt < timeout)
+    throw new BrowserOperationError('wait-timeout', `Timed out after ${timeout}ms waiting for browser ${condition}`)
   }
 
-  async assertPage(condition: string, value?: string, ref?: string, tabId?: string): Promise<{ passed: boolean; condition: string; expected?: string; actual: unknown }> {
-    const tab = this.requireTab(tabId)
-    if (!['text_contains', 'url_contains', 'element_visible', 'element_enabled', 'element_checked'].includes(condition)) {
-      throw new Error(`Unsupported browser assertion: ${condition}`)
-    }
+  async assertPage(condition: string, value?: string, ref?: string, tabId?: string, timeoutMs: unknown = 0, expected = true): Promise<{ passed: boolean; condition: string; expected: unknown; actual: unknown; elapsedMs: number }> {
+    if (!['text_contains', 'url_contains', 'element_visible', 'element_enabled', 'element_checked', 'value_equals'].includes(condition)) throw new Error(`Unsupported browser assertion: ${condition}`)
     if ((condition === 'text_contains' || condition === 'url_contains') && !value) throw new Error(`${condition} assertion requires value`)
-    const targetRef = ref ? this.requireCurrentRef(tab, ref) : undefined
-    const safeRef = targetRef?.ref
-    if (condition.startsWith('element_') && !safeRef) throw new Error(`${condition} assertion requires ref`)
-
-    if (condition === 'url_contains') {
-      const actual = tab.view.webContents.getURL()
-      return { passed: actual.includes(value!), condition, expected: value, actual }
-    }
-    if (condition === 'text_contains') {
-      const actual = await this.readFrameText(tab)
-      return { passed: actual.includes(value!), condition, expected: value, actual: actual.slice(0, 2_000) }
-    }
-
-    const actual = await targetRef!.frame.executeJavaScript(`(() => {
-      const element = document.querySelector('[data-turboflux-ref="${safeRef}"]')
-      if (!element) return { exists: false, visible: false, enabled: false, checked: false }
-      const style = getComputedStyle(element)
-      const rect = element.getBoundingClientRect()
-      return {
-        exists: true,
-        visible: style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0,
-        enabled: !(element.disabled || element.getAttribute('aria-disabled') === 'true'),
-        checked: element instanceof HTMLInputElement ? element.checked : element.getAttribute('aria-checked') === 'true',
+    if (condition === 'value_equals' && value === undefined) throw new Error('value_equals assertion requires value')
+    if ((condition.startsWith('element_') || condition === 'value_equals') && !ref) throw new Error(`${condition} assertion requires ref`)
+    const tab = this.requireTab(tabId)
+    const timeout = Number(timeoutMs) === 0 ? 0 : normalizeBrowserTimeout(timeoutMs)
+    const startedAt = Date.now()
+    let actual: unknown
+    let passed = false
+    for (;;) {
+      this.requireTab(tab.id)
+      if (condition === 'url_contains') { actual = tab.view.webContents.getURL(); passed = (actual as string).includes(value!) === expected }
+      else if (condition === 'text_contains') {
+        const text = await this.readFrameText(tab)
+        passed = text.includes(value!) === expected
+        actual = text.slice(0, 2_000)
+      } else {
+        const target = this.requireCurrentRef(tab, ref!)
+        const state = await this.evaluateDOM<BrowserTargetProbe>(tab, target.frame, `return dom.probe(${JSON.stringify(target.ref)})`)
+        actual = state
+        const matched = condition === 'value_equals' ? state.value === value : condition === 'element_visible' ? state.visible : condition === 'element_enabled' ? state.enabled : state.checked
+        passed = matched === expected
       }
-    })()`, true) as { exists: boolean; visible: boolean; enabled: boolean; checked: boolean }
-    const key = condition === 'element_visible' ? 'visible' : condition === 'element_enabled' ? 'enabled' : 'checked'
-    return { passed: actual[key], condition, expected: 'true', actual }
+      if (passed || Date.now() - startedAt >= timeout) break
+      await this.runtime.delay(Math.min(100, timeout - (Date.now() - startedAt)))
+    }
+    return { passed, condition, expected: { value, matches: expected }, actual, elapsedMs: Date.now() - startedAt }
+  }
+
+  async inspect(ref?: string, tabId?: string): Promise<unknown> {
+    const tab = this.requireTab(tabId)
+    const target = ref ? this.requireCurrentRef(tab, ref) : undefined
+    const inspection = await this.evaluateDOM<Record<string, unknown>>(tab, target?.frame || tab.view.webContents.mainFrame, `return dom.inspect(${JSON.stringify(target?.ref)})`)
+    return { tabId: tab.id, ...inspection, frame: target ? this.frameSnapshot(target.frame, target.isMainFrame, true, 1) : undefined,
+      health: { crashed: tab.crashed, unresponsive: tab.unresponsive, loading: tab.loading }, diagnostics: this.diagnostics(false, tab.id).counts }
   }
 
   diagnostics(clear = false, tabId?: string): { console: BrowserConsoleEntry[]; network: BrowserNetworkIssue[]; counts: { console: number; network: number } } {
@@ -928,7 +871,7 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
 
   private async captureViewport(tabId?: string, signal?: AbortSignal): Promise<BrowserViewportCapture> {
     const tab = this.requireTab(tabId)
-    return captureBrowserViewport(tab, this.storageRoot ?? join(this.workspacePath, '.turboflux'), this.emit, signal)
+    return captureBrowserViewport(tab, this.storageRoot ?? join(this.workspacePath, '.turboflux'), this.emit, signal, this.runtime)
   }
 
   pauseForRuntime(): BrowserSystemSnapshot {
@@ -1006,7 +949,7 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     const directory = this.storageRoot
       ? join(this.storageRoot, 'attachments', 'browser-downloads')
       : join(this.workspacePath, '.turboflux', 'browser-downloads')
-    const path = join(directory, `${Date.now()}-${filename}`)
+    const path = join(directory, `${Date.now()}-${randomUUID().slice(0, 8)}-${filename}`)
     const startedAt = Date.now()
     let limitError: string | undefined
     const update = (status: BrowserDownloadSnapshot['status'], error?: string) => {
@@ -1070,14 +1013,18 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
   private bindTab(tab: BrowserTab): void {
     const contents = tab.view.webContents
     contents.on('did-start-loading', () => {
+      if (tab.view.webContents !== contents) return
       this.invalidateObservation(tab)
       tab.loading = true
       tab.consoleEntries = []
       tab.networkIssues = []
       this.emitState()
     })
-    contents.on('did-stop-loading', () => { tab.loading = false; this.updateTab(tab); this.emitState() })
+    contents.on('did-stop-loading', () => {
+      if (tab.view.webContents !== contents) return
+      tab.loading = false; this.updateTab(tab); this.emitState() })
     contents.on('console-message', event => {
+      if (tab.view.webContents !== contents) return
       this.pushBounded(tab.consoleEntries, {
         level: event.level,
         message: event.message.slice(0, 2_000),
@@ -1087,6 +1034,7 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
       })
     })
     contents.on('did-fail-load', (_event, errorCode, errorDescription, url, isMainFrame) => {
+      if (tab.view.webContents !== contents) return
       if (!isMainFrame || errorCode === -3) return
       this.pushBounded(tab.networkIssues, {
         method: 'GET',
@@ -1097,16 +1045,24 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
       })
       this.recordError({ code: 'load-failed', message: errorDescription, tabId: tab.id, recoverable: true })
     })
-    contents.on('page-title-updated', (event, title) => { event.preventDefault(); tab.title = title || tab.title; this.emitState() })
-    contents.on('did-navigate', (_event, url) => { this.invalidateObservation(tab); tab.url = url; this.emitState() })
-    contents.on('did-navigate-in-page', (_event, url) => { this.invalidateObservation(tab); tab.url = url; this.emitState() })
+    contents.on('page-title-updated', (event, title) => {
+      if (tab.view.webContents !== contents) return
+      event.preventDefault(); tab.title = title || tab.title; this.emitState() })
+    contents.on('did-navigate', (_event, url) => {
+      if (tab.view.webContents !== contents) return
+      this.invalidateObservation(tab); tab.url = url; this.emitState() })
+    contents.on('did-navigate-in-page', (_event, url) => {
+      if (tab.view.webContents !== contents) return
+      this.invalidateObservation(tab); tab.url = url; this.emitState() })
     contents.on('did-frame-navigate', (_event, _url, _statusCode, _statusText, isMainFrame) => {
+      if (tab.view.webContents !== contents) return
       if (!isMainFrame) this.invalidateObservation(tab)
     })
-    contents.on('frame-created', () => this.invalidateObservation(tab))
+    contents.on('frame-created', () => { if (tab.view.webContents === contents) this.invalidateObservation(tab) })
     contents.on('will-navigate', (event, url) => {
+      if (tab.view.webContents !== contents) return
       try {
-        validateBrowserNavigation(url)
+        validateBrowserDestination(url)
       } catch (error) {
         event.preventDefault()
         const reason = error instanceof Error ? error.message : String(error)
@@ -1114,16 +1070,53 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
         this.emit({ type: 'blocked-navigation', url, reason })
       }
     })
+    contents.on('will-frame-navigate', event => {
+      if (tab.view.webContents !== contents) return
+      try { validateBrowserDestination(event.url, !event.isMainFrame) }
+      catch (error) {
+        event.preventDefault()
+        this.emit({ type: 'blocked-navigation', url: event.url, reason: error instanceof Error ? error.message : String(error) })
+      }
+    })
+    contents.on('will-redirect', (event, url) => {
+      if (tab.view.webContents !== contents) return
+      try { validateBrowserDestination(url) }
+      catch (error) {
+        event.preventDefault()
+        this.emit({ type: 'blocked-navigation', url, reason: error instanceof Error ? error.message : String(error) })
+      }
+    })
+    contents.on('unresponsive', () => {
+      if (tab.view.webContents !== contents) return
+      tab.unresponsive = true; this.emitState() })
+    contents.on('responsive', () => {
+      if (tab.view.webContents !== contents) return
+      tab.unresponsive = false; this.emitState() })
+    contents.on('destroyed', () => {
+      if (this.destroyed || tab.view.webContents !== contents) return
+      this.invalidateObservation(tab)
+      this.tabs.delete(tab.id)
+      if (this.activeTabId === tab.id) this.activeTabId = this.tabs.keys().next().value || null
+      if (!this.activeTabId) this.visible = false
+      else if (this.visible && this.presentationEnabled) this.attachActiveView()
+      this.emitState()
+    })
     contents.on('will-attach-webview', event => event.preventDefault())
     contents.on('render-process-gone', () => {
+      if (tab.view.webContents !== contents) return
+      this.invalidateObservation(tab)
+      tab.unresponsive = false
       tab.crashed = true
       tab.loading = false
       this.recordError({ code: 'renderer-crashed', message: '浏览器页面进程已停止，可以重新加载恢复', tabId: tab.id, recoverable: true })
     })
     contents.setWindowOpenHandler(details => {
+      if (tab.view.webContents !== contents) return { action: 'deny' }
       try {
-        validateBrowserNavigation(details.url)
-        void this.createTab(details.url)
+        validateBrowserDestination(details.url)
+        void this.createTab(details.url).catch(error => {
+          if (!this.destroyed) this.recordError({ code: 'load-failed', message: error instanceof Error ? error.message : String(error), recoverable: true })
+        })
       } catch (error) {
         this.emit({ type: 'blocked-navigation', url: details.url, reason: error instanceof Error ? error.message : String(error) })
       }
@@ -1141,7 +1134,7 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     const mainFrame = tab.view.webContents.mainFrame
     try {
       return mainFrame.framesInSubtree
-        .filter(frame => !frame.isDestroyed() && !frame.detached)
+        .filter(frame => this.isFrameAvailable(frame))
         .slice(0, MAX_OBSERVED_FRAMES)
     } catch {
       return mainFrame.isDestroyed() ? [] : [mainFrame]
@@ -1163,7 +1156,9 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
           snapshot: this.frameSnapshot(frame, isMainFrame, true, result.elements.length),
           result,
         }
-      } catch {
+      } catch (error) {
+        this.runtime.assertActive()
+        if (isMainFrame) throw error
         return {
           frame,
           frameIndex,
@@ -1200,37 +1195,65 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
   }
 
   private async frameTextContains(tab: BrowserTab, value: string): Promise<boolean> {
-    for (const frame of this.currentFrames(tab)) {
-      try {
-        if (await frame.executeJavaScript(`(document.body?.innerText || '').includes(${JSON.stringify(value)})`, true) as boolean) return true
-      } catch {}
-    }
-    return false
+    return (await this.readFrameText(tab)).includes(value)
   }
 
   private async readFrameText(tab: BrowserTab): Promise<string> {
-    const mainFrame = tab.view.webContents.mainFrame
-    const parts: string[] = []
-    for (const frame of this.currentFrames(tab)) {
-      try {
-        const value = await frame.executeJavaScript(`(document.body?.innerText || '').slice(0, ${MAX_OBSERVED_TEXT})`, true) as string
-        if (!value) continue
-        parts.push(frame === mainFrame || frame.parent === null ? value : `[Frame ${frame.name || `frame-${frame.frameTreeNodeId}`}]\n${value}`)
-      } catch {}
+    const frames = this.currentFrames(tab)
+    const values = await Promise.all(frames.map(async (frame, index) => {
+      try { return await this.evaluateDOM<string>(tab, frame, 'return dom.text()') }
+      catch (error) { this.runtime.assertActive(); if (index === 0) throw error; return '' }
+    }))
+    return values.join('\n\n').slice(0, MAX_OBSERVED_TEXT)
+  }
+
+  private isFrameAvailable(frame: WebFrameMain): boolean {
+    return !frame.isDestroyed() && !frame.detached
+  }
+
+  private evaluate<T>(frame: WebFrameMain, script: string): Promise<T> {
+    return this.runtime.call(() => {
+      if (!this.isFrameAvailable(frame)) throw new BrowserOperationError('stale-reference', 'Page frame is detached; observe the page again')
+      return frame.executeJavaScript(script, true) as Promise<T>
+    })
+  }
+
+  private evaluateDOM<T>(tab: BrowserTab, frame: WebFrameMain, body: string): Promise<T> {
+    return this.evaluate(frame, browserDOMScript(tab.refScope, body))
+  }
+
+  private async prepareTarget(tab: BrowserTab, ref: string, options: { pointer?: boolean; editable?: boolean } = {}): Promise<BrowserTargetProbe> {
+    const deadline = Date.now() + 2_000
+    let previous: BrowserTargetProbe | undefined
+    let reason = 'Element is not actionable'
+    for (;;) {
+      const target = this.requireCurrentRef(tab, ref)
+      const probe = await this.evaluateDOM<BrowserTargetProbe>(tab, target.frame, `return dom.probe(${JSON.stringify(target.ref)}, ${!previous})`)
+      const stable = previous && ['x', 'y', 'width', 'height'].every(key => Math.abs(probe.bounds[key as keyof BrowserBounds] - previous!.bounds[key as keyof BrowserBounds]) <= 0.5)
+      reason = !probe.visible ? 'Element is not visible' : !probe.enabled ? 'Element is disabled'
+        : options.editable && !probe.editable ? 'Element is not editable (password and readonly fields cannot be filled)'
+          : options.pointer && !probe.receivesEvents ? `Element is obscured or outside the viewport${probe.blocker ? ` by ${probe.blocker}` : ''}`
+            : options.pointer && !stable ? 'Element is moving' : ''
+      if (!reason) return probe
+      previous = probe
+      if (Date.now() >= deadline) break
+      await this.runtime.delay(80)
     }
-    return parts.join('\n\n').slice(0, MAX_OBSERVED_TEXT)
+    throw new BrowserOperationError('not-actionable', reason, 'Use inspect or visual_observe to check visibility, overlays and state. Wait for the page to settle, then find the target again.')
   }
 
   private requireTab(tabId?: string): BrowserTab {
+    this.runtime.assertActive()
+    if (this.destroyed) throw new Error('Browser system has been destroyed')
     const id = tabId || this.activeTabId
     const tab = id ? this.tabs.get(id) : undefined
-    if (!tab) throw new Error('Browser tab not found')
+    if (!tab || tab.view.webContents.isDestroyed()) throw new BrowserOperationError('tab-closed', 'Browser tab not found or closed', 'Call tabs and select an existing tab, or open a new one.')
     return tab
   }
 
   private nextObservationPrefix(tab: BrowserTab): string {
     this.invalidateObservation(tab)
-    return `o${tab.observationEpoch.toString(36)}`
+    return `o${tab.observationEpoch.toString(36)}-${tab.refScope}`
   }
 
   private invalidateObservation(tab: BrowserTab): void {
@@ -1239,12 +1262,13 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
   }
 
   private requireCurrentRef(tab: BrowserTab, ref: string): BrowserElementRefTarget & { ref: string } {
+    this.runtime.assertActive()
     const safeRef = sanitizeBrowserRef(ref)
-    if (!isBrowserRefForEpoch(safeRef, tab.observationEpoch)) {
+    if (!isBrowserRefForEpoch(safeRef, tab.observationEpoch, tab.refScope)) {
       throw new Error('Element ref is stale; observe the page again')
     }
     const target = tab.elementRefs.get(safeRef)
-    if (!target || target.frame.isDestroyed() || target.frame.detached
+    if (!target || !this.isFrameAvailable(target.frame)
       || target.frame.frameTreeNodeId !== target.frameTreeNodeId
       || target.frame.processId !== target.processId
       || target.frame.routingId !== target.routingId) {
@@ -1254,9 +1278,9 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     return { ref: safeRef, ...target }
   }
 
-  private validatePoint(tab: BrowserTab, x: number, y: number): { x: number; y: number } {
+  private async validatePoint(tab: BrowserTab, x: number, y: number): Promise<{ x: number; y: number }> {
     if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Browser coordinates must be finite numbers')
-    const bounds = tab.view.getBounds()
+    const bounds = await this.evaluate<{ width: number; height: number }>(tab.view.webContents.mainFrame, '({ width: innerWidth, height: innerHeight })')
     if (bounds.width <= 0 || bounds.height <= 0) throw new Error('Browser surface is not ready for coordinate input')
     const point = { x: Math.round(x), y: Math.round(y) }
     if (point.x < 0 || point.y < 0 || point.x >= bounds.width || point.y >= bounds.height) {
@@ -1290,9 +1314,10 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
       title: tab.title,
       url: tab.url,
       loading: tab.loading,
-      canGoBack: history.canGoBack(),
-      canGoForward: history.canGoForward(),
+      canGoBack: !tab.view.webContents.isDestroyed() && history.canGoBack(),
+      canGoForward: !tab.view.webContents.isDestroyed() && history.canGoForward(),
       crashed: tab.crashed || undefined,
+      unresponsive: tab.unresponsive || undefined,
       retention: tab.retention,
     }
   }
@@ -1323,13 +1348,14 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
 
   private capabilityReport() {
     return {
-      apiVersion: 2,
+      apiVersion: 3,
       backend: { id: 'electron-iab', type: 'iab', conversationIsolatedSession: true },
-      semantic: { observe: true, find: true, shortLivedRefs: true, shadowDom: false },
+      semantic: { observe: true, find: true, shortLivedRefs: true, shadowDom: 'open-only', labels: true, nodeIdentity: true },
       frames: { observe: true, find: true, semanticActions: true, nativeCoordinates: false, fileUpload: false },
       coordinates: { click: true, drag: true, visualObservation: true, scope: 'top-viewport' },
       files: { workspaceUpload: true, workspaceDownload: true, maximumBytes: MAX_BROWSER_DOWNLOAD_BYTES },
-      diagnostics: { console: true, networkFailures: true },
+      diagnostics: { console: true, networkFailures: true, inspect: true, computedStyles: true },
+      reliability: { commandTimeoutMs: 5000, toolTimeoutMs: 60000, cancellable: true, actionabilityChecks: true, automaticActionReplay: false, retryingAssertions: true },
       lifecycle: { deliverable: true, handoff: true, transientCleanup: true },
       authentication: { secureBroker: false, passwordEntry: 'manual-only' },
       externalTabs: { discover: false, claim: false },
@@ -1436,12 +1462,16 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     try {
       const result = await work()
       assertBrowserOperationActive(options?.signal)
-      this.finishExecution(execution, 'completed', result)
+      this.finishExecution(execution, (result as { isError?: boolean })?.isError ? 'failed' : 'completed', result)
       return result
     } catch (error) {
-      const cancelled = options?.signal?.aborted || isOperationAbort(error)
+      const cancelled = isOperationAbort(error) || Boolean(options?.signal?.aborted && !(options.signal.reason instanceof BrowserOperationError))
       this.finishExecution(execution, cancelled ? 'cancelled' : 'failed')
       if (cancelled) throw browserOperationAbortError()
+      if (error instanceof BrowserOperationError && ['command-timeout', 'operation-timeout'].includes(error.code)) {
+        const stalled = this.tabs.get(tabId || this.activeTabId || '')
+        if (stalled) { stalled.unresponsive = true; this.invalidateObservation(stalled) }
+      }
       const lastError = this.lastError as BrowserErrorSnapshot | undefined
       if (!lastError || lastError.occurredAt < activity.startedAt) {
         this.recordError({ code: 'operation-failed', message: error instanceof Error ? error.message : String(error), tabId, recoverable: true })
@@ -1474,12 +1504,16 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     const requestedTabId = typeof args.tab_id === 'string' ? args.tab_id : this.activeTabId || undefined
     const stopLoading = () => {
       const tab = requestedTabId ? this.tabs.get(requestedTabId) : undefined
-      if (tab?.view.webContents.isLoading()) tab.view.webContents.stop()
+      if (tab && !tab.view.webContents.isDestroyed() && tab.view.webContents.isLoading()) tab.view.webContents.stop()
     }
+    const boundArgs = requestedTabId && !args.tab_id && !['open', 'tabs', 'capabilities', 'set_layout'].includes(toolName) ? { ...args, tab_id: requestedTabId } : args
     return this.operations.enqueue(async signal => {
-      const result = await this.handleTool(toolName, args, signal, options)
+      const result = await this.runtime.run(signal, () => this.handleTool(toolName, boundArgs, this.runtime.signal, options))
       return result as T
-    }, { externalSignal: options?.signal, onAbort: stopLoading })
+    }, { externalSignal: options?.signal, onAbort: stopLoading }).catch(error => {
+      if (isOperationAbort(error) || options?.signal?.aborted) throw error
+      return { kind: 'local_tool_result', isError: true, content: JSON.stringify({ error: browserFailure(error, toolName, requestedTabId) }) } as T
+    })
   }
 
   private async handleTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal, executionOptions?: McpToolCallOptions): Promise<unknown> {
@@ -1488,7 +1522,7 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
     if (!this.activeTabId && !['capabilities', 'open', 'tabs', 'close', 'set_layout', 'mark_deliverable', 'mark_handoff'].includes(toolName)) await this.createTab('about:blank', signal)
     const tabId = typeof args.tab_id === 'string' ? args.tab_id : this.activeTabId || undefined
     if (tabId && toolName !== 'close' && this.tabs.has(tabId) && this.activeTabId !== tabId) this.activateTab(tabId)
-    const phase: BrowserActivityPhase = ['open'].includes(toolName) ? 'opening' : ['capabilities', 'observe', 'find', 'diagnostics', 'assert', 'tabs'].includes(toolName) ? 'observing' : ['screenshot', 'visual_observe'].includes(toolName) ? 'capturing' : ['navigate', 'back', 'forward', 'reload', 'activate'].includes(toolName) ? 'navigating' : 'acting'
+    const phase: BrowserActivityPhase = ['open'].includes(toolName) ? 'opening' : ['capabilities', 'observe', 'find', 'inspect', 'diagnostics', 'assert', 'tabs'].includes(toolName) ? 'observing' : ['screenshot', 'visual_observe'].includes(toolName) ? 'capturing' : ['navigate', 'back', 'forward', 'reload', 'activate'].includes(toolName) ? 'navigating' : 'acting'
     return this.withActivity(phase, toolName, tabId, `执行浏览器操作：${toolName}`, async () => {
       switch (toolName) {
       case 'capabilities': return this.capabilityReport()
@@ -1535,12 +1569,18 @@ export class BrowserSystem implements RuntimePausableSystemCapability<BrowserSys
         args.tab_id as string | undefined,
         signal,
       )
-      case 'assert': return this.assertPage(
-        String(args.condition || ''),
-        typeof args.value === 'string' ? args.value : undefined,
-        typeof args.ref === 'string' ? args.ref : undefined,
-        args.tab_id as string | undefined,
-      )
+      case 'assert': {
+        const result = await this.assertPage(
+          String(args.condition || ''),
+          typeof args.value === 'string' ? args.value : undefined,
+          typeof args.ref === 'string' ? args.ref : undefined,
+          args.tab_id as string | undefined,
+          args.timeout_ms ?? 2_000,
+          args.expected !== false,
+        )
+        return { kind: 'local_tool_result', isError: !result.passed, content: JSON.stringify(result) } satisfies McpLocalToolResult
+      }
+      case 'inspect': return this.inspect(typeof args.ref === 'string' ? args.ref : undefined, args.tab_id as string | undefined)
       case 'diagnostics': return this.diagnostics(args.clear === true, args.tab_id as string | undefined)
       case 'back': return this.goBack(args.tab_id as string | undefined)
       case 'forward': return this.goForward(args.tab_id as string | undefined)

@@ -12,8 +12,13 @@ export function normalizeBrowserAddress(value: string): string {
 
 export function validateBrowserNavigation(value: string): URL {
   const normalized = normalizeBrowserAddress(value)
-  if (normalized === 'about:blank') return new URL(normalized)
-  const parsed = new URL(normalized)
+  return validateBrowserDestination(normalized)
+}
+
+/** Page-originated destinations must never be normalized into search queries. */
+export function validateBrowserDestination(value: string, allowSrcdoc = false): URL {
+  if (value === 'about:blank' || allowSrcdoc && value === 'about:srcdoc') return new URL(value)
+  const parsed = new URL(value)
   if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error(`Blocked browser protocol: ${parsed.protocol}`)
   if (parsed.username || parsed.password) throw new Error('URLs containing embedded credentials are not allowed')
   return parsed

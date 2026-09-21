@@ -11,7 +11,7 @@ import {
   saveConfig,
   WorkspaceBindingService,
   type ProfileContext,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import { describe, expect, it, vi } from 'vitest'
 import { switchDesktopProfile } from './profileSwitchCoordinator'
 

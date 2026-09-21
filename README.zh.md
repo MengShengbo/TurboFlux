@@ -4,9 +4,11 @@
 
 TurboFlux 是由执行内核和 Electron 桌面应用组成的开源本地 Agent 工作台。你可以配置自己的模型服务，在本地项目中执行任务，并通过 Desktop 查看会话、审批、进度和结果。
 
+![TurboFlux Desktop 主界面](docs/assets/desktop-main.png)
+
 ## 当前范围
 
-- **Agent Core 内核**：模型接入、Agent 执行、工具、上下文管理、会话、Skills、MCP、Plugins 和本地资料服务。
+- **领域包与 Agent Runtime**：模型接入、Agent 执行、工具、上下文管理、会话、Skills、MCP、Plugins 和本地资料服务。
 - **Desktop 桌面端**：任务与会话界面、设置、本地资料、浏览器与电脑适配、终端集成及自动化。
 - **桌面远控配套**：通过配对的浏览器客户端和加密协议控制已授权的 Desktop。实际执行和模型凭据保留在桌面主机。
 
@@ -33,14 +35,18 @@ TURBOFLUX_DESKTOP_PORT=25174 npm run dev:desktop
 
 | 路径 | 职责 |
 | --- | --- |
-| [`packages/agent-core`](packages/agent-core) | 执行内核和平台无关的应用服务 |
+| [`packages/agent-runtime`](packages/agent-runtime) | Agent 执行、上下文与生命周期 |
+| [`packages/workbench`](packages/workbench) | 应用服务装配；模型、工具、会话、扩展、资料和自动化分别由同级领域包提供 |
+| [`packages/renderer`](packages/renderer) | 浏览器渲染引擎；`presentation` 提供纯界面投影 |
+| [`packages/agent-core`](packages/agent-core) | 旧消费者的兼容导出 |
 | [`apps/desktop`](apps/desktop) | Electron 应用、Renderer 和原生宿主适配 |
 | [`packages/remote-protocol`](packages/remote-protocol) | 桌面设备配对、能力授权、加密命令和事件 |
 | [`apps/remote-mobile`](apps/remote-mobile) | Desktop 的远控 PWA |
+| [`apps/model-proxy`](apps/model-proxy) | 可选的本地模型代理 |
 | [`docs`](docs/README.md) | 架构、开发、隐私与运维文档 |
 | `scripts` | 构建、边界检查、打包、基准和验收工具 |
 
-Desktop 通过公共包导出消费内核。`DesktopRuntimeHost` 装配 `WorkbenchRuntime`，再创建 `AgentRuntime` 和 `AgentEngine`。浏览器、电脑和终端原生能力由宿主注入。详见[架构总览](docs/architecture/project-overview.md)和[仓库边界](docs/architecture/repository-boundary.md)。
+Desktop 通过公共包导出消费内核。`DesktopRuntimeHost` 装配 `WorkbenchRuntime`，再创建 `AgentRuntime` 和 `AgentEngine`。浏览器、电脑和终端原生能力由宿主注入。详见[包架构](docs/architecture/packages.md)、[架构总览](docs/architecture/project-overview.md)和[仓库边界](docs/architecture/repository-boundary.md)。
 
 ## 开发与验证
 

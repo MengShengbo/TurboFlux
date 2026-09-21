@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
@@ -13,6 +15,13 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true
   },
-  "include": ["packages/agent-core/src/**/*"],
-  "exclude": ["node_modules", "dist", "packages/agent-core/src/**/*.test.ts", "packages/agent-core/src/**/*.test.tsx", "claude-code-reference"]
+  "include": [
+    "packages/*/src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/dist/**",
+    "**/*.test.ts",
+    "**/*.test.tsx"
+  ]
 }

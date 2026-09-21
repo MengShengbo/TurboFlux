@@ -3,15 +3,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { captureGithubActionsProvenance } from './github-actions-provenance.mjs'
 import { writeSourceEvidenceReportAtomically } from './source-evidence-report.mjs'
-import { AgentEngine } from '../packages/agent-core/src/core/agentEngine'
-import { NodeToolExecutor } from '../packages/agent-core/src/core/runtime/nodeToolExecutor'
-import { DefaultAgentStateProvider } from '../packages/agent-core/src/core/runtime/stateProvider'
-import { ConversationInteractionStoreV2 } from '../packages/agent-core/src/application/conversations/conversationInteractionStoreV2'
-import { ConversationRepositoryV2 } from '../packages/agent-core/src/application/conversations/conversationRepositoryV2'
-import { ConversationRuntimeRepositoryV2 } from '../packages/agent-core/src/application/conversations/conversationRuntimeRepositoryV2'
-import { WorkSession } from '../packages/agent-core/src/application/work/workSession'
-import type { AgentTurn } from '../packages/agent-core/src/shared/agentTypes'
-import type { PersistedConversation } from '../packages/agent-core/src/application/conversations/types'
+import { AgentEngine } from '@turboflux/agent-runtime/agentEngine'
+import { NodeToolExecutor } from '@turboflux/tools/nodeToolExecutor'
+import { DefaultAgentStateProvider } from '@turboflux/agent-runtime/runtime/stateProvider'
+import { ConversationInteractionStoreV2 } from '@turboflux/conversations/conversations/conversationInteractionStoreV2'
+import { ConversationRepositoryV2 } from '@turboflux/conversations/conversations/conversationRepositoryV2'
+import { ConversationRuntimeRepositoryV2 } from '@turboflux/conversations/conversations/conversationRuntimeRepositoryV2'
+import { WorkSession } from '@turboflux/workbench/work/workSession'
+import type { AgentTurn } from '@turboflux/contracts/agentTypes'
+import type { PersistedConversation } from '@turboflux/conversations/conversations/types'
 import {
   InstallationProfileRegistry,
   ProfileArchiveApplicationService,
@@ -26,7 +26,7 @@ import {
   workspaceOverlayRoot,
   type ArchiveComponentId,
   type LocalProfileRecord,
-} from '../packages/agent-core/src/application/profiles/index'
+} from '@turboflux/profiles'
 
 function invariant(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`Profile archive cross-platform smoke failed: ${message}`)

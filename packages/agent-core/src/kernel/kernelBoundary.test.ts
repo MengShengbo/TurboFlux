@@ -30,6 +30,6 @@ describe('published Agent kernel boundary', () => {
     expect(existsSync(join(repositoryRoot, 'src/cli'))).toBe(false)
     expect(existsSync(join(repositoryRoot, 'archive'))).toBe(false)
     expect(existsSync(join(repositoryRoot, 'apps/desktop/package.json'))).toBe(true)
-    expect(existsSync(join(repositoryRoot, 'packages/agent-core/src/core/runtime/nodeToolExecutor.ts'))).toBe(true)
+    expect(existsSync(join(repositoryRoot, 'packages/tools/src/nodeToolExecutor.ts'))).toBe(true)
   })
 })

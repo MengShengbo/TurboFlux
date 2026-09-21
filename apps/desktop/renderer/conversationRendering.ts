@@ -1,5 +1,5 @@
-import { extractProviderErrorDetail, requestErrorSummary } from '@turboflux/agent-core/renderer'
-import type { AgentTurn, WorkbenchSnapshot } from '@turboflux/agent-core/workbench'
+import { extractProviderErrorDetail, requestErrorSummary } from '@turboflux/presentation'
+import type { AgentTurn, WorkbenchSnapshot } from '@turboflux/workbench'
 
 const LEGACY_RECOVERY_PLACEHOLDERS = new Set([
   'Interrupted: assistant response was not recorded before restart.',
@@ -202,40 +202,6 @@ export function resolveWorkTurnPresentation(input: {
 
 export function latestUserTurnId(turns: readonly AgentTurn[]): string | undefined {
   return [...turns].reverse().find(turn => turn.role === 'user' && turn.metadata?.internal !== true)?.id
-}
-
-export interface RequestStatusTerminalFence {
-  conversationId: string
-  latestUserTurnId?: string
-}
-
-export function requestStatusTerminalFenceApplies(input: {
-  fence: RequestStatusTerminalFence | null
-  conversationId?: string
-  latestUserTurnId?: string
-}): boolean {
-  if (!input.fence || !input.conversationId || input.fence.conversationId !== input.conversationId) return false
-  return !input.fence.latestUserTurnId
-    || !input.latestUserTurnId
-    || input.fence.latestUserTurnId === input.latestUserTurnId
-}
-
-export function shouldIgnoreSnapshotAfterRequestTerminal(input: {
-  fence: RequestStatusTerminalFence | null
-  conversationId: string
-  latestUserTurnId?: string
-  runtimeStatus?: WorkbenchSnapshot['runtime']['status']
-  runPhase?: WorkbenchSnapshot['runtime']['runState']['phase']
-  activeRunId?: string | null
-}): boolean {
-  if (!requestStatusTerminalFenceApplies(input)) return false
-  return Boolean(
-    input.activeRunId
-    || input.runtimeStatus === 'running'
-    || input.runtimeStatus === 'paused'
-    || input.runtimeStatus === 'awaiting-action'
-    || ['thinking', 'compacting', 'tool_running', 'awaiting_approval', 'awaiting_input', 'paused', 'aborting'].includes(input.runPhase || ''),
-  )
 }
 
 export function shouldRestoreRequestStatus(input: {

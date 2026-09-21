@@ -38,7 +38,7 @@ import {
   WorkbenchSettingsUpdate,
   type TurboFluxConfig,
   type WorkbenchSnapshot,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import { DESKTOP_EXPERIENCE_SYSTEM_PROMPT } from './productExperience'
 import { fallbackTaskTitle, isPlaceholderTaskTitle, reusableEmptyConversation } from './conversationPolicy'
 import { recoverContextUsage } from './contextUsageRecovery'
@@ -56,6 +56,7 @@ export type DesktopRuntimeEventListener = (event: WorkbenchEvent) => void
 
 
 export interface DesktopRuntimeHostOptions {
+  onUsageEvent?: (event: WorkbenchEvent) => void
   registerSystemPlugins?: (client: McpClient, context: { conversationId: string; workspaceOverlayRoot?: string }) => void
   storagePath?: string
   profileStorage?: ProfileStorageLayout
@@ -115,6 +116,7 @@ function safeFilename(value: string): string {
 }
 
 export class DesktopRuntimeHost {
+  private readonly onUsageEvent?: DesktopRuntimeHostOptions['onUsageEvent']
   private runtime: WorkbenchRuntime | null = null
   private destroyPromise?: Promise<void>
   private unsubscribeRuntime: (() => void) | null = null
@@ -150,6 +152,7 @@ export class DesktopRuntimeHost {
   private readonly desktopStreamListenerDurations = new Map<string, number[]>()
 
   private constructor(workspacePath: string, options: DesktopRuntimeHostOptions = {}) {
+    this.onUsageEvent = options.onUsageEvent
     this.workspacePath = workspacePath
     this.registerSystemPlugins = options.registerSystemPlugins
     this.storagePath = options.storagePath
@@ -517,6 +520,16 @@ export class DesktopRuntimeHost {
 
   addProject(path: string, name?: string) {
     return this.requireRuntime().addProject(path, name)
+  }
+
+  renameProject(id: string, name: string) {
+    this.requireRuntime().updateProject(id, { name })
+    return this.getSnapshot()
+  }
+
+  removeProject(id: string) {
+    this.requireRuntime().removeProject(id)
+    return this.getSnapshot()
   }
 
   async newConversationInProject(id: string) {
@@ -1050,7 +1063,9 @@ export class DesktopRuntimeHost {
       },
       workspace: {
         ...snapshot.workspace,
-        name: specified ? snapshot.workspace.name : '未指定工作区',
+        name: specified
+          ? projects.find(project => resolve(project.path) === resolve(snapshot.workspace.path))?.name || snapshot.workspace.name
+          : '未指定工作区',
         specified,
       },
       projects: {
@@ -1141,6 +1156,7 @@ export class DesktopRuntimeHost {
     const runtimeEpoch = this.runtimeEpoch
     this.unsubscribeRuntime = runtime.subscribe(event => {
       if (this.runtime !== runtime || this.runtimeEpoch !== runtimeEpoch) return
+      this.onUsageEvent?.(event)
       const canonicalType = event.type === 'conversation-event' ? event.event.type : event.type
       if (process.env.TURBOFLUX_STREAM_TRACE === '1' && canonicalType === 'stream.started') {
         this.desktopStreamTraceActive = true
@@ -1201,6 +1217,7 @@ export class DesktopRuntimeHost {
     })
     this.applyDesktopToolPolicy(runtime)
     try {
+      runtime.subscribe(event => this.onUsageEvent?.(event))
       await runtime.initializePlatform()
       return runtime
     } catch (error) {

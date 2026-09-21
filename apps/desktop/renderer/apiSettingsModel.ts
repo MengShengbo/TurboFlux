@@ -3,7 +3,7 @@ import type {
   WorkbenchApiConfigSummary,
   WorkbenchModelOption,
   WorkbenchSettingsSnapshot,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 
 export function normalizedApiUrl(value: string): string {
   return value.trim().replace(/\/+$/, '')

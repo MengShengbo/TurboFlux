@@ -1,0 +1,66 @@
+{
+  "name": "@turboflux/presentation",
+  "version": "1.0.1",
+  "description": "Browser-safe deterministic conversation and task projections",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./conversationTitle": {
+      "types": "./dist/conversationTitle.d.ts",
+      "import": "./dist/conversationTitle.js"
+    },
+    "./conversationViewProjection": {
+      "types": "./dist/conversationViewProjection.d.ts",
+      "import": "./dist/conversationViewProjection.js"
+    },
+    "./diffCompute": {
+      "types": "./dist/diffCompute.d.ts",
+      "import": "./dist/diffCompute.js"
+    },
+    "./requestErrorPresentation": {
+      "types": "./dist/requestErrorPresentation.d.ts",
+      "import": "./dist/requestErrorPresentation.js"
+    },
+    "./taskFlowLinearization": {
+      "types": "./dist/taskFlowLinearization.d.ts",
+      "import": "./dist/taskFlowLinearization.js"
+    },
+    "./taskFlowProjection": {
+      "types": "./dist/taskFlowProjection.d.ts",
+      "import": "./dist/taskFlowProjection.js"
+    },
+    "./workExecutionPresentation": {
+      "types": "./dist/workExecutionPresentation.d.ts",
+      "import": "./dist/workExecutionPresentation.js"
+    },
+    "./workProjection": {
+      "types": "./dist/workProjection.d.ts",
+      "import": "./dist/workProjection.js"
+    },
+    "./workTypes": {
+      "types": "./dist/workTypes.d.ts",
+      "import": "./dist/workTypes.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@turboflux/contracts": "*",
+    "diff": "^9.0.0"
+  }
+}

@@ -1,4 +1,4 @@
-import type { WorkbenchSnapshot, WorkStep, WorkStepControlAction } from '@turboflux/agent-core/workbench'
+import type { WorkbenchSnapshot, WorkStep, WorkStepControlAction } from '@turboflux/workbench'
 import { contextUsageTokenCount } from '../contextUsageRecovery'
 import {
   activeSiblingCount,
@@ -170,7 +170,6 @@ function renderExecutionStep(
   step: WorkStep,
   run: WorkbenchSnapshot['activity']['execution']['runs'][number],
   actions: WorkbenchPanelActions,
-  refresh: () => void,
   depth = 0,
 ): HTMLElement {
   const wrapper = document.createElement('div')
@@ -203,7 +202,7 @@ function renderExecutionStep(
     if (expandedWorkStepIds.has(step.id)) expandedWorkStepIds.delete(step.id)
     else expandedWorkStepIds.add(step.id)
     const host = wrapper.parentElement
-    if (host) host.replaceChild(renderExecutionStep(step, run, actions, refresh, depth), wrapper)
+    if (host) host.replaceChild(renderExecutionStep(step, run, actions, depth), wrapper)
   })
   wrapper.append(row)
   const controls = workStepControls(step, actions)
@@ -228,7 +227,7 @@ function renderExecutionStep(
       dependencyDetail.textContent = `前置步骤：${dependencies.all.map(item => `${item.title}（${statusLabel(item.status)}）`).join(' · ')}`
       detailHost.append(dependencyDetail)
     }
-    for (const child of orderedWorkSteps(run, step.childIds)) detailHost.append(renderExecutionStep(child, run, actions, refresh, depth + 1))
+    for (const child of orderedWorkSteps(run, step.childIds)) detailHost.append(renderExecutionStep(child, run, actions, depth + 1))
     wrapper.append(detailHost)
   }
   return wrapper
@@ -318,11 +317,10 @@ export function renderActivityPanel(
   container.append(header)
 
   const rootSteps = orderedWorkSteps(run, run.rootStepIds)
-  const refresh = () => renderActivityPanel(container, snapshot, actions, run.id)
   if (rootSteps.length > 0) {
     const steps = section('步骤')
     steps.classList.add('work-execution-steps')
-    for (const step of rootSteps) steps.append(renderExecutionStep(step, run, actions, refresh))
+    for (const step of rootSteps) steps.append(renderExecutionStep(step, run, actions))
     container.append(steps)
   }
 

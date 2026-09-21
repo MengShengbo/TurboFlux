@@ -1,0 +1,65 @@
+{
+  "name": "@turboflux/platform",
+  "version": "1.0.1",
+  "description": "Node process, filesystem, profile path and network adapters",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./atomicJsonStore": {
+      "types": "./dist/atomicJsonStore.d.ts",
+      "import": "./dist/atomicJsonStore.js"
+    },
+    "./fileIO": {
+      "types": "./dist/fileIO.d.ts",
+      "import": "./dist/fileIO.js"
+    },
+    "./networkProxy": {
+      "types": "./dist/networkProxy.d.ts",
+      "import": "./dist/networkProxy.js"
+    },
+    "./pathUtils": {
+      "types": "./dist/pathUtils.d.ts",
+      "import": "./dist/pathUtils.js"
+    },
+    "./process": {
+      "types": "./dist/process.d.ts",
+      "import": "./dist/process.js"
+    },
+    "./profilePaths": {
+      "types": "./dist/profilePaths.d.ts",
+      "import": "./dist/profilePaths.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "import": "./dist/runtime.js"
+    },
+    "./schemaValidation": {
+      "types": "./dist/schemaValidation.d.ts",
+      "import": "./dist/schemaValidation.js"
+    },
+    "./streamTimingTrace": {
+      "types": "./dist/streamTimingTrace.d.ts",
+      "import": "./dist/streamTimingTrace.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json && node ../../scripts/fix-dist-imports.mjs dist",
+    "type-check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "undici": "^7.29.0"
+  }
+}

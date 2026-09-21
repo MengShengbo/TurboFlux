@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ComputerObservation } from '@turboflux/agent-core/contracts'
+import type { ComputerObservation } from '@turboflux/contracts'
 import {
   assertFreshObservation,
   keyCombinationRequiresEscalation,

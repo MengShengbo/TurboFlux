@@ -1,4 +1,4 @@
-import type { ArchiveComponentId, ArchiveOperationSnapshot, ProfileExportEstimate } from '@turboflux/agent-core/workbench'
+import type { ArchiveComponentId, ArchiveOperationSnapshot, ProfileExportEstimate } from '@turboflux/workbench'
 import { presentDesktopError } from './conversationRendering'
 import {
   captureProfileDialogReturnFocus,

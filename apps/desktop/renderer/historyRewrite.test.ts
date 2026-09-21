@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { AgentTurn } from '@turboflux/agent-core/workbench'
+import type { AgentTurn } from '@turboflux/workbench'
 import { projectHistoryRewrite } from '../historyRewrite'
 
 describe('history rewrite projection', () => {

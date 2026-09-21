@@ -8,7 +8,7 @@ import {
   AutomationService,
   WorkbenchRuntime,
   type TurboFluxConfig,
-} from '@turboflux/agent-core/workbench'
+} from '@turboflux/workbench'
 import { WorkspaceRuntimePool } from './workspaceRuntimePool'
 import { DesktopRuntimeHost } from './runtimeHost'
 

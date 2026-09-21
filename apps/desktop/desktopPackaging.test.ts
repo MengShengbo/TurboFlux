@@ -60,7 +60,18 @@ async function createDesktopPackageFixture(platform: 'darwin' | 'linux' | 'win32
   writeFixtureFile(source, 'generated/packagedBootstrap.mjs', { value: "runPackagedDesktopBootstrap(() => import('./main.mjs'))" })
   writeFixtureFile(source, 'generated/packagedBootstrapRuntime.mjs', { value: 'TURBOFLUX_DESKTOP_QA_HIDDEN uncaughtException unhandledRejection TurboFlux hidden QA bootstrap failure' })
   for (const path of [
-    'node_modules/@turboflux/agent-core/package.json',
+    'node_modules/@turboflux/workbench/package.json',
+    'node_modules/@turboflux/agent-runtime/package.json',
+    'node_modules/@turboflux/contracts/package.json',
+    'node_modules/@turboflux/models/package.json',
+    'node_modules/@turboflux/platform/package.json',
+    'node_modules/@turboflux/tools/package.json',
+    'node_modules/@turboflux/extensions/package.json',
+    'node_modules/@turboflux/conversations/package.json',
+    'node_modules/@turboflux/profiles/package.json',
+    'node_modules/@turboflux/automations/package.json',
+    'node_modules/@turboflux/presentation/package.json',
+    'node_modules/@turboflux/renderer/package.json',
     'node_modules/@turboflux/remote-protocol/package.json',
     `node_modules/@esbuild/${esbuildPackage}/package.json`,
     'node_modules/esbuild/package.json',
@@ -130,7 +141,7 @@ describe('Desktop packaging contract', () => {
     expect(builderConfig).toContain('!node_modules/pngjs/**/*')
     expect(builderConfig).toContain('!node_modules/**/coverage/**/*')
     expect(desktopPackage.dependencies).toMatchObject({
-      '@turboflux/agent-core': expect.any(String),
+      '@turboflux/workbench': expect.any(String),
       '@turboflux/remote-protocol': expect.any(String),
       'node-pty': expect.any(String),
       tsx: expect.any(String),
