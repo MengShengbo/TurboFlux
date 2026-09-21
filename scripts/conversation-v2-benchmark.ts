@@ -347,9 +347,8 @@ try {
     : sanitizeSourceEvidenceReport(report)
   process.stdout.write(`${JSON.stringify(sanitizedReport, null, 2)}\n`)
   if (!report.passed) process.exitCode = 1
-} catch (error) {
-  const diagnostic = sanitizeSourceEvidenceReport({ message: error instanceof Error ? error.message : 'Unknown benchmark error' })
-  process.stderr.write(`Conversation V2 benchmark failed: ${diagnostic.message}\n`)
+} catch {
+  process.stderr.write('Conversation V2 benchmark failed\n')
   process.exitCode = 1
 } finally {
   if (temporaryRoot) rmSync(temporaryRoot, { recursive: true, force: true })
