@@ -64,7 +64,8 @@ describe('remote host service', () => {
     expect(service.pairingStatus(pending.requestId, pending.pollToken)).toMatchObject({ status: 'approved' })
 
     expect(service.listPairedDevices()).toMatchObject([{ displayName: 'Phone', capabilities: ['session.read'] }])
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    // Windows uses ACLs; Node's mode bits do not represent POSIX owner-only access.
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
     const persistedText = await import('node:fs/promises').then(module => module.readFile(path, 'utf8'))
     expect(persistedText).not.toContain(service.identity.signingPrivateKey)
     service.close()

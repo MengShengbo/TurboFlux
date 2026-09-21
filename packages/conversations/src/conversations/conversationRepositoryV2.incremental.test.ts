@@ -236,11 +236,15 @@ describe('incremental projection persistence', () => {
     repository.append([rename('initial-delta')])
     const moduleUrl = pathToFileURL(resolve('packages/conversations/src/conversations/conversationRepositoryV2.ts')).href
     const watermarkPath = join(root, 'projection-watermarks.json')
+    const crashMarker = join(root, 'crash-reached')
     const source = `import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
       const rename = fs.renameSync;
       fs.renameSync = (source, target) => {
-        if (String(target) === ${JSON.stringify(watermarkPath)}) process.kill(process.pid, 'SIGKILL');
+        if (String(target) === ${JSON.stringify(watermarkPath)}) {
+          fs.writeFileSync(${JSON.stringify(crashMarker)}, 'before-delta-watermark');
+          process.kill(process.pid, 'SIGKILL');
+        }
         rename(source, target);
       };
       syncBuiltinESMExports();
@@ -252,8 +256,14 @@ describe('incremental projection persistence', () => {
     try {
       await new Promise<void>((resolve, reject) => {
         child.once('error', reject)
-        child.once('exit', (code, signal) => signal === 'SIGKILL' ? resolve() : reject(new Error(stderr || `Unexpected exit ${code}`)))
+        child.once('close', (code, signal) => {
+          // Windows reports an emulated SIGKILL as exit code 1, without a signal.
+          const killed = process.platform === 'win32' ? code === 1 : signal === 'SIGKILL'
+          if (killed) resolve()
+          else reject(new Error(stderr || `Unexpected exit ${code} (${signal})`))
+        })
       })
+      expect(fs.readFileSync(crashMarker, 'utf8')).toBe('before-delta-watermark')
       const restarted = new ConversationRepositoryV2(root)
       expect(restarted.append([rename('after-crash')])).toMatchObject({ appended: 0, lastSeq: 203 })
       expect(restarted.search('after-crash')).toHaveLength(1)

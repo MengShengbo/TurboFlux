@@ -172,11 +172,15 @@ describe('Conversation V2 journal indexes', () => {
     const { root, store, indexPath } = setup()
     store.append([event('one')])
     const moduleUrl = pathToFileURL(resolve('packages/conversations/src/conversations/conversationEventStoreV2.ts')).href
+    const crashMarker = join(root, 'crash-reached')
     const source = `import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
       const rename = fs.renameSync;
       fs.renameSync = (source, target) => {
-        if (String(target) === ${JSON.stringify(indexPath)}) process.kill(process.pid, 'SIGKILL');
+        if (String(target) === ${JSON.stringify(indexPath)}) {
+          fs.writeFileSync(${JSON.stringify(crashMarker)}, 'before-index-checkpoint');
+          process.kill(process.pid, 'SIGKILL');
+        }
         rename(source, target);
       };
       syncBuiltinESMExports();
@@ -186,11 +190,16 @@ describe('Conversation V2 journal indexes', () => {
     let stderr = ''
     child.stderr.on('data', chunk => { stderr += chunk })
     try {
-      const signal = await new Promise<NodeJS.Signals | null>((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
         child.once('error', reject)
-        child.once('exit', (code, signal) => signal === 'SIGKILL' ? resolve(signal) : reject(new Error(stderr || `Unexpected exit ${code}`)))
+        child.once('close', (code, signal) => {
+          // Windows reports an emulated SIGKILL as exit code 1, without a signal.
+          const killed = process.platform === 'win32' ? code === 1 : signal === 'SIGKILL'
+          if (killed) resolve()
+          else reject(new Error(stderr || `Unexpected exit ${code} (${signal})`))
+        })
       })
-      expect(signal).toBe('SIGKILL')
+      expect(fs.readFileSync(crashMarker, 'utf8')).toBe('before-index-checkpoint')
       const restarted = new ConversationEventStoreV2(root)
       expect(restarted.append([event('two'), event('three')])).toMatchObject({ appended: 1, lastSeq: 3, duplicateEventIds: ['two'] })
       expect(restarted.read('c').events.map(value => value.eventId)).toEqual(['one', 'two', 'three'])
