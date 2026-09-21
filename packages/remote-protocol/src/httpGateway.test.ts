@@ -188,15 +188,16 @@ describe('remote HTTP gateway', () => {
       for (let index = 0; index < 3; index += 1) {
         await rawRequest(endpoint.port, '/v1/pair', { method: 'POST', body: '{}' })
       }
-      const now = Date.now()
       const invite = service.createPairingInvite(['session.read'], [{ kind: 'custom', value: endpoint.url }])
+      // A response must not predate the invite when the clock advances between calls.
+      const now = Date.now()
       const phone = createNodeDeviceIdentity('Phone behind the same proxy', now)
       const response = await rawRequest(endpoint.port, '/v1/pair', {
         method: 'POST',
         body: JSON.stringify(createPairingResponse(phone, invite, ['session.read'], now)),
       })
 
-      expect(response.status).toBe(202)
+      expect(response.status, response.body).toBe(202)
       expect(service.listPendingPairings()).toHaveLength(1)
     } finally {
       await gateway.close()

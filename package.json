@@ -41,10 +41,10 @@
     "perf:profile-switch:stable": "npm run build:core && node scripts/desktop-profile-switch-benchmark.mjs",
     "smoke:profiles": "tsx scripts/profile-archive-cross-platform-smoke.ts",
     "qa:browser": "npm run build:core && electron --use-mock-keychain scripts/browser-runtime-smoke.mjs",
-    "qa:profiles:hidden": "node scripts/desktop-profile-hidden-qa.mjs",
+    "qa:profiles:hidden": "node scripts/desktop-user-profile-qa.mjs",
     "qa:remote:hidden": "npm run build --workspace @turboflux/remote-protocol && npm run build:remote && tsx scripts/remote-mobile-hidden-qa.ts",
     "verify:profiles:evidence": "node scripts/verify-profile-cross-platform-evidence.mjs --require-platforms=darwin,win32,linux --expected-source-job=desktop-package --report=apps/desktop/generated/profile-smoke/profile-evidence-report.json",
-    "verify:profiles:hidden:evidence": "node scripts/verify-profile-hidden-evidence.mjs --require-platforms=darwin,win32,linux --expected-source-job=desktop-package --require-application-mode=packaged-app --package-evidence-root=apps/desktop/generated/package-evidence --report=apps/desktop/generated/profile-qa/profile-hidden-evidence-report.json",
+    "verify:profiles:hidden:evidence": "node scripts/verify-user-profile-evidence.mjs --require-platforms=darwin,win32,linux --expected-source-job=desktop-package --require-application-mode=packaged-app --package-evidence-root=apps/desktop/generated/package-evidence --report=apps/desktop/generated/profile-qa/profile-hidden-evidence-report.json",
     "verify:profiles:stable-benchmarks": "node scripts/verify-profile-stable-benchmark-evidence.mjs --platform=linux --arch=x64 --expected-source-job=desktop-package --report=apps/desktop/generated/profile-benchmarks/stable-benchmark-evidence-report.json",
     "verify:desktop:package": "node scripts/verify-desktop-package.mjs --report=apps/desktop/generated/package-verification/package-report.json",
     "verify:desktop:package:evidence": "node scripts/verify-desktop-package-evidence.mjs apps/desktop/generated/package-evidence --require-platforms=darwin,win32,linux --expected-source-job=desktop-package --report=apps/desktop/generated/package-verification/package-evidence-report.json",
@@ -81,7 +81,8 @@
     "qa:renderer": "npm run build:packages && node scripts/qa-renderer.mjs",
     "build:proxy": "npm run build --workspace @turboflux/model-proxy",
     "bench:kernel": "tsx --tsconfig tsconfig.open-source.json scripts/kernel-benchmark.ts",
-    "bench:kernel:live": "electron scripts/kernel-benchmark/electron.mjs"
+    "bench:kernel:live": "electron scripts/kernel-benchmark/electron.mjs",
+    "qa:profiles:legacy": "node scripts/desktop-profile-hidden-qa.mjs"
   },
   "devDependencies": {
     "@electron/asar": "^3.4.1",
