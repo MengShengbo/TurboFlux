@@ -251,6 +251,14 @@ try {
   const profileScale = qualification === 'stable'
     ? writeStableProfileScaleFixture(eventsRoot, records)
     : { eventCount: 0, journalBytes: 0 }
+  if (qualification === 'stable') {
+    // Model an already migrated profile using real projection checkpoints.
+    // Recovery from missing checkpoints is covered by the repository tests.
+    const prepared = new ConversationRepositoryV2(temporaryRoot).rebuildAllProjections()
+    if (prepared.conversations !== CONVERSATION_COUNT || prepared.events !== profileScale.eventCount) {
+      throw new Error('Stable catalog fixture did not produce complete projection checkpoints')
+    }
+  }
   const reads: string[] = []
   let eventPageBytesRead = 0
   const catalogStartedAt = performance.now()
@@ -339,8 +347,9 @@ try {
     : sanitizeSourceEvidenceReport(report)
   process.stdout.write(`${JSON.stringify(sanitizedReport, null, 2)}\n`)
   if (!report.passed) process.exitCode = 1
-} catch {
-  process.stderr.write('Conversation V2 benchmark failed\n')
+} catch (error) {
+  const diagnostic = sanitizeSourceEvidenceReport({ message: error instanceof Error ? error.message : 'Unknown benchmark error' })
+  process.stderr.write(`Conversation V2 benchmark failed: ${diagnostic.message}\n`)
   process.exitCode = 1
 } finally {
   if (temporaryRoot) rmSync(temporaryRoot, { recursive: true, force: true })
