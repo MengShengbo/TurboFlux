@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/desktop-source-*']
   pull_request:
   workflow_dispatch:
 

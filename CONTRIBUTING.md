@@ -19,7 +19,7 @@ npm run ci
 
 The local check sequence covers lint, package and application builds, all workspace type checks, package tests, Desktop tests, remote-control tests, and publication and architecture boundaries. Lefthook runs staged lint and whitespace checks before commits, and source checks before pushes. Confirm hooks with `npx lefthook install` if your installation skipped dependency lifecycle scripts.
 
-GitHub Actions also validates Linux and Windows package tests, macOS and Windows Desktop tests, and macOS, Windows, and Linux packaging and acceptance evidence. The required **Quality gate** succeeds only when every dependency job succeeds. Main protection applies to administrators and disallows force pushes and deletion. Before updating `main`, publish a temporary verification branch and run the CI workflow on that exact commit. Advance `main` only after it passes, then delete the verification branch.
+GitHub Actions also validates Linux and Windows package tests, macOS and Windows Desktop tests, and macOS, Windows, and Linux packaging and acceptance evidence. The required **Quality gate** succeeds only when every dependency job succeeds. Main protection applies to administrators and disallows force pushes and deletion. Before updating `main`, push the exact candidate commit to a temporary `codex/desktop-source-*` branch. Its push automatically starts the CI checks required by branch protection. Advance `main` only after it passes, then delete the verification branch.
 
 The external-PR policy runs from the trusted default branch with permission to close pull requests from forks. It never checks out or executes pull-request code. Issue triage labels incoming reports, and failures are surfaced instead of being silently ignored.
 
